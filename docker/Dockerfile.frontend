@@ -1,0 +1,79 @@
+# =============================================================================
+# AIDocumentIndexer Frontend - Dockerfile
+# =============================================================================
+# Multi-stage build for optimized production image
+# Uses Chainguard images for ZERO CVE vulnerabilities in production
+# See: https://snyk.io/blog/choosing-the-best-node-js-docker-image/
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: Dependencies (using Chainguard dev image for npm)
+# -----------------------------------------------------------------------------
+FROM cgr.dev/chainguard/node:latest-dev AS deps
+
+WORKDIR /app
+
+# Install dependencies
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci
+
+# -----------------------------------------------------------------------------
+# Stage 2: Builder
+# -----------------------------------------------------------------------------
+FROM cgr.dev/chainguard/node:latest-dev AS builder
+
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY frontend/ .
+
+# Build arguments for environment variables
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
+# Build the application
+RUN npm run build
+
+# -----------------------------------------------------------------------------
+# Stage 3: Runner (Production) - ZERO VULNERABILITIES
+# -----------------------------------------------------------------------------
+# Chainguard distroless Node.js image has 0 CVEs
+# https://images.chainguard.dev/directory/image/node/overview
+FROM cgr.dev/chainguard/node:latest AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+# Copy necessary files (Chainguard runs as non-root by default)
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+
+EXPOSE 3000
+
+# Chainguard distroless doesn't have curl/wget, use node for health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD node -e "fetch('http://localhost:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
+CMD ["server.js"]
+
+# -----------------------------------------------------------------------------
+# Stage 4: Development (uses dev image with shell/npm)
+# -----------------------------------------------------------------------------
+FROM cgr.dev/chainguard/node:latest-dev AS development
+
+WORKDIR /app
+
+# Install dependencies
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci
+
+# Copy source code
+COPY frontend/ .
+
+EXPOSE 3000
+
+CMD ["npm", "run", "dev"]

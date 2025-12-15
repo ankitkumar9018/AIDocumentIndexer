@@ -1,0 +1,216 @@
+version: '3.8'
+
+# =============================================================================
+# AIDocumentIndexer - Docker Compose Configuration
+# =============================================================================
+# Usage:
+#   Development: docker-compose up -d
+#   Production:  docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # PostgreSQL + pgvector (Vector Database)
+  # ===========================================================================
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: aidoc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-aidocindexer}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-aidocindexer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aidoc-network
+
+  # ===========================================================================
+  # Redis (Caching & Sessions)
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: aidoc-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aidoc-network
+
+  # ===========================================================================
+  # Ray Head Node (Distributed Processing)
+  # ===========================================================================
+  ray-head:
+    image: rayproject/ray:2.9.0-py311
+    container_name: aidoc-ray-head
+    restart: unless-stopped
+    command: >
+      bash -c "ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 --block"
+    environment:
+      - RAY_ADDRESS=auto
+    ports:
+      - "${RAY_DASHBOARD_PORT:-8265}:8265"
+      - "6380:6379"  # Ray GCS port (different from Redis)
+      - "10001:10001"  # Ray client port
+    volumes:
+      - ray_tmp:/tmp/ray
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "ray", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - aidoc-network
+
+  # ===========================================================================
+  # Ray Worker Node (Scale as needed)
+  # ===========================================================================
+  ray-worker:
+    image: rayproject/ray:2.9.0-py311
+    container_name: aidoc-ray-worker
+    restart: unless-stopped
+    command: >
+      bash -c "ray start --address=ray-head:6379 --block"
+    environment:
+      - RAY_ADDRESS=ray-head:6379
+    volumes:
+      - ray_tmp:/tmp/ray
+    shm_size: '2gb'
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    deploy:
+      replicas: 1  # Increase for more workers
+    networks:
+      - aidoc-network
+
+  # ===========================================================================
+  # Ollama (Local LLM - Optional)
+  # ===========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: aidoc-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    # Uncomment for GPU support (NVIDIA):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - aidoc-network
+
+  # ===========================================================================
+  # Backend (FastAPI + LangChain + Ray)
+  # ===========================================================================
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: aidoc-backend
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-aidocindexer}
+      - REDIS_URL=redis://redis:6379/0
+      - RAY_ADDRESS=ray://ray-head:10001
+      - OLLAMA_HOST=http://ollama:11434
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - SECRET_KEY=${SECRET_KEY}
+      - APP_ENV=${APP_ENV:-development}
+    volumes:
+      - ../backend:/app/backend
+      - storage_data:/app/storage
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ray-head:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - aidoc-network
+
+  # ===========================================================================
+  # Frontend (Next.js)
+  # ===========================================================================
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    container_name: aidoc-frontend
+    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+      - NEXTAUTH_URL=${NEXTAUTH_URL:-http://localhost:3000}
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+    volumes:
+      - ../frontend:/app/frontend
+      - /app/frontend/node_modules  # Anonymous volume for node_modules
+      - /app/frontend/.next  # Anonymous volume for build cache
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+    networks:
+      - aidoc-network
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  aidoc-network:
+    driver: bridge
+    name: aidoc-network
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+    name: aidoc-postgres-data
+  redis_data:
+    name: aidoc-redis-data
+  ray_tmp:
+    name: aidoc-ray-tmp
+  ollama_data:
+    name: aidoc-ollama-data
+  storage_data:
+    name: aidoc-storage-data

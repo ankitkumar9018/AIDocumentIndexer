@@ -1,0 +1,3617 @@
+"""
+AIDocumentIndexer - Admin API Routes
+=====================================
+
+Endpoints for admin operations:
+- User management
+- Access tier management
+- Audit log viewing
+- System configuration
+"""
+
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field, EmailStr
+from sqlalchemy import select, func, and_, desc
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+import structlog
+
+from backend.db.database import get_async_session
+from backend.db.models import User, AccessTier, AuditLog
+from backend.api.middleware.auth import (
+    get_user_context,
+    require_admin,
+    AdminUser,
+)
+from backend.services.permissions import UserContext
+from backend.services.audit import (
+    AuditService,
+    AuditAction,
+    AuditEntry,
+    get_audit_service,
+)
+from backend.services.settings import (
+    SettingsService,
+    SettingCategory,
+    get_settings_service,
+)
+from backend.services.database_manager import (
+    DatabaseManager,
+    DatabaseConnectionService,
+    get_database_manager,
+)
+from backend.services.llm_provider import (
+    LLMProviderService,
+    PROVIDER_TYPES,
+)
+
+logger = structlog.get_logger(__name__)
+
+router = APIRouter()
+
+
+# =============================================================================
+# Pydantic Models - Access Tiers
+# =============================================================================
+
+class AccessTierBase(BaseModel):
+    """Base access tier model."""
+    name: str = Field(..., min_length=1, max_length=100)
+    level: int = Field(..., ge=1, le=100)
+    description: Optional[str] = None
+    color: str = Field(default="#6B7280", pattern="^#[0-9A-Fa-f]{6}$")
+
+
+class AccessTierCreate(AccessTierBase):
+    """Access tier creation request."""
+    pass
+
+
+class AccessTierUpdate(BaseModel):
+    """Access tier update request."""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    level: Optional[int] = Field(None, ge=1, le=100)
+    description: Optional[str] = None
+    color: Optional[str] = Field(None, pattern="^#[0-9A-Fa-f]{6}$")
+
+
+class AccessTierResponse(AccessTierBase):
+    """Access tier response model."""
+    id: UUID
+    user_count: int = 0
+    document_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AccessTierListResponse(BaseModel):
+    """Paginated access tier list response."""
+    tiers: List[AccessTierResponse]
+    total: int
+
+
+# =============================================================================
+# Pydantic Models - Users
+# =============================================================================
+
+class UserBase(BaseModel):
+    """Base user model."""
+    email: EmailStr
+    name: Optional[str] = None
+
+
+class UserCreate(UserBase):
+    """User creation request."""
+    password: str = Field(..., min_length=8)
+    access_tier_id: UUID
+
+
+class UserUpdate(BaseModel):
+    """User update request."""
+    name: Optional[str] = None
+    access_tier_id: Optional[UUID] = None
+    is_active: Optional[bool] = None
+
+
+class UserResponse(BaseModel):
+    """User response model."""
+    id: UUID
+    email: str
+    name: Optional[str]
+    is_active: bool
+    access_tier_id: UUID
+    access_tier_name: str
+    access_tier_level: int
+    created_at: datetime
+    last_login_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+class UserListResponse(BaseModel):
+    """Paginated user list response."""
+    users: List[UserResponse]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+
+
+# =============================================================================
+# Pydantic Models - Audit Logs
+# =============================================================================
+
+class AuditLogResponse(BaseModel):
+    """Audit log entry response."""
+    id: str
+    action: str
+    user_id: Optional[str]
+    user_email: Optional[str]
+    resource_type: Optional[str]
+    resource_id: Optional[str]
+    details: Optional[dict]
+    ip_address: Optional[str]
+    created_at: datetime
+
+
+class AuditLogListResponse(BaseModel):
+    """Paginated audit log list response."""
+    logs: List[AuditLogResponse]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def get_client_ip(request: Request) -> Optional[str]:
+    """Extract client IP from request."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
+# =============================================================================
+# Access Tier Endpoints
+# =============================================================================
+
+@router.get("/tiers", response_model=AccessTierListResponse)
+async def list_access_tiers(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List all access tiers.
+
+    Admin only endpoint.
+    """
+    logger.info("Listing access tiers", admin_id=admin.user_id)
+
+    # Get all tiers with counts
+    query = select(AccessTier).order_by(AccessTier.level)
+    result = await db.execute(query)
+    tiers = result.scalars().all()
+
+    # Get user counts per tier
+    user_count_query = (
+        select(User.access_tier_id, func.count(User.id))
+        .group_by(User.access_tier_id)
+    )
+    user_counts_result = await db.execute(user_count_query)
+    user_counts = {row[0]: row[1] for row in user_counts_result.all()}
+
+    # Get document counts per tier
+    from backend.db.models import Document
+    doc_count_query = (
+        select(Document.access_tier_id, func.count(Document.id))
+        .group_by(Document.access_tier_id)
+    )
+    doc_counts_result = await db.execute(doc_count_query)
+    doc_counts = {row[0]: row[1] for row in doc_counts_result.all()}
+
+    # Build response
+    tier_responses = [
+        AccessTierResponse(
+            id=tier.id,
+            name=tier.name,
+            level=tier.level,
+            description=tier.description,
+            color=tier.color,
+            user_count=user_counts.get(tier.id, 0),
+            document_count=doc_counts.get(tier.id, 0),
+            created_at=tier.created_at,
+            updated_at=tier.updated_at,
+        )
+        for tier in tiers
+    ]
+
+    return AccessTierListResponse(
+        tiers=tier_responses,
+        total=len(tier_responses),
+    )
+
+
+@router.post("/tiers", response_model=AccessTierResponse, status_code=status.HTTP_201_CREATED)
+async def create_access_tier(
+    tier: AccessTierCreate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a new access tier.
+
+    Admin only endpoint.
+    """
+    logger.info("Creating access tier", admin_id=admin.user_id, tier_name=tier.name)
+
+    # Check for duplicate name
+    existing_query = select(AccessTier).where(AccessTier.name == tier.name)
+    existing_result = await db.execute(existing_query)
+    if existing_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Access tier with name '{tier.name}' already exists",
+        )
+
+    # Check for duplicate level
+    level_query = select(AccessTier).where(AccessTier.level == tier.level)
+    level_result = await db.execute(level_query)
+    if level_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Access tier with level {tier.level} already exists",
+        )
+
+    # Create tier
+    new_tier = AccessTier(
+        name=tier.name,
+        level=tier.level,
+        description=tier.description,
+        color=tier.color,
+    )
+    db.add(new_tier)
+    await db.commit()
+    await db.refresh(new_tier)
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.TIER_CREATE,
+        admin_user_id=admin.user_id,
+        target_resource_type="access_tier",
+        target_resource_id=str(new_tier.id),
+        changes={"name": tier.name, "level": tier.level},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return AccessTierResponse(
+        id=new_tier.id,
+        name=new_tier.name,
+        level=new_tier.level,
+        description=new_tier.description,
+        color=new_tier.color,
+        user_count=0,
+        document_count=0,
+        created_at=new_tier.created_at,
+        updated_at=new_tier.updated_at,
+    )
+
+
+@router.patch("/tiers/{tier_id}", response_model=AccessTierResponse)
+async def update_access_tier(
+    tier_id: UUID,
+    update: AccessTierUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update an access tier.
+
+    Admin only endpoint.
+    """
+    logger.info("Updating access tier", admin_id=admin.user_id, tier_id=str(tier_id))
+
+    # Get tier
+    query = select(AccessTier).where(AccessTier.id == tier_id)
+    result = await db.execute(query)
+    tier = result.scalar_one_or_none()
+
+    if not tier:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Access tier not found",
+        )
+
+    # Track changes for audit
+    changes = {}
+
+    # Check for duplicate name if updating
+    if update.name and update.name != tier.name:
+        existing_query = select(AccessTier).where(
+            and_(AccessTier.name == update.name, AccessTier.id != tier_id)
+        )
+        existing_result = await db.execute(existing_query)
+        if existing_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Access tier with name '{update.name}' already exists",
+            )
+        changes["name"] = {"old": tier.name, "new": update.name}
+        tier.name = update.name
+
+    # Check for duplicate level if updating
+    if update.level and update.level != tier.level:
+        level_query = select(AccessTier).where(
+            and_(AccessTier.level == update.level, AccessTier.id != tier_id)
+        )
+        level_result = await db.execute(level_query)
+        if level_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Access tier with level {update.level} already exists",
+            )
+        changes["level"] = {"old": tier.level, "new": update.level}
+        tier.level = update.level
+
+    if update.description is not None:
+        changes["description"] = {"old": tier.description, "new": update.description}
+        tier.description = update.description
+
+    if update.color:
+        changes["color"] = {"old": tier.color, "new": update.color}
+        tier.color = update.color
+
+    await db.commit()
+    await db.refresh(tier)
+
+    # Log the action
+    if changes:
+        audit_service = get_audit_service()
+        await audit_service.log_admin_action(
+            action=AuditAction.TIER_UPDATE,
+            admin_user_id=admin.user_id,
+            target_resource_type="access_tier",
+            target_resource_id=str(tier_id),
+            changes=changes,
+            ip_address=get_client_ip(request),
+            session=db,
+        )
+
+    # Get user count
+    user_count_query = select(func.count(User.id)).where(User.access_tier_id == tier_id)
+    user_count_result = await db.execute(user_count_query)
+    user_count = user_count_result.scalar() or 0
+
+    return AccessTierResponse(
+        id=tier.id,
+        name=tier.name,
+        level=tier.level,
+        description=tier.description,
+        color=tier.color,
+        user_count=user_count,
+        document_count=0,
+        created_at=tier.created_at,
+        updated_at=tier.updated_at,
+    )
+
+
+@router.delete("/tiers/{tier_id}")
+async def delete_access_tier(
+    tier_id: UUID,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete an access tier.
+
+    Cannot delete a tier that has users assigned to it.
+    Admin only endpoint.
+    """
+    logger.info("Deleting access tier", admin_id=admin.user_id, tier_id=str(tier_id))
+
+    # Get tier
+    query = select(AccessTier).where(AccessTier.id == tier_id)
+    result = await db.execute(query)
+    tier = result.scalar_one_or_none()
+
+    if not tier:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Access tier not found",
+        )
+
+    # Check if tier has users
+    user_count_query = select(func.count(User.id)).where(User.access_tier_id == tier_id)
+    user_count_result = await db.execute(user_count_query)
+    user_count = user_count_result.scalar() or 0
+
+    if user_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete tier with {user_count} users. Reassign users first.",
+        )
+
+    tier_name = tier.name
+    tier_level = tier.level
+
+    # Delete tier
+    await db.delete(tier)
+    await db.commit()
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.TIER_DELETE,
+        admin_user_id=admin.user_id,
+        target_resource_type="access_tier",
+        target_resource_id=str(tier_id),
+        changes={"name": tier_name, "level": tier_level},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "Access tier deleted successfully", "tier_id": str(tier_id)}
+
+
+# =============================================================================
+# User Management Endpoints
+# =============================================================================
+
+@router.get("/users", response_model=UserListResponse)
+async def list_users(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    tier_id: Optional[UUID] = None,
+    is_active: Optional[bool] = None,
+    search: Optional[str] = None,
+):
+    """
+    List all users with filtering.
+
+    Admin only endpoint.
+    """
+    logger.info("Listing users", admin_id=admin.user_id, page=page)
+
+    # Build query
+    query = select(User).options(selectinload(User.access_tier))
+
+    conditions = []
+    if tier_id:
+        conditions.append(User.access_tier_id == tier_id)
+    if is_active is not None:
+        conditions.append(User.is_active == is_active)
+    if search:
+        conditions.append(
+            User.email.ilike(f"%{search}%") | User.name.ilike(f"%{search}%")
+        )
+
+    if conditions:
+        query = query.where(and_(*conditions))
+
+    # Get total count
+    count_query = select(func.count()).select_from(query.subquery())
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    # Apply pagination
+    offset = (page - 1) * page_size
+    query = query.order_by(User.created_at.desc()).offset(offset).limit(page_size)
+
+    # Execute query
+    result = await db.execute(query)
+    users = result.scalars().all()
+
+    # Build response
+    user_responses = [
+        UserResponse(
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            is_active=user.is_active,
+            access_tier_id=user.access_tier_id,
+            access_tier_name=user.access_tier.name if user.access_tier else "Unknown",
+            access_tier_level=user.access_tier.level if user.access_tier else 0,
+            created_at=user.created_at,
+            last_login_at=user.last_login_at,
+        )
+        for user in users
+    ]
+
+    return UserListResponse(
+        users=user_responses,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=(offset + len(users)) < total,
+    )
+
+
+@router.get("/users/{user_id}", response_model=UserResponse)
+async def get_user(
+    user_id: UUID,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get a specific user by ID.
+
+    Admin only endpoint.
+    """
+    query = (
+        select(User)
+        .where(User.id == user_id)
+        .options(selectinload(User.access_tier))
+    )
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        is_active=user.is_active,
+        access_tier_id=user.access_tier_id,
+        access_tier_name=user.access_tier.name if user.access_tier else "Unknown",
+        access_tier_level=user.access_tier.level if user.access_tier else 0,
+        created_at=user.created_at,
+        last_login_at=user.last_login_at,
+    )
+
+
+@router.patch("/users/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: UUID,
+    update: UserUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update a user.
+
+    Admin only endpoint.
+    """
+    logger.info("Updating user", admin_id=admin.user_id, target_user_id=str(user_id))
+
+    # Get user
+    query = (
+        select(User)
+        .where(User.id == user_id)
+        .options(selectinload(User.access_tier))
+    )
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # Track changes for audit
+    changes = {}
+
+    if update.name is not None:
+        changes["name"] = {"old": user.name, "new": update.name}
+        user.name = update.name
+
+    if update.is_active is not None:
+        changes["is_active"] = {"old": user.is_active, "new": update.is_active}
+        user.is_active = update.is_active
+
+    if update.access_tier_id:
+        # Verify tier exists
+        tier_query = select(AccessTier).where(AccessTier.id == update.access_tier_id)
+        tier_result = await db.execute(tier_query)
+        new_tier = tier_result.scalar_one_or_none()
+
+        if not new_tier:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Access tier not found",
+            )
+
+        # Check admin can assign this tier (must be at or below admin's tier)
+        if new_tier.level > admin.access_tier_level:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cannot assign tier {new_tier.level}. Your tier: {admin.access_tier_level}",
+            )
+
+        old_tier_name = user.access_tier.name if user.access_tier else "Unknown"
+        changes["access_tier"] = {"old": old_tier_name, "new": new_tier.name}
+        user.access_tier_id = update.access_tier_id
+
+    await db.commit()
+    await db.refresh(user)
+
+    # Log the action
+    if changes:
+        audit_service = get_audit_service()
+
+        # Special handling for tier change
+        if "access_tier" in changes:
+            await audit_service.log_admin_action(
+                action=AuditAction.USER_TIER_CHANGE,
+                admin_user_id=admin.user_id,
+                target_user_id=str(user_id),
+                changes=changes,
+                ip_address=get_client_ip(request),
+                session=db,
+            )
+        else:
+            await audit_service.log_admin_action(
+                action=AuditAction.USER_UPDATE,
+                admin_user_id=admin.user_id,
+                target_user_id=str(user_id),
+                changes=changes,
+                ip_address=get_client_ip(request),
+                session=db,
+            )
+
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        is_active=user.is_active,
+        access_tier_id=user.access_tier_id,
+        access_tier_name=user.access_tier.name if user.access_tier else "Unknown",
+        access_tier_level=user.access_tier.level if user.access_tier else 0,
+        created_at=user.created_at,
+        last_login_at=user.last_login_at,
+    )
+
+
+# =============================================================================
+# Audit Log Endpoints
+# =============================================================================
+
+@router.get("/audit-logs", response_model=AuditLogListResponse)
+async def list_audit_logs(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    action: Optional[str] = None,
+    user_id: Optional[UUID] = None,
+    resource_type: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
+    """
+    List audit logs with filtering.
+
+    Admin only endpoint.
+    """
+    logger.info("Listing audit logs", admin_id=admin.user_id, page=page)
+
+    audit_service = get_audit_service()
+
+    # Convert action string to enum if provided
+    action_enum = None
+    if action:
+        try:
+            action_enum = AuditAction(action)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid action: {action}",
+            )
+
+    entries, total = await audit_service.get_logs(
+        action=action_enum,
+        user_id=str(user_id) if user_id else None,
+        resource_type=resource_type,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        page_size=page_size,
+        session=db,
+    )
+
+    log_responses = [
+        AuditLogResponse(
+            id=entry.id,
+            action=entry.action,
+            user_id=entry.user_id,
+            user_email=entry.user_email,
+            resource_type=entry.resource_type,
+            resource_id=entry.resource_id,
+            details=entry.details,
+            ip_address=entry.ip_address,
+            created_at=entry.created_at,
+        )
+        for entry in entries
+    ]
+
+    offset = (page - 1) * page_size
+
+    return AuditLogListResponse(
+        logs=log_responses,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_more=(offset + len(entries)) < total,
+    )
+
+
+@router.get("/audit-logs/actions")
+async def list_audit_actions(admin: AdminUser):
+    """
+    List all available audit action types.
+
+    Admin only endpoint.
+    """
+    return {
+        "actions": [
+            {"value": action.value, "name": action.name}
+            for action in AuditAction
+        ]
+    }
+
+
+@router.get("/audit-logs/user/{user_id}")
+async def get_user_audit_logs(
+    user_id: UUID,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    days: int = Query(default=30, ge=1, le=365),
+):
+    """
+    Get audit logs for a specific user.
+
+    Admin only endpoint.
+    """
+    audit_service = get_audit_service()
+
+    entries = await audit_service.get_user_activity(
+        user_id=str(user_id),
+        days=days,
+        session=db,
+    )
+
+    return {
+        "user_id": str(user_id),
+        "days": days,
+        "entries": [
+            AuditLogResponse(
+                id=entry.id,
+                action=entry.action,
+                user_id=entry.user_id,
+                user_email=entry.user_email,
+                resource_type=entry.resource_type,
+                resource_id=entry.resource_id,
+                details=entry.details,
+                ip_address=entry.ip_address,
+                created_at=entry.created_at,
+            )
+            for entry in entries
+        ],
+    }
+
+
+@router.get("/audit-logs/security")
+async def get_security_events(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    hours: int = Query(default=24, ge=1, le=168),
+):
+    """
+    Get security-relevant audit events (failed logins, access denials).
+
+    Admin only endpoint.
+    """
+    audit_service = get_audit_service()
+
+    failed_logins = await audit_service.get_failed_logins(hours=hours, session=db)
+    access_denials = await audit_service.get_access_denials(hours=hours, session=db)
+
+    return {
+        "hours": hours,
+        "failed_logins": {
+            "count": len(failed_logins),
+            "entries": [
+                AuditLogResponse(
+                    id=entry.id,
+                    action=entry.action,
+                    user_id=entry.user_id,
+                    user_email=entry.user_email,
+                    resource_type=entry.resource_type,
+                    resource_id=entry.resource_id,
+                    details=entry.details,
+                    ip_address=entry.ip_address,
+                    created_at=entry.created_at,
+                )
+                for entry in failed_logins
+            ],
+        },
+        "access_denials": {
+            "count": len(access_denials),
+            "entries": [
+                AuditLogResponse(
+                    id=entry.id,
+                    action=entry.action,
+                    user_id=entry.user_id,
+                    user_email=entry.user_email,
+                    resource_type=entry.resource_type,
+                    resource_id=entry.resource_id,
+                    details=entry.details,
+                    ip_address=entry.ip_address,
+                    created_at=entry.created_at,
+                )
+                for entry in access_denials
+            ],
+        },
+    }
+
+
+# =============================================================================
+# System Stats Endpoint
+# =============================================================================
+
+@router.get("/stats")
+async def get_system_stats(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get system statistics for the admin dashboard.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import Document, Chunk
+
+    # Get user count
+    user_count_query = select(func.count(User.id))
+    user_count_result = await db.execute(user_count_query)
+    user_count = user_count_result.scalar() or 0
+
+    # Get active user count
+    active_user_query = select(func.count(User.id)).where(User.is_active == True)
+    active_user_result = await db.execute(active_user_query)
+    active_user_count = active_user_result.scalar() or 0
+
+    # Get document count
+    doc_count_query = select(func.count(Document.id))
+    doc_count_result = await db.execute(doc_count_query)
+    doc_count = doc_count_result.scalar() or 0
+
+    # Get chunk count
+    chunk_count_query = select(func.count(Chunk.id))
+    chunk_count_result = await db.execute(chunk_count_query)
+    chunk_count = chunk_count_result.scalar() or 0
+
+    # Get tier count
+    tier_count_query = select(func.count(AccessTier.id))
+    tier_count_result = await db.execute(tier_count_query)
+    tier_count = tier_count_result.scalar() or 0
+
+    return {
+        "users": {
+            "total": user_count,
+            "active": active_user_count,
+            "inactive": user_count - active_user_count,
+        },
+        "documents": {
+            "total": doc_count,
+        },
+        "chunks": {
+            "total": chunk_count,
+        },
+        "access_tiers": {
+            "total": tier_count,
+        },
+    }
+
+
+# =============================================================================
+# System Settings Endpoints
+# =============================================================================
+
+class SettingsUpdateRequest(BaseModel):
+    """Request to update system settings."""
+    settings: Dict[str, Any]
+
+
+class SettingsResponse(BaseModel):
+    """System settings response."""
+    settings: Dict[str, Any]
+    definitions: List[Dict[str, Any]]
+
+
+@router.get("/settings", response_model=SettingsResponse)
+async def get_settings(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get all system settings.
+
+    Returns current values and definitions for all settings.
+    Admin only endpoint.
+    """
+    logger.info("Getting system settings", admin_id=admin.user_id)
+
+    settings_service = get_settings_service()
+    settings = await settings_service.get_all_settings(db)
+    definitions = settings_service.get_setting_definitions()
+
+    return SettingsResponse(
+        settings=settings,
+        definitions=definitions,
+    )
+
+
+@router.patch("/settings", response_model=SettingsResponse)
+async def update_settings(
+    update: SettingsUpdateRequest,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update system settings.
+
+    Admin only endpoint.
+    """
+    logger.info("Updating system settings", admin_id=admin.user_id, keys=list(update.settings.keys()))
+
+    settings_service = get_settings_service()
+
+    # Get old values for audit
+    old_settings = await settings_service.get_all_settings(db)
+
+    # Update settings
+    new_settings = await settings_service.update_settings(update.settings, db)
+
+    # Log changes
+    changes = {}
+    for key, new_value in update.settings.items():
+        old_value = old_settings.get(key)
+        if old_value != new_value:
+            changes[key] = {"old": old_value, "new": new_value}
+
+    if changes:
+        audit_service = get_audit_service()
+        await audit_service.log_admin_action(
+            action=AuditAction.SYSTEM_CONFIG_CHANGE,
+            admin_user_id=admin.user_id,
+            target_resource_type="system_settings",
+            changes=changes,
+            ip_address=get_client_ip(request),
+            session=db,
+        )
+
+    definitions = settings_service.get_setting_definitions()
+
+    return SettingsResponse(
+        settings=new_settings,
+        definitions=definitions,
+    )
+
+
+@router.post("/settings/reset")
+async def reset_settings(
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Reset all settings to defaults.
+
+    Admin only endpoint.
+    """
+    logger.info("Resetting system settings to defaults", admin_id=admin.user_id)
+
+    settings_service = get_settings_service()
+    settings = await settings_service.reset_to_defaults(db)
+
+    # Log the reset
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="system_settings",
+        changes={"action": "reset_to_defaults"},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "Settings reset to defaults", "settings": settings}
+
+
+# =============================================================================
+# System Health Endpoint
+# =============================================================================
+
+@router.get("/health")
+async def get_system_health(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get system health status.
+
+    Checks database connectivity and service availability.
+    Admin only endpoint.
+    """
+    import os
+    from datetime import datetime
+
+    health_status = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": {}
+    }
+
+    # Check API Server (always online if we reach this point)
+    health_status["services"]["api_server"] = {
+        "status": "online",
+        "message": "API server is running"
+    }
+
+    # Check Database
+    try:
+        from sqlalchemy import text
+        await db.execute(text("SELECT 1"))
+        db_type = os.getenv("DATABASE_TYPE", "sqlite")
+        health_status["services"]["database"] = {
+            "status": "connected",
+            "type": db_type,
+            "message": f"{db_type.upper()} connection successful"
+        }
+    except Exception as e:
+        health_status["services"]["database"] = {
+            "status": "error",
+            "message": str(e)
+        }
+
+    # Check Vector Store (ChromaDB)
+    try:
+        from backend.services.vectorstore_local import LocalVectorStore
+        vs = LocalVectorStore()
+        # Just check if it initializes
+        health_status["services"]["vector_store"] = {
+            "status": "connected",
+            "type": "chromadb",
+            "message": "ChromaDB is available"
+        }
+    except Exception as e:
+        health_status["services"]["vector_store"] = {
+            "status": "unavailable",
+            "message": str(e)
+        }
+
+    # Check LLM Configuration
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+
+    llm_status = []
+    if openai_key and openai_key != "your-openai-api-key":
+        llm_status.append("OpenAI")
+    if anthropic_key and anthropic_key != "your-anthropic-api-key":
+        llm_status.append("Anthropic")
+
+    if llm_status:
+        health_status["services"]["llm"] = {
+            "status": "configured",
+            "providers": llm_status,
+            "message": f"Configured providers: {', '.join(llm_status)}"
+        }
+    else:
+        health_status["services"]["llm"] = {
+            "status": "not_configured",
+            "providers": [],
+            "message": "No LLM API keys configured"
+        }
+
+    return health_status
+
+
+# =============================================================================
+# Database Management Endpoints
+# =============================================================================
+
+class DatabaseTestRequest(BaseModel):
+    """Request to test a database connection."""
+    database_url: str = Field(..., description="Database connection URL to test")
+
+
+class DatabaseSetupRequest(BaseModel):
+    """Request to setup PostgreSQL database."""
+    database_url: str = Field(..., description="PostgreSQL connection URL")
+
+
+class DatabaseImportRequest(BaseModel):
+    """Request to import data."""
+    clear_existing: bool = Field(default=False, description="Clear existing data before import")
+
+
+class DatabaseInfoResponse(BaseModel):
+    """Database information response."""
+    type: str
+    url_masked: str
+    is_connected: bool
+    vector_store: str
+    documents_count: int
+    chunks_count: int
+    users_count: int
+
+
+@router.get("/database/info", response_model=DatabaseInfoResponse)
+async def get_database_info(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get current database configuration and statistics.
+
+    Admin only endpoint.
+    """
+    logger.info("Getting database info", admin_id=admin.user_id)
+
+    manager = get_database_manager(db)
+    info = await manager.get_info()
+
+    return DatabaseInfoResponse(**info)
+
+
+@router.post("/database/test")
+async def test_database_connection(
+    request: DatabaseTestRequest,
+    admin: AdminUser,
+):
+    """
+    Test a database connection string.
+
+    Admin only endpoint.
+    """
+    logger.info("Testing database connection", admin_id=admin.user_id)
+
+    manager = get_database_manager()
+    result = await manager.test_connection(request.database_url)
+
+    return result
+
+
+@router.post("/database/export")
+async def export_database(
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Export all data to JSON format.
+
+    Admin only endpoint.
+    """
+    from fastapi.responses import JSONResponse
+
+    logger.info("Exporting database", admin_id=admin.user_id)
+
+    manager = get_database_manager(db)
+    data = await manager.export_data()
+
+    # Log the export action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="database",
+        changes={"action": "export", "records": sum(len(v) for k, v in data.items() if isinstance(v, list))},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return JSONResponse(
+        content=data,
+        headers={
+            "Content-Disposition": f"attachment; filename=aidocindexer_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        }
+    )
+
+
+@router.post("/database/import")
+async def import_database(
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+    clear_existing: bool = Query(default=False, description="Clear existing data before import"),
+):
+    """
+    Import data from JSON export.
+
+    Send JSON data in the request body.
+    Admin only endpoint.
+    """
+    logger.info("Importing database", admin_id=admin.user_id, clear_existing=clear_existing)
+
+    # Get JSON data from request body
+    try:
+        data = await request.json()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid JSON data: {str(e)}"
+        )
+
+    manager = get_database_manager(db)
+    result = await manager.import_data(data, clear_existing=clear_existing)
+
+    # Log the import action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="database",
+        changes={
+            "action": "import",
+            "success": result["success"],
+            "imported": result["imported"],
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return result
+
+
+@router.post("/database/setup")
+async def setup_postgresql(
+    request_data: DatabaseSetupRequest,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Setup PostgreSQL database with pgvector extension.
+
+    Creates the pgvector extension and all required tables.
+    Admin only endpoint.
+    """
+    logger.info("Setting up PostgreSQL database", admin_id=admin.user_id)
+
+    manager = get_database_manager()
+    result = await manager.setup_postgresql(request_data.database_url)
+
+    # Log the setup action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="database",
+        changes={
+            "action": "postgresql_setup",
+            "success": result["success"],
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return result
+
+
+@router.get("/database/migration-instructions")
+async def get_migration_instructions(
+    admin: AdminUser,
+    from_type: str = Query(..., description="Current database type (sqlite, postgresql)"),
+    to_type: str = Query(..., description="Target database type (sqlite, postgresql)"),
+):
+    """
+    Get step-by-step migration instructions.
+
+    Admin only endpoint.
+    """
+    manager = get_database_manager()
+    instructions = manager.get_migration_instructions(from_type, to_type)
+
+    return instructions
+
+
+# =============================================================================
+# LLM Provider Management Endpoints
+# =============================================================================
+
+class LLMProviderCreate(BaseModel):
+    """Request to create an LLM provider."""
+    name: str = Field(..., min_length=1, max_length=100)
+    provider_type: str = Field(..., description="Provider type (openai, anthropic, ollama, etc.)")
+    api_key: Optional[str] = Field(None, description="API key (will be encrypted)")
+    api_base_url: Optional[str] = Field(None, description="Custom API base URL")
+    organization_id: Optional[str] = Field(None, description="Organization ID (for OpenAI)")
+    default_chat_model: Optional[str] = Field(None, description="Default chat model")
+    default_embedding_model: Optional[str] = Field(None, description="Default embedding model")
+    is_default: bool = Field(False, description="Set as default provider")
+    settings: Optional[Dict[str, Any]] = Field(None, description="Additional settings")
+
+
+class LLMProviderUpdate(BaseModel):
+    """Request to update an LLM provider."""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    api_key: Optional[str] = Field(None, description="API key (will be encrypted)")
+    api_base_url: Optional[str] = Field(None, description="Custom API base URL")
+    organization_id: Optional[str] = Field(None, description="Organization ID")
+    default_chat_model: Optional[str] = Field(None, description="Default chat model")
+    default_embedding_model: Optional[str] = Field(None, description="Default embedding model")
+    is_active: Optional[bool] = Field(None, description="Active status")
+    settings: Optional[Dict[str, Any]] = Field(None, description="Additional settings")
+
+
+@router.get("/llm/providers")
+async def list_llm_providers(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List all configured LLM providers.
+
+    Admin only endpoint.
+    """
+    logger.info("Listing LLM providers", admin_id=admin.user_id)
+
+    providers = await LLMProviderService.list_providers(db)
+    return {
+        "providers": [
+            LLMProviderService.format_provider_response(p) for p in providers
+        ],
+        "total": len(providers),
+    }
+
+
+@router.get("/llm/provider-types")
+async def get_llm_provider_types(admin: AdminUser):
+    """
+    Get all supported LLM provider types and their configurations.
+
+    Admin only endpoint.
+    """
+    return {
+        "provider_types": LLMProviderService.get_provider_types(),
+    }
+
+
+@router.get("/llm/ollama-models")
+async def list_ollama_models(
+    admin: AdminUser,
+    base_url: str = Query("http://localhost:11434", description="Ollama API base URL"),
+):
+    """
+    List available models from a local Ollama instance.
+
+    This endpoint allows fetching models before creating a provider.
+    Admin only endpoint.
+    """
+    from backend.services.llm import list_ollama_models as get_ollama_models
+
+    result = await get_ollama_models(base_url)
+    return result
+
+
+@router.get("/llm/providers/{provider_id}")
+async def get_llm_provider(
+    provider_id: str,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get a specific LLM provider by ID.
+
+    Admin only endpoint.
+    """
+    provider = await LLMProviderService.get_provider(db, provider_id)
+
+    if not provider:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="LLM provider not found",
+        )
+
+    return LLMProviderService.format_provider_response(provider)
+
+
+@router.post("/llm/providers", status_code=status.HTTP_201_CREATED)
+async def create_llm_provider(
+    provider_data: LLMProviderCreate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a new LLM provider configuration.
+
+    Admin only endpoint.
+    """
+    logger.info("Creating LLM provider", admin_id=admin.user_id, provider_type=provider_data.provider_type)
+
+    # Check for duplicate name
+    existing = await LLMProviderService.get_provider_by_name(db, provider_data.name)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Provider with name '{provider_data.name}' already exists",
+        )
+
+    try:
+        provider = await LLMProviderService.create_provider(
+            session=db,
+            name=provider_data.name,
+            provider_type=provider_data.provider_type,
+            api_key=provider_data.api_key,
+            api_base_url=provider_data.api_base_url,
+            organization_id=provider_data.organization_id,
+            default_chat_model=provider_data.default_chat_model,
+            default_embedding_model=provider_data.default_embedding_model,
+            is_default=provider_data.is_default,
+            settings=provider_data.settings,
+        )
+
+        # Log the action
+        audit_service = get_audit_service()
+        await audit_service.log_admin_action(
+            action=AuditAction.SYSTEM_CONFIG_CHANGE,
+            admin_user_id=admin.user_id,
+            target_resource_type="llm_provider",
+            target_resource_id=str(provider.id),
+            changes={"action": "create", "name": provider_data.name, "type": provider_data.provider_type},
+            ip_address=get_client_ip(request),
+            session=db,
+        )
+
+        return LLMProviderService.format_provider_response(provider)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.patch("/llm/providers/{provider_id}")
+async def update_llm_provider(
+    provider_id: str,
+    update_data: LLMProviderUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update an LLM provider configuration.
+
+    Admin only endpoint.
+    """
+    logger.info("Updating LLM provider", admin_id=admin.user_id, provider_id=provider_id)
+
+    # Check name uniqueness if updating
+    if update_data.name:
+        existing = await LLMProviderService.get_provider_by_name(db, update_data.name)
+        if existing and str(existing.id) != provider_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Provider with name '{update_data.name}' already exists",
+            )
+
+    provider = await LLMProviderService.update_provider(
+        session=db,
+        provider_id=provider_id,
+        name=update_data.name,
+        api_key=update_data.api_key,
+        api_base_url=update_data.api_base_url,
+        organization_id=update_data.organization_id,
+        default_chat_model=update_data.default_chat_model,
+        default_embedding_model=update_data.default_embedding_model,
+        is_active=update_data.is_active,
+        settings=update_data.settings,
+    )
+
+    if not provider:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="LLM provider not found",
+        )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="llm_provider",
+        target_resource_id=provider_id,
+        changes={"action": "update"},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return LLMProviderService.format_provider_response(provider)
+
+
+@router.delete("/llm/providers/{provider_id}")
+async def delete_llm_provider(
+    provider_id: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete an LLM provider.
+
+    Admin only endpoint.
+    """
+    logger.info("Deleting LLM provider", admin_id=admin.user_id, provider_id=provider_id)
+
+    # Get provider for audit log
+    provider = await LLMProviderService.get_provider(db, provider_id)
+    if not provider:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="LLM provider not found",
+        )
+
+    if provider.is_default:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete the default provider. Set another provider as default first.",
+        )
+
+    provider_name = provider.name
+    deleted = await LLMProviderService.delete_provider(db, provider_id)
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="llm_provider",
+        target_resource_id=provider_id,
+        changes={"action": "delete", "name": provider_name},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "LLM provider deleted successfully", "provider_id": provider_id}
+
+
+@router.post("/llm/providers/{provider_id}/test")
+async def test_llm_provider(
+    provider_id: str,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Test connection to an LLM provider.
+
+    Admin only endpoint.
+    """
+    logger.info("Testing LLM provider", admin_id=admin.user_id, provider_id=provider_id)
+
+    result = await LLMProviderService.test_provider(db, provider_id)
+    return result
+
+
+@router.post("/llm/providers/{provider_id}/default")
+async def set_default_llm_provider(
+    provider_id: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Set an LLM provider as the default.
+
+    Admin only endpoint.
+    """
+    logger.info("Setting default LLM provider", admin_id=admin.user_id, provider_id=provider_id)
+
+    provider = await LLMProviderService.set_default_provider(db, provider_id)
+
+    if not provider:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="LLM provider not found",
+        )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="llm_provider",
+        target_resource_id=provider_id,
+        changes={"action": "set_default", "name": provider.name},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return LLMProviderService.format_provider_response(provider)
+
+
+@router.get("/llm/providers/{provider_id}/models")
+async def list_llm_provider_models(
+    provider_id: str,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List available models for a provider.
+
+    Admin only endpoint.
+    """
+    result = await LLMProviderService.list_available_models(db, provider_id)
+    return result
+
+
+# =============================================================================
+# Database Connection Management Endpoints
+# =============================================================================
+
+class DatabaseConnectionCreate(BaseModel):
+    """Request to create a database connection."""
+    name: str = Field(..., min_length=1, max_length=100)
+    db_type: str = Field(..., description="Database type (sqlite, postgresql, mysql)")
+    database: str = Field(..., description="Database name or path")
+    host: Optional[str] = Field(None, description="Database host")
+    port: Optional[int] = Field(None, description="Database port")
+    username: Optional[str] = Field(None, description="Database username")
+    password: Optional[str] = Field(None, description="Database password (will be encrypted)")
+    vector_store: str = Field("auto", description="Vector store type (auto, pgvector, chromadb)")
+    is_active: bool = Field(False, description="Set as active connection")
+    connection_options: Optional[Dict[str, Any]] = Field(None, description="Additional options")
+
+
+class DatabaseConnectionUpdate(BaseModel):
+    """Request to update a database connection."""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    host: Optional[str] = Field(None, description="Database host")
+    port: Optional[int] = Field(None, description="Database port")
+    database: Optional[str] = Field(None, description="Database name or path")
+    username: Optional[str] = Field(None, description="Database username")
+    password: Optional[str] = Field(None, description="Database password")
+    vector_store: Optional[str] = Field(None, description="Vector store type")
+    connection_options: Optional[Dict[str, Any]] = Field(None, description="Additional options")
+
+
+@router.get("/database/connections")
+async def list_database_connections(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List all saved database connections.
+
+    Admin only endpoint.
+    """
+    logger.info("Listing database connections", admin_id=admin.user_id)
+
+    connections = await DatabaseConnectionService.list_connections(db)
+    return {
+        "connections": [
+            DatabaseConnectionService.format_connection_response(c) for c in connections
+        ],
+        "total": len(connections),
+    }
+
+
+@router.get("/database/connection-types")
+async def get_database_connection_types(admin: AdminUser):
+    """
+    Get all supported database types and their configurations.
+
+    Admin only endpoint.
+    """
+    return {
+        "database_types": DatabaseConnectionService.get_database_types(),
+    }
+
+
+@router.get("/database/connections/{connection_id}")
+async def get_database_connection(
+    connection_id: str,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get a specific database connection by ID.
+
+    Admin only endpoint.
+    """
+    connection = await DatabaseConnectionService.get_connection(db, connection_id)
+
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Database connection not found",
+        )
+
+    return DatabaseConnectionService.format_connection_response(connection)
+
+
+@router.post("/database/connections", status_code=status.HTTP_201_CREATED)
+async def create_database_connection(
+    connection_data: DatabaseConnectionCreate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a new database connection configuration.
+
+    Admin only endpoint.
+    """
+    logger.info("Creating database connection", admin_id=admin.user_id, db_type=connection_data.db_type)
+
+    # Check for duplicate name
+    existing = await DatabaseConnectionService.get_connection_by_name(db, connection_data.name)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Connection with name '{connection_data.name}' already exists",
+        )
+
+    try:
+        connection = await DatabaseConnectionService.create_connection(
+            session=db,
+            name=connection_data.name,
+            db_type=connection_data.db_type,
+            database=connection_data.database,
+            host=connection_data.host,
+            port=connection_data.port,
+            username=connection_data.username,
+            password=connection_data.password,
+            vector_store=connection_data.vector_store,
+            is_active=connection_data.is_active,
+            connection_options=connection_data.connection_options,
+        )
+
+        # Log the action
+        audit_service = get_audit_service()
+        await audit_service.log_admin_action(
+            action=AuditAction.SYSTEM_CONFIG_CHANGE,
+            admin_user_id=admin.user_id,
+            target_resource_type="database_connection",
+            target_resource_id=str(connection.id),
+            changes={"action": "create", "name": connection_data.name, "type": connection_data.db_type},
+            ip_address=get_client_ip(request),
+            session=db,
+        )
+
+        return DatabaseConnectionService.format_connection_response(connection)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.patch("/database/connections/{connection_id}")
+async def update_database_connection(
+    connection_id: str,
+    update_data: DatabaseConnectionUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update a database connection configuration.
+
+    Admin only endpoint.
+    """
+    logger.info("Updating database connection", admin_id=admin.user_id, connection_id=connection_id)
+
+    # Check name uniqueness if updating
+    if update_data.name:
+        existing = await DatabaseConnectionService.get_connection_by_name(db, update_data.name)
+        if existing and str(existing.id) != connection_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Connection with name '{update_data.name}' already exists",
+            )
+
+    connection = await DatabaseConnectionService.update_connection(
+        session=db,
+        connection_id=connection_id,
+        name=update_data.name,
+        host=update_data.host,
+        port=update_data.port,
+        database=update_data.database,
+        username=update_data.username,
+        password=update_data.password,
+        vector_store=update_data.vector_store,
+        connection_options=update_data.connection_options,
+    )
+
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Database connection not found",
+        )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="database_connection",
+        target_resource_id=connection_id,
+        changes={"action": "update"},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return DatabaseConnectionService.format_connection_response(connection)
+
+
+@router.delete("/database/connections/{connection_id}")
+async def delete_database_connection(
+    connection_id: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete a database connection.
+
+    Cannot delete the active connection.
+    Admin only endpoint.
+    """
+    logger.info("Deleting database connection", admin_id=admin.user_id, connection_id=connection_id)
+
+    # Get connection for audit log
+    connection = await DatabaseConnectionService.get_connection(db, connection_id)
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Database connection not found",
+        )
+
+    connection_name = connection.name
+
+    try:
+        deleted = await DatabaseConnectionService.delete_connection(db, connection_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="database_connection",
+        target_resource_id=connection_id,
+        changes={"action": "delete", "name": connection_name},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "Database connection deleted successfully", "connection_id": connection_id}
+
+
+@router.post("/database/connections/{connection_id}/test")
+async def test_saved_database_connection(
+    connection_id: str,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Test a saved database connection.
+
+    Admin only endpoint.
+    """
+    logger.info("Testing database connection", admin_id=admin.user_id, connection_id=connection_id)
+
+    result = await DatabaseConnectionService.test_saved_connection(db, connection_id)
+    return result
+
+
+@router.post("/database/connections/{connection_id}/activate")
+async def activate_database_connection(
+    connection_id: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Set a database connection as active.
+
+    Note: This only marks the connection as active in the database.
+    To actually switch databases, you need to restart the application
+    with the new DATABASE_URL environment variable.
+
+    Admin only endpoint.
+    """
+    logger.info("Activating database connection", admin_id=admin.user_id, connection_id=connection_id)
+
+    connection = await DatabaseConnectionService.set_active_connection(db, connection_id)
+
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Database connection not found",
+        )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="database_connection",
+        target_resource_id=connection_id,
+        changes={"action": "activate", "name": connection.name},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {
+        "message": "Database connection activated. Restart the application to use this connection.",
+        "connection": DatabaseConnectionService.format_connection_response(connection),
+    }
+
+
+# =============================================================================
+# LLM Operation Configuration Endpoints
+# =============================================================================
+
+class LLMOperationConfigCreate(BaseModel):
+    """Request to set operation-level LLM configuration."""
+    operation_type: str = Field(..., description="Operation type (chat, embeddings, document_processing, rag)")
+    provider_id: Optional[str] = Field(None, description="Provider ID to use for this operation")
+    model_override: Optional[str] = Field(None, description="Model to use (overrides provider default)")
+    temperature_override: Optional[float] = Field(None, ge=0.0, le=2.0, description="Temperature override")
+    max_tokens_override: Optional[int] = Field(None, ge=1, description="Max tokens override")
+    fallback_provider_id: Optional[str] = Field(None, description="Fallback provider ID")
+
+
+class LLMOperationConfigResponse(BaseModel):
+    """Operation config response."""
+    id: str
+    operation_type: str
+    provider_id: Optional[str]
+    provider_name: Optional[str]
+    model_override: Optional[str]
+    temperature_override: Optional[float]
+    max_tokens_override: Optional[int]
+    fallback_provider_id: Optional[str]
+    fallback_provider_name: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+VALID_OPERATIONS = ["chat", "embeddings", "document_processing", "rag", "summarization"]
+
+
+@router.get("/llm/operations")
+async def list_llm_operations(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List all operation-level LLM configurations.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import LLMOperationConfig, LLMProvider
+
+    logger.info("Listing LLM operation configs", admin_id=admin.user_id)
+
+    query = (
+        select(LLMOperationConfig)
+        .options(
+            selectinload(LLMOperationConfig.provider),
+            selectinload(LLMOperationConfig.fallback_provider),
+        )
+        .order_by(LLMOperationConfig.operation_type)
+    )
+    result = await db.execute(query)
+    configs = result.scalars().all()
+
+    return {
+        "operations": [
+            LLMOperationConfigResponse(
+                id=str(c.id),
+                operation_type=c.operation_type,
+                provider_id=str(c.provider_id) if c.provider_id else None,
+                provider_name=c.provider.name if c.provider else None,
+                model_override=c.model_override,
+                temperature_override=c.temperature_override,
+                max_tokens_override=c.max_tokens_override,
+                fallback_provider_id=str(c.fallback_provider_id) if c.fallback_provider_id else None,
+                fallback_provider_name=c.fallback_provider.name if c.fallback_provider else None,
+                created_at=c.created_at,
+                updated_at=c.updated_at,
+            )
+            for c in configs
+        ],
+        "valid_operations": VALID_OPERATIONS,
+        "total": len(configs),
+    }
+
+
+@router.put("/llm/operations/{operation_type}")
+async def set_llm_operation_config(
+    operation_type: str,
+    config_data: LLMOperationConfigCreate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Set LLM configuration for a specific operation.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import LLMOperationConfig, LLMProvider
+    from backend.services.llm import LLMConfigManager
+
+    if operation_type not in VALID_OPERATIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid operation type. Valid types: {VALID_OPERATIONS}",
+        )
+
+    logger.info("Setting LLM operation config", admin_id=admin.user_id, operation=operation_type)
+
+    # Verify provider exists if provided
+    if config_data.provider_id:
+        provider_query = select(LLMProvider).where(LLMProvider.id == config_data.provider_id)
+        provider_result = await db.execute(provider_query)
+        if not provider_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provider not found",
+            )
+
+    # Verify fallback provider if provided
+    if config_data.fallback_provider_id:
+        fallback_query = select(LLMProvider).where(LLMProvider.id == config_data.fallback_provider_id)
+        fallback_result = await db.execute(fallback_query)
+        if not fallback_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Fallback provider not found",
+            )
+
+    # Check if config exists
+    existing_query = select(LLMOperationConfig).where(LLMOperationConfig.operation_type == operation_type)
+    existing_result = await db.execute(existing_query)
+    existing = existing_result.scalar_one_or_none()
+
+    if existing:
+        # Update existing
+        existing.provider_id = config_data.provider_id
+        existing.model_override = config_data.model_override
+        existing.temperature_override = config_data.temperature_override
+        existing.max_tokens_override = config_data.max_tokens_override
+        existing.fallback_provider_id = config_data.fallback_provider_id
+        await db.commit()
+        await db.refresh(existing)
+        config = existing
+    else:
+        # Create new
+        config = LLMOperationConfig(
+            operation_type=operation_type,
+            provider_id=config_data.provider_id,
+            model_override=config_data.model_override,
+            temperature_override=config_data.temperature_override,
+            max_tokens_override=config_data.max_tokens_override,
+            fallback_provider_id=config_data.fallback_provider_id,
+        )
+        db.add(config)
+        await db.commit()
+        await db.refresh(config)
+
+    # Invalidate cache
+    await LLMConfigManager.invalidate_cache(f"operation:{operation_type}")
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="llm_operation_config",
+        target_resource_id=operation_type,
+        changes={
+            "action": "set",
+            "operation": operation_type,
+            "provider_id": config_data.provider_id,
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    # Reload with relationships
+    query = (
+        select(LLMOperationConfig)
+        .where(LLMOperationConfig.id == config.id)
+        .options(
+            selectinload(LLMOperationConfig.provider),
+            selectinload(LLMOperationConfig.fallback_provider),
+        )
+    )
+    result = await db.execute(query)
+    config = result.scalar_one()
+
+    return LLMOperationConfigResponse(
+        id=str(config.id),
+        operation_type=config.operation_type,
+        provider_id=str(config.provider_id) if config.provider_id else None,
+        provider_name=config.provider.name if config.provider else None,
+        model_override=config.model_override,
+        temperature_override=config.temperature_override,
+        max_tokens_override=config.max_tokens_override,
+        fallback_provider_id=str(config.fallback_provider_id) if config.fallback_provider_id else None,
+        fallback_provider_name=config.fallback_provider.name if config.fallback_provider else None,
+        created_at=config.created_at,
+        updated_at=config.updated_at,
+    )
+
+
+@router.delete("/llm/operations/{operation_type}")
+async def delete_llm_operation_config(
+    operation_type: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete operation-level LLM configuration (reset to default).
+
+    Admin only endpoint.
+    """
+    from backend.db.models import LLMOperationConfig
+    from backend.services.llm import LLMConfigManager
+
+    if operation_type not in VALID_OPERATIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid operation type. Valid types: {VALID_OPERATIONS}",
+        )
+
+    logger.info("Deleting LLM operation config", admin_id=admin.user_id, operation=operation_type)
+
+    query = select(LLMOperationConfig).where(LLMOperationConfig.operation_type == operation_type)
+    result = await db.execute(query)
+    config = result.scalar_one_or_none()
+
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Operation config not found",
+        )
+
+    await db.delete(config)
+    await db.commit()
+
+    # Invalidate cache
+    await LLMConfigManager.invalidate_cache(f"operation:{operation_type}")
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="llm_operation_config",
+        target_resource_id=operation_type,
+        changes={"action": "delete", "operation": operation_type},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": f"Operation config for '{operation_type}' deleted. Will use default provider."}
+
+
+# =============================================================================
+# LLM Usage Analytics Endpoints
+# =============================================================================
+
+class UsageSummaryResponse(BaseModel):
+    """Usage summary response."""
+    request_count: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_tokens: int
+    total_cost_usd: float
+    avg_duration_ms: float
+
+
+class UsageByProviderResponse(BaseModel):
+    """Usage grouped by provider."""
+    provider_id: Optional[str]
+    provider_type: str
+    provider_name: Optional[str]
+    request_count: int
+    total_tokens: int
+    total_cost_usd: float
+
+
+class UsageByOperationResponse(BaseModel):
+    """Usage grouped by operation."""
+    operation_type: str
+    request_count: int
+    total_tokens: int
+    total_cost_usd: float
+
+
+@router.get("/llm/usage", response_model=UsageSummaryResponse)
+async def get_llm_usage_summary(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    start_date: Optional[datetime] = Query(None, description="Start date filter"),
+    end_date: Optional[datetime] = Query(None, description="End date filter"),
+    provider_id: Optional[str] = Query(None, description="Filter by provider"),
+    operation_type: Optional[str] = Query(None, description="Filter by operation"),
+):
+    """
+    Get overall LLM usage summary.
+
+    Admin only endpoint.
+    """
+    from backend.services.llm import LLMUsageTracker
+
+    logger.info("Getting LLM usage summary", admin_id=admin.user_id)
+
+    summary = await LLMUsageTracker.get_usage_summary(
+        provider_id=provider_id,
+        operation_type=operation_type,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    return UsageSummaryResponse(**summary)
+
+
+@router.get("/llm/usage/by-provider")
+async def get_llm_usage_by_provider(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    start_date: Optional[datetime] = Query(None, description="Start date filter"),
+    end_date: Optional[datetime] = Query(None, description="End date filter"),
+):
+    """
+    Get LLM usage grouped by provider.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import LLMUsageLog, LLMProvider
+
+    logger.info("Getting LLM usage by provider", admin_id=admin.user_id)
+
+    query = (
+        select(
+            LLMUsageLog.provider_id,
+            LLMUsageLog.provider_type,
+            func.count(LLMUsageLog.id).label("request_count"),
+            func.sum(LLMUsageLog.total_tokens).label("total_tokens"),
+            func.sum(LLMUsageLog.total_cost_usd).label("total_cost_usd"),
+        )
+        .group_by(LLMUsageLog.provider_id, LLMUsageLog.provider_type)
+    )
+
+    if start_date:
+        query = query.where(LLMUsageLog.created_at >= start_date)
+    if end_date:
+        query = query.where(LLMUsageLog.created_at <= end_date)
+
+    result = await db.execute(query)
+    rows = result.all()
+
+    # Get provider names
+    provider_ids = [r.provider_id for r in rows if r.provider_id]
+    provider_names = {}
+    if provider_ids:
+        providers_query = select(LLMProvider.id, LLMProvider.name).where(LLMProvider.id.in_(provider_ids))
+        providers_result = await db.execute(providers_query)
+        provider_names = {str(p.id): p.name for p in providers_result.all()}
+
+    return {
+        "usage_by_provider": [
+            UsageByProviderResponse(
+                provider_id=str(r.provider_id) if r.provider_id else None,
+                provider_type=r.provider_type,
+                provider_name=provider_names.get(str(r.provider_id)) if r.provider_id else None,
+                request_count=r.request_count or 0,
+                total_tokens=r.total_tokens or 0,
+                total_cost_usd=float(r.total_cost_usd or 0),
+            )
+            for r in rows
+        ],
+    }
+
+
+@router.get("/llm/usage/by-operation")
+async def get_llm_usage_by_operation(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    start_date: Optional[datetime] = Query(None, description="Start date filter"),
+    end_date: Optional[datetime] = Query(None, description="End date filter"),
+):
+    """
+    Get LLM usage grouped by operation type.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import LLMUsageLog
+
+    logger.info("Getting LLM usage by operation", admin_id=admin.user_id)
+
+    query = (
+        select(
+            LLMUsageLog.operation_type,
+            func.count(LLMUsageLog.id).label("request_count"),
+            func.sum(LLMUsageLog.total_tokens).label("total_tokens"),
+            func.sum(LLMUsageLog.total_cost_usd).label("total_cost_usd"),
+        )
+        .group_by(LLMUsageLog.operation_type)
+    )
+
+    if start_date:
+        query = query.where(LLMUsageLog.created_at >= start_date)
+    if end_date:
+        query = query.where(LLMUsageLog.created_at <= end_date)
+
+    result = await db.execute(query)
+    rows = result.all()
+
+    return {
+        "usage_by_operation": [
+            UsageByOperationResponse(
+                operation_type=r.operation_type,
+                request_count=r.request_count or 0,
+                total_tokens=r.total_tokens or 0,
+                total_cost_usd=float(r.total_cost_usd or 0),
+            )
+            for r in rows
+        ],
+    }
+
+
+@router.get("/llm/usage/recent")
+async def get_recent_llm_usage(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    limit: int = Query(50, ge=1, le=500, description="Number of records to return"),
+):
+    """
+    Get recent LLM usage logs.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import LLMUsageLog, LLMProvider, User
+
+    logger.info("Getting recent LLM usage", admin_id=admin.user_id, limit=limit)
+
+    query = (
+        select(LLMUsageLog)
+        .options(
+            selectinload(LLMUsageLog.provider),
+            selectinload(LLMUsageLog.user),
+        )
+        .order_by(desc(LLMUsageLog.created_at))
+        .limit(limit)
+    )
+
+    result = await db.execute(query)
+    logs = result.scalars().all()
+
+    return {
+        "logs": [
+            {
+                "id": str(log.id),
+                "provider_type": log.provider_type,
+                "provider_name": log.provider.name if log.provider else None,
+                "model": log.model,
+                "operation_type": log.operation_type,
+                "user_email": log.user.email if log.user else None,
+                "input_tokens": log.input_tokens,
+                "output_tokens": log.output_tokens,
+                "total_tokens": log.total_tokens,
+                "total_cost_usd": log.total_cost_usd,
+                "request_duration_ms": log.request_duration_ms,
+                "success": log.success,
+                "created_at": log.created_at.isoformat(),
+            }
+            for log in logs
+        ],
+        "total": len(logs),
+    }
+
+
+@router.post("/llm/cache/invalidate")
+async def invalidate_llm_cache(
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Invalidate LLM configuration cache.
+
+    Use this after making configuration changes to force immediate effect.
+    Admin only endpoint.
+    """
+    from backend.services.llm import LLMConfigManager, LLMFactory
+
+    logger.info("Invalidating LLM cache", admin_id=admin.user_id)
+
+    # Clear both config cache and model instance cache
+    await LLMConfigManager.invalidate_cache()
+    LLMFactory.clear_cache()
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="llm_cache",
+        changes={"action": "invalidate"},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "LLM cache invalidated successfully"}
+
+
+# =============================================================================
+# Rate Limit Management Endpoints
+# =============================================================================
+
+class RateLimitConfigCreate(BaseModel):
+    """Request to set rate limit configuration for a tier."""
+    requests_per_minute: int = Field(60, ge=1, description="Requests per minute")
+    requests_per_hour: int = Field(1000, ge=1, description="Requests per hour")
+    requests_per_day: int = Field(10000, ge=1, description="Requests per day")
+    tokens_per_minute: int = Field(100000, ge=1, description="Tokens per minute")
+    tokens_per_day: int = Field(1000000, ge=1, description="Tokens per day")
+    operation_limits: Optional[Dict[str, int]] = Field(None, description="Per-operation limits")
+
+
+class RateLimitConfigResponse(BaseModel):
+    """Rate limit configuration response."""
+    id: str
+    tier_id: str
+    tier_name: Optional[str]
+    requests_per_minute: int
+    requests_per_hour: int
+    requests_per_day: int
+    tokens_per_minute: int
+    tokens_per_day: int
+    operation_limits: Optional[Dict[str, int]]
+    created_at: datetime
+    updated_at: datetime
+
+
+class RateLimitUsageResponse(BaseModel):
+    """Rate limit usage response."""
+    user_id: str
+    user_email: str
+    tier_name: str
+    requests: Dict[str, Dict[str, int]]
+    tokens: Dict[str, Dict[str, int]]
+
+
+@router.get("/rate-limits")
+async def list_rate_limit_configs(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List all rate limit configurations by tier.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import RateLimitConfig
+
+    logger.info("Listing rate limit configs", admin_id=admin.user_id)
+
+    query = (
+        select(RateLimitConfig)
+        .options(selectinload(RateLimitConfig.tier))
+        .order_by(RateLimitConfig.created_at)
+    )
+    result = await db.execute(query)
+    configs = result.scalars().all()
+
+    return {
+        "configs": [
+            RateLimitConfigResponse(
+                id=str(c.id),
+                tier_id=str(c.tier_id),
+                tier_name=c.tier.name if c.tier else None,
+                requests_per_minute=c.requests_per_minute,
+                requests_per_hour=c.requests_per_hour,
+                requests_per_day=c.requests_per_day,
+                tokens_per_minute=c.tokens_per_minute,
+                tokens_per_day=c.tokens_per_day,
+                operation_limits=c.operation_limits,
+                created_at=c.created_at,
+                updated_at=c.updated_at,
+            )
+            for c in configs
+        ],
+        "total": len(configs),
+    }
+
+
+@router.put("/rate-limits/{tier_id}")
+async def set_rate_limit_config(
+    tier_id: str,
+    config_data: RateLimitConfigCreate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Set rate limit configuration for an access tier.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import RateLimitConfig
+    from backend.api.middleware.rate_limit import clear_tier_cache
+
+    logger.info("Setting rate limit config", admin_id=admin.user_id, tier_id=tier_id)
+
+    # Verify tier exists
+    tier_query = select(AccessTier).where(AccessTier.id == tier_id)
+    tier_result = await db.execute(tier_query)
+    tier = tier_result.scalar_one_or_none()
+
+    if not tier:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Access tier not found",
+        )
+
+    # Check if config exists
+    existing_query = select(RateLimitConfig).where(RateLimitConfig.tier_id == tier_id)
+    existing_result = await db.execute(existing_query)
+    existing = existing_result.scalar_one_or_none()
+
+    if existing:
+        existing.requests_per_minute = config_data.requests_per_minute
+        existing.requests_per_hour = config_data.requests_per_hour
+        existing.requests_per_day = config_data.requests_per_day
+        existing.tokens_per_minute = config_data.tokens_per_minute
+        existing.tokens_per_day = config_data.tokens_per_day
+        existing.operation_limits = config_data.operation_limits
+        await db.commit()
+        await db.refresh(existing)
+        config = existing
+    else:
+        config = RateLimitConfig(
+            tier_id=tier_id,
+            requests_per_minute=config_data.requests_per_minute,
+            requests_per_hour=config_data.requests_per_hour,
+            requests_per_day=config_data.requests_per_day,
+            tokens_per_minute=config_data.tokens_per_minute,
+            tokens_per_day=config_data.tokens_per_day,
+            operation_limits=config_data.operation_limits,
+        )
+        db.add(config)
+        await db.commit()
+        await db.refresh(config)
+
+    # Clear cache
+    await clear_tier_cache(tier_id)
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="rate_limit_config",
+        target_resource_id=tier_id,
+        changes={"action": "set", "tier": tier.name},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return RateLimitConfigResponse(
+        id=str(config.id),
+        tier_id=str(config.tier_id),
+        tier_name=tier.name,
+        requests_per_minute=config.requests_per_minute,
+        requests_per_hour=config.requests_per_hour,
+        requests_per_day=config.requests_per_day,
+        tokens_per_minute=config.tokens_per_minute,
+        tokens_per_day=config.tokens_per_day,
+        operation_limits=config.operation_limits,
+        created_at=config.created_at,
+        updated_at=config.updated_at,
+    )
+
+
+@router.get("/rate-limits/usage")
+async def get_rate_limit_usage(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+):
+    """
+    Get current rate limit usage for users.
+
+    Admin only endpoint.
+    """
+    from backend.api.middleware.rate_limit import get_user_rate_limit_usage
+
+    logger.info("Getting rate limit usage", admin_id=admin.user_id)
+
+    # Get users to check usage for
+    query = select(User).options(selectinload(User.access_tier))
+    if user_id:
+        query = query.where(User.id == user_id)
+    query = query.limit(100)  # Limit to avoid performance issues
+
+    result = await db.execute(query)
+    users = result.scalars().all()
+
+    usage_list = []
+    for user in users:
+        try:
+            usage = await get_user_rate_limit_usage(
+                user_id=str(user.id),
+                tier_id=str(user.access_tier_id),
+                tier_level=user.access_tier.level if user.access_tier else 0,
+                db=db
+            )
+            usage_list.append(RateLimitUsageResponse(
+                user_id=str(user.id),
+                user_email=user.email,
+                tier_name=user.access_tier.name if user.access_tier else "Unknown",
+                requests=usage['requests'],
+                tokens=usage['tokens'],
+            ))
+        except Exception as e:
+            logger.warning("Failed to get rate limit usage", user_id=str(user.id), error=str(e))
+
+    return {
+        "usage": [u.model_dump() for u in usage_list],
+        "total": len(usage_list),
+    }
+
+
+@router.post("/rate-limits/reset/{user_id}")
+async def reset_user_rate_limits(
+    user_id: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Reset rate limits for a specific user.
+
+    Admin only endpoint.
+    """
+    from backend.api.middleware.rate_limit import reset_user_rate_limits as reset_limits
+
+    logger.info("Resetting rate limits", admin_id=admin.user_id, target_user_id=user_id)
+
+    # Verify user exists
+    user_query = select(User).where(User.id == user_id)
+    user_result = await db.execute(user_query)
+    user = user_result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    await reset_limits(user_id)
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="rate_limit",
+        target_user_id=user_id,
+        changes={"action": "reset", "user_email": user.email},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": f"Rate limits reset for user {user.email}"}
+
+
+# =============================================================================
+# Cost Limit Management Endpoints
+# =============================================================================
+
+class CostLimitConfigCreate(BaseModel):
+    """Request to set cost limit configuration for a user."""
+    daily_limit_usd: float = Field(10.0, ge=0, description="Daily cost limit in USD")
+    monthly_limit_usd: float = Field(100.0, ge=0, description="Monthly cost limit in USD")
+    enforce_hard_limit: bool = Field(True, description="Enforce hard limit (block vs warn)")
+    alert_thresholds: List[int] = Field([50, 80, 100], description="Alert threshold percentages")
+
+
+class CostLimitResponse(BaseModel):
+    """Cost limit response."""
+    user_id: str
+    user_email: str
+    daily: Dict[str, Any]
+    monthly: Dict[str, Any]
+    enforce_hard_limit: bool
+    alert_thresholds: List[int]
+
+
+class CostAlertResponse(BaseModel):
+    """Cost alert response."""
+    id: str
+    user_email: str
+    alert_type: str
+    threshold_percent: int
+    usage_at_alert_usd: float
+    notified: bool
+    acknowledged: bool
+    created_at: datetime
+
+
+@router.get("/cost-limits")
+async def list_cost_limits(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+):
+    """
+    List user cost limits.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import UserCostLimit
+
+    logger.info("Listing cost limits", admin_id=admin.user_id)
+
+    query = (
+        select(UserCostLimit)
+        .options(selectinload(UserCostLimit.user))
+    )
+    if user_id:
+        query = query.where(UserCostLimit.user_id == user_id)
+    query = query.order_by(UserCostLimit.created_at.desc())
+
+    result = await db.execute(query)
+    limits = result.scalars().all()
+
+    return {
+        "limits": [
+            {
+                "id": str(l.id),
+                "user_id": str(l.user_id),
+                "user_email": l.user.email if l.user else "Unknown",
+                "daily_limit_usd": l.daily_limit_usd,
+                "monthly_limit_usd": l.monthly_limit_usd,
+                "current_daily_usage_usd": l.current_daily_usage_usd,
+                "current_monthly_usage_usd": l.current_monthly_usage_usd,
+                "enforce_hard_limit": l.enforce_hard_limit,
+                "alert_thresholds": l.alert_thresholds,
+                "last_daily_reset": l.last_daily_reset.isoformat() if l.last_daily_reset else None,
+                "last_monthly_reset": l.last_monthly_reset.isoformat() if l.last_monthly_reset else None,
+            }
+            for l in limits
+        ],
+        "total": len(limits),
+    }
+
+
+@router.put("/cost-limits/{user_id}")
+async def set_cost_limit(
+    user_id: str,
+    config_data: CostLimitConfigCreate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Set cost limits for a user.
+
+    Admin only endpoint.
+    """
+    from backend.api.middleware.cost_limit import get_cost_limit_checker
+
+    logger.info("Setting cost limit", admin_id=admin.user_id, target_user_id=user_id)
+
+    # Verify user exists
+    user_query = select(User).options(selectinload(User.access_tier)).where(User.id == user_id)
+    user_result = await db.execute(user_query)
+    user = user_result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    checker = get_cost_limit_checker()
+    await checker.update_user_cost_limits(
+        db=db,
+        user_id=user_id,
+        tier_level=user.access_tier.level if user.access_tier else 0,
+        daily_limit=config_data.daily_limit_usd,
+        monthly_limit=config_data.monthly_limit_usd,
+        enforce_hard_limit=config_data.enforce_hard_limit,
+        alert_thresholds=config_data.alert_thresholds,
+    )
+    await db.commit()
+
+    # Get current status
+    status_data = await checker.get_user_cost_status(
+        db=db,
+        user_id=user_id,
+        tier_level=user.access_tier.level if user.access_tier else 0,
+    )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="cost_limit",
+        target_user_id=user_id,
+        changes={
+            "action": "set",
+            "user_email": user.email,
+            "daily_limit": config_data.daily_limit_usd,
+            "monthly_limit": config_data.monthly_limit_usd,
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return CostLimitResponse(
+        user_id=user_id,
+        user_email=user.email,
+        daily=status_data['daily'],
+        monthly=status_data['monthly'],
+        enforce_hard_limit=status_data['enforce_hard_limit'],
+        alert_thresholds=status_data['alert_thresholds'],
+    )
+
+
+@router.get("/cost-limits/{user_id}/status")
+async def get_user_cost_status(
+    user_id: str,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get cost limit status for a specific user.
+
+    Admin only endpoint.
+    """
+    from backend.api.middleware.cost_limit import get_cost_limit_checker
+
+    logger.info("Getting cost limit status", admin_id=admin.user_id, target_user_id=user_id)
+
+    # Verify user exists
+    user_query = select(User).options(selectinload(User.access_tier)).where(User.id == user_id)
+    user_result = await db.execute(user_query)
+    user = user_result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    checker = get_cost_limit_checker()
+    status_data = await checker.get_user_cost_status(
+        db=db,
+        user_id=user_id,
+        tier_level=user.access_tier.level if user.access_tier else 0,
+    )
+
+    return CostLimitResponse(
+        user_id=user_id,
+        user_email=user.email,
+        daily=status_data['daily'],
+        monthly=status_data['monthly'],
+        enforce_hard_limit=status_data['enforce_hard_limit'],
+        alert_thresholds=status_data['alert_thresholds'],
+    )
+
+
+@router.get("/cost-alerts")
+async def list_cost_alerts(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    unacknowledged_only: bool = Query(True, description="Only show unacknowledged alerts"),
+):
+    """
+    List cost alerts.
+
+    Admin only endpoint.
+    """
+    from backend.api.middleware.cost_limit import get_cost_limit_checker
+
+    logger.info("Listing cost alerts", admin_id=admin.user_id)
+
+    checker = get_cost_limit_checker()
+    alerts = await checker.get_pending_alerts(
+        db=db,
+        unacknowledged_only=unacknowledged_only,
+    )
+
+    # Get user emails for alerts
+    from backend.db.models import UserCostLimit
+    alert_responses = []
+
+    for alert in alerts:
+        # Get user email through cost limit
+        limit_query = (
+            select(UserCostLimit)
+            .options(selectinload(UserCostLimit.user))
+            .where(UserCostLimit.id == alert.cost_limit_id)
+        )
+        limit_result = await db.execute(limit_query)
+        limit = limit_result.scalar_one_or_none()
+
+        alert_responses.append(CostAlertResponse(
+            id=str(alert.id),
+            user_email=limit.user.email if limit and limit.user else "Unknown",
+            alert_type=alert.alert_type,
+            threshold_percent=alert.threshold_percent,
+            usage_at_alert_usd=alert.usage_at_alert_usd,
+            notified=alert.notified,
+            acknowledged=alert.acknowledged,
+            created_at=alert.created_at,
+        ))
+
+    return {
+        "alerts": [a.model_dump() for a in alert_responses],
+        "total": len(alert_responses),
+    }
+
+
+@router.post("/cost-alerts/{alert_id}/acknowledge")
+async def acknowledge_cost_alert(
+    alert_id: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Acknowledge a cost alert.
+
+    Admin only endpoint.
+    """
+    from backend.api.middleware.cost_limit import get_cost_limit_checker
+
+    logger.info("Acknowledging cost alert", admin_id=admin.user_id, alert_id=alert_id)
+
+    checker = get_cost_limit_checker()
+    alert = await checker.acknowledge_alert(db, alert_id)
+    await db.commit()
+
+    if not alert:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Alert not found",
+        )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="cost_alert",
+        target_resource_id=alert_id,
+        changes={"action": "acknowledge"},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "Alert acknowledged", "alert_id": alert_id}
+
+
+@router.post("/cost-limits/{user_id}/reset")
+async def reset_user_cost_tracking(
+    user_id: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+    reset_daily: bool = Query(True, description="Reset daily usage"),
+    reset_monthly: bool = Query(False, description="Reset monthly usage"),
+):
+    """
+    Reset cost tracking for a user.
+
+    Admin only endpoint.
+    """
+    from backend.api.middleware.cost_limit import reset_user_cost_tracking as reset_cost
+
+    logger.info("Resetting cost tracking", admin_id=admin.user_id, target_user_id=user_id)
+
+    # Verify user exists
+    user_query = select(User).options(selectinload(User.access_tier)).where(User.id == user_id)
+    user_result = await db.execute(user_query)
+    user = user_result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    await reset_cost(
+        db=db,
+        user_id=user_id,
+        tier_level=user.access_tier.level if user.access_tier else 0,
+        reset_daily=reset_daily,
+        reset_monthly=reset_monthly,
+    )
+    await db.commit()
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="cost_limit",
+        target_user_id=user_id,
+        changes={
+            "action": "reset",
+            "user_email": user.email,
+            "reset_daily": reset_daily,
+            "reset_monthly": reset_monthly,
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": f"Cost tracking reset for user {user.email}"}
+
+
+# =============================================================================
+# Provider Health Endpoints
+# =============================================================================
+
+class ProviderHealthResponse(BaseModel):
+    """Provider health status response."""
+    provider_id: str
+    provider_name: str
+    provider_type: str
+    is_healthy: bool
+    latency_ms: Optional[int]
+    error_message: Optional[str]
+    consecutive_failures: int
+    circuit_open: bool
+    last_check: Optional[datetime]
+
+
+class HealthCheckHistoryResponse(BaseModel):
+    """Health check history entry."""
+    id: str
+    is_healthy: bool
+    latency_ms: Optional[int]
+    error_message: Optional[str]
+    consecutive_failures: int
+    checked_at: datetime
+
+
+@router.get("/provider-health")
+async def get_provider_health(
+    admin: AdminUser,
+):
+    """
+    Get health status of all LLM providers.
+
+    Admin only endpoint.
+    """
+    from backend.services.provider_health import ProviderHealthChecker
+
+    logger.info("Getting provider health", admin_id=admin.user_id)
+
+    health_statuses = await ProviderHealthChecker.get_all_provider_health()
+
+    return {
+        "providers": [
+            ProviderHealthResponse(
+                provider_id=str(h.get("provider_id", "")),
+                provider_name=h.get("provider_name", ""),
+                provider_type=h.get("provider_type", ""),
+                is_healthy=h.get("is_healthy", False),
+                latency_ms=h.get("last_latency_ms"),
+                error_message=h.get("status") if not h.get("is_healthy") else None,
+                consecutive_failures=h.get("consecutive_failures", 0),
+                circuit_open=h.get("circuit_open", False),
+                last_check=datetime.fromisoformat(h["last_check_at"]) if h.get("last_check_at") else None,
+            ).model_dump()
+            for h in health_statuses
+        ],
+        "total": len(health_statuses),
+    }
+
+
+@router.post("/provider-health/check")
+async def trigger_health_check(
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+    provider_id: Optional[str] = Query(None, description="Check specific provider"),
+):
+    """
+    Trigger immediate health check for providers.
+
+    Admin only endpoint.
+    """
+    from backend.services.provider_health import ProviderHealthChecker
+
+    logger.info("Triggering health check", admin_id=admin.user_id, provider_id=provider_id)
+
+    if provider_id:
+        # Check specific provider
+        result = await ProviderHealthChecker.check_provider_health(provider_id)
+        results = [result] if result else []
+    else:
+        # Check all providers
+        results = await ProviderHealthChecker.run_all_health_checks()
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="provider_health",
+        changes={
+            "action": "health_check",
+            "provider_id": provider_id,
+            "results_count": len(results),
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {
+        "checked": len(results),
+        "results": [
+            ProviderHealthResponse(
+                provider_id=str(r.provider_id),
+                provider_name=r.provider_name,
+                provider_type=r.provider_type,
+                is_healthy=r.is_healthy,
+                latency_ms=r.latency_ms,
+                error_message=r.error_message,
+                consecutive_failures=0,  # Not available in HealthCheckResult
+                circuit_open=False,  # Not available in HealthCheckResult
+                last_check=r.checked_at,
+            ).model_dump()
+            for r in results
+        ],
+    }
+
+
+@router.get("/provider-health/{provider_id}/history")
+async def get_provider_health_history(
+    provider_id: str,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    limit: int = Query(50, ge=1, le=500, description="Number of records"),
+):
+    """
+    Get health check history for a provider.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import ProviderHealthLog
+
+    logger.info("Getting provider health history", admin_id=admin.user_id, provider_id=provider_id)
+
+    query = (
+        select(ProviderHealthLog)
+        .where(ProviderHealthLog.provider_id == provider_id)
+        .order_by(desc(ProviderHealthLog.created_at))
+        .limit(limit)
+    )
+    result = await db.execute(query)
+    logs = result.scalars().all()
+
+    return {
+        "provider_id": provider_id,
+        "history": [
+            HealthCheckHistoryResponse(
+                id=str(log.id),
+                is_healthy=log.is_healthy,
+                latency_ms=log.latency_ms,
+                error_message=log.error_message,
+                consecutive_failures=log.consecutive_failures,
+                checked_at=log.created_at,
+            ).model_dump()
+            for log in logs
+        ],
+        "total": len(logs),
+    }
+
+
+@router.post("/provider-health/{provider_id}/reset-circuit")
+async def reset_provider_circuit(
+    provider_id: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Reset circuit breaker for a provider.
+
+    Admin only endpoint.
+    """
+    from backend.db.models import ProviderHealthCache
+
+    logger.info("Resetting provider circuit", admin_id=admin.user_id, provider_id=provider_id)
+
+    # Reset circuit in cache
+    query = select(ProviderHealthCache).where(ProviderHealthCache.provider_id == provider_id)
+    result = await db.execute(query)
+    cache = result.scalar_one_or_none()
+
+    if cache:
+        cache.circuit_open = False
+        cache.circuit_open_until = None
+        cache.consecutive_failures = 0
+        await db.commit()
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="provider_health",
+        target_resource_id=provider_id,
+        changes={"action": "reset_circuit"},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "Circuit breaker reset", "provider_id": provider_id}
+
+
+# =============================================================================
+# Response Cache Management
+# =============================================================================
+
+class CacheStatsResponse(BaseModel):
+    """Response cache statistics."""
+    total_entries: int
+    total_hits: int
+    total_size_bytes: int
+    hit_rate: float
+    oldest_entry: Optional[datetime]
+    newest_entry: Optional[datetime]
+    estimated_savings_usd: float
+
+
+class CacheSettingsUpdate(BaseModel):
+    """Cache settings update request."""
+    is_enabled: Optional[bool] = None
+    default_ttl_seconds: Optional[int] = Field(None, ge=60, le=604800)  # 1 min to 7 days
+    max_cache_size_mb: Optional[int] = Field(None, ge=10, le=10000)
+    cache_temperature_threshold: Optional[float] = Field(None, ge=0, le=2)
+    model_settings: Optional[dict] = None
+    excluded_operations: Optional[List[str]] = None
+
+
+class CacheClearRequest(BaseModel):
+    """Cache clear request."""
+    model_id: Optional[str] = None
+    provider_id: Optional[str] = None
+    older_than_days: Optional[int] = None
+
+
+@router.get("/cache/stats")
+async def get_cache_stats(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+) -> CacheStatsResponse:
+    """
+    Get response cache statistics.
+
+    Admin only endpoint.
+    """
+    from backend.services.response_cache import get_response_cache_service
+
+    cache_service = get_response_cache_service()
+    stats = await cache_service.get_cache_stats(db)
+
+    return CacheStatsResponse(
+        total_entries=stats.total_entries,
+        total_hits=stats.total_hits,
+        total_size_bytes=stats.total_size_bytes,
+        hit_rate=stats.hit_rate,
+        oldest_entry=stats.oldest_entry,
+        newest_entry=stats.newest_entry,
+        estimated_savings_usd=stats.estimated_savings_usd,
+    )
+
+
+@router.get("/cache/settings")
+async def get_cache_settings(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get current cache settings.
+
+    Admin only endpoint.
+    """
+    from backend.services.response_cache import get_response_cache_service
+
+    cache_service = get_response_cache_service()
+    return await cache_service.get_cache_settings(db)
+
+
+@router.put("/cache/settings")
+async def update_cache_settings(
+    settings: CacheSettingsUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update cache settings.
+
+    Admin only endpoint.
+    """
+    from backend.services.response_cache import get_response_cache_service
+
+    logger.info("Updating cache settings", admin_id=admin.user_id)
+
+    cache_service = get_response_cache_service()
+    success = await cache_service.update_settings(
+        db,
+        is_enabled=settings.is_enabled,
+        default_ttl_seconds=settings.default_ttl_seconds,
+        max_cache_size_mb=settings.max_cache_size_mb,
+        cache_temperature_threshold=settings.cache_temperature_threshold,
+        model_settings=settings.model_settings,
+        excluded_operations=settings.excluded_operations,
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update cache settings",
+        )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="cache_settings",
+        changes=settings.model_dump(exclude_none=True),
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "Cache settings updated"}
+
+
+@router.post("/cache/clear")
+async def clear_cache(
+    clear_request: CacheClearRequest,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Clear response cache.
+
+    Admin only endpoint.
+    """
+    from backend.services.response_cache import get_response_cache_service
+    from datetime import timedelta
+
+    logger.info(
+        "Clearing cache",
+        admin_id=admin.user_id,
+        model_id=clear_request.model_id,
+        provider_id=clear_request.provider_id,
+    )
+
+    cache_service = get_response_cache_service()
+
+    older_than = None
+    if clear_request.older_than_days:
+        older_than = datetime.utcnow() - timedelta(days=clear_request.older_than_days)
+
+    deleted_count = await cache_service.clear_cache(
+        db,
+        model_id=clear_request.model_id,
+        provider_id=clear_request.provider_id,
+        older_than=older_than,
+    )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="cache",
+        changes={
+            "action": "clear",
+            "deleted_count": deleted_count,
+            **clear_request.model_dump(exclude_none=True),
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": f"Cleared {deleted_count} cache entries", "deleted_count": deleted_count}
+
+
+@router.post("/cache/cleanup")
+async def cleanup_expired_cache(
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Clean up expired cache entries.
+
+    Admin only endpoint.
+    """
+    from backend.services.response_cache import get_response_cache_service
+
+    logger.info("Cleaning up expired cache", admin_id=admin.user_id)
+
+    cache_service = get_response_cache_service()
+    deleted_count = await cache_service.cleanup_expired(db)
+
+    return {"message": f"Cleaned up {deleted_count} expired entries", "deleted_count": deleted_count}
+
+
+# =============================================================================
+# Smart Routing Management
+# =============================================================================
+
+class RoutingStatsResponse(BaseModel):
+    """Routing statistics response."""
+    total_providers: int
+    healthy_providers: int
+    unhealthy_providers: int
+    average_latency_ms: Optional[float]
+    providers: List[dict]
+
+
+class ProviderPriorityUpdate(BaseModel):
+    """Provider priority update request."""
+    priority: int = Field(..., ge=0, le=100)
+
+
+class ProviderOrderUpdate(BaseModel):
+    """Provider order update request."""
+    provider_order: List[str] = Field(..., min_length=1)
+
+
+@router.get("/routing/stats")
+async def get_routing_stats(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+) -> RoutingStatsResponse:
+    """
+    Get smart routing statistics.
+
+    Admin only endpoint.
+    """
+    from backend.services.smart_router import get_smart_router
+
+    router_service = get_smart_router()
+    stats = await router_service.get_routing_stats(db)
+
+    return RoutingStatsResponse(**stats)
+
+
+@router.put("/routing/providers/{provider_id}/priority")
+async def update_provider_priority(
+    provider_id: str,
+    priority_update: ProviderPriorityUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update a provider's routing priority.
+
+    Lower priority values are preferred.
+    Admin only endpoint.
+    """
+    from backend.services.smart_router import get_smart_router
+
+    logger.info(
+        "Updating provider priority",
+        admin_id=admin.user_id,
+        provider_id=provider_id,
+        priority=priority_update.priority,
+    )
+
+    router_service = get_smart_router()
+    success = await router_service.update_provider_priority(
+        db, provider_id, priority_update.priority
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update provider priority",
+        )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="provider_routing",
+        target_resource_id=provider_id,
+        changes={"priority": priority_update.priority},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "Provider priority updated", "provider_id": provider_id}
+
+
+@router.put("/routing/reorder")
+async def reorder_providers(
+    order_update: ProviderOrderUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Reorder all providers by priority.
+
+    Providers are ordered by their position in the list (first = highest priority).
+    Admin only endpoint.
+    """
+    from backend.services.smart_router import get_smart_router
+
+    logger.info(
+        "Reordering providers",
+        admin_id=admin.user_id,
+        count=len(order_update.provider_order),
+    )
+
+    router_service = get_smart_router()
+    success = await router_service.reorder_providers(db, order_update.provider_order)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reorder providers",
+        )
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="provider_routing",
+        changes={"action": "reorder", "provider_order": order_update.provider_order},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {"message": "Providers reordered successfully"}
