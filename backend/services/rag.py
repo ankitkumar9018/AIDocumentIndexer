@@ -402,6 +402,64 @@ class RAGService:
             logger.debug("Token counting failed, using estimation", error=str(e))
             return len(text) // 4
 
+    async def search(
+        self,
+        query: str,
+        limit: int = 5,
+        collection_filter: Optional[str] = None,
+        access_tier: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search documents without generating an LLM response.
+
+        This method is useful for agent workflows that need raw document
+        chunks without the full RAG query processing.
+
+        Args:
+            query: Search query
+            limit: Maximum number of results to return
+            collection_filter: Filter by collection
+            access_tier: User's access tier for RLS
+
+        Returns:
+            List of document dicts with content, source, and score
+        """
+        logger.info(
+            "Searching documents",
+            query_length=len(query),
+            limit=limit,
+            collection_filter=collection_filter,
+        )
+
+        # Use _retrieve to get document chunks
+        retrieved_docs = await self._retrieve(
+            query=query,
+            collection_filter=collection_filter,
+            access_tier=access_tier,
+            top_k=limit,
+        )
+
+        # Format results for agent consumption
+        results = []
+        for doc, score in retrieved_docs:
+            results.append({
+                "content": doc.page_content,
+                "document_name": doc.metadata.get("document_filename",
+                                doc.metadata.get("source", "Unknown")),
+                "source": doc.metadata.get("source", "Unknown"),
+                "chunk_id": doc.metadata.get("chunk_id"),
+                "score": score,
+                "metadata": doc.metadata,
+            })
+
+        logger.info(
+            "Document search completed",
+            result_count=len(results),
+            query=query[:50],
+        )
+
+        return results
+
     async def query(
         self,
         question: str,

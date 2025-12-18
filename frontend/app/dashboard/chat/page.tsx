@@ -114,6 +114,14 @@ export default function ChatPage() {
   const [temperature, setTemperature] = useState<number>(0.7);
   const [agentExecutionMode, setAgentExecutionMode] = useState<ExecutionMode>("agent");
   const [chatMode, setChatMode] = useState<"chat" | "general" | "agent">("chat");
+  // Agent mode options - user-configurable settings for agent execution
+  const [agentOptions, setAgentOptions] = useState({
+    search_documents: true,      // Force search uploaded documents first
+    include_web_search: false,   // Include web search in research
+    require_approval: false,     // Show plan and require approval before execution
+    max_steps: 5,                // Maximum number of steps in execution plan
+    collection: null as string | null,  // Target specific collection (null = all)
+  });
   const [showCostApproval, setShowCostApproval] = useState(false);
   const [pendingPlanId, setPendingPlanId] = useState<string | null>(null);
   const [pendingPlanSummary, setPendingPlanSummary] = useState<string | null>(null);
@@ -310,6 +318,7 @@ export default function ChatPage() {
           message: messageText,
           session_id: currentSessionId || undefined,
           mode: "agent",
+          agent_options: agentOptions,
         })) {
           switch (chunk.type) {
             case "session":
@@ -381,8 +390,8 @@ export default function ChatPage() {
               break;
 
             case "content":
-              if (chunk.content) {
-                streamContent += chunk.content;
+              if (chunk.data) {
+                streamContent += chunk.data as string;
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === assistantId
@@ -677,6 +686,132 @@ export default function ChatPage() {
               showLabel={false}
               onModeChange={handleModeChange}
             />
+
+            {/* Agent Options Popover - Only show when in agent mode */}
+            {chatMode === "agent" && (
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-2">
+                    <Settings2 className="h-4 w-4" />
+                    <span className="hidden sm:inline">Agent Settings</span>
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-80" align="end">
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <h4 className="font-medium leading-none flex items-center gap-2">
+                        <Brain className="h-4 w-4" />
+                        Agent Mode Options
+                      </h4>
+                      <p className="text-sm text-muted-foreground">
+                        Configure how the AI agent processes your requests.
+                      </p>
+                    </div>
+
+                    {/* Search Documents Toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium flex items-center gap-2">
+                          <FileSearch className="h-3 w-3" />
+                          Search Documents
+                        </Label>
+                        <p className="text-xs text-muted-foreground">
+                          Always search your uploaded documents first
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={agentOptions.search_documents}
+                        onChange={(e) =>
+                          setAgentOptions((prev) => ({
+                            ...prev,
+                            search_documents: e.target.checked,
+                          }))
+                        }
+                        className="h-4 w-4 rounded border-gray-300"
+                      />
+                    </div>
+
+                    {/* Include Web Search Toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium flex items-center gap-2">
+                          <Search className="h-3 w-3" />
+                          Include Web Search
+                        </Label>
+                        <p className="text-xs text-muted-foreground">
+                          Also search the web for information
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={agentOptions.include_web_search}
+                        onChange={(e) =>
+                          setAgentOptions((prev) => ({
+                            ...prev,
+                            include_web_search: e.target.checked,
+                          }))
+                        }
+                        className="h-4 w-4 rounded border-gray-300"
+                      />
+                    </div>
+
+                    {/* Require Approval Toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium flex items-center gap-2">
+                          <Check className="h-3 w-3" />
+                          Require Approval
+                        </Label>
+                        <p className="text-xs text-muted-foreground">
+                          Show plan before executing
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={agentOptions.require_approval}
+                        onChange={(e) =>
+                          setAgentOptions((prev) => ({
+                            ...prev,
+                            require_approval: e.target.checked,
+                          }))
+                        }
+                        className="h-4 w-4 rounded border-gray-300"
+                      />
+                    </div>
+
+                    {/* Max Steps Slider */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-sm font-medium flex items-center gap-2">
+                          <Zap className="h-3 w-3" />
+                          Max Steps
+                        </Label>
+                        <span className="text-sm text-muted-foreground">
+                          {agentOptions.max_steps}
+                        </span>
+                      </div>
+                      <Slider
+                        value={[agentOptions.max_steps]}
+                        onValueChange={([value]) =>
+                          setAgentOptions((prev) => ({
+                            ...prev,
+                            max_steps: value,
+                          }))
+                        }
+                        min={1}
+                        max={10}
+                        step={1}
+                        className="w-full"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Limit complexity of execution plan
+                      </p>
+                    </div>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
 
             {/* LLM Model Selector */}
             <DropdownMenu>
@@ -994,7 +1129,9 @@ export default function ChatPage() {
                       )}
                       <span className="text-sm text-muted-foreground">
                         {chatMode === "agent"
-                          ? "Agents planning task..."
+                          ? isAgentExecuting && agentSteps.length > 0
+                            ? `Executing step ${(currentAgentStep ?? 0) + 1}/${agentSteps.length}: ${agentSteps[currentAgentStep ?? 0]?.name || "Processing..."}`
+                            : "Agents planning task..."
                           : chatMode === "general"
                           ? "Thinking..."
                           : "Searching documents..."}

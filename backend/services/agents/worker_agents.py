@@ -124,14 +124,20 @@ class GeneratorAgent(BaseAgent):
         # Build context string from dependencies
         context_parts = []
 
-        # Add dependency results
+        # Add dependency results - especially research findings
         if context.get("dependency_results"):
-            context_parts.append("Previous steps provided:\n")
+            context_parts.append("Information from previous steps:\n")
             for step_id, result in context["dependency_results"].items():
                 if isinstance(result, str):
-                    context_parts.append(f"- {result[:500]}")
+                    # Use more content for better context (up to 2000 chars)
+                    context_parts.append(f"{result[:2000]}")
                 elif isinstance(result, dict):
-                    context_parts.append(f"- {json.dumps(result)[:500]}")
+                    # Research agent returns findings dict - extract the actual findings
+                    if "findings" in result:
+                        findings = result["findings"]
+                        context_parts.append(f"Research Findings:\n{findings[:2000]}")
+                    else:
+                        context_parts.append(f"{json.dumps(result, indent=2)[:2000]}")
 
         # Add document context
         if context.get("documents"):
@@ -144,7 +150,11 @@ class GeneratorAgent(BaseAgent):
         context_str = "\n".join(context_parts) if context_parts else "No additional context provided."
 
         # Build messages
-        output_format = context.get("output_format", task.expected_outputs.get("format", "text"))
+        # expected_outputs might be a dict or str, handle both
+        default_format = "text"
+        if isinstance(task.expected_outputs, dict):
+            default_format = task.expected_outputs.get("format", "text")
+        output_format = context.get("output_format", default_format)
         messages = self.prompt_template.build_messages(
             task=task.description,
             context=context_str,
@@ -175,12 +185,20 @@ class GeneratorAgent(BaseAgent):
             )
 
         except Exception as e:
+            logger.error(
+                "GeneratorAgent execution failed",
+                error=str(e),
+                task_id=task.id,
+                agent_id=self.agent_id,
+                exc_info=True,
+            )
             return AgentResult(
                 task_id=task.id,
                 agent_id=self.agent_id,
                 status=TaskStatus.FAILED,
                 output=None,
                 error_message=str(e),
+                confidence_score=0.0,  # Failed tasks should have 0 confidence
                 trajectory_steps=self._current_trajectory,
             )
 
@@ -649,10 +667,11 @@ class ResearchAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         """Search documents using RAGService."""
         if not self.rag_service:
+            logger.warning("No RAG service available for document search")
             return []
 
         try:
-            # Use RAGService search
+            # Use RAGService search method
             results = await self.rag_service.search(
                 query=query,
                 limit=limit,
@@ -664,6 +683,12 @@ class ResearchAgent(BaseAgent):
                 output_data={"result_count": len(results)},
             )
 
+            logger.info(
+                "Document search completed",
+                query=query[:50],
+                result_count=len(results),
+            )
+
             return [
                 {
                     "source": r.get("document_name", "Document"),
@@ -673,19 +698,9 @@ class ResearchAgent(BaseAgent):
                 for r in results
             ]
 
-        except AttributeError:
-            # RAGService might not have search method, try query
-            try:
-                response = await self.rag_service.query(
-                    query=query,
-                    include_sources=True,
-                )
-                if isinstance(response, dict):
-                    return response.get("sources", [])
-            except Exception:
-                pass
-
-        return []
+        except Exception as e:
+            logger.error(f"Document search failed: {e}", exc_info=True)
+            return []
 
     async def _search_web(
         self,

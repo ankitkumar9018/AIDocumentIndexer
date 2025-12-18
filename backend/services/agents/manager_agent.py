@@ -181,6 +181,14 @@ class ExecutionPlan:
 # Default prompts for the Manager Agent
 MANAGER_SYSTEM_PROMPT = """You are a Task Manager Agent responsible for understanding user requests and creating execution plans.
 
+CRITICAL RULES - YOU MUST FOLLOW THESE:
+1. The "generator" agent CANNOT access user documents - it only has general LLM knowledge
+2. The "research" agent CAN search user's uploaded documents via RAG
+3. For ANY request about documents, files, or finding specific information:
+   - ALWAYS start with a "research" step to search the user's documents
+   - NEVER use "generator" alone when the user asks about their documents
+   - Pass research results to subsequent steps via dependencies
+
 Your role:
 1. Analyze the user's request to understand their intent
 2. Classify the request type (document_generation, qa_with_citations, analysis, comparison, research)
@@ -188,16 +196,16 @@ Your role:
 4. Assign each subtask to the appropriate worker agent
 
 Available worker agents:
-- generator: Creates content (documents, summaries, outlines)
+- generator: Creates content using LLM knowledge (NO document access - use for writing/creating)
 - critic: Evaluates quality and provides feedback
-- research: Retrieves information from documents and web
+- research: Searches user's uploaded documents and retrieves information (HAS document access via RAG)
 - tool: Executes file operations (generate PPTX, DOCX, PDF)
 
 Guidelines:
+- ALWAYS use "research" first when user mentions: documents, docs, files, list, find, search, uploaded, "in my", "from my"
 - Keep plans focused and minimal - don't add unnecessary steps
 - Each step should have clear inputs and expected outputs
-- Mark dependencies between steps correctly
-- Research should typically come before generation
+- Mark dependencies between steps correctly - steps that need document content must depend on research
 - Include critique steps for important deliverables
 
 Output your plan as JSON with this structure:
@@ -369,12 +377,13 @@ class ManagerAgent(BaseAgent):
             # Parse JSON response
             plan_data = self._parse_plan_response(response_text)
 
-            # Create execution plan
+            # Create execution plan (pass options from context for fallback logic)
             plan = self._build_execution_plan(
                 plan_data=plan_data,
                 user_request=user_request,
                 session_id=session_id,
                 user_id=user_id,
+                options=context.get("options"),
             )
 
             duration_ms = int((time.time() - start_time) * 1000)
@@ -467,9 +476,55 @@ class ManagerAgent(BaseAgent):
         user_request: str,
         session_id: str,
         user_id: str,
+        options: Optional[Dict[str, Any]] = None,
     ) -> ExecutionPlan:
         """Build ExecutionPlan from parsed plan data."""
+        options = options or {}
         steps = []
+
+        # Check if LLM plan already has research step
+        has_research = any(
+            s.get("agent") == "research"
+            for s in plan_data.get("steps", [])
+        )
+
+        # FALLBACK: If LLM didn't add research but query needs documents
+        # Keywords that indicate user wants to search their documents
+        document_keywords = [
+            "document", "docs", "file", "list", "find", "search",
+            "all the", "in my", "from my", "uploaded", "extract",
+            "summarize", "what", "which", "show me"
+        ]
+        needs_research = any(kw in user_request.lower() for kw in document_keywords)
+
+        # User can also force document search via options
+        force_document_search = options.get("search_documents", False)
+
+        # Prepend research step if needed and not present
+        if (needs_research or force_document_search) and not has_research:
+            logger.warning(
+                "LLM plan missing research step for document query, adding fallback",
+                user_request=user_request[:100],
+            )
+            research_task = AgentTask(
+                id=str(uuid.uuid4()),
+                type=TaskType.RESEARCH,
+                name="Search Documents",
+                description=f"Search user's uploaded documents for: {user_request}",
+                expected_outputs={"output": "Relevant document excerpts"},
+                fallback_strategy=FallbackStrategy.RETRY,
+                max_retries=2,
+            )
+            research_step = PlanStep(
+                id=str(uuid.uuid4()),
+                agent_type="research",
+                task=research_task,
+                dependencies=[],
+            )
+            steps.append(research_step)
+
+        # Track if we prepended a research step (for dependency adjustment)
+        prepended_research = len(steps) > 0
 
         for i, step_data in enumerate(plan_data.get("steps", [])):
             # Map task type string to enum
@@ -493,9 +548,25 @@ class ManagerAgent(BaseAgent):
             # Map dependency indices to step IDs
             depends_on_indices = step_data.get("depends_on", [])
             dependencies = []
+
+            # If we prepended a research step, adjust indices and make first LLM step depend on it
+            offset = 1 if prepended_research else 0
+
             for dep_idx in depends_on_indices:
-                if 0 <= dep_idx < len(steps):
-                    dependencies.append(steps[dep_idx].id)
+                # Handle both int and string indices from LLM
+                try:
+                    idx = int(dep_idx) if isinstance(dep_idx, str) else dep_idx
+                    # Adjust index for prepended research step
+                    adjusted_idx = idx + offset
+                    if 0 <= adjusted_idx < len(steps):
+                        dependencies.append(steps[adjusted_idx].id)
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid dependency index: {dep_idx}")
+
+            # If we prepended research and this is the first step with no dependencies,
+            # make it depend on the research step
+            if prepended_research and not dependencies and i == 0:
+                dependencies.append(steps[0].id)  # Research step is first
 
             # Create plan step
             plan_step = PlanStep(
@@ -601,6 +672,17 @@ class ManagerAgent(BaseAgent):
                             "output_preview": str(result.output)[:200] if result.output else None,
                             "progress": plan.progress_percentage,
                         }
+
+                        # Stream step output as content for real-time display
+                        if result.output:
+                            output_text = result.output
+                            if isinstance(result.output, dict):
+                                # Research agent returns {"findings": ..., "sources": ...}
+                                output_text = result.output.get("findings", str(result.output))
+                            yield {
+                                "type": "content",
+                                "data": f"**{step.task.name}**\n\n{output_text}\n\n---\n\n"
+                            }
                     else:
                         # Handle failure based on strategy
                         recovery = await self._handle_step_failure(

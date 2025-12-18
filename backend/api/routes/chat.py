@@ -140,6 +140,15 @@ class ChatSource(BaseModel):
     snippet: str
 
 
+class AgentOptions(BaseModel):
+    """Options for agent mode execution."""
+    search_documents: bool = Field(default=True, description="Force search uploaded documents first")
+    include_web_search: bool = Field(default=False, description="Include web search in research")
+    require_approval: bool = Field(default=False, description="Show plan and require approval before execution")
+    max_steps: int = Field(default=5, ge=1, le=10, description="Maximum number of steps in execution plan")
+    collection: Optional[str] = Field(default=None, description="Target specific collection (None = all)")
+
+
 class ChatRequest(BaseModel):
     """Chat completion request."""
     message: str
@@ -149,6 +158,7 @@ class ChatRequest(BaseModel):
     collection_filter: Optional[str] = None
     query_only: bool = False  # If True, don't store in RAG
     mode: Optional[str] = Field(None, pattern="^(agent|chat|general)$")  # Execution mode: agent, chat (RAG), or general (LLM)
+    agent_options: Optional[AgentOptions] = Field(default=None, description="Options for agent mode execution")
 
 
 class ChatResponse(BaseModel):
@@ -233,6 +243,11 @@ async def create_chat_completion(
                 rag_service = get_rag()
                 orchestrator = await create_orchestrator(db=db, rag_service=rag_service)
 
+                # Build context with agent options
+                agent_context = {"collection_filter": request.collection_filter}
+                if request.agent_options:
+                    agent_context["options"] = request.agent_options.model_dump()
+
                 final_output = ""
                 async for update in orchestrator.process_request(
                     request=request.message,
@@ -240,7 +255,7 @@ async def create_chat_completion(
                     user_id=DEFAULT_USER_ID,
                     show_cost_estimation=True,
                     require_approval_above_usd=1.0,
-                    context={"collection_filter": request.collection_filter},
+                    context=agent_context,
                 ):
                     if update.get("type") == "plan_completed":
                         final_output = update.get("output", "")
@@ -466,6 +481,11 @@ async def create_streaming_completion(
                     rag_service=rag_service,
                 )
 
+                # Build context with agent options
+                agent_context = {"collection_filter": request.collection_filter}
+                if request.agent_options:
+                    agent_context["options"] = request.agent_options.model_dump()
+
                 # Process through agent system
                 async for update in orchestrator.process_request(
                     request=request.message,
@@ -473,7 +493,7 @@ async def create_streaming_completion(
                     user_id=user_id,
                     show_cost_estimation=True,
                     require_approval_above_usd=1.0,
-                    context={"collection_filter": request.collection_filter},
+                    context=agent_context,
                 ):
                     update_type = update.get("type", "unknown")
 

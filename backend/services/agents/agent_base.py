@@ -67,12 +67,18 @@ class TaskType(str, Enum):
 
 @dataclass
 class AgentConfig:
-    """Configuration for an agent instance."""
+    """
+    Configuration for an agent instance.
+
+    Note: provider_type and model are now optional as agents use
+    LLMConfigManager to get the admin-configured provider dynamically.
+    These fields are kept for backward compatibility and override cases.
+    """
     agent_id: str
     name: str
     description: str
-    provider_type: str = "openai"
-    model: str = "gpt-4o"
+    provider_type: Optional[str] = None  # Uses admin-configured default if None
+    model: Optional[str] = None  # Uses admin-configured default if None
     temperature: float = 0.7
     max_tokens: int = 4096
     api_key: Optional[str] = None
@@ -204,7 +210,12 @@ class AgentResult:
     @property
     def is_success(self) -> bool:
         """Check if execution was successful."""
-        return self.status == TaskStatus.COMPLETED
+        # TaskStatus is a (str, Enum) so comparison should work directly
+        # But for robustness, also check string value
+        if isinstance(self.status, TaskStatus):
+            return self.status == TaskStatus.COMPLETED
+        # Fallback for string status
+        return str(self.status).lower() == "completed"
 
     @property
     def is_partial(self) -> bool:
@@ -389,20 +400,50 @@ class BaseAgent(ABC):
         """Get agent name."""
         return self.config.name
 
+    async def get_llm(self) -> BaseChatModel:
+        """
+        Get or create LLM instance using admin-configured provider.
+
+        Uses LLMConfigManager to respect:
+        1. Operation-specific config (for "agent" operation)
+        2. Default provider set in admin UI
+        3. Environment fallback
+
+        This ensures agents use the provider configured by admin,
+        not hardcoded OpenAI.
+        """
+        if self._llm is None:
+            from backend.services.llm import EnhancedLLMFactory
+
+            # Get LLM using operation-based config resolution
+            # This respects admin-configured default provider
+            self._llm, config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="agent",
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+            )
+
+            logger.debug(
+                "Agent LLM initialized",
+                agent=self.config.name,
+                provider=config.provider_type,
+                model=config.model,
+                source=config.source,
+            )
+
+        return self._llm
+
     @property
     def llm(self) -> BaseChatModel:
         """
-        Get or create LLM instance.
+        Get LLM instance (sync property for backward compatibility).
 
-        Lazily creates LLM using LLMFactory if not provided.
+        DEPRECATED: Use get_llm() async method instead.
+        This property only works if _llm was already initialized.
         """
         if self._llm is None:
-            from backend.services.llm import LLMFactory
-            self._llm = LLMFactory.get_chat_model(
-                provider=self.config.provider_type,
-                model=self.config.model,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
+            raise RuntimeError(
+                "LLM not initialized. Call 'await get_llm()' first, or use invoke_llm()."
             )
         return self._llm
 
@@ -484,12 +525,17 @@ class BaseAgent(ABC):
         if isinstance(task.expected_outputs, dict) and task.expected_outputs:
             if isinstance(output, dict):
                 for key, spec in task.expected_outputs.items():
-                    if spec.get("required", False) and key not in output:
+                    # spec might be a dict with "required" key, or just a string description
+                    if isinstance(spec, dict) and spec.get("required", False) and key not in output:
                         errors.append(f"Missing required output field: {key}")
                         score -= 0.2
             else:
-                # Output is not dict but spec expects dict
-                if any(spec.get("required") for spec in task.expected_outputs.values()):
+                # Output is not dict but spec expects dict - only check if spec values are dicts with required=True
+                has_required = any(
+                    isinstance(spec, dict) and spec.get("required", False)
+                    for spec in task.expected_outputs.values()
+                )
+                if has_required:
                     errors.append("Output should be a dictionary")
                     score = 0.3
 
@@ -620,7 +666,9 @@ class BaseAgent(ABC):
         start_time = time.time()
 
         try:
-            response = await self.llm.ainvoke(messages)
+            # Get LLM using admin-configured provider
+            llm = await self.get_llm()
+            response = await llm.ainvoke(messages)
 
             # Extract response text
             if hasattr(response, "content"):
@@ -714,6 +762,15 @@ class BaseAgent(ABC):
                 self.clear_trajectory()
                 result = await self.execute(task, context)
 
+                # Debug: log status info
+                logger.info(
+                    "execute_with_retry status check",
+                    status=result.status,
+                    status_type=type(result.status).__name__,
+                    is_success=result.is_success,
+                    confidence=result.confidence_score,
+                )
+
                 if result.is_success:
                     return result
 
@@ -723,6 +780,8 @@ class BaseAgent(ABC):
                         "Task completed with low confidence",
                         agent_id=self.agent_id,
                         task_id=task.id,
+                        status=result.status,
+                        status_type=type(result.status).__name__,
                         confidence=result.confidence_score,
                         attempt=attempt + 1,
                     )
