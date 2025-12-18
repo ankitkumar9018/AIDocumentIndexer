@@ -12,12 +12,15 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 import structlog
 import json
 
 from backend.services.rag import RAGService, RAGConfig, get_rag_service
 from backend.services.response_cache import get_response_cache_service, ResponseCacheService
 from backend.db.database import async_session_context, get_async_session
+from backend.db.models import ChatSession as ChatSessionModel, ChatMessage as ChatMessageModel, MessageRole
 from backend.services.agent_orchestrator import AgentOrchestrator, create_orchestrator
 
 logger = structlog.get_logger(__name__)
@@ -26,6 +29,84 @@ logger = structlog.get_logger(__name__)
 DEFAULT_USER_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 router = APIRouter()
+
+
+async def get_or_create_session(db, session_id: UUID, user_id: str = DEFAULT_USER_ID) -> ChatSessionModel:
+    """Get existing session or create a new one."""
+    query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
+    result = await db.execute(query)
+    session = result.scalar_one_or_none()
+
+    if not session:
+        # Create new session
+        session = ChatSessionModel(
+            id=session_id,
+            user_id=user_id,
+            title="New Conversation",
+            is_active=True,
+        )
+        db.add(session)
+        await db.commit()
+        await db.refresh(session)
+
+    return session
+
+
+async def save_chat_messages(
+    session_id: UUID,
+    user_message: str,
+    assistant_response: str,
+    sources: Optional[List[dict]] = None,
+    model_used: Optional[str] = None,
+    tokens_used: Optional[int] = None,
+):
+    """Save user and assistant messages to the database."""
+    try:
+        async with async_session_context() as db:
+            # Ensure session exists
+            await get_or_create_session(db, session_id)
+
+            # Save user message
+            user_msg = ChatMessageModel(
+                session_id=session_id,
+                role=MessageRole.USER,
+                content=user_message,
+            )
+            db.add(user_msg)
+
+            # Save assistant message
+            assistant_msg = ChatMessageModel(
+                session_id=session_id,
+                role=MessageRole.ASSISTANT,
+                content=assistant_response,
+                source_chunks=sources,
+                model_used=model_used,
+                tokens_used=tokens_used,
+            )
+            db.add(assistant_msg)
+
+            # Update session title if it's the first message
+            session_query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
+            result = await db.execute(session_query)
+            session = result.scalar_one()
+
+            # Check message count - if this is the first exchange, generate title from user message
+            msg_count_query = select(func.count(ChatMessageModel.id)).where(
+                ChatMessageModel.session_id == session_id
+            )
+            count_result = await db.execute(msg_count_query)
+            msg_count = count_result.scalar() or 0
+
+            if msg_count == 0 and session.title == "New Conversation":
+                # Generate title from first user message (truncate to 50 chars)
+                new_title = user_message[:50] + "..." if len(user_message) > 50 else user_message
+                session.title = new_title
+
+            await db.commit()
+            logger.info("Saved chat messages", session_id=str(session_id))
+
+    except Exception as e:
+        logger.error("Failed to save chat messages", error=str(e), session_id=str(session_id))
 
 # Initialize RAG service
 _rag_service: Optional[RAGService] = None
@@ -225,6 +306,15 @@ async def create_chat_completion(
                         output_tokens=len(response.content) // 4,
                     )
 
+            # Save messages to database for session persistence
+            if not request.query_only:
+                await save_chat_messages(
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response.content,
+                    model_used="general-chat",
+                )
+
             return ChatResponse(
                 session_id=session_id,
                 message_id=message_id,
@@ -300,6 +390,29 @@ async def create_chat_completion(
                         input_tokens=response.tokens_used or len(request.message) // 4,
                         output_tokens=len(response.content) // 4,
                     )
+
+            # Save messages to database for session persistence
+            if not request.query_only:
+                source_data = [
+                    {
+                        "document_id": str(s.document_id),
+                        "document_name": s.document_name,
+                        "chunk_id": str(s.chunk_id),
+                        "page_number": s.page_number,
+                        "relevance_score": s.relevance_score,
+                        "snippet": s.snippet,
+                    }
+                    for s in sources
+                ] if sources else None
+
+                await save_chat_messages(
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response.content,
+                    sources=source_data,
+                    model_used=response.model,
+                    tokens_used=response.tokens_used,
+                )
 
             return ChatResponse(
                 session_id=session_id,
@@ -420,6 +533,16 @@ async def create_streaming_completion(
             )
             # Send entire response as single content chunk
             yield f"data: {json.dumps({'type': 'content', 'data': response.content})}\n\n"
+
+            # Save messages to database
+            if not request.query_only:
+                await save_chat_messages(
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response.content,
+                    model_used="general-chat",
+                )
+
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except Exception as e:
@@ -434,6 +557,10 @@ async def create_streaming_completion(
         # Send session info first
         yield f"data: {json.dumps({'type': 'session', 'session_id': str(session_id)})}\n\n"
 
+        # Accumulate content and sources for saving
+        accumulated_content = []
+        accumulated_sources = []
+
         try:
             # Stream from RAG service
             async for chunk in rag_service.query_stream(
@@ -443,12 +570,24 @@ async def create_streaming_completion(
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
             ):
                 if chunk.type == "content":
+                    accumulated_content.append(chunk.data)
                     yield f"data: {json.dumps({'type': 'content', 'data': chunk.data})}\n\n"
                 elif chunk.type == "sources" and request.include_sources:
                     # Format sources for API response
                     sources = chunk.data[:request.max_sources] if chunk.data else []
+                    accumulated_sources = sources
                     yield f"data: {json.dumps({'type': 'sources', 'data': sources})}\n\n"
                 elif chunk.type == "done":
+                    # Save messages to database before signaling done
+                    if not request.query_only:
+                        full_response = "".join(accumulated_content)
+                        await save_chat_messages(
+                            session_id=session_id,
+                            user_message=request.message,
+                            assistant_response=full_response,
+                            sources=accumulated_sources if accumulated_sources else None,
+                            model_used=rag_service.config.chat_model,
+                        )
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 elif chunk.type == "error":
                     yield f"data: {json.dumps({'type': 'error', 'data': str(chunk.data)})}\n\n"
@@ -487,28 +626,57 @@ async def list_sessions(
     """
     logger.info("Listing chat sessions", page=page, page_size=page_size)
 
-    # Return sample sessions for demo; connect to database when persistence is implemented
-    mock_sessions = [
-        SessionResponse(
-            id=UUID("550e8400-e29b-41d4-a716-446655440100"),
-            title="Q4 Strategy Questions",
-            message_count=8,
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-        ),
-        SessionResponse(
-            id=UUID("550e8400-e29b-41d4-a716-446655440101"),
-            title="Marketing Analysis",
-            message_count=12,
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-        ),
-    ]
+    try:
+        async with async_session_context() as db:
+            # Get total count
+            count_query = select(func.count(ChatSessionModel.id)).where(
+                ChatSessionModel.user_id == DEFAULT_USER_ID,
+                ChatSessionModel.is_active == True,
+            )
+            result = await db.execute(count_query)
+            total = result.scalar() or 0
 
-    return SessionListResponse(
-        sessions=mock_sessions,
-        total=len(mock_sessions),
-    )
+            # Get sessions with message count
+            offset = (page - 1) * page_size
+            sessions_query = (
+                select(ChatSessionModel)
+                .where(
+                    ChatSessionModel.user_id == DEFAULT_USER_ID,
+                    ChatSessionModel.is_active == True,
+                )
+                .order_by(ChatSessionModel.updated_at.desc())
+                .offset(offset)
+                .limit(page_size)
+            )
+            result = await db.execute(sessions_query)
+            sessions = result.scalars().all()
+
+            # Build response with message counts
+            session_responses = []
+            for session in sessions:
+                # Get message count for this session
+                msg_count_query = select(func.count(ChatMessageModel.id)).where(
+                    ChatMessageModel.session_id == session.id
+                )
+                msg_result = await db.execute(msg_count_query)
+                message_count = msg_result.scalar() or 0
+
+                session_responses.append(SessionResponse(
+                    id=session.id,
+                    title=session.title or "New Conversation",
+                    message_count=message_count,
+                    created_at=session.created_at,
+                    updated_at=session.updated_at,
+                ))
+
+            return SessionListResponse(
+                sessions=session_responses,
+                total=total,
+            )
+
+    except Exception as e:
+        logger.error("Failed to list sessions", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to list sessions: {str(e)}")
 
 
 @router.get("/sessions/{session_id}", response_model=SessionMessagesResponse)
@@ -521,31 +689,43 @@ async def get_session(
     """
     logger.info("Getting chat session", session_id=str(session_id))
 
-    # Return sample messages for demo; connect to database when persistence is implemented
-    return SessionMessagesResponse(
-        session_id=session_id,
-        messages=[
-            ChatMessage(role="user", content="What were the key Q4 initiatives?"),
-            ChatMessage(
-                role="assistant",
-                content="Based on your documents, the Q4 strategy focuses on digital transformation and customer experience improvements.",
-            ),
-            ChatMessage(role="user", content="Tell me more about the digital transformation plans."),
-            ChatMessage(
-                role="assistant",
-                content="The digital transformation initiative includes cloud migration, AI integration, and process automation as outlined in the strategy presentation.",
-            ),
-        ],
-        sources={
-            "msg-1": [
-                {
-                    "document_name": "Q4 Strategy Presentation.pptx",
-                    "page_number": 5,
-                    "relevance_score": 0.92,
-                }
-            ]
-        },
-    )
+    try:
+        async with async_session_context() as db:
+            # Get session with messages
+            query = (
+                select(ChatSessionModel)
+                .where(ChatSessionModel.id == session_id)
+                .options(selectinload(ChatSessionModel.messages))
+            )
+            result = await db.execute(query)
+            session = result.scalar_one_or_none()
+
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+
+            # Convert messages to response format
+            messages = []
+            sources = {}
+            for msg in sorted(session.messages, key=lambda m: m.created_at):
+                messages.append(ChatMessage(
+                    role=msg.role.value,
+                    content=msg.content,
+                ))
+                # Include sources if available
+                if msg.source_chunks:
+                    sources[str(msg.id)] = msg.source_chunks
+
+            return SessionMessagesResponse(
+                session_id=session_id,
+                messages=messages,
+                sources=sources,
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get session", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to get session: {str(e)}")
 
 
 @router.delete("/sessions/{session_id}")
@@ -558,9 +738,27 @@ async def delete_session(
     """
     logger.info("Deleting chat session", session_id=str(session_id))
 
-    # Session deletion is a no-op until database persistence is implemented
-    logger.info("Session deletion requested", session_id=str(session_id))
-    return {"message": "Session deleted successfully", "session_id": str(session_id)}
+    try:
+        async with async_session_context() as db:
+            # Get the session
+            query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
+            result = await db.execute(query)
+            session = result.scalar_one_or_none()
+
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+
+            # Delete the session (cascade will delete messages)
+            await db.delete(session)
+            await db.commit()
+
+            return {"message": "Session deleted successfully", "session_id": str(session_id)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete session", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete session: {str(e)}")
 
 
 @router.patch("/sessions/{session_id}/title")
@@ -574,9 +772,27 @@ async def update_session_title(
     """
     logger.info("Updating session title", session_id=str(session_id), title=title)
 
-    # Title update is a no-op until database persistence is implemented
-    logger.info("Session title update requested", session_id=str(session_id), new_title=title)
-    return {"message": "Title updated", "session_id": str(session_id), "title": title}
+    try:
+        async with async_session_context() as db:
+            # Get the session
+            query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
+            result = await db.execute(query)
+            session = result.scalar_one_or_none()
+
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
+
+            # Update the title
+            session.title = title
+            await db.commit()
+
+            return {"message": "Title updated", "session_id": str(session_id), "title": title}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to update session title", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update title: {str(e)}")
 
 
 @router.post("/sessions/new", response_model=SessionResponse)
@@ -589,15 +805,29 @@ async def create_session(
     """
     logger.info("Creating new chat session", title=title)
 
-    session_id = UUID("550e8400-e29b-41d4-a716-446655440150")
+    try:
+        async with async_session_context() as db:
+            # Create new session in database
+            new_session = ChatSessionModel(
+                user_id=DEFAULT_USER_ID,
+                title=title or "New Conversation",
+                is_active=True,
+            )
+            db.add(new_session)
+            await db.commit()
+            await db.refresh(new_session)
 
-    return SessionResponse(
-        id=session_id,
-        title=title or "New Conversation",
-        message_count=0,
-        created_at=datetime.now(),
-        updated_at=datetime.now(),
-    )
+            return SessionResponse(
+                id=new_session.id,
+                title=new_session.title,
+                message_count=0,
+                created_at=new_session.created_at,
+                updated_at=new_session.updated_at,
+            )
+
+    except Exception as e:
+        logger.error("Failed to create session", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
 
 
 @router.post("/feedback")
