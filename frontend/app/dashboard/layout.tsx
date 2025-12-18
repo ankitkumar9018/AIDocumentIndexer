@@ -21,6 +21,7 @@ import {
   Sparkles,
   Search,
   User,
+  Bot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -51,6 +52,7 @@ const navigation = [
 
 const adminNavigation = [
   { name: "Users", href: "/dashboard/admin/users", icon: Users },
+  { name: "Agents", href: "/dashboard/admin/agents", icon: Bot },
   { name: "Settings", href: "/dashboard/admin/settings", icon: Settings },
 ];
 
@@ -64,6 +66,7 @@ const pageTitles: Record<string, string> = {
   "/dashboard/scraper": "Web Scraper",
   "/dashboard/costs": "Costs",
   "/dashboard/admin/users": "Users",
+  "/dashboard/admin/agents": "Agent Management",
   "/dashboard/admin/settings": "Settings",
 };
 

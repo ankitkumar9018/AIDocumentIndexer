@@ -16,8 +16,14 @@ import structlog
 import json
 
 from backend.services.rag import RAGService, RAGConfig, get_rag_service
+from backend.services.response_cache import get_response_cache_service, ResponseCacheService
+from backend.db.database import async_session_context, get_async_session
+from backend.services.agent_orchestrator import AgentOrchestrator, create_orchestrator
 
 logger = structlog.get_logger(__name__)
+
+# Default user ID for development (will be replaced when auth is enabled)
+DEFAULT_USER_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 router = APIRouter()
 
@@ -61,6 +67,7 @@ class ChatRequest(BaseModel):
     max_sources: int = Field(default=5, ge=1, le=20)
     collection_filter: Optional[str] = None
     query_only: bool = False  # If True, don't store in RAG
+    mode: Optional[str] = Field(None, pattern="^(agent|chat|general)$")  # Execution mode: agent, chat (RAG), or general (LLM)
 
 
 class ChatResponse(BaseModel):
@@ -110,65 +117,197 @@ async def create_chat_completion(
     # user = Depends(get_current_user),
 ):
     """
-    Create a chat completion with RAG.
+    Create a chat completion.
 
-    The AI will search the knowledge base for relevant context
-    and generate a response with source citations.
+    Modes:
+    - chat: RAG-powered response with document search and source citations
+    - general: Direct LLM response without document search
+    - agent: Multi-agent orchestration for complex tasks
+
+    If no mode specified, defaults to 'chat' (RAG-powered).
+
+    Response caching is enabled for low-temperature requests to reduce costs.
     """
     logger.info(
         "Creating chat completion",
         message_length=len(request.message),
         session_id=str(request.session_id) if request.session_id else None,
         query_only=request.query_only,
+        mode=request.mode,
     )
-
-    # Get RAG service
-    rag_service = get_rag()
 
     # Generate session ID if not provided
     session_id = request.session_id or uuid4()
     message_id = uuid4()
 
+    # Get cache service
+    cache_service = get_response_cache_service()
+
     try:
-        # Query RAG service
-        response = await rag_service.query(
-            question=request.message,
-            session_id=str(session_id) if not request.query_only else None,
-            collection_filter=request.collection_filter,
-            access_tier=100,  # Default tier; use user.access_tier when auth is enabled
-        )
+        # Route based on mode
+        if request.mode == "agent":
+            # Use agent orchestrator for complex multi-step tasks
+            # Note: Non-streaming agent mode collects all output before returning
+            async with async_session_context() as db:
+                rag_service = get_rag()
+                orchestrator = await create_orchestrator(db=db, rag_service=rag_service)
 
-        # Convert sources to API format
-        sources = []
-        if request.include_sources:
-            for source in response.sources[:request.max_sources]:
-                # Parse UUIDs safely, falling back to generated ones
-                try:
-                    doc_uuid = UUID(source.document_id) if source.document_id else uuid4()
-                except ValueError:
-                    doc_uuid = uuid4()
+                final_output = ""
+                async for update in orchestrator.process_request(
+                    request=request.message,
+                    session_id=str(session_id),
+                    user_id=DEFAULT_USER_ID,
+                    show_cost_estimation=True,
+                    require_approval_above_usd=1.0,
+                    context={"collection_filter": request.collection_filter},
+                ):
+                    if update.get("type") == "plan_completed":
+                        final_output = update.get("output", "")
+                    elif update.get("type") == "approval_required":
+                        # For non-streaming, we can't wait for approval
+                        return ChatResponse(
+                            session_id=session_id,
+                            message_id=message_id,
+                            content="This request requires cost approval. Please use the streaming endpoint for agent mode.",
+                            sources=[],
+                            created_at=datetime.now(),
+                        )
+                    elif update.get("type") == "error":
+                        raise HTTPException(status_code=500, detail=update.get("error", "Agent execution failed"))
 
-                try:
-                    chunk_uuid = UUID(source.chunk_id) if source.chunk_id else uuid4()
-                except ValueError:
-                    chunk_uuid = uuid4()
+                return ChatResponse(
+                    session_id=session_id,
+                    message_id=message_id,
+                    content=final_output,
+                    sources=[],  # Agents don't return traditional sources
+                    created_at=datetime.now(),
+                )
 
-                sources.append(ChatSource(
-                    document_id=doc_uuid,
-                    document_name=source.document_name,
-                    chunk_id=chunk_uuid,
-                    page_number=source.page_number,
-                    relevance_score=source.relevance_score,
-                    snippet=source.snippet,
-                ))
+        elif request.mode == "general":
+            # Use general chat service (no RAG)
+            from backend.services.general_chat import get_general_chat_service
+            general_service = get_general_chat_service()
 
-        return ChatResponse(
-            session_id=session_id,
-            message_id=message_id,
-            content=response.content,
-            sources=sources,
-            created_at=datetime.now(),
-        )
+            # Check cache for general chat (only for query_only mode to avoid caching conversational context)
+            if request.query_only:
+                async with async_session_context() as db:
+                    # Check cache eligibility (low temperature)
+                    temperature = 0.7  # Default temperature
+                    if await cache_service.is_cache_eligible(db, temperature, "general", len(request.message)):
+                        cached = await cache_service.get_cached_response(
+                            db, request.message, "general-chat", temperature
+                        )
+                        if cached:
+                            logger.info("Cache hit for general chat", prompt_length=len(request.message))
+                            return ChatResponse(
+                                session_id=session_id,
+                                message_id=message_id,
+                                content=cached.response_text,
+                                sources=[],
+                                created_at=datetime.now(),
+                            )
+
+            response = await general_service.query(
+                question=request.message,
+                session_id=str(session_id) if not request.query_only else None,
+            )
+
+            # Cache the response for query_only requests
+            if request.query_only:
+                async with async_session_context() as db:
+                    await cache_service.cache_response(
+                        db=db,
+                        prompt=request.message,
+                        model_id="general-chat",
+                        temperature=0.7,
+                        response_text=response.content,
+                        input_tokens=len(request.message) // 4,
+                        output_tokens=len(response.content) // 4,
+                    )
+
+            return ChatResponse(
+                session_id=session_id,
+                message_id=message_id,
+                content=response.content,
+                sources=[],  # No sources for general chat
+                created_at=datetime.now(),
+            )
+
+        else:
+            # Default: Use RAG service
+            rag_service = get_rag()
+
+            # Check cache for RAG queries (only for query_only mode)
+            if request.query_only:
+                async with async_session_context() as db:
+                    temperature = rag_service.config.temperature
+                    cache_key = f"{request.message}|{request.collection_filter or ''}"
+                    if await cache_service.is_cache_eligible(db, temperature, "rag", len(cache_key)):
+                        cached = await cache_service.get_cached_response(
+                            db, cache_key, f"rag-{rag_service.config.chat_model or 'default'}", temperature
+                        )
+                        if cached:
+                            logger.info("Cache hit for RAG query", prompt_length=len(request.message))
+                            return ChatResponse(
+                                session_id=session_id,
+                                message_id=message_id,
+                                content=cached.response_text,
+                                sources=[],  # Cached responses don't include sources
+                                created_at=datetime.now(),
+                            )
+
+            response = await rag_service.query(
+                question=request.message,
+                session_id=str(session_id) if not request.query_only else None,
+                collection_filter=request.collection_filter,
+                access_tier=100,  # Default tier; use user.access_tier when auth is enabled
+            )
+
+            # Convert sources to API format
+            sources = []
+            if request.include_sources:
+                for source in response.sources[:request.max_sources]:
+                    # Parse UUIDs safely, falling back to generated ones
+                    try:
+                        doc_uuid = UUID(source.document_id) if source.document_id else uuid4()
+                    except ValueError:
+                        doc_uuid = uuid4()
+
+                    try:
+                        chunk_uuid = UUID(source.chunk_id) if source.chunk_id else uuid4()
+                    except ValueError:
+                        chunk_uuid = uuid4()
+
+                    sources.append(ChatSource(
+                        document_id=doc_uuid,
+                        document_name=source.document_name,
+                        chunk_id=chunk_uuid,
+                        page_number=source.page_number,
+                        relevance_score=source.relevance_score,
+                        snippet=source.snippet,
+                    ))
+
+            # Cache the response for query_only requests
+            if request.query_only:
+                async with async_session_context() as db:
+                    cache_key = f"{request.message}|{request.collection_filter or ''}"
+                    await cache_service.cache_response(
+                        db=db,
+                        prompt=cache_key,
+                        model_id=f"rag-{response.model}",
+                        temperature=rag_service.config.temperature,
+                        response_text=response.content,
+                        input_tokens=response.tokens_used or len(request.message) // 4,
+                        output_tokens=len(response.content) // 4,
+                    )
+
+            return ChatResponse(
+                session_id=session_id,
+                message_id=message_id,
+                content=response.content,
+                sources=sources,
+                created_at=datetime.now(),
+            )
 
     except Exception as e:
         logger.error("Chat completion failed", error=str(e))
@@ -181,7 +320,12 @@ async def create_streaming_completion(
     # user = Depends(get_current_user),
 ):
     """
-    Create a streaming chat completion with RAG.
+    Create a streaming chat completion.
+
+    Supports three modes:
+    - chat: RAG-powered document search (default)
+    - general: Direct LLM without document search
+    - agent: Multi-agent orchestration for complex tasks
 
     Returns Server-Sent Events (SSE) for real-time streaming.
     """
@@ -189,9 +333,100 @@ async def create_streaming_completion(
         "Creating streaming chat completion",
         message_length=len(request.message),
         session_id=str(request.session_id) if request.session_id else None,
+        mode=request.mode,
     )
 
-    async def generate_stream() -> AsyncGenerator[str, None]:
+    async def generate_agent_stream() -> AsyncGenerator[str, None]:
+        """Generate streaming response using Agent orchestrator."""
+        session_id = request.session_id or uuid4()
+        user_id = DEFAULT_USER_ID  # TODO: Use actual user from auth
+
+        # Send session info first
+        yield f"data: {json.dumps({'type': 'session', 'session_id': str(session_id)})}\n\n"
+
+        try:
+            async with async_session_context() as db:
+                # Create orchestrator with RAG service for research
+                rag_service = get_rag()
+                orchestrator = await create_orchestrator(
+                    db=db,
+                    rag_service=rag_service,
+                )
+
+                # Process through agent system
+                async for update in orchestrator.process_request(
+                    request=request.message,
+                    session_id=str(session_id),
+                    user_id=user_id,
+                    show_cost_estimation=True,
+                    require_approval_above_usd=1.0,
+                    context={"collection_filter": request.collection_filter},
+                ):
+                    update_type = update.get("type", "unknown")
+
+                    if update_type == "planning":
+                        yield f"data: {json.dumps({'type': 'agent_status', 'status': 'planning', 'message': update.get('message', 'Planning...')})}\n\n"
+
+                    elif update_type == "plan_created":
+                        yield f"data: {json.dumps({'type': 'agent_plan', 'plan_id': update.get('plan_id'), 'summary': update.get('summary'), 'step_count': update.get('step_count')})}\n\n"
+
+                    elif update_type == "estimating_cost":
+                        yield f"data: {json.dumps({'type': 'agent_status', 'status': 'estimating', 'message': update.get('message', 'Estimating cost...')})}\n\n"
+
+                    elif update_type == "cost_estimated":
+                        yield f"data: {json.dumps({'type': 'agent_cost', 'estimated_cost_usd': update.get('estimated_cost_usd')})}\n\n"
+
+                    elif update_type == "approval_required":
+                        yield f"data: {json.dumps({'type': 'approval_required', 'plan_id': update.get('plan_id'), 'estimated_cost_usd': update.get('estimated_cost_usd'), 'threshold_usd': update.get('threshold_usd')})}\n\n"
+
+                    elif update_type == "budget_exceeded":
+                        yield f"data: {json.dumps({'type': 'error', 'data': update.get('message', 'Budget exceeded')})}\n\n"
+
+                    elif update_type == "step_started":
+                        yield f"data: {json.dumps({'type': 'agent_step', 'step': update.get('step_name'), 'agent': update.get('agent_type'), 'status': 'started'})}\n\n"
+
+                    elif update_type == "step_completed":
+                        yield f"data: {json.dumps({'type': 'agent_step', 'step': update.get('step_name'), 'agent': update.get('agent_type'), 'status': 'completed'})}\n\n"
+
+                    elif update_type == "content":
+                        yield f"data: {json.dumps({'type': 'content', 'data': update.get('data', '')})}\n\n"
+
+                    elif update_type == "plan_completed":
+                        output = update.get("output", "")
+                        yield f"data: {json.dumps({'type': 'content', 'data': output})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done', 'total_cost_usd': update.get('total_cost_usd')})}\n\n"
+
+                    elif update_type == "error":
+                        yield f"data: {json.dumps({'type': 'error', 'data': update.get('error', 'Unknown error')})}\n\n"
+
+        except Exception as e:
+            logger.error("Agent streaming error", error=str(e), exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
+
+    async def generate_general_stream() -> AsyncGenerator[str, None]:
+        """Generate streaming response using general chat (no RAG)."""
+        from backend.services.general_chat import get_general_chat_service
+
+        session_id = request.session_id or uuid4()
+
+        # Send session info first
+        yield f"data: {json.dumps({'type': 'session', 'session_id': str(session_id)})}\n\n"
+
+        try:
+            general_service = get_general_chat_service()
+            response = await general_service.query(
+                question=request.message,
+                session_id=str(session_id) if not request.query_only else None,
+            )
+            # Send entire response as single content chunk
+            yield f"data: {json.dumps({'type': 'content', 'data': response.content})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        except Exception as e:
+            logger.error("General chat streaming error", error=str(e))
+            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
+
+    async def generate_rag_stream() -> AsyncGenerator[str, None]:
         """Generate streaming response using RAG service."""
         rag_service = get_rag()
         session_id = request.session_id or uuid4()
@@ -219,11 +454,20 @@ async def create_streaming_completion(
                     yield f"data: {json.dumps({'type': 'error', 'data': str(chunk.data)})}\n\n"
 
         except Exception as e:
-            logger.error("Streaming error", error=str(e))
+            logger.error("RAG streaming error", error=str(e))
             yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
 
+    # Route to appropriate stream generator based on mode
+    if request.mode == "agent":
+        stream_generator = generate_agent_stream()
+    elif request.mode == "general":
+        stream_generator = generate_general_stream()
+    else:
+        # Default to RAG (chat mode)
+        stream_generator = generate_rag_stream()
+
     return StreamingResponse(
-        generate_stream(),
+        stream_generator,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

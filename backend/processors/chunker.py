@@ -4,10 +4,16 @@ AIDocumentIndexer - Document Chunker
 
 Semantic text chunking for RAG using LangChain text splitters.
 Supports multiple chunking strategies optimized for different document types.
+
+Features:
+- Multiple chunking strategies (recursive, semantic, token, markdown, code, etc.)
+- Adaptive chunking based on document type detection
+- Hierarchical chunking for large documents (document → section → detail)
+- All advanced features are optional via configuration
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Literal
+from typing import List, Dict, Any, Optional, Literal, Tuple
 from enum import Enum
 import hashlib
 import re
@@ -35,6 +41,18 @@ class ChunkingStrategy(str, Enum):
     HTML = "html"            # Preserves HTML structure
     CODE = "code"            # Language-aware code splitting
     SLIDE = "slide"          # Preserve slide boundaries for presentations
+    HIERARCHICAL = "hierarchical"  # Multi-level chunking for large docs
+
+
+class DocumentType(str, Enum):
+    """Document types for adaptive chunking."""
+    CODE = "code"            # Source code files
+    LEGAL = "legal"          # Legal documents, contracts
+    TECHNICAL = "technical"  # Technical documentation
+    ACADEMIC = "academic"    # Research papers, academic texts
+    NARRATIVE = "narrative"  # Stories, articles, prose
+    TABULAR = "tabular"      # Tables, spreadsheet-like content
+    GENERAL = "general"      # Default for unknown types
 
 
 @dataclass
@@ -54,6 +72,13 @@ class Chunk:
     chunk_hash: str = ""
     char_count: int = 0
     word_count: int = 0
+
+    # Hierarchical chunking support
+    # chunk_level: 0 = detail (default), 1 = section summary, 2 = document summary
+    chunk_level: int = 0
+    is_summary: bool = False
+    parent_chunk_id: Optional[str] = None
+    child_chunk_ids: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         """Calculate hash and counts after initialization."""
@@ -91,6 +116,25 @@ class ChunkingConfig:
     # Metadata to include
     include_position_metadata: bool = True
     include_statistics: bool = True
+
+    # Adaptive chunking (optional - OFF by default)
+    enable_adaptive_chunking: bool = False
+    # Type-specific chunk sizes (characters)
+    adaptive_settings: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
+        "code": {"chunk_size": 256, "chunk_overlap": 50, "strategy": "code"},
+        "legal": {"chunk_size": 1024, "chunk_overlap": 200, "preserve_paragraphs": True},
+        "technical": {"chunk_size": 512, "chunk_overlap": 100, "preserve_sections": True},
+        "academic": {"chunk_size": 800, "chunk_overlap": 150, "preserve_paragraphs": True},
+        "narrative": {"chunk_size": 1000, "chunk_overlap": 200},
+        "tabular": {"chunk_size": 500, "chunk_overlap": 50},
+        "general": {"chunk_size": 1000, "chunk_overlap": 200},
+    })
+
+    # Hierarchical chunking (optional - OFF by default)
+    enable_hierarchical_chunking: bool = False
+    hierarchical_threshold_chars: int = 100000  # ~25k tokens - threshold to enable
+    hierarchical_levels: int = 3  # 2=document summary, 1=section summary, 0=detail
+    sections_per_document: int = 10  # Target number of section summaries
 
 
 class DocumentChunker:
@@ -573,6 +617,373 @@ class DocumentChunker:
         self._initialize_splitters()
 
         return new_chunks
+
+    # =========================================================================
+    # Adaptive Chunking Methods
+    # =========================================================================
+
+    def detect_document_type(
+        self,
+        text: str,
+        filename: Optional[str] = None,
+        mime_type: Optional[str] = None,
+    ) -> DocumentType:
+        """
+        Detect document type for adaptive chunking.
+
+        Uses heuristics based on content analysis and file metadata.
+
+        Args:
+            text: Document text content
+            filename: Optional filename for extension-based detection
+            mime_type: Optional MIME type
+
+        Returns:
+            Detected DocumentType
+        """
+        if not text:
+            return DocumentType.GENERAL
+
+        text_lower = text.lower()
+        text_sample = text[:5000]  # Analyze first 5000 chars
+
+        # Check filename extension first
+        if filename:
+            ext = filename.lower().split('.')[-1] if '.' in filename else ''
+            if ext in ('py', 'js', 'ts', 'java', 'go', 'rs', 'cpp', 'c', 'cs', 'rb', 'php'):
+                return DocumentType.CODE
+            if ext in ('md', 'markdown'):
+                # Could be code docs or general markdown
+                if re.search(r'```[\w]+', text_sample):
+                    return DocumentType.CODE
+                return DocumentType.TECHNICAL
+
+        # Check for code patterns
+        code_indicators = [
+            r'^\s*(def|class|function|import|from|const|let|var|public|private)\s+',
+            r'^\s*#include\s*<',
+            r'^\s*package\s+[\w.]+;',
+            r'^\s*using\s+[\w.]+;',
+            r'{\s*\n.*}\s*$',
+            r'\(\s*\)\s*{',
+            r'=>\s*{',
+        ]
+        code_matches = sum(1 for p in code_indicators if re.search(p, text_sample, re.MULTILINE))
+        if code_matches >= 2:
+            return DocumentType.CODE
+
+        # Check for legal document patterns
+        legal_indicators = [
+            r'\b(hereby|whereas|pursuant|notwithstanding|herein|thereof)\b',
+            r'\b(agreement|contract|party|parties|terms|conditions)\b',
+            r'\b(section|article|clause)\s+\d+',
+            r'\b(shall|must|may not)\b',
+            r'\b(plaintiff|defendant|court|jurisdiction)\b',
+        ]
+        legal_matches = sum(1 for p in legal_indicators if re.search(p, text_lower))
+        if legal_matches >= 3:
+            return DocumentType.LEGAL
+
+        # Check for academic/research patterns
+        academic_indicators = [
+            r'\babstract\b',
+            r'\bintroduction\b',
+            r'\bmethodology\b',
+            r'\bconclusion\b',
+            r'\breferences\b',
+            r'\b(et al\.|ibid\.)\b',
+            r'\[\d+\]',  # Citation numbers
+            r'\(\d{4}\)',  # Year citations
+        ]
+        academic_matches = sum(1 for p in academic_indicators if re.search(p, text_lower))
+        if academic_matches >= 3:
+            return DocumentType.ACADEMIC
+
+        # Check for technical documentation patterns
+        tech_indicators = [
+            r'\b(api|endpoint|parameter|request|response)\b',
+            r'\b(configuration|installation|setup)\b',
+            r'```',  # Code blocks
+            r'\b(example|usage|note|warning|tip)\b:?',
+            r'^#+\s+',  # Markdown headers
+        ]
+        tech_matches = sum(1 for p in tech_indicators if re.search(p, text_lower, re.MULTILINE))
+        if tech_matches >= 3:
+            return DocumentType.TECHNICAL
+
+        # Check for tabular content
+        if text.count('|') > 10 or text.count('\t') > 20:
+            return DocumentType.TABULAR
+
+        # Check for narrative content (long paragraphs, less structure)
+        paragraphs = text.split('\n\n')
+        avg_para_length = sum(len(p) for p in paragraphs) / max(len(paragraphs), 1)
+        if avg_para_length > 500 and len(paragraphs) > 5:
+            return DocumentType.NARRATIVE
+
+        return DocumentType.GENERAL
+
+    def chunk_adaptive(
+        self,
+        text: str,
+        filename: Optional[str] = None,
+        mime_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
+    ) -> List[Chunk]:
+        """
+        Chunk text with automatic document type detection and adaptive settings.
+
+        Uses different chunking strategies and sizes based on detected document type.
+
+        Args:
+            text: Text content to chunk
+            filename: Optional filename for type detection
+            mime_type: Optional MIME type
+            metadata: Additional metadata
+            document_id: Document identifier
+
+        Returns:
+            List of Chunk objects with type-optimized chunking
+        """
+        if not self.config.enable_adaptive_chunking:
+            # Fall back to standard chunking
+            return self.chunk(text, metadata=metadata, document_id=document_id)
+
+        # Detect document type
+        doc_type = self.detect_document_type(text, filename, mime_type)
+
+        logger.info(
+            "Adaptive chunking detected document type",
+            document_type=doc_type.value,
+            filename=filename,
+        )
+
+        # Get type-specific settings
+        type_settings = self.config.adaptive_settings.get(doc_type.value, {})
+
+        # Create type-optimized config
+        adaptive_config = ChunkingConfig(
+            chunk_size=type_settings.get("chunk_size", self.config.chunk_size),
+            chunk_overlap=type_settings.get("chunk_overlap", self.config.chunk_overlap),
+            strategy=ChunkingStrategy(type_settings.get("strategy", "recursive")),
+            preserve_paragraphs=type_settings.get("preserve_paragraphs", self.config.preserve_paragraphs),
+            code_language=type_settings.get("language") if doc_type == DocumentType.CODE else None,
+            min_chunk_size=self.config.min_chunk_size,
+            include_position_metadata=self.config.include_position_metadata,
+            include_statistics=self.config.include_statistics,
+        )
+
+        # Save current config and use adaptive config
+        original_config = self.config
+        self.config = adaptive_config
+        self._initialize_splitters()
+
+        # Add document type to metadata
+        chunk_metadata = {**(metadata or {}), "document_type": doc_type.value}
+
+        # Perform chunking
+        chunks = self.chunk(
+            text,
+            strategy=adaptive_config.strategy,
+            metadata=chunk_metadata,
+            document_id=document_id,
+        )
+
+        # Restore original config
+        self.config = original_config
+        self._initialize_splitters()
+
+        return chunks
+
+    # =========================================================================
+    # Hierarchical Chunking Methods
+    # =========================================================================
+
+    def should_use_hierarchical(self, text: str) -> bool:
+        """
+        Check if document is large enough for hierarchical chunking.
+
+        Args:
+            text: Document text
+
+        Returns:
+            True if document exceeds threshold and hierarchical is enabled
+        """
+        if not self.config.enable_hierarchical_chunking:
+            return False
+
+        return len(text) >= self.config.hierarchical_threshold_chars
+
+    def chunk_hierarchical(
+        self,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
+    ) -> List[Chunk]:
+        """
+        Create hierarchical chunks for large documents.
+
+        Creates a multi-level structure:
+        - Level 2: Document summary (1 chunk)
+        - Level 1: Section summaries (~10 chunks)
+        - Level 0: Detailed chunks (many chunks)
+
+        Note: This creates the structure for summaries but does NOT generate
+        the summary content itself. Use DocumentSummarizer for that.
+
+        Args:
+            text: Full document text
+            metadata: Additional metadata
+            document_id: Document identifier
+
+        Returns:
+            List of Chunk objects with hierarchy metadata
+        """
+        if not self.should_use_hierarchical(text):
+            # Document not large enough, use standard chunking
+            return self.chunk(text, metadata=metadata, document_id=document_id)
+
+        logger.info(
+            "Creating hierarchical chunks",
+            text_length=len(text),
+            target_sections=self.config.sections_per_document,
+        )
+
+        all_chunks = []
+        chunk_metadata = metadata or {}
+
+        # Split document into sections
+        sections = self._split_into_sections(text)
+
+        # Create placeholder for document-level summary (Level 2)
+        doc_summary_id = f"doc_summary_{document_id or hashlib.md5(text[:1000].encode()).hexdigest()[:8]}"
+        doc_summary_chunk = Chunk(
+            content="[DOCUMENT SUMMARY PLACEHOLDER - Use DocumentSummarizer to generate]",
+            chunk_index=-2000,  # Negative index for document summary
+            metadata={**chunk_metadata, "type": "document_summary"},
+            document_id=document_id,
+            chunk_level=2,
+            is_summary=True,
+            chunk_hash=doc_summary_id,
+        )
+        all_chunks.append(doc_summary_chunk)
+
+        section_chunk_ids = []
+        detail_chunk_index = 0
+
+        for section_idx, section_text in enumerate(sections):
+            if len(section_text.strip()) < self.config.min_chunk_size:
+                continue
+
+            # Create section summary placeholder (Level 1)
+            section_id = f"section_{section_idx}_{hashlib.md5(section_text[:500].encode()).hexdigest()[:8]}"
+            section_chunk = Chunk(
+                content=f"[SECTION {section_idx + 1} SUMMARY PLACEHOLDER]",
+                chunk_index=-1000 - section_idx,  # Negative index for section summaries
+                metadata={**chunk_metadata, "type": "section_summary", "section_index": section_idx},
+                document_id=document_id,
+                chunk_level=1,
+                is_summary=True,
+                parent_chunk_id=doc_summary_id,
+                chunk_hash=section_id,
+            )
+            all_chunks.append(section_chunk)
+            section_chunk_ids.append(section_id)
+
+            # Create detailed chunks for this section (Level 0)
+            section_detailed_chunks = self.chunk(
+                section_text,
+                strategy=self.config.strategy,
+                metadata={**chunk_metadata, "type": "detail", "section_index": section_idx},
+                document_id=document_id,
+            )
+
+            # Update chunk metadata with hierarchy info
+            child_ids = []
+            for chunk in section_detailed_chunks:
+                chunk.chunk_index = detail_chunk_index
+                chunk.chunk_level = 0
+                chunk.is_summary = False
+                chunk.parent_chunk_id = section_id
+                child_ids.append(chunk.chunk_hash)
+                detail_chunk_index += 1
+
+            # Update section chunk with child references
+            section_chunk.child_chunk_ids = child_ids
+
+            all_chunks.extend(section_detailed_chunks)
+
+        # Update document summary with section references
+        doc_summary_chunk.child_chunk_ids = section_chunk_ids
+
+        logger.info(
+            "Hierarchical chunking complete",
+            total_chunks=len(all_chunks),
+            sections=len(sections),
+            detail_chunks=detail_chunk_index,
+        )
+
+        return all_chunks
+
+    def _split_into_sections(self, text: str) -> List[str]:
+        """
+        Split document into logical sections for hierarchical chunking.
+
+        Uses various heuristics to identify section boundaries.
+
+        Args:
+            text: Full document text
+
+        Returns:
+            List of section texts
+        """
+        target_sections = self.config.sections_per_document
+
+        # Try to split by common section patterns
+        section_patterns = [
+            r'\n(?=(?:Chapter|Section|Part)\s+\d)',  # Chapter 1, Section 2
+            r'\n(?=\d+\.\s+[A-Z])',  # Numbered headings: 1. Introduction
+            r'\n{3,}',  # Multiple blank lines
+            r'\n(?=[A-Z][A-Z\s]{10,})\n',  # ALL CAPS HEADINGS
+            r'\n(?=#{1,3}\s+)',  # Markdown headers
+        ]
+
+        sections = [text]
+        for pattern in section_patterns:
+            new_sections = []
+            for section in sections:
+                parts = re.split(pattern, section)
+                new_sections.extend(p for p in parts if p.strip())
+            if len(new_sections) > len(sections):
+                sections = new_sections
+
+        # If we got too many sections, merge small ones
+        if len(sections) > target_sections * 2:
+            merged_sections = []
+            current_section = ""
+            target_length = len(text) // target_sections
+
+            for section in sections:
+                current_section += section
+                if len(current_section) >= target_length:
+                    merged_sections.append(current_section)
+                    current_section = ""
+
+            if current_section:
+                merged_sections.append(current_section)
+
+            sections = merged_sections
+
+        # If we still have too few sections, split by size
+        if len(sections) < 2:
+            char_per_section = len(text) // target_sections
+            sections = [
+                text[i:i + char_per_section]
+                for i in range(0, len(text), char_per_section)
+            ]
+
+        return sections[:target_sections]
 
 
 # Convenience functions

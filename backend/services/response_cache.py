@@ -11,11 +11,12 @@ Features:
 - Temperature-based cache eligibility
 - Cache statistics and hit rate tracking
 - Automatic cache cleanup for expired entries
+- Semantic caching: match similar queries by embedding similarity (optional)
 """
 
 import hashlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,15 @@ logger = structlog.get_logger(__name__)
 
 
 @dataclass
+class SemanticCacheConfig:
+    """Configuration for semantic caching."""
+    enabled: bool = False
+    similarity_threshold: float = 0.95
+    max_entries: int = 10000
+    embedding_provider: str = "openai"
+
+
+@dataclass
 class CacheStats:
     """Cache statistics."""
     total_entries: int
@@ -38,6 +48,8 @@ class CacheStats:
     oldest_entry: Optional[datetime]
     newest_entry: Optional[datetime]
     estimated_savings_usd: float
+    semantic_cache_entries: int = 0
+    semantic_cache_hits: int = 0
 
 
 @dataclass
@@ -49,6 +61,8 @@ class CachedResponse:
     original_cost_usd: float
     hit_count: int
     created_at: datetime
+    is_semantic_match: bool = False
+    similarity_score: Optional[float] = None
 
 
 class ResponseCacheService:
@@ -122,6 +136,10 @@ class ResponseCacheService:
                     "cache_temperature_threshold": settings.cache_temperature_threshold,
                     "model_settings": settings.model_settings or {},
                     "excluded_operations": settings.excluded_operations or [],
+                    # Semantic cache settings
+                    "enable_semantic_cache": getattr(settings, "enable_semantic_cache", False),
+                    "semantic_similarity_threshold": getattr(settings, "semantic_similarity_threshold", 0.95),
+                    "max_semantic_cache_entries": getattr(settings, "max_semantic_cache_entries", 10000),
                 }
 
             # Return defaults if no settings exist
@@ -132,6 +150,10 @@ class ResponseCacheService:
                 "cache_temperature_threshold": self.DEFAULT_TEMPERATURE_THRESHOLD,
                 "model_settings": {},
                 "excluded_operations": [],
+                # Semantic cache defaults (OFF)
+                "enable_semantic_cache": False,
+                "semantic_similarity_threshold": 0.95,
+                "max_semantic_cache_entries": 10000,
             }
 
         except Exception as e:
@@ -143,6 +165,10 @@ class ResponseCacheService:
                 "cache_temperature_threshold": self.DEFAULT_TEMPERATURE_THRESHOLD,
                 "model_settings": {},
                 "excluded_operations": [],
+                # Semantic cache defaults (OFF)
+                "enable_semantic_cache": False,
+                "semantic_similarity_threshold": 0.95,
+                "max_semantic_cache_entries": 10000,
             }
 
     async def is_cache_eligible(
@@ -281,6 +307,153 @@ class ResponseCacheService:
             logger.error("Cache lookup failed", error=str(e))
             return None
 
+    async def get_semantic_cached_response(
+        self,
+        db: AsyncSession,
+        prompt: str,
+        model_id: str,
+        system_prompt: Optional[str] = None,
+        embedding_service: Optional[Any] = None,
+    ) -> Optional[CachedResponse]:
+        """
+        Look up cached response using semantic similarity matching.
+
+        This enables finding cached responses for queries that are semantically
+        similar but not identical (e.g., "What is the capital of France?" and
+        "Tell me France's capital city").
+
+        Args:
+            db: Database session
+            prompt: User prompt
+            model_id: Model identifier
+            system_prompt: Optional system prompt
+            embedding_service: Optional embedding service instance
+
+        Returns:
+            CachedResponse if semantically similar query found, None otherwise
+        """
+        try:
+            # Check if semantic caching is enabled
+            settings = await self.get_cache_settings(db)
+            if not settings.get("enable_semantic_cache", False):
+                logger.debug("Semantic cache disabled")
+                return None
+
+            similarity_threshold = settings.get("semantic_similarity_threshold", 0.95)
+
+            # Get embedding service if not provided
+            if embedding_service is None:
+                try:
+                    import os
+                    from backend.services.embeddings import get_embedding_service
+                    # Use configured provider from env, with openai as fallback
+                    default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+                    embedding_service = get_embedding_service(provider=default_provider, use_ray=False)
+                except ImportError as e:
+                    logger.warning("Could not import embedding service", error=str(e))
+                    return None
+
+            # Generate embedding for the query
+            combined_query = prompt
+            if system_prompt:
+                combined_query = f"{system_prompt}|||{prompt}"
+
+            try:
+                query_embedding = await embedding_service.embed_text_async(combined_query)
+            except Exception as e:
+                logger.warning("Failed to generate query embedding", error=str(e))
+                return None
+
+            # Search for similar cached queries using vector similarity
+            # Note: This uses pgvector's cosine similarity operator <=>
+            # The result is cosine distance (1 - cosine_similarity), so we need to convert
+            try:
+                from sqlalchemy import text
+
+                # Use raw SQL for vector similarity search
+                # pgvector: <=> is cosine distance, so similarity = 1 - distance
+                similarity_query = text("""
+                    SELECT
+                        id,
+                        response_text,
+                        input_tokens,
+                        output_tokens,
+                        original_cost_usd,
+                        hit_count,
+                        created_at,
+                        1 - (query_embedding <=> :query_embedding) as similarity
+                    FROM response_cache
+                    WHERE
+                        query_embedding IS NOT NULL
+                        AND model_id = :model_id
+                        AND (expires_at IS NULL OR expires_at > :now)
+                        AND 1 - (query_embedding <=> :query_embedding) >= :threshold
+                    ORDER BY similarity DESC
+                    LIMIT 1
+                """)
+
+                result = await db.execute(
+                    similarity_query,
+                    {
+                        "query_embedding": str(query_embedding),  # pgvector expects string format
+                        "model_id": model_id,
+                        "now": datetime.utcnow(),
+                        "threshold": similarity_threshold,
+                    }
+                )
+
+                row = result.fetchone()
+
+                if row is None:
+                    logger.debug(
+                        "Semantic cache miss",
+                        model=model_id,
+                        threshold=similarity_threshold,
+                    )
+                    return None
+
+                # Update hit count for the matched entry
+                await db.execute(
+                    update(ResponseCache)
+                    .where(ResponseCache.id == row.id)
+                    .values(
+                        hit_count=ResponseCache.hit_count + 1,
+                        last_accessed_at=datetime.utcnow(),
+                    )
+                )
+                await db.commit()
+
+                logger.info(
+                    "Semantic cache hit",
+                    model=model_id,
+                    similarity=round(row.similarity, 4),
+                    hit_count=row.hit_count + 1,
+                    saved_cost=row.original_cost_usd,
+                )
+
+                return CachedResponse(
+                    response_text=row.response_text,
+                    input_tokens=row.input_tokens,
+                    output_tokens=row.output_tokens,
+                    original_cost_usd=row.original_cost_usd or 0.0,
+                    hit_count=row.hit_count + 1,
+                    created_at=row.created_at,
+                    is_semantic_match=True,
+                    similarity_score=row.similarity,
+                )
+
+            except Exception as e:
+                # If pgvector is not available or query fails, fall back gracefully
+                logger.warning(
+                    "Semantic cache query failed (pgvector may not be available)",
+                    error=str(e),
+                )
+                return None
+
+        except Exception as e:
+            logger.error("Semantic cache lookup failed", error=str(e))
+            return None
+
     async def cache_response(
         self,
         db: AsyncSession,
@@ -294,6 +467,7 @@ class ResponseCacheService:
         system_prompt: Optional[str] = None,
         provider_id: Optional[str] = None,
         ttl_seconds: Optional[int] = None,
+        embedding_service: Optional[Any] = None,
     ) -> Optional[str]:
         """
         Cache an LLM response.
@@ -310,6 +484,7 @@ class ResponseCacheService:
             system_prompt: Optional system prompt
             provider_id: Provider UUID string
             ttl_seconds: Custom TTL, uses default if not specified
+            embedding_service: Optional embedding service for semantic caching
 
         Returns:
             Cache entry ID if successful, None otherwise
@@ -332,6 +507,30 @@ class ResponseCacheService:
             system_hash = self.hash_system_prompt(system_prompt) if system_prompt else None
             expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
 
+            # Generate query embedding for semantic caching (if enabled)
+            query_embedding = None
+            query_text = None
+            if settings.get("enable_semantic_cache", False):
+                query_text = prompt
+                if system_prompt:
+                    query_text = f"{system_prompt}|||{prompt}"
+
+                # Get embedding service if not provided
+                if embedding_service is None:
+                    try:
+                        from backend.services.embeddings import get_embedding_service
+                        embedding_service = get_embedding_service(provider="openai", use_ray=False)
+                    except ImportError:
+                        pass
+
+                if embedding_service:
+                    try:
+                        query_embedding = await embedding_service.embed_text_async(query_text)
+                        logger.debug("Generated query embedding for semantic cache")
+                    except Exception as e:
+                        logger.warning("Failed to generate query embedding", error=str(e))
+                        query_embedding = None
+
             # Check if entry already exists (upsert)
             existing_query = (
                 select(ResponseCache)
@@ -345,17 +544,23 @@ class ResponseCacheService:
 
             if existing:
                 # Update existing entry
+                update_values = {
+                    "response_text": response_text,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "original_cost_usd": cost_usd,
+                    "expires_at": expires_at,
+                    "last_accessed_at": datetime.utcnow(),
+                }
+                # Add embedding if generated and not already stored
+                if query_embedding is not None and not getattr(existing, "query_embedding", None):
+                    update_values["query_embedding"] = query_embedding
+                    update_values["query_text"] = query_text
+
                 await db.execute(
                     update(ResponseCache)
                     .where(ResponseCache.id == existing.id)
-                    .values(
-                        response_text=response_text,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        original_cost_usd=cost_usd,
-                        expires_at=expires_at,
-                        last_accessed_at=datetime.utcnow(),
-                    )
+                    .values(**update_values)
                 )
                 await db.commit()
 
@@ -363,6 +568,7 @@ class ResponseCacheService:
                     "Updated cache entry",
                     prompt_hash=prompt_hash[:8],
                     model=model_id,
+                    has_embedding=query_embedding is not None,
                 )
                 return str(existing.id)
 
@@ -380,6 +586,11 @@ class ResponseCacheService:
                 provider_id=uuid.UUID(provider_id) if provider_id else None,
             )
 
+            # Add semantic cache fields if embedding was generated
+            if query_embedding is not None:
+                cache_entry.query_embedding = query_embedding
+                cache_entry.query_text = query_text
+
             db.add(cache_entry)
             await db.commit()
             await db.refresh(cache_entry)
@@ -390,6 +601,7 @@ class ResponseCacheService:
                 model=model_id,
                 ttl_seconds=ttl_seconds,
                 tokens=input_tokens + output_tokens,
+                has_embedding=query_embedding is not None,
             )
 
             return str(cache_entry.id)
@@ -432,6 +644,18 @@ class ResponseCacheService:
             if total_entries > 0 and total_hits > 0:
                 hit_rate = total_hits / (total_hits + total_entries)
 
+            # Get semantic cache entries count (entries with embeddings)
+            semantic_cache_entries = 0
+            try:
+                semantic_query = select(
+                    func.count(ResponseCache.id)
+                ).where(ResponseCache.query_embedding.isnot(None))
+                semantic_result = await db.execute(semantic_query)
+                semantic_cache_entries = semantic_result.scalar() or 0
+            except Exception:
+                # query_embedding column may not exist yet
+                pass
+
             return CacheStats(
                 total_entries=total_entries,
                 total_hits=total_hits,
@@ -440,6 +664,7 @@ class ResponseCacheService:
                 oldest_entry=row.oldest,
                 newest_entry=row.newest,
                 estimated_savings_usd=row.savings or 0.0,
+                semantic_cache_entries=semantic_cache_entries,
             )
 
         except Exception as e:
@@ -546,6 +771,9 @@ class ResponseCacheService:
         cache_temperature_threshold: Optional[float] = None,
         model_settings: Optional[dict] = None,
         excluded_operations: Optional[list] = None,
+        enable_semantic_cache: Optional[bool] = None,
+        semantic_similarity_threshold: Optional[float] = None,
+        max_semantic_cache_entries: Optional[int] = None,
     ) -> bool:
         """
         Update cache settings.
@@ -558,6 +786,9 @@ class ResponseCacheService:
             cache_temperature_threshold: Temperature threshold for caching
             model_settings: Model-specific settings
             excluded_operations: Operations to exclude from caching
+            enable_semantic_cache: Enable semantic cache lookups
+            semantic_similarity_threshold: Similarity threshold for semantic matching
+            max_semantic_cache_entries: Maximum semantic cache entries
 
         Returns:
             True if successful
@@ -576,6 +807,13 @@ class ResponseCacheService:
                     model_settings=model_settings or {},
                     excluded_operations=excluded_operations or [],
                 )
+                # Set semantic cache defaults
+                if hasattr(settings, "enable_semantic_cache"):
+                    settings.enable_semantic_cache = enable_semantic_cache if enable_semantic_cache is not None else False
+                if hasattr(settings, "semantic_similarity_threshold"):
+                    settings.semantic_similarity_threshold = semantic_similarity_threshold if semantic_similarity_threshold is not None else 0.95
+                if hasattr(settings, "max_semantic_cache_entries"):
+                    settings.max_semantic_cache_entries = max_semantic_cache_entries if max_semantic_cache_entries is not None else 10000
                 db.add(settings)
             else:
                 # Update existing settings
@@ -591,10 +829,17 @@ class ResponseCacheService:
                     settings.model_settings = model_settings
                 if excluded_operations is not None:
                     settings.excluded_operations = excluded_operations
+                # Update semantic cache settings (if columns exist)
+                if enable_semantic_cache is not None and hasattr(settings, "enable_semantic_cache"):
+                    settings.enable_semantic_cache = enable_semantic_cache
+                if semantic_similarity_threshold is not None and hasattr(settings, "semantic_similarity_threshold"):
+                    settings.semantic_similarity_threshold = semantic_similarity_threshold
+                if max_semantic_cache_entries is not None and hasattr(settings, "max_semantic_cache_entries"):
+                    settings.max_semantic_cache_entries = max_semantic_cache_entries
 
             await db.commit()
 
-            logger.info("Updated cache settings")
+            logger.info("Updated cache settings", semantic_cache_enabled=enable_semantic_cache)
             return True
 
         except Exception as e:

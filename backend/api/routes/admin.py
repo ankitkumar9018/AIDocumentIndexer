@@ -1091,8 +1091,8 @@ async def get_system_health(
 
     # Check Vector Store (ChromaDB)
     try:
-        from backend.services.vectorstore_local import LocalVectorStore
-        vs = LocalVectorStore()
+        from backend.services.vectorstore_local import ChromaVectorStore
+        vs = ChromaVectorStore()
         # Just check if it initializes
         health_status["services"]["vector_store"] = {
             "status": "connected",
@@ -1105,27 +1105,51 @@ async def get_system_health(
             "message": str(e)
         }
 
-    # Check LLM Configuration
-    openai_key = os.getenv("OPENAI_API_KEY", "")
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    # Check LLM Configuration - query database for active providers
+    try:
+        from backend.db.models import LLMProvider
+        from sqlalchemy import select
 
-    llm_status = []
-    if openai_key and openai_key != "your-openai-api-key":
-        llm_status.append("OpenAI")
-    if anthropic_key and anthropic_key != "your-anthropic-api-key":
-        llm_status.append("Anthropic")
+        result = await db.execute(
+            select(LLMProvider).where(LLMProvider.is_active == True)
+        )
+        active_providers = result.scalars().all()
 
-    if llm_status:
+        if active_providers:
+            provider_names = [p.name for p in active_providers]
+            provider_types = list(set(p.provider_type for p in active_providers))
+            health_status["services"]["llm"] = {
+                "status": "configured",
+                "providers": provider_types,
+                "message": f"Configured: {', '.join(provider_names)}"
+            }
+        else:
+            # Fallback to env vars for backwards compatibility
+            openai_key = os.getenv("OPENAI_API_KEY", "")
+            anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+            llm_status = []
+            if openai_key and openai_key != "your-openai-api-key":
+                llm_status.append("OpenAI")
+            if anthropic_key and anthropic_key != "your-anthropic-api-key":
+                llm_status.append("Anthropic")
+
+            if llm_status:
+                health_status["services"]["llm"] = {
+                    "status": "configured",
+                    "providers": llm_status,
+                    "message": f"Configured providers: {', '.join(llm_status)}"
+                }
+            else:
+                health_status["services"]["llm"] = {
+                    "status": "not_configured",
+                    "providers": [],
+                    "message": "No LLM providers configured"
+                }
+    except Exception as e:
         health_status["services"]["llm"] = {
-            "status": "configured",
-            "providers": llm_status,
-            "message": f"Configured providers: {', '.join(llm_status)}"
-        }
-    else:
-        health_status["services"]["llm"] = {
-            "status": "not_configured",
+            "status": "error",
             "providers": [],
-            "message": "No LLM API keys configured"
+            "message": f"Error checking LLM config: {str(e)}"
         }
 
     return health_status

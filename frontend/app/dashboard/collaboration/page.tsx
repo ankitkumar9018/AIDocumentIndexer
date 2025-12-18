@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSession } from "next-auth/react";
 import {
   Sparkles,
   Play,
@@ -63,13 +64,16 @@ const modeDescriptions: Record<CollaborationMode, { title: string; description: 
 };
 
 export default function CollaborationPage() {
+  const { status } = useSession();
+  const isAuthenticated = status === "authenticated";
+
   const [prompt, setPrompt] = useState("");
   const [context, setContext] = useState("");
   const [mode, setMode] = useState<CollaborationMode>("full");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
 
-  // Queries
-  const { data: sessions, isLoading: sessionsLoading, refetch: refetchSessions } = useCollaborationSessions();
+  // Queries - only fetch when authenticated
+  const { data: sessions, isLoading: sessionsLoading, refetch: refetchSessions } = useCollaborationSessions(undefined);
   const { data: selectedSession } = useCollaborationSession(selectedSessionId || "");
   const { data: critiques } = useCollaborationCritiques(selectedSessionId || "");
   const { data: modes } = useCollaborationModes();

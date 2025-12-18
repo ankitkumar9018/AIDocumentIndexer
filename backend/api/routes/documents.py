@@ -11,6 +11,8 @@ from typing import Optional, List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse
+from pathlib import Path
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, and_, or_, desc, asc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -211,10 +213,17 @@ async def list_documents(
     )
 
     # Build base query with access tier filtering
+    # Exclude soft-deleted documents (those marked as failed with "Deleted by user" error)
     base_query = (
         select(Document)
         .join(AccessTier, Document.access_tier_id == AccessTier.id)
         .where(AccessTier.level <= user.access_tier_level)
+        .where(
+            ~(
+                (Document.processing_status == ProcessingStatus.FAILED)
+                & (Document.processing_error == "Deleted by user")
+            )
+        )
     )
 
     # Apply filters
@@ -806,3 +815,65 @@ async def list_collections(
     ]
 
     return CollectionsResponse(collections=collections)
+
+
+@router.get("/{document_id}/download")
+async def download_document(
+    document_id: UUID,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Download the original document file.
+
+    Returns the file with appropriate content-type for browser download.
+    """
+    logger.info(
+        "Downloading document",
+        document_id=str(document_id),
+        user_id=user.user_id,
+    )
+
+    # Get document
+    query = select(Document).where(Document.id == document_id)
+    result = await db.execute(query)
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    # Check read permission
+    permission_service = get_permission_service()
+    has_access = await permission_service.check_document_access(
+        user_context=user,
+        document_id=str(document_id),
+        permission=Permission.READ,
+        session=db,
+    )
+
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to download this document",
+        )
+
+    # Check if file exists
+    file_path = Path(document.file_path)
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document file not found on disk",
+        )
+
+    # Get MIME type
+    mime_type = document.mime_type or "application/octet-stream"
+
+    # Return file
+    return FileResponse(
+        path=str(file_path),
+        filename=document.original_filename,
+        media_type=mime_type,
+    )

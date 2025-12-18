@@ -84,6 +84,8 @@ dependencies = [
     "pandas>=2.1.0",
     "pyjwt>=2.10.1",
     "langchain-text-splitters>=0.3.0,<1.0.0",
+    "pytesseract>=0.3.13",
+    "langchain-anthropic>=0.3.22",
 ]
 
 [project.optional-dependencies]

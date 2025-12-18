@@ -205,6 +205,21 @@ class EmbeddingService:
         with ThreadPoolExecutor() as executor:
             return await loop.run_in_executor(executor, self.embed_text, text)
 
+    async def embed_query(self, text: str) -> List[float]:
+        """
+        Async method to embed a query text.
+
+        This is an alias for embed_text_async, provided for compatibility
+        with LangChain's Embeddings interface naming convention.
+
+        Args:
+            text: Query text to embed
+
+        Returns:
+            Embedding vector as list of floats
+        """
+        return await self.embed_text_async(text)
+
     async def embed_texts_async(self, texts: List[str]) -> List[List[float]]:
         """Async version of embed_texts."""
         loop = asyncio.get_event_loop()

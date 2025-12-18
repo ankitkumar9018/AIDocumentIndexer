@@ -68,9 +68,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Startup tasks
     try:
         # Initialize database connection
-        # from backend.db.database import init_db
-        # await init_db()
+        from backend.db.database import init_db
+        await init_db()
         logger.info("Database initialized")
+
+        # Seed default agents
+        from backend.db.seed_agents import seed_default_agents
+        await seed_default_agents()
+        logger.info("Default agents seeded")
 
         # Initialize Ray connection
         # from backend.ray.config import init_ray
@@ -199,9 +204,11 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.scraper import router as scraper_router
     from backend.api.routes.costs import router as costs_router
     from backend.api.routes.templates import router as templates_router
+    from backend.api.routes.agent import router as agent_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
+    app.include_router(agent_router, prefix="/api/v1/agent", tags=["Agent Orchestration"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

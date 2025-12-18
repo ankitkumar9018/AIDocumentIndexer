@@ -30,12 +30,48 @@ class ExtractedContent:
     language: str = "en"
 
 
+@dataclass
+class ImageOptimizationConfig:
+    """Configuration for image optimization during processing."""
+    # Zoom levels for OCR rendering
+    # Higher zoom = better OCR quality for scanned documents
+    default_zoom: float = 2.5  # Increased from 1.5 for better OCR quality
+    large_pdf_zoom: float = 2.0  # Increased from 1.0 for better quality on large files
+
+    # Size thresholds
+    large_file_threshold_mb: float = 10.0  # Files > 10MB use large_pdf_zoom
+
+    # Image optimization
+    compress_before_ocr: bool = True  # Compress images before OCR
+    max_image_dimension: int = 3000  # Increased from 2000 for better OCR
+    convert_to_grayscale: bool = False  # Disabled - color can improve OCR accuracy
+
+
 class UniversalProcessor:
     """
     Universal document processor supporting multiple file formats.
 
     Automatically selects the appropriate extractor based on file type.
     """
+
+    # Mapping from Tesseract language codes to PaddleOCR language codes
+    # Tesseract uses ISO 639-2 (3-letter), PaddleOCR uses various formats
+    TESSERACT_TO_PADDLE_LANG = {
+        "eng": "en",
+        "deu": "de",
+        "fra": "fr",
+        "spa": "es",
+        "ita": "it",
+        "por": "pt",
+        "nld": "nl",
+        "pol": "pl",
+        "rus": "ru",
+        "jpn": "japan",
+        "chi_sim": "ch",
+        "chi_tra": "chinese_cht",
+        "kor": "korean",
+        "ara": "ar",
+    }
 
     # File type to processor mapping
     PROCESSORS = {
@@ -79,8 +115,9 @@ class UniversalProcessor:
         self,
         enable_ocr: bool = True,
         enable_image_analysis: bool = True,
-        ocr_language: str = "en",
+        ocr_language: str = None,  # Will use OCR_LANGUAGE env var or default
         smart_image_handling: bool = True,
+        optimization_config: Optional[ImageOptimizationConfig] = None,
     ):
         """
         Initialize the universal processor.
@@ -88,13 +125,17 @@ class UniversalProcessor:
         Args:
             enable_ocr: Enable OCR for scanned documents
             enable_image_analysis: Enable image description generation
-            ocr_language: Language for OCR (default: English)
+            ocr_language: Language for OCR (uses OCR_LANGUAGE env var or defaults to 'eng')
             smart_image_handling: Optimize image quality based on content
+            optimization_config: Image optimization configuration
         """
+        import os
         self.enable_ocr = enable_ocr
         self.enable_image_analysis = enable_image_analysis
-        self.ocr_language = ocr_language
+        # Use provided language, env var, or default to English
+        self.ocr_language = ocr_language or os.getenv("OCR_LANGUAGE", "eng")
         self.smart_image_handling = smart_image_handling
+        self.optimization_config = optimization_config or ImageOptimizationConfig()
 
         # Lazy-load heavy dependencies
         self._ocr_engine = None
@@ -158,6 +199,9 @@ class UniversalProcessor:
             logger.warning("PyMuPDF not installed, using fallback")
             return self._process_pdf_fallback(file_path, mode)
 
+        # Get file size for smart optimization
+        file_size_mb = Path(file_path).stat().st_size / (1024 * 1024)
+
         doc = fitz.open(file_path)
         pages = []
         all_text = []
@@ -170,7 +214,7 @@ class UniversalProcessor:
 
             # Check if page needs OCR (mostly images, little text)
             if self.enable_ocr and len(text.strip()) < 50:
-                ocr_text = self._ocr_page(page)
+                ocr_text = self._ocr_page(page, file_size_mb)
                 if ocr_text:
                     all_text[-1] = ocr_text
                     text = ocr_text
@@ -197,6 +241,7 @@ class UniversalProcessor:
             metadata={
                 "file_type": "pdf",
                 "file_path": file_path,
+                "file_size_mb": file_size_mb,
             },
             pages=pages,
             images=images,
@@ -431,6 +476,32 @@ class UniversalProcessor:
             page_count=1,
         )
 
+    def _convert_ocr_language(self, tesseract_lang: str) -> str:
+        """
+        Convert Tesseract language code to PaddleOCR format.
+
+        Tesseract uses ISO 639-2 codes (e.g., 'eng', 'deu') while
+        PaddleOCR uses various formats (e.g., 'en', 'de', 'german').
+
+        Args:
+            tesseract_lang: Language code in Tesseract format (e.g., 'deu+eng')
+
+        Returns:
+            PaddleOCR compatible language code
+        """
+        # Handle multi-language (e.g., "deu+eng" -> use first language)
+        primary_lang = tesseract_lang.split("+")[0].strip()
+
+        # Convert using mapping, fallback to original if not found
+        paddle_lang = self.TESSERACT_TO_PADDLE_LANG.get(primary_lang, primary_lang)
+
+        logger.debug(
+            "Converted OCR language",
+            tesseract=tesseract_lang,
+            paddle=paddle_lang,
+        )
+        return paddle_lang
+
     def _ocr_image(self, image_path: str) -> str:
         """Perform OCR on an image file."""
         if not self.enable_ocr:
@@ -440,9 +511,11 @@ class UniversalProcessor:
             from paddleocr import PaddleOCR
 
             if self._ocr_engine is None:
+                # Convert Tesseract language code to PaddleOCR format
+                paddle_lang = self._convert_ocr_language(self.ocr_language)
                 self._ocr_engine = PaddleOCR(
                     use_angle_cls=True,
-                    lang=self.ocr_language,
+                    lang=paddle_lang,
                     show_log=False,
                 )
 
@@ -464,8 +537,15 @@ class UniversalProcessor:
     def _ocr_tesseract(self, image_path: str) -> str:
         """Fallback OCR using Tesseract."""
         try:
+            import os
             import pytesseract
             from PIL import Image
+
+            # Ensure TESSDATA_PREFIX is set for pytesseract to find language files
+            tessdata_prefix = os.getenv("TESSDATA_PREFIX")
+            if tessdata_prefix and os.path.isdir(tessdata_prefix):
+                os.environ["TESSDATA_PREFIX"] = tessdata_prefix
+                logger.debug("Using TESSDATA_PREFIX", path=tessdata_prefix)
 
             img = Image.open(image_path)
             text = pytesseract.image_to_string(img, lang=self.ocr_language)
@@ -473,13 +553,80 @@ class UniversalProcessor:
         except ImportError:
             logger.warning("Neither PaddleOCR nor pytesseract installed")
             return ""
+        except Exception as e:
+            logger.error("Tesseract OCR failed", error=str(e), language=self.ocr_language)
+            return ""
 
-    def _ocr_page(self, page) -> str:
-        """OCR a PDF page."""
+    def _optimize_image_for_ocr(self, img_data: bytes) -> bytes:
+        """
+        Optimize image before OCR to reduce processing time.
+
+        - Resizes if larger than max dimension
+        - Converts to grayscale for faster OCR
+        - Compresses PNG output
+        """
         try:
+            from PIL import Image
+            import io
+
+            img = Image.open(io.BytesIO(img_data))
+
+            # Resize if too large
+            max_dim = self.optimization_config.max_image_dimension
+            if max(img.size) > max_dim:
+                ratio = max_dim / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                logger.debug(
+                    "Resized image for OCR",
+                    original_size=img.size,
+                    new_size=new_size,
+                )
+
+            # Convert to grayscale for faster OCR
+            if self.optimization_config.convert_to_grayscale:
+                img = img.convert('L')
+
+            # Compress output
+            output = io.BytesIO()
+            img.save(output, format='PNG', optimize=True)
+            return output.getvalue()
+
+        except Exception as e:
+            logger.warning("Image optimization failed, using original", error=str(e))
+            return img_data
+
+    def _ocr_page(self, page, file_size_mb: float = 0) -> str:
+        """
+        OCR a PDF page with smart optimization.
+
+        Uses adaptive zoom based on file size and applies image optimization
+        when smart_image_handling is enabled.
+        """
+        try:
+            import fitz  # Import here since it's conditional
+
+            # Calculate appropriate zoom based on file size
+            if self.smart_image_handling:
+                if file_size_mb > self.optimization_config.large_file_threshold_mb:
+                    zoom = self.optimization_config.large_pdf_zoom
+                    logger.debug(
+                        "Using reduced zoom for large file",
+                        file_size_mb=file_size_mb,
+                        zoom=zoom,
+                    )
+                else:
+                    zoom = self.optimization_config.default_zoom
+            else:
+                zoom = 2.0  # Original default
+
             # Render page to image
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
             img_data = pix.tobytes("png")
+
+            # Apply image optimization if smart handling is enabled
+            if self.smart_image_handling and self.optimization_config.compress_before_ocr:
+                img_data = self._optimize_image_for_ocr(img_data)
 
             # Save temp file for OCR
             import tempfile

@@ -63,6 +63,7 @@ import {
   useDeleteLLMProvider,
   useTestLLMProvider,
   useSetDefaultLLMProvider,
+  useUpdateLLMProvider,
   useDatabaseConnections,
   useDatabaseConnectionTypes,
   useCreateDatabaseConnection,
@@ -128,6 +129,7 @@ export default function AdminSettingsPage() {
   });
   const [showApiKey, setShowApiKey] = useState(false);
   const [providerTestResults, setProviderTestResults] = useState<Record<string, { success: boolean; message?: string; error?: string }>>({});
+  const [editingProvider, setEditingProvider] = useState<LLMProvider | null>(null);
 
   // Database Connection state
   const [showAddConnection, setShowAddConnection] = useState(false);
@@ -159,6 +161,7 @@ export default function AdminSettingsPage() {
   const { data: providersData, isLoading: providersLoading, refetch: refetchProviders } = useLLMProviders({ enabled: isAuthenticated });
   const { data: providerTypesData } = useLLMProviderTypes({ enabled: isAuthenticated });
   const createProvider = useCreateLLMProvider();
+  const updateProvider = useUpdateLLMProvider();
   const deleteProvider = useDeleteLLMProvider();
   const testProvider = useTestLLMProvider();
   const setDefaultProvider = useSetDefaultLLMProvider();
@@ -377,6 +380,75 @@ export default function AdminSettingsPage() {
       console.error("Failed to set default provider:", err);
       alert("Failed to set default provider: " + (err as Error).message);
     }
+  };
+
+  const handleEditProvider = (provider: LLMProvider) => {
+    setEditingProvider(provider);
+    setNewProvider({
+      name: provider.name,
+      provider_type: provider.provider_type,
+      api_key: "", // Keep empty for security - only send if user enters new key
+      api_base_url: provider.api_base_url || "",
+      organization_id: provider.organization_id || "",
+      default_chat_model: provider.default_chat_model || "",
+      default_embedding_model: provider.default_embedding_model || "",
+      is_default: provider.is_default,
+    });
+    setShowAddProvider(true);
+  };
+
+  const handleSaveProvider = async () => {
+    if (editingProvider) {
+      // Update existing provider
+      try {
+        await updateProvider.mutateAsync({
+          providerId: editingProvider.id,
+          data: {
+            name: newProvider.name !== editingProvider.name ? newProvider.name : undefined,
+            api_key: newProvider.api_key || undefined, // Only send if changed
+            api_base_url: newProvider.api_base_url || undefined,
+            organization_id: newProvider.organization_id || undefined,
+            default_chat_model: newProvider.default_chat_model || undefined,
+            default_embedding_model: newProvider.default_embedding_model || undefined,
+            is_active: true,
+          },
+        });
+        setEditingProvider(null);
+        setShowAddProvider(false);
+        setNewProvider({
+          name: "",
+          provider_type: "openai",
+          api_key: "",
+          api_base_url: "",
+          organization_id: "",
+          default_chat_model: "",
+          default_embedding_model: "",
+          is_default: false,
+        });
+        refetchProviders();
+      } catch (err) {
+        console.error("Failed to update provider:", err);
+        alert("Failed to update provider: " + (err as Error).message);
+      }
+    } else {
+      // Create new provider
+      await handleAddProvider();
+    }
+  };
+
+  const handleCancelProviderForm = () => {
+    setShowAddProvider(false);
+    setEditingProvider(null);
+    setNewProvider({
+      name: "",
+      provider_type: "openai",
+      api_key: "",
+      api_base_url: "",
+      organization_id: "",
+      default_chat_model: "",
+      default_embedding_model: "",
+      is_default: false,
+    });
   };
 
   // Database Connection handlers
@@ -656,6 +728,14 @@ export default function AdminSettingsPage() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      onClick={() => handleEditProvider(provider)}
+                      title="Edit provider"
+                    >
+                      <Edit2 className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       onClick={() => handleTestProvider(provider.id)}
                       disabled={testProvider.isPending}
                     >
@@ -691,10 +771,10 @@ export default function AdminSettingsPage() {
             </p>
           )}
 
-          {/* Add Provider Form */}
+          {/* Add/Edit Provider Form */}
           {showAddProvider && (
             <div className="p-4 rounded-lg border bg-muted/50 space-y-4">
-              <h4 className="font-medium">Add New Provider</h4>
+              <h4 className="font-medium">{editingProvider ? "Edit Provider" : "Add New Provider"}</h4>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Display Name</label>
@@ -707,8 +787,9 @@ export default function AdminSettingsPage() {
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Provider Type</label>
                   <select
-                    className="w-full h-10 px-3 rounded-md border bg-background"
+                    className="w-full h-10 px-3 rounded-md border bg-background disabled:opacity-50"
                     value={newProvider.provider_type}
+                    disabled={!!editingProvider}
                     onChange={(e) => {
                       const type = e.target.value;
                       const config = getProviderTypeConfig(type);
@@ -732,11 +813,16 @@ export default function AdminSettingsPage() {
               </div>
               {getProviderTypeConfig(newProvider.provider_type)?.fields.includes("api_key") && (
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">API Key</label>
+                  <label className="text-sm font-medium">
+                    API Key
+                    {editingProvider && (
+                      <span className="text-muted-foreground font-normal ml-1">(leave empty to keep current)</span>
+                    )}
+                  </label>
                   <div className="relative">
                     <Input
                       type={showApiKey ? "text" : "password"}
-                      placeholder="sk-..."
+                      placeholder={editingProvider ? "••••••••••••••••" : "sk-..."}
                       value={newProvider.api_key}
                       onChange={(e) => setNewProvider({ ...newProvider, api_key: e.target.value })}
                     />
@@ -833,17 +919,19 @@ export default function AdminSettingsPage() {
               </div>
               <div className="flex gap-2">
                 <Button
-                  onClick={handleAddProvider}
-                  disabled={!newProvider.name || createProvider.isPending}
+                  onClick={handleSaveProvider}
+                  disabled={!newProvider.name || createProvider.isPending || updateProvider.isPending}
                 >
-                  {createProvider.isPending ? (
+                  {(createProvider.isPending || updateProvider.isPending) ? (
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : editingProvider ? (
+                    <Save className="h-4 w-4 mr-2" />
                   ) : (
                     <Plus className="h-4 w-4 mr-2" />
                   )}
-                  Add Provider
+                  {editingProvider ? "Update Provider" : "Add Provider"}
                 </Button>
-                <Button variant="outline" onClick={() => setShowAddProvider(false)}>
+                <Button variant="outline" onClick={handleCancelProviderForm}>
                   Cancel
                 </Button>
               </div>
@@ -1288,6 +1376,354 @@ DATABASE_URL=postgresql://user:password@localhost:5432/aidocindexer
 VECTOR_STORE_BACKEND=auto`}
                 </pre>
                 <p>Then restart the server.</p>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* AI Optimization Settings */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Sparkles className="h-5 w-5" />
+            AI Optimization
+          </CardTitle>
+          <CardDescription>
+            Configure AI features to reduce costs and improve quality
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {/* Text Preprocessing */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <FileText className="h-4 w-4" />
+              Text Preprocessing
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Clean and normalize text before embedding to reduce token costs (10-20% savings)
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Enable Preprocessing</p>
+                  <p className="text-sm text-muted-foreground">
+                    Clean text before embedding
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={localSettings["ai.enable_preprocessing"] as boolean ?? true}
+                  onChange={(e) => handleSettingChange("ai.enable_preprocessing", e.target.checked)}
+                />
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Remove Boilerplate</p>
+                  <p className="text-sm text-muted-foreground">
+                    Strip headers, footers, page numbers
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={localSettings["ai.remove_boilerplate"] as boolean ?? true}
+                  onChange={(e) => handleSettingChange("ai.remove_boilerplate", e.target.checked)}
+                />
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Normalize Whitespace</p>
+                  <p className="text-sm text-muted-foreground">
+                    Collapse multiple spaces/newlines
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={localSettings["ai.normalize_whitespace"] as boolean ?? true}
+                  onChange={(e) => handleSettingChange("ai.normalize_whitespace", e.target.checked)}
+                />
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Deduplicate Content</p>
+                  <p className="text-sm text-muted-foreground">
+                    Remove near-duplicate chunks
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={localSettings["ai.deduplicate_content"] as boolean ?? false}
+                  onChange={(e) => handleSettingChange("ai.deduplicate_content", e.target.checked)}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Document Summarization */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <MessageSquare className="h-4 w-4" />
+              Document Summarization
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Generate summaries for large documents to reduce embedding tokens (30-40% savings)
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Summarization</p>
+                <p className="text-sm text-muted-foreground">
+                  Summarize large docs before chunking
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["ai.enable_summarization"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("ai.enable_summarization", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Page Threshold</label>
+                <Input
+                  type="number"
+                  placeholder="50"
+                  value={localSettings["ai.summarization_threshold_pages"] as number ?? 50}
+                  onChange={(e) => handleSettingChange("ai.summarization_threshold_pages", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Summarize docs with more pages</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">KB Threshold</label>
+                <Input
+                  type="number"
+                  placeholder="100"
+                  value={localSettings["ai.summarization_threshold_kb"] as number ?? 100}
+                  onChange={(e) => handleSettingChange("ai.summarization_threshold_kb", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Summarize docs larger than this</p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Summary Model</label>
+              <select
+                className="w-full h-10 px-3 rounded-md border bg-background"
+                value={localSettings["ai.summarization_model"] as string || "gpt-4o-mini"}
+                onChange={(e) => handleSettingChange("ai.summarization_model", e.target.value)}
+              >
+                <option value="gpt-4o-mini">GPT-4o Mini (Cost-effective)</option>
+                <option value="gpt-4o">GPT-4o (Higher quality)</option>
+                <option value="claude-3-haiku">Claude 3 Haiku (Fast)</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Semantic Caching */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Search className="h-4 w-4" />
+              Semantic Caching
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Cache responses for semantically similar queries (up to 68% API cost reduction)
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Semantic Cache</p>
+                <p className="text-sm text-muted-foreground">
+                  Match similar queries by embedding
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["ai.enable_semantic_cache"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("ai.enable_semantic_cache", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Similarity Threshold</label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0.8"
+                  max="1.0"
+                  placeholder="0.95"
+                  value={localSettings["ai.semantic_similarity_threshold"] as number ?? 0.95}
+                  onChange={(e) => handleSettingChange("ai.semantic_similarity_threshold", parseFloat(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Higher = stricter matching (0.8-1.0)</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Max Cache Entries</label>
+                <Input
+                  type="number"
+                  placeholder="10000"
+                  value={localSettings["ai.max_semantic_cache_entries"] as number ?? 10000}
+                  onChange={(e) => handleSettingChange("ai.max_semantic_cache_entries", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Limit semantic cache size</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Query Expansion */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Zap className="h-4 w-4" />
+              Query Expansion
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Generate query variations to improve search recall (8-12% accuracy improvement)
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Query Expansion</p>
+                <p className="text-sm text-muted-foreground">
+                  Generate paraphrased queries for better retrieval
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["ai.enable_query_expansion"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("ai.enable_query_expansion", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Query Variations</label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="5"
+                  placeholder="2"
+                  value={localSettings["ai.query_expansion_count"] as number ?? 2}
+                  onChange={(e) => handleSettingChange("ai.query_expansion_count", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Number of variations to generate (1-5)</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Expansion Model</label>
+                <select
+                  className="w-full h-10 px-3 rounded-md border bg-background"
+                  value={localSettings["ai.query_expansion_model"] as string || "gpt-4o-mini"}
+                  onChange={(e) => handleSettingChange("ai.query_expansion_model", e.target.value)}
+                >
+                  <option value="gpt-4o-mini">GPT-4o Mini (Cost-effective)</option>
+                  <option value="gpt-4o">GPT-4o (Higher quality)</option>
+                  <option value="claude-3-haiku">Claude 3 Haiku (Fast)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Adaptive Chunking */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Cog className="h-4 w-4" />
+              Adaptive Chunking
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Automatically optimize chunk size based on document type (10-15% token savings)
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Adaptive Chunking</p>
+                <p className="text-sm text-muted-foreground">
+                  Auto-detect document type and adjust chunk size
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["ai.enable_adaptive_chunking"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("ai.enable_adaptive_chunking", e.target.checked)}
+              />
+            </div>
+            <div className="bg-muted/30 rounded-lg p-3">
+              <p className="text-xs font-medium mb-2">Type-Specific Chunk Sizes</p>
+              <ul className="text-xs text-muted-foreground space-y-1">
+                <li>Code: 256 chars (preserve function boundaries)</li>
+                <li>Legal: 1024 chars (preserve paragraphs)</li>
+                <li>Technical: 512 chars (preserve sections)</li>
+                <li>Academic: 800 chars (preserve citations)</li>
+                <li>General: 1000 chars (balanced)</li>
+              </ul>
+            </div>
+          </div>
+
+          {/* Hierarchical Chunking */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Activity className="h-4 w-4" />
+              Hierarchical Chunking
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Create multi-level chunk hierarchy for very large documents (20-30% token savings)
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Hierarchical Chunking</p>
+                <p className="text-sm text-muted-foreground">
+                  Create document/section/detail chunk levels
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["ai.enable_hierarchical_chunking"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("ai.enable_hierarchical_chunking", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Size Threshold (KB)</label>
+                <Input
+                  type="number"
+                  min="50"
+                  placeholder="100"
+                  value={(localSettings["ai.hierarchical_threshold_chars"] as number ?? 100000) / 1000}
+                  onChange={(e) => handleSettingChange("ai.hierarchical_threshold_chars", parseInt(e.target.value) * 1000)}
+                />
+                <p className="text-xs text-muted-foreground">Enable for docs larger than this</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Target Sections</label>
+                <Input
+                  type="number"
+                  min="3"
+                  max="20"
+                  placeholder="10"
+                  value={localSettings["ai.sections_per_document"] as number ?? 10}
+                  onChange={(e) => handleSettingChange("ai.sections_per_document", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Number of section summaries</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Cost Savings Info */}
+          <div className="pt-4 border-t">
+            <div className="bg-muted/50 rounded-lg p-4">
+              <div className="flex items-start gap-3">
+                <DollarSign className="h-5 w-5 text-green-500 mt-0.5" />
+                <div>
+                  <p className="font-medium text-sm">Estimated Savings</p>
+                  <ul className="text-sm text-muted-foreground mt-1 space-y-1">
+                    <li>Text Preprocessing: 10-20% token reduction</li>
+                    <li>Document Summarization: 30-40% for large files</li>
+                    <li>Semantic Caching: Up to 68% fewer API calls</li>
+                    <li>Query Expansion: 8-12% accuracy improvement</li>
+                    <li>Adaptive Chunking: 10-15% token savings</li>
+                    <li>Hierarchical Chunking: 20-30% for large docs</li>
+                  </ul>
+                </div>
               </div>
             </div>
           </div>

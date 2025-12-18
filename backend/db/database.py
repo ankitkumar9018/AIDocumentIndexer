@@ -10,7 +10,18 @@ Supports multiple database backends:
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator, Optional
+
+# Load environment variables before anything else
+from dotenv import load_dotenv
+
+# Try to load from project root .env file
+_env_file = Path(__file__).parent.parent.parent / ".env"
+if _env_file.exists():
+    load_dotenv(_env_file)
+else:
+    load_dotenv()
 
 import structlog
 from sqlalchemy import create_engine, text

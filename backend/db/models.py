@@ -389,6 +389,11 @@ class Chunk(Base, UUIDMixin):
 
     Documents are split into chunks for RAG retrieval.
     Each chunk has an embedding vector for similarity search.
+
+    Supports hierarchical chunking:
+    - is_summary: True for document/section summaries
+    - chunk_level: 0=detail, 1=section summary, 2=document summary
+    - parent_chunk_id: Reference to parent chunk in hierarchy
     """
     __tablename__ = "chunks"
 
@@ -413,6 +418,15 @@ class Chunk(Base, UUIDMixin):
     token_count: Mapped[Optional[int]] = mapped_column(Integer)
     char_count: Mapped[Optional[int]] = mapped_column(Integer)
 
+    # Hierarchical chunking support (for large document optimization)
+    is_summary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    chunk_level: Mapped[int] = mapped_column(Integer, default=0)  # 0=detail, 1=section, 2=document
+    parent_chunk_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("chunks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -436,9 +450,14 @@ class Chunk(Base, UUIDMixin):
     # Relationships
     document: Mapped["Document"] = relationship("Document", back_populates="chunks")
     access_tier: Mapped["AccessTier"] = relationship("AccessTier", back_populates="chunks")
+    parent_chunk: Mapped[Optional["Chunk"]] = relationship(
+        "Chunk",
+        remote_side="Chunk.id",
+        backref="child_chunks",
+    )
 
     def __repr__(self) -> str:
-        return f"<Chunk(document_id='{self.document_id}', index={self.chunk_index})>"
+        return f"<Chunk(document_id='{self.document_id}', index={self.chunk_index}, level={self.chunk_level})>"
 
 
 class ScrapedContent(Base, UUIDMixin):
@@ -1108,7 +1127,7 @@ class ResponseCache(Base, UUIDMixin, TimestampMixin):
     LLM response cache for cost reduction.
 
     Caches identical prompt/model/temperature combinations to avoid
-    redundant API calls.
+    redundant API calls. Supports both exact-match and semantic similarity caching.
     """
     __tablename__ = "response_cache"
 
@@ -1117,6 +1136,15 @@ class ResponseCache(Base, UUIDMixin, TimestampMixin):
     model_id: Mapped[str] = mapped_column(String(100), nullable=False)
     temperature: Mapped[float] = mapped_column(Float, default=0.7)
     system_prompt_hash: Mapped[Optional[str]] = mapped_column(String(64))
+
+    # Semantic caching: store query embedding for similarity matching
+    # Uses pgvector for efficient similarity search (fallback to Text for SQLite)
+    query_embedding: Mapped[Optional[List[float]]] = mapped_column(
+        Vector(1536) if HAS_PGVECTOR else Text,
+        nullable=True,
+    )
+    # Original query text (for debugging/display)
+    query_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Cached response
     response_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1163,6 +1191,11 @@ class CacheSettings(Base, UUIDMixin, TimestampMixin):
     # Cache by temperature ranges (temperature <= threshold uses cache)
     cache_temperature_threshold: Mapped[float] = mapped_column(Float, default=0.3)
 
+    # Semantic cache settings (optional - OFF by default)
+    enable_semantic_cache: Mapped[bool] = mapped_column(Boolean, default=False)
+    semantic_similarity_threshold: Mapped[float] = mapped_column(Float, default=0.95)
+    max_semantic_cache_entries: Mapped[int] = mapped_column(Integer, default=10000)
+
     # Model-specific settings (JSON: {"gpt-4": {"ttl": 3600}, "claude-3": {"ttl": 7200}})
     model_settings: Mapped[Optional[dict]] = mapped_column(JSONType())
 
@@ -1170,7 +1203,7 @@ class CacheSettings(Base, UUIDMixin, TimestampMixin):
     excluded_operations: Mapped[Optional[list]] = mapped_column(JSONType(), default=[])
 
     def __repr__(self) -> str:
-        return f"<CacheSettings(enabled={self.is_enabled}, ttl={self.default_ttl_seconds}s)>"
+        return f"<CacheSettings(enabled={self.is_enabled}, semantic={self.enable_semantic_cache}, ttl={self.default_ttl_seconds}s)>"
 
 
 class PromptTemplate(Base, UUIDMixin, TimestampMixin):
@@ -1227,6 +1260,363 @@ class PromptTemplate(Base, UUIDMixin, TimestampMixin):
 
 
 # =============================================================================
+# Agent System Models
+# =============================================================================
+
+class AgentType(str, PyEnum):
+    """Agent type classification."""
+    MANAGER = "manager"
+    GENERATOR = "generator"
+    CRITIC = "critic"
+    RESEARCH = "research"
+    TOOL_EXECUTOR = "tool_executor"
+
+
+class ExecutionMode(str, PyEnum):
+    """Execution mode for chat/agent routing."""
+    AGENT = "agent"
+    CHAT = "chat"
+    GENERAL = "general"  # General LLM chat without RAG
+
+
+class AgentDefinition(Base, UUIDMixin, TimestampMixin):
+    """
+    Definition of an agent in the multi-agent system.
+
+    Each agent has a type, associated prompt versions, and LLM configuration.
+    """
+    __tablename__ = "agent_definitions"
+
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    agent_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Current active prompt version
+    active_prompt_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID())
+
+    # Default LLM configuration (can be overridden per agent)
+    default_provider_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("llm_providers.id", ondelete="SET NULL"),
+    )
+    default_model: Mapped[Optional[str]] = mapped_column(String(100))
+    default_temperature: Mapped[float] = mapped_column(Float, default=0.7)
+    max_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Agent capabilities and settings
+    settings: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Example: {"tools": ["search", "generate"], "max_iterations": 5}
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Performance metrics (updated after executions)
+    total_executions: Mapped[int] = mapped_column(Integer, default=0)
+    success_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_latency_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    avg_tokens_per_execution: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Relationships
+    default_provider: Mapped[Optional["LLMProvider"]] = relationship("LLMProvider")
+
+    __table_args__ = (
+        Index("idx_agent_definitions_type", "agent_type"),
+        Index("idx_agent_definitions_active", "is_active"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AgentDefinition(name='{self.name}', type='{self.agent_type}')>"
+
+
+class AgentPromptVersion(Base, UUIDMixin, TimestampMixin):
+    """
+    Version history for agent prompts.
+
+    Enables prompt optimization, A/B testing, and rollback capability.
+    """
+    __tablename__ = "agent_prompt_versions"
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("agent_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Prompt content
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    task_prompt_template: Mapped[str] = mapped_column(Text, nullable=False)
+    # Template uses {{variable}} syntax for substitution
+
+    # Optional: Few-shot examples and output schema
+    few_shot_examples: Mapped[Optional[list]] = mapped_column(JSONType())
+    # Example: [{"input": "...", "output": "..."}, ...]
+    output_schema: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # JSON Schema for expected output format
+
+    # Version metadata
+    change_reason: Mapped[Optional[str]] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(50), default="system")
+    # Values: "system", "manual", "prompt_builder", "rollback"
+
+    # Performance metrics for this version
+    execution_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_quality_score: Mapped[Optional[float]] = mapped_column(Float)
+
+    # A/B testing support
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    traffic_percentage: Mapped[int] = mapped_column(Integer, default=0)
+    # For A/B testing: 0-100% of traffic routed to this version
+
+    # Parent version (for tracking lineage)
+    parent_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("agent_prompt_versions.id", ondelete="SET NULL"),
+    )
+
+    # Relationships
+    agent: Mapped["AgentDefinition"] = relationship("AgentDefinition")
+    parent_version: Mapped[Optional["AgentPromptVersion"]] = relationship(
+        "AgentPromptVersion", remote_side="AgentPromptVersion.id"
+    )
+
+    __table_args__ = (
+        Index("idx_agent_prompt_versions_agent", "agent_id"),
+        Index("idx_agent_prompt_versions_active", "agent_id", "is_active"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AgentPromptVersion(agent_id={self.agent_id}, v{self.version_number})>"
+
+
+class AgentTrajectory(Base, UUIDMixin, TimestampMixin):
+    """
+    Records agent execution trajectories for analysis and self-improvement.
+
+    Each trajectory captures the full execution path including reasoning,
+    tool calls, and outcomes for later analysis by the Prompt Builder agent.
+    """
+    __tablename__ = "agent_trajectories"
+
+    session_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False, index=True)
+    agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("agent_definitions.id", ondelete="SET NULL"),
+    )
+
+    # Execution details
+    task_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    input_summary: Mapped[Optional[str]] = mapped_column(Text)
+    # Hashed or summarized input for privacy
+
+    # Full trajectory (list of steps)
+    trajectory_steps: Mapped[dict] = mapped_column(JSONType(), nullable=False)
+    # Structure: [
+    #   {"step": 1, "action": "reasoning", "content": "...", "duration_ms": 100},
+    #   {"step": 2, "action": "tool_call", "tool": "search", "result": "...", "duration_ms": 500},
+    #   {"step": 3, "action": "llm_invoke", "tokens": 150, "duration_ms": 2000},
+    #   {"step": 4, "action": "output", "content": "...", "duration_ms": 50}
+    # ]
+
+    # Outcome
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    quality_score: Mapped[Optional[float]] = mapped_column(Float)
+    # Score 0.0-5.0, can be set by CriticAgent or user feedback
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Resource usage
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    total_cost_usd: Mapped[Optional[float]] = mapped_column(Float)
+
+    # User feedback (optional)
+    user_rating: Mapped[Optional[int]] = mapped_column(Integer)
+    # Rating 1-5 stars
+    user_feedback: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Prompt version used (for A/B testing analysis)
+    prompt_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("agent_prompt_versions.id", ondelete="SET NULL"),
+    )
+
+    # Relationships
+    agent: Mapped[Optional["AgentDefinition"]] = relationship("AgentDefinition")
+    prompt_version: Mapped[Optional["AgentPromptVersion"]] = relationship("AgentPromptVersion")
+
+    __table_args__ = (
+        Index("idx_trajectory_agent_success", "agent_id", "success"),
+        Index("idx_trajectory_created", "created_at"),
+        Index("idx_trajectory_session", "session_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AgentTrajectory(agent_id={self.agent_id}, success={self.success})>"
+
+
+class AgentExecutionPlan(Base, UUIDMixin, TimestampMixin):
+    """
+    Persistent storage for multi-step execution plans.
+
+    Enables recovery from failures, auditing, and cost tracking.
+    """
+    __tablename__ = "agent_execution_plans"
+
+    session_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False, index=True)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+    )
+
+    # Original request
+    user_request: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Plan structure
+    plan_steps: Mapped[dict] = mapped_column(JSONType(), nullable=False)
+    # Structure: [
+    #   {"step": 1, "agent": "research", "task": "Find relevant docs", "status": "completed", "dependencies": []},
+    #   {"step": 2, "agent": "generator", "task": "Draft content", "status": "in_progress", "dependencies": [1]},
+    #   {"step": 3, "agent": "critic", "task": "Review quality", "status": "pending", "dependencies": [2]}
+    # ]
+
+    # Execution state
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    # Values: "pending", "executing", "paused", "completed", "failed", "cancelled"
+    current_step: Mapped[int] = mapped_column(Integer, default=0)
+    completed_steps: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Cost tracking
+    estimated_cost_usd: Mapped[Optional[float]] = mapped_column(Float)
+    actual_cost_usd: Mapped[Optional[float]] = mapped_column(Float)
+    user_approved_cost: Mapped[bool] = mapped_column(Boolean, default=False)
+    # True if user approved execution after seeing cost estimate
+
+    # Results
+    final_output: Mapped[Optional[str]] = mapped_column(Text)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Timing
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Relationships
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_execution_plan_status", "status"),
+        Index("idx_execution_plan_user", "user_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AgentExecutionPlan(session_id={self.session_id}, status='{self.status}')>"
+
+
+class PromptOptimizationJob(Base, UUIDMixin, TimestampMixin):
+    """
+    Tracks prompt optimization jobs run by the Prompt Builder Agent.
+
+    Records the analysis, variants generated, A/B test results, and approval status.
+    """
+    __tablename__ = "prompt_optimization_jobs"
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("agent_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Job status
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    # Values: "pending", "analyzing", "generating", "testing", "awaiting_approval", "completed", "rejected", "failed"
+
+    # Analysis results
+    analysis_window_hours: Mapped[int] = mapped_column(Integer, default=24)
+    trajectories_analyzed: Mapped[int] = mapped_column(Integer, default=0)
+    failure_patterns: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Structure: {"patterns": [{"description": "...", "count": 5, "examples": [...]}]}
+
+    # Generated variants
+    variants_generated: Mapped[int] = mapped_column(Integer, default=0)
+    variant_ids: Mapped[Optional[list]] = mapped_column(JSONType())
+    # List of AgentPromptVersion IDs generated
+
+    # A/B test results
+    test_start_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    test_end_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    winning_variant_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID())
+
+    # Metrics improvement
+    baseline_success_rate: Mapped[Optional[float]] = mapped_column(Float)
+    new_success_rate: Mapped[Optional[float]] = mapped_column(Float)
+    improvement_percentage: Mapped[Optional[float]] = mapped_column(Float)
+
+    # Approval tracking
+    approved_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+    )
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Relationships
+    agent: Mapped["AgentDefinition"] = relationship("AgentDefinition")
+    approver: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_optimization_job_agent", "agent_id"),
+        Index("idx_optimization_job_status", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PromptOptimizationJob(agent_id={self.agent_id}, status='{self.status}')>"
+
+
+class ExecutionModePreference(Base, UUIDMixin, TimestampMixin):
+    """
+    User preferences for execution mode (agent vs chat).
+
+    Controls auto-detection, cost approval thresholds, and agent mode toggle.
+    """
+    __tablename__ = "execution_mode_preferences"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+
+    # Default mode for new sessions
+    default_mode: Mapped[str] = mapped_column(String(20), default="agent")
+    # Values: "agent", "chat"
+
+    # Toggle to completely disable agent mode
+    agent_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Auto-detection settings
+    auto_detect_complexity: Mapped[bool] = mapped_column(Boolean, default=True)
+    # If True, automatically switch to agent mode for complex requests
+
+    # Cost management
+    show_cost_estimation: Mapped[bool] = mapped_column(Boolean, default=True)
+    require_approval_above_usd: Mapped[float] = mapped_column(Float, default=1.0)
+    # Ask user for approval if estimated cost exceeds this threshold
+
+    # General chat mode (non-RAG)
+    general_chat_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # If True, allows general LLM responses without document search
+    fallback_to_general: Mapped[bool] = mapped_column(Boolean, default=True)
+    # If True, automatically use general chat when no relevant documents found
+
+    # Relationships
+    user: Mapped["User"] = relationship("User")
+
+    def __repr__(self) -> str:
+        return f"<ExecutionModePreference(user_id={self.user_id}, mode='{self.default_mode}')>"
+
+
+# =============================================================================
 # Indexes (defined after models)
 # =============================================================================
 
@@ -1234,3 +1624,11 @@ class PromptTemplate(Base, UUIDMixin, TimestampMixin):
 Index("idx_documents_created_at", Document.created_at.desc())
 Index("idx_chunks_document_access", Chunk.document_id, Chunk.access_tier_id)
 Index("idx_audit_user_action", AuditLog.user_id, AuditLog.action)
+
+# Performance optimization indexes (added for common query patterns)
+# Documents: access tier + created_at for filtered listing
+Index("idx_documents_tier_created", Document.access_tier_id, Document.created_at.desc())
+# Chunks: access tier + created_at for filtered search results
+Index("idx_chunks_tier_created", Chunk.access_tier_id, Chunk.created_at.desc())
+# ChatMessages: session + created_at for conversation history retrieval
+Index("idx_chat_messages_session_created", ChatMessage.session_id, ChatMessage.created_at.asc())

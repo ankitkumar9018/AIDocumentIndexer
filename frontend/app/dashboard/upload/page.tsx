@@ -1,6 +1,9 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
+import { useSession } from "next-auth/react";
+import { toast } from "sonner";
+import { useWebSocket, FileUpdateMessage, WebSocketMessage } from "@/lib/websocket";
 import {
   Upload,
   FileText,
@@ -22,6 +25,12 @@ import {
   ChevronDown,
   ChevronUp,
   FolderOpen,
+  Settings,
+  Zap,
+  Eye,
+  FileSearch,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,6 +42,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   useUploadFile,
   useUploadBatch,
@@ -85,13 +101,34 @@ const getStatusColor = (status: string) => {
 };
 
 export default function UploadPage() {
+  const { status } = useSession();
+  const isAuthenticated = status === "authenticated";
+
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [collection, setCollection] = useState("");
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
 
-  // Queries
-  const { data: queue, isLoading: queueLoading, refetch: refetchQueue } = useProcessingQueue();
+  // Track file IDs being processed for WebSocket notifications
+  const processingFileIds = useRef<Set<string>>(new Set());
+  const notifiedCompletions = useRef<Set<string>>(new Set());
+
+  // WebSocket for real-time processing updates
+  const { subscribe, unsubscribe, isConnected, onMessage } = useWebSocket();
+
+  // Processing options state
+  const [processingOptions, setProcessingOptions] = useState({
+    enable_ocr: true,
+    enable_image_analysis: true,
+    smart_image_handling: true,
+    smart_chunking: true,
+    detect_duplicates: true,
+    processing_mode: "smart" as "full" | "smart" | "text_only",
+  });
+
+  // Queries - only fetch when authenticated
+  const { data: queue, isLoading: queueLoading, refetch: refetchQueue } = useProcessingQueue({ enabled: isAuthenticated });
   const { data: supportedTypes } = useSupportedFileTypes();
 
   // Mutations
@@ -99,6 +136,52 @@ export default function UploadPage() {
   const uploadBatch = useUploadBatch();
   const cancelProcessing = useCancelProcessing();
   const retryProcessing = useRetryProcessing();
+
+  // WebSocket message handler for processing updates
+  useEffect(() => {
+    if (!isConnected) return;
+
+    // Define message handler
+    const handleMessage = (message: WebSocketMessage) => {
+      // Only handle file update messages
+      if (message.type !== "file_update") return;
+
+      const fileMessage = message as FileUpdateMessage;
+      const fileId = fileMessage.file_id;
+      const filename = fileMessage.filename || "Document";
+
+      // Only show notifications for files we're tracking
+      if (!processingFileIds.current.has(fileId)) return;
+
+      if (fileMessage.status === "completed" && !notifiedCompletions.current.has(fileId)) {
+        notifiedCompletions.current.add(fileId);
+        processingFileIds.current.delete(fileId);
+        toast.success(`"${filename}" processed successfully`, {
+          description: `${fileMessage.chunk_count || 0} chunks created`,
+        });
+        refetchQueue();
+      } else if (fileMessage.status === "failed" && !notifiedCompletions.current.has(fileId)) {
+        notifiedCompletions.current.add(fileId);
+        processingFileIds.current.delete(fileId);
+        toast.error(`"${filename}" processing failed`, {
+          description: fileMessage.error || "An error occurred during processing",
+        });
+        refetchQueue();
+      } else if (fileMessage.status === "processing" && fileMessage.progress === 0) {
+        // Show toast when processing starts (first update)
+        toast.info(`Processing "${filename}"...`, {
+          description: fileMessage.current_step || "Starting...",
+        });
+      }
+    };
+
+    // Subscribe to WebSocket messages
+    const unsubscribeMsg = onMessage(handleMessage);
+
+    return () => {
+      unsubscribeMsg();
+    };
+  }, [isConnected, onMessage, refetchQueue]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -131,40 +214,84 @@ export default function UploadPage() {
   const handleUpload = async () => {
     if (selectedFiles.length === 0) return;
 
+    // Build upload options including processing settings
+    const uploadOptions = {
+      ...(collection && { collection }),
+      ...processingOptions,
+    };
+
     try {
       if (selectedFiles.length === 1) {
-        await uploadFile.mutateAsync({
+        const result = await uploadFile.mutateAsync({
           file: selectedFiles[0],
-          options: collection ? { collection } : undefined,
+          options: Object.keys(uploadOptions).length > 0 ? uploadOptions : undefined,
+        });
+        // Track file ID for WebSocket notifications
+        if (result?.file_id) {
+          const fileId = String(result.file_id);
+          processingFileIds.current.add(fileId);
+          subscribe(fileId);
+        }
+        toast.success("File uploaded successfully", {
+          description: "Processing will begin shortly.",
         });
       } else {
-        await uploadBatch.mutateAsync({
+        const result = await uploadBatch.mutateAsync({
           files: selectedFiles,
-          options: collection ? { collection } : undefined,
+          options: Object.keys(uploadOptions).length > 0 ? uploadOptions : undefined,
+        });
+        // Track all file IDs for WebSocket notifications
+        result.files?.forEach((file: any) => {
+          if (file?.file_id && file.status !== 'failed') {
+            const fileId = String(file.file_id);
+            processingFileIds.current.add(fileId);
+            subscribe(fileId);
+          }
+        });
+        toast.success(`${result.successful} files uploaded successfully`, {
+          description: result.failed > 0 ? `${result.failed} files failed.` : "Processing will begin shortly.",
         });
       }
       setSelectedFiles([]);
       refetchQueue();
-    } catch (error) {
+    } catch (error: any) {
       console.error("Upload failed:", error);
+      const errorMessage = error?.detail || error?.message || "Upload failed";
+      if (error?.status === 401) {
+        toast.error("Authentication error", {
+          description: "Your session may have expired. Please sign out and sign in again.",
+        });
+      } else {
+        toast.error("Upload failed", {
+          description: errorMessage,
+        });
+      }
     }
   };
 
   const handleCancel = async (id: string) => {
     try {
       await cancelProcessing.mutateAsync(id);
+      toast.success("Processing cancelled");
       refetchQueue();
-    } catch (error) {
+    } catch (error: any) {
       console.error("Cancel failed:", error);
+      toast.error("Failed to cancel processing", {
+        description: error?.detail || error?.message,
+      });
     }
   };
 
   const handleRetry = async (id: string) => {
     try {
       await retryProcessing.mutateAsync(id);
+      toast.success("Retrying processing");
       refetchQueue();
-    } catch (error) {
+    } catch (error: any) {
       console.error("Retry failed:", error);
+      toast.error("Failed to retry processing", {
+        description: error?.detail || error?.message,
+      });
     }
   };
 
@@ -203,10 +330,30 @@ export default function UploadPage() {
             Upload documents and monitor the processing queue
           </p>
         </div>
-        <Button onClick={() => refetchQueue()} variant="outline" size="sm">
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* WebSocket connection status */}
+          <div className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs ${
+            isConnected
+              ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+              : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400"
+          }`}>
+            {isConnected ? (
+              <>
+                <Wifi className="h-3 w-3" />
+                <span>Live</span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="h-3 w-3" />
+                <span>Connecting...</span>
+              </>
+            )}
+          </div>
+          <Button onClick={() => refetchQueue()} variant="outline" size="sm">
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Stats Cards */}
@@ -314,6 +461,103 @@ export default function UploadPage() {
                 onChange={(e) => setCollection(e.target.value)}
               />
             </div>
+
+            {/* Processing Options */}
+            <Collapsible open={showAdvancedOptions} onOpenChange={setShowAdvancedOptions}>
+              <CollapsibleTrigger asChild>
+                <Button variant="ghost" className="w-full justify-between p-2 h-auto">
+                  <div className="flex items-center gap-2">
+                    <Settings className="h-4 w-4" />
+                    <span className="text-sm font-medium">Processing Options</span>
+                  </div>
+                  {showAdvancedOptions ? (
+                    <ChevronUp className="h-4 w-4" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4" />
+                  )}
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="space-y-4 pt-4">
+                {/* Processing Mode */}
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">Processing Mode</Label>
+                  <select
+                    className="w-full h-10 px-3 rounded-md border bg-background text-sm"
+                    value={processingOptions.processing_mode}
+                    onChange={(e) =>
+                      setProcessingOptions((prev) => ({
+                        ...prev,
+                        processing_mode: e.target.value as "full" | "smart" | "text_only",
+                      }))
+                    }
+                  >
+                    <option value="smart">Smart (Recommended)</option>
+                    <option value="full">Full (All features)</option>
+                    <option value="text_only">Text Only (Fastest)</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Smart mode optimizes processing based on file content
+                  </p>
+                </div>
+
+                {/* Toggle Options */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-muted/50">
+                    <div className="flex items-center gap-2">
+                      <Eye className="h-4 w-4 text-muted-foreground" />
+                      <div>
+                        <Label className="text-sm">OCR Processing</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Extract text from images & scanned PDFs
+                        </p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={processingOptions.enable_ocr}
+                      onCheckedChange={(checked) =>
+                        setProcessingOptions((prev) => ({ ...prev, enable_ocr: checked }))
+                      }
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-muted/50">
+                    <div className="flex items-center gap-2">
+                      <Zap className="h-4 w-4 text-muted-foreground" />
+                      <div>
+                        <Label className="text-sm">Smart Image Handling</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Optimize images for faster processing
+                        </p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={processingOptions.smart_image_handling}
+                      onCheckedChange={(checked) =>
+                        setProcessingOptions((prev) => ({ ...prev, smart_image_handling: checked }))
+                      }
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-muted/50">
+                    <div className="flex items-center gap-2">
+                      <FileSearch className="h-4 w-4 text-muted-foreground" />
+                      <div>
+                        <Label className="text-sm">Duplicate Detection</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Skip files already in the system
+                        </p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={processingOptions.detect_duplicates}
+                      onCheckedChange={(checked) =>
+                        setProcessingOptions((prev) => ({ ...prev, detect_duplicates: checked }))
+                      }
+                    />
+                  </div>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
 
             {/* Selected Files */}
             {selectedFiles.length > 0 && (

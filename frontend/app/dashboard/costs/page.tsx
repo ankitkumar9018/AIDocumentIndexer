@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSession } from "next-auth/react";
 import {
   DollarSign,
   TrendingUp,
@@ -40,16 +41,19 @@ import {
 type Period = "day" | "week" | "month" | "year";
 
 export default function CostsPage() {
+  const { status } = useSession();
+  const isAuthenticated = status === "authenticated";
+
   const [period, setPeriod] = useState<Period>("month");
   const [alertThreshold, setAlertThreshold] = useState("");
   const [estimateModel, setEstimateModel] = useState("gpt-4");
   const [estimatePrompt, setEstimatePrompt] = useState("");
 
-  // Queries
+  // Queries - only fetch when authenticated
   const { data: usage, isLoading: usageLoading } = useCostUsage(period);
   const { data: history } = useCostHistory(30);
   const { data: currentCost } = useCurrentCost(period);
-  const { data: dashboard, isLoading: dashboardLoading, refetch: refetchDashboard } = useCostDashboard();
+  const { data: dashboard, isLoading: dashboardLoading, refetch: refetchDashboard } = useCostDashboard({ enabled: isAuthenticated });
   const { data: alerts, refetch: refetchAlerts } = useCostAlerts();
   const { data: pricing } = useModelPricing();
 

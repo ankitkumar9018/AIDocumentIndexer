@@ -1,0 +1,230 @@
+"""
+AIDocumentIndexer - General Chat Service
+=========================================
+
+LLM chat service without RAG - for general questions that don't require
+document search. Uses the same LLM infrastructure as RAG but skips retrieval.
+"""
+
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass, field
+import time
+import structlog
+
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+from backend.services.llm import (
+    EnhancedLLMFactory,
+    LLMConfigResult,
+    LLMUsageTracker,
+)
+from backend.services.session_memory import get_session_memory_manager
+
+logger = structlog.get_logger(__name__)
+
+
+# System prompt for general chat mode
+GENERAL_CHAT_SYSTEM_PROMPT = """You are a helpful AI assistant. Answer the user's question
+to the best of your ability using your general knowledge.
+
+Guidelines:
+- Be concise and accurate
+- If you're not sure about something, say so
+- For complex topics, break down your explanation into clear steps
+- Be helpful and friendly in your responses
+
+Note: This system also has a document search capability. If the user's question
+might be better answered by searching their documents, you can suggest they
+switch to document search mode.
+"""
+
+
+@dataclass
+class GeneralChatResponse:
+    """Response from general chat query."""
+    content: str
+    query: str
+    model: str
+    is_general_response: bool = True
+    sources: List[Any] = field(default_factory=list)  # Always empty for general chat
+    tokens_used: Optional[int] = None
+    processing_time_ms: Optional[float] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class GeneralChatService:
+    """
+    LLM chat service without RAG.
+
+    For answering general questions that don't require document search.
+    Uses the same LLM configuration and memory management as RAG service.
+    """
+
+    def __init__(
+        self,
+        track_usage: bool = True,
+        memory_window_k: int = 10,
+    ):
+        """
+        Initialize General Chat Service.
+
+        Args:
+            track_usage: Whether to track LLM usage
+            memory_window_k: Number of messages to keep in memory
+        """
+        self.track_usage = track_usage
+        self.memory_window_k = memory_window_k
+
+        # Use centralized session memory manager with LRU eviction (prevents memory leaks)
+        self._session_memory = get_session_memory_manager(
+            max_sessions=1000,
+            memory_window_k=memory_window_k,
+            cleanup_stale_after_hours=24.0,
+        )
+
+        logger.info(
+            "GeneralChatService initialized",
+            track_usage=track_usage,
+            memory_window_k=memory_window_k,
+        )
+
+    async def get_llm_for_session(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> tuple:
+        """Get LLM instance for a session using database-driven config."""
+        # Use EnhancedLLMFactory which handles config resolution and model creation
+        llm, config_result = await EnhancedLLMFactory.get_chat_model_for_operation(
+            operation="chat",
+            session_id=session_id,
+            user_id=user_id,
+            track_usage=self.track_usage,
+        )
+
+        return llm, config_result
+
+    def _get_memory(self, session_id: str):
+        """Get or create conversation memory for session using centralized manager."""
+        return self._session_memory.get_memory(session_id)
+
+    def clear_memory(self, session_id: str):
+        """Clear conversation memory for session."""
+        self._session_memory.clear_memory(session_id)
+
+    async def query(
+        self,
+        question: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> GeneralChatResponse:
+        """
+        Query the general chat service.
+
+        Args:
+            question: User's question
+            session_id: Session ID for conversation memory
+            user_id: User ID for usage tracking
+            system_prompt: Optional custom system prompt
+
+        Returns:
+            GeneralChatResponse with answer
+        """
+        start_time = time.time()
+
+        logger.info(
+            "Processing general chat query",
+            question_length=len(question),
+            session_id=session_id,
+        )
+
+        # Get LLM for this session
+        llm, llm_config = await self.get_llm_for_session(
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+        # Use custom system prompt or default
+        prompt = system_prompt or GENERAL_CHAT_SYSTEM_PROMPT
+
+        # Build messages
+        if session_id:
+            # Use conversational prompt with history
+            memory = self._get_memory(session_id)
+            chat_history = memory.load_memory_variables({}).get("chat_history", [])
+
+            messages = [
+                SystemMessage(content=prompt),
+                *chat_history,
+                HumanMessage(content=question),
+            ]
+        else:
+            # Single-turn query
+            messages = [
+                SystemMessage(content=prompt),
+                HumanMessage(content=question),
+            ]
+
+        # Generate response
+        response = await llm.ainvoke(messages)
+        content = response.content if hasattr(response, 'content') else str(response)
+
+        processing_time_ms = (time.time() - start_time) * 1000
+
+        # Track usage if enabled
+        if self.track_usage and llm_config:
+            # Estimate token counts
+            input_text = prompt + question
+            input_tokens = len(input_text) // 4  # ~4 chars per token
+            output_tokens = len(content) // 4
+
+            await LLMUsageTracker.log_usage(
+                provider_type=llm_config.provider_type,
+                model=llm_config.model,
+                operation_type="general_chat",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                provider_id=llm_config.provider_id,
+                user_id=user_id,
+                session_id=session_id,
+                duration_ms=int(processing_time_ms),
+                success=True,
+            )
+
+        # Update memory if using session
+        if session_id:
+            memory = self._get_memory(session_id)
+            memory.save_context(
+                {"input": question},
+                {"output": content}
+            )
+
+        # Get model name from config
+        model_name = llm_config.model if llm_config else "default"
+
+        return GeneralChatResponse(
+            content=content,
+            query=question,
+            model=model_name,
+            is_general_response=True,
+            sources=[],  # No sources for general chat
+            processing_time_ms=processing_time_ms,
+            metadata={
+                "session_id": session_id,
+                "provider": llm_config.provider_type if llm_config else "unknown",
+                "mode": "general",
+            },
+        )
+
+
+# Singleton instance
+_general_chat_service: Optional[GeneralChatService] = None
+
+
+def get_general_chat_service() -> GeneralChatService:
+    """Get or create the general chat service singleton."""
+    global _general_chat_service
+    if _general_chat_service is None:
+        _general_chat_service = GeneralChatService()
+    return _general_chat_service

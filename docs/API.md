@@ -205,7 +205,10 @@ Delete a chat session.
 
 ### POST /chat/completions
 
-Send a chat message and get a response.
+Send a chat message and get a response. Supports three modes:
+- `chat` (default): RAG mode with document search
+- `general`: Pure LLM mode without document search
+- `agent`: Multi-agent orchestration for complex tasks
 
 **Request:**
 ```json
@@ -216,7 +219,28 @@ Send a chat message and get a response.
   "collection": "optional-collection",
   "search_type": "hybrid",
   "top_k": 5,
-  "stream": false
+  "stream": false,
+  "mode": "chat"
+}
+```
+
+**General Chat Mode Example:**
+```json
+{
+  "message": "What is the capital of France?",
+  "mode": "general"
+}
+```
+
+**Response:**
+```json
+{
+  "session_id": "uuid",
+  "message_id": "uuid",
+  "content": "The capital of France is Paris...",
+  "sources": [],
+  "is_general_response": true,
+  "created_at": "2025-01-01T00:00:00Z"
 }
 ```
 
@@ -236,10 +260,16 @@ Upload a single file.
 - `file`: File to upload
 - `collection` (optional): Collection name
 - `access_tier` (optional): Access tier level (1-100)
+- `enable_ocr` (optional, default: true): Enable OCR for scanned documents
+- `enable_image_analysis` (optional, default: true): Enable image analysis
+- `smart_image_handling` (optional, default: true): Optimize images for faster processing
+- `smart_chunking` (optional, default: true): Use semantic chunking
+- `detect_duplicates` (optional, default: true): Skip duplicate files
+- `processing_mode` (optional): "full", "smart" (default), or "text_only"
 
 ### POST /upload/batch
 
-Upload multiple files.
+Upload multiple files. Accepts same options as single upload.
 
 ### GET /upload/status/{file_id}
 
@@ -482,6 +512,74 @@ Estimate cost for a request.
 ### GET /costs/pricing
 
 Get model pricing information.
+
+---
+
+## Agent Endpoints
+
+### GET /agent/mode
+
+Get current execution mode and preferences.
+
+**Response:**
+```json
+{
+  "mode": "agent",
+  "agent_mode_enabled": true,
+  "auto_detect_complexity": true
+}
+```
+
+### POST /agent/mode/toggle
+
+Toggle agent mode on/off.
+
+### GET /agent/preferences
+
+Get user's agent preferences.
+
+**Response:**
+```json
+{
+  "default_mode": "chat",
+  "agent_mode_enabled": true,
+  "auto_detect_complexity": true,
+  "show_cost_estimation": true,
+  "require_approval_above_usd": 1.0,
+  "general_chat_enabled": true,
+  "fallback_to_general": true
+}
+```
+
+### PATCH /agent/preferences
+
+Update agent preferences.
+
+**Request:**
+```json
+{
+  "default_mode": "agent",
+  "agent_mode_enabled": true,
+  "auto_detect_complexity": true,
+  "show_cost_estimation": true,
+  "require_approval_above_usd": 1.0,
+  "general_chat_enabled": true,
+  "fallback_to_general": true
+}
+```
+
+### POST /agent/execute
+
+Execute a request through the multi-agent system.
+
+**Request:**
+```json
+{
+  "message": "Generate a comprehensive market analysis",
+  "session_id": "optional-session-id",
+  "context": {}
+}
+```
 
 ---
 

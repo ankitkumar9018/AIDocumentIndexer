@@ -245,23 +245,64 @@ curl http://localhost:11434/api/tags
 # Start Ollama
 ollama serve
 
-# Pull required model
-ollama pull llama3.2
+# Pull required models
+ollama pull llama3.2           # Chat model
+ollama pull nomic-embed-text   # Embedding model
+
+# List available models
+ollama list
 ```
+
+### Ollama Embeddings Not Working
+
+**Problem:** Using Ollama but embeddings fail with OpenAI API key error.
+
+**Causes & Solutions:**
+
+1. **Wrong provider configured:**
+   ```bash
+   # Ensure DEFAULT_LLM_PROVIDER is set to ollama
+   DEFAULT_LLM_PROVIDER=ollama
+   ```
+
+2. **RAG service using wrong provider:**
+   The RAG service now reads `DEFAULT_LLM_PROVIDER` from environment. Ensure your `.env` is correct and restart the backend.
+
+3. **Embedding model not pulled:**
+   ```bash
+   ollama pull nomic-embed-text
+   ```
 
 ### Embedding Dimension Mismatch
 
-**Problem:** `vector dimension mismatch`
+**Problem:** `vector dimension mismatch` or embeddings don't match
+
+**Causes:**
+- Switched embedding models after indexing documents
+- `EMBEDDING_DIMENSION` doesn't match actual model output
 
 **Solution:**
 ```bash
 # Ensure EMBEDDING_DIMENSION matches model output
 # OpenAI text-embedding-3-small: 1536
-# nomic-embed-text: 768
+# OpenAI text-embedding-3-large: 3072
+# Ollama nomic-embed-text: 768
+# HuggingFace all-MiniLM-L6-v2: 384
 
-EMBEDDING_DIMENSION=1536
+EMBEDDING_DIMENSION=768  # For Ollama nomic-embed-text
 
-# May need to recreate embeddings if changed
+# If you changed models, you need to:
+# 1. Clear ChromaDB: rm -rf ./data/chroma
+# 2. Reprocess all documents
+```
+
+### LangChain Deprecation Warnings
+
+**Problem:** Logs show `LangChainDeprecationWarning: The class 'OllamaEmbeddings' was deprecated`
+
+**Solution:** These are warnings, not errors. The code will continue to work. To suppress warnings, you can upgrade langchain-ollama:
+```bash
+pip install -U langchain-ollama
 ```
 
 ---
@@ -324,6 +365,116 @@ python -c "from paddleocr import PaddleOCR; print('OK')"
 OCR_LANGUAGE=en,ch
 ```
 
+### Tesseract OCR Not Installed
+
+**Problem:** Scanned PDFs process with 0 chunks, backend logs show `tesseract is not installed or it's not in your PATH`.
+
+**Solution:**
+
+Tesseract OCR is a system binary that must be installed separately from Python packages.
+
+```bash
+# macOS
+brew install tesseract
+
+# Ubuntu/Debian
+sudo apt install tesseract-ocr tesseract-ocr-eng
+
+# Windows
+winget install UB-Mannheim.TesseractOCR
+# Add to PATH: C:\Program Files\Tesseract-OCR
+
+# Verify installation
+tesseract --version
+```
+
+**Note:** The `pytesseract` Python package is just a wrapper - the Tesseract binary must be installed on the system. After installation, restart the backend server.
+
+### Tesseract Language Data Not Found
+
+**Problem:** PDF shows status "completed" but has 0 chunks and 0 words. Backend logs show:
+```
+Error opening data file /opt/homebrew/share/tessdata/en.traineddata
+Please make sure the TESSDATA_PREFIX environment variable is set to your "tessdata" directory.
+Failed loading language 'en'
+```
+
+**Solution:**
+
+1. Set the `TESSDATA_PREFIX` environment variable in `.env`:
+   ```bash
+   # macOS (Homebrew)
+   TESSDATA_PREFIX=/opt/homebrew/share/tessdata
+
+   # Linux (apt)
+   TESSDATA_PREFIX=/usr/share/tesseract-ocr/4.00/tessdata
+
+   # Windows
+   TESSDATA_PREFIX=C:\Program Files\Tesseract-OCR\tessdata
+   ```
+
+2. Verify the language data files exist:
+   ```bash
+   ls $TESSDATA_PREFIX
+   # Should show: eng.traineddata, osd.traineddata, etc.
+   ```
+
+3. Restart the backend server after changing `.env`.
+
+### OCR Language Not Installed
+
+**Problem:** Non-English PDFs (e.g., German, French) show 0 words after processing.
+
+**Solution:**
+
+1. Install additional language packs:
+   ```bash
+   # macOS - install all languages
+   brew install tesseract-lang
+
+   # Ubuntu/Debian - specific language
+   sudo apt install tesseract-ocr-deu  # German
+   sudo apt install tesseract-ocr-fra  # French
+   ```
+
+2. Configure the OCR language in `.env`:
+   ```bash
+   # German + English
+   OCR_LANGUAGE=deu+eng
+
+   # French + English
+   OCR_LANGUAGE=fra+eng
+   ```
+
+3. Reprocess the document via the UI "Reprocess" button or API.
+
+### PDF Shows "Completed" But Has 0 Chunks
+
+**Problem:** Document processing completes successfully but word_count and chunk_count are 0.
+
+**Causes & Solutions:**
+
+1. **OCR failing silently** - Check for Tesseract errors in logs:
+   ```bash
+   grep -i "tesseract\|ocr" /tmp/backend.log
+   ```
+
+2. **PDF contains only images** (scanned document):
+   - Ensure `ENABLE_OCR=true`
+   - Verify `TESSDATA_PREFIX` is set correctly
+   - Check `OCR_LANGUAGE` matches document language
+
+3. **Text extraction returning empty**:
+   ```bash
+   # Test PDF text extraction manually
+   PYTHONPATH=. python -c "
+   from backend.processors.universal import UniversalProcessor
+   p = UniversalProcessor()
+   result = p.process_file('path/to/file.pdf')
+   print(f'Text length: {len(result.text)}')
+   "
+   ```
+
 ---
 
 ## Frontend Issues
@@ -355,27 +506,86 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 localStorage.getItem('theme')
 ```
 
-### Search Not Returning Results
+### Search/Chat Not Returning Results
 
-**Problem:** Search returns empty despite documents.
+**Problem:** Chat says "no relevant documents found" even though documents are indexed.
 
 **Causes & Solutions:**
 
-1. Documents not indexed:
+1. **Documents not indexed:**
    ```bash
    # Check document status
-   curl /api/documents?status=completed
+   curl -H "Authorization: Bearer $TOKEN" \
+     http://localhost:8000/api/v1/documents?status=completed
    ```
 
-2. Access tier too low:
+2. **Embedding provider mismatch:**
+   The chat/RAG service might be using a different embedding provider than the one used to index documents.
    ```bash
-   # Documents may have higher access tier
+   # Ensure DEFAULT_LLM_PROVIDER matches what was used during indexing
+   DEFAULT_LLM_PROVIDER=ollama  # or openai
    ```
 
-3. Query too specific:
+3. **Similarity threshold too high:**
+   OCR'd documents may have lower similarity scores. The default threshold has been lowered to 0.4.
    ```bash
-   # Try broader search terms
+   # Check vectorstore.py VectorStoreConfig
+   similarity_threshold: float = 0.4  # Lower for OCR documents
    ```
+
+4. **Embedding dimension mismatch:**
+   If you switched embedding models, old embeddings won't match.
+   ```bash
+   # Check EMBEDDING_DIMENSION matches current model
+   EMBEDDING_DIMENSION=768   # nomic-embed-text (Ollama)
+   EMBEDDING_DIMENSION=1536  # text-embedding-3-small (OpenAI)
+   ```
+
+5. **ChromaDB collection empty or corrupted:**
+   ```bash
+   # Check ChromaDB document count
+   PYTHONPATH=. python -c "
+   import chromadb
+   client = chromadb.PersistentClient(path='./data/chroma')
+   collection = client.get_collection('documents')
+   print(f'Documents in ChromaDB: {collection.count()}')
+   "
+   ```
+
+### RAG Returns "EmbeddingService has no attribute" Error
+
+**Problem:** Backend logs show `'EmbeddingService' object has no attribute 'embed_query'`
+
+**Solution:** This was a bug that has been fixed. The `EmbeddingService` class now has the `embed_query` async method. Update your code to the latest version.
+
+### Documents Found But Not Relevant
+
+**Problem:** RAG returns sources but they're from wrong documents (e.g., test documents instead of real content).
+
+**Causes & Solutions:**
+
+1. **Documents indexed but chunks stored incorrectly:**
+   ```bash
+   # Check if chunks exist in SQLite
+   sqlite3 aidocindexer.db "SELECT COUNT(*) FROM chunks WHERE document_id='YOUR_DOC_ID'"
+   ```
+
+2. **ChromaDB and SQLite out of sync:**
+   ```bash
+   # Verify both have the same count
+   # SQLite
+   sqlite3 aidocindexer.db "SELECT COUNT(*) FROM chunks"
+
+   # ChromaDB
+   PYTHONPATH=. python -c "
+   import chromadb
+   client = chromadb.PersistentClient(path='./data/chroma')
+   print(client.get_collection('documents').count())
+   "
+   ```
+
+3. **Reindex documents:**
+   Use the "Reprocess" button in the UI or call the reprocess API endpoint.
 
 ---
 

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
+import { useSession } from "next-auth/react";
 import {
   FileText,
   Search,
@@ -23,6 +24,10 @@ import {
   RefreshCw,
   SortAsc,
   SortDesc,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +40,14 @@ import {
 } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { toast } from "sonner";
+import {
   useDocuments,
   useDocument,
   useUpdateDocument,
@@ -42,6 +55,7 @@ import {
   useSearchDocuments,
   useCollections,
   Document,
+  api,
 } from "@/lib/api";
 
 type ViewMode = "grid" | "list";
@@ -64,21 +78,40 @@ const formatFileSize = (bytes: number) => {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 };
 
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
+
+// File type filter options
+const FILE_TYPE_OPTIONS = [
+  { value: "", label: "All Types" },
+  { value: "pdf", label: "PDF" },
+  { value: "docx", label: "Word" },
+  { value: "xlsx", label: "Excel" },
+  { value: "pptx", label: "PowerPoint" },
+  { value: "txt", label: "Text" },
+  { value: "image", label: "Images" },
+];
+
 export default function DocumentsPage() {
+  const { status } = useSession();
+  const isAuthenticated = status === "authenticated";
+
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCollection, setSelectedCollection] = useState<string | null>(null);
   const [selectedDocuments, setSelectedDocuments] = useState<Set<string>>(new Set());
   const [sortBy, setSortBy] = useState<string>("created_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [selectedFileType, setSelectedFileType] = useState<string>("");
 
-  // Queries
+  // Queries - only fetch when authenticated
   const { data: documentsData, isLoading, refetch } = useDocuments({
     collection: selectedCollection || undefined,
     sort_by: sortBy,
     sort_order: sortOrder,
-  });
-  const { data: collections } = useCollections();
+  }, { enabled: isAuthenticated });
+  const { data: collections } = useCollections({ enabled: isAuthenticated });
 
   // Mutations
   const deleteDocument = useDeleteDocument();
@@ -86,9 +119,36 @@ export default function DocumentsPage() {
   // Use real documents from API (no mock fallback)
   const documents: Document[] = documentsData?.documents ?? [];
 
-  const filteredDocuments = documents.filter((doc) =>
-    doc.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // Filter documents by search query and file type
+  const filteredDocuments = useMemo(() => {
+    return documents.filter((doc) => {
+      const matchesSearch = doc.name.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesFileType = !selectedFileType || doc.file_type?.toLowerCase().includes(selectedFileType.toLowerCase());
+      return matchesSearch && matchesFileType;
+    });
+  }, [documents, searchQuery, selectedFileType]);
+
+  // Pagination calculations
+  const totalPages = Math.ceil(filteredDocuments.length / pageSize);
+  const startIndex = (currentPage - 1) * pageSize;
+  const endIndex = startIndex + pageSize;
+  const paginatedDocuments = filteredDocuments.slice(startIndex, endIndex);
+
+  // Reset to page 1 when filters change
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value);
+    setCurrentPage(1);
+  };
+
+  const handleFileTypeChange = (value: string) => {
+    setSelectedFileType(value);
+    setCurrentPage(1);
+  };
+
+  const handlePageSizeChange = (size: number) => {
+    setPageSize(size);
+    setCurrentPage(1);
+  };
 
   const toggleSelectDocument = (id: string) => {
     setSelectedDocuments((prev) => {
@@ -130,6 +190,40 @@ export default function DocumentsPage() {
   // Use real collections from API (no mock fallback)
   const collectionsList = collections?.collections?.map((c: { name: string }) => c.name) ?? [];
 
+  const handleDeleteDocument = async (docId: string, docName: string) => {
+    try {
+      await deleteDocument.mutateAsync(docId);
+      toast.success("Document deleted", {
+        description: `"${docName}" has been deleted.`,
+      });
+      refetch();
+    } catch (error: any) {
+      console.error("Delete failed:", error);
+      toast.error("Failed to delete document", {
+        description: error?.detail || error?.message || "An error occurred",
+      });
+    }
+  };
+
+  const handleDownloadDocument = async (docId: string, docName: string) => {
+    try {
+      await api.downloadDocument(docId, docName);
+      toast.success("Download started", {
+        description: `Downloading "${docName}"...`,
+      });
+    } catch (error: any) {
+      console.error("Download failed:", error);
+      toast.error("Failed to download document", {
+        description: error?.detail || error?.message || "An error occurred",
+      });
+    }
+  };
+
+  const handleViewDocument = (docId: string) => {
+    // Navigate to document detail view
+    window.location.href = `/dashboard/documents/${docId}`;
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -154,17 +248,37 @@ export default function DocumentsPage() {
           <Input
             placeholder="Search documents..."
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => handleSearchChange(e.target.value)}
             className="pl-9"
+            aria-label="Search documents"
           />
         </div>
 
-        {/* Collection Filter */}
-        <div className="flex items-center gap-2">
+        {/* Filters */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* File Type Filter */}
+          <select
+            value={selectedFileType}
+            onChange={(e) => handleFileTypeChange(e.target.value)}
+            className="h-10 px-3 rounded-md border bg-background text-sm"
+            aria-label="Filter by file type"
+          >
+            {FILE_TYPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+
+          {/* Collection Filter */}
           <select
             value={selectedCollection || ""}
-            onChange={(e) => setSelectedCollection(e.target.value || null)}
+            onChange={(e) => {
+              setSelectedCollection(e.target.value || null);
+              setCurrentPage(1);
+            }}
             className="h-10 px-3 rounded-md border bg-background text-sm"
+            aria-label="Filter by collection"
           >
             <option value="">All Collections</option>
             {collectionsList.map((col: string) => (
@@ -181,6 +295,7 @@ export default function DocumentsPage() {
               size="sm"
               className="h-8 px-2"
               onClick={() => setViewMode("list")}
+              aria-label="List view"
             >
               <List className="h-4 w-4" />
             </Button>
@@ -189,6 +304,7 @@ export default function DocumentsPage() {
               size="sm"
               className="h-8 px-2"
               onClick={() => setViewMode("grid")}
+              aria-label="Grid view"
             >
               <Grid className="h-4 w-4" />
             </Button>
@@ -298,7 +414,7 @@ export default function DocumentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredDocuments.map((doc) => {
+                  {paginatedDocuments.map((doc) => {
                     const FileIcon = getFileIcon(doc.file_type);
                     return (
                       <tr
@@ -311,6 +427,7 @@ export default function DocumentsPage() {
                             size="sm"
                             className="h-6 w-6 p-0"
                             onClick={() => toggleSelectDocument(doc.id)}
+                            aria-label={selectedDocuments.has(doc.id) ? "Deselect document" : "Select document"}
                           >
                             {selectedDocuments.has(doc.id) ? (
                               <CheckSquare className="h-4 w-4" />
@@ -345,9 +462,31 @@ export default function DocumentsPage() {
                           {new Date(doc.created_at).toLocaleDateString()}
                         </td>
                         <td className="p-3">
-                          <Button variant="ghost" size="icon" className="h-8 w-8">
-                            <MoreVertical className="h-4 w-4" />
-                          </Button>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="More options">
+                                <MoreVertical className="h-4 w-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={() => handleViewDocument(doc.id)}>
+                                <Eye className="h-4 w-4 mr-2" />
+                                View Details
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => handleDownloadDocument(doc.id, doc.name)}>
+                                <Download className="h-4 w-4 mr-2" />
+                                Download
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                className="text-destructive focus:text-destructive"
+                                onClick={() => handleDeleteDocument(doc.id, doc.name)}
+                              >
+                                <Trash2 className="h-4 w-4 mr-2" />
+                                Delete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </td>
                       </tr>
                     );
@@ -359,7 +498,7 @@ export default function DocumentsPage() {
         </Card>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {filteredDocuments.map((doc) => {
+          {paginatedDocuments.map((doc) => {
             const FileIcon = getFileIcon(doc.file_type);
             return (
               <Card
@@ -374,14 +513,37 @@ export default function DocumentsPage() {
                     <div className="p-3 rounded-lg bg-muted">
                       <FileIcon className="h-8 w-8 text-muted-foreground" />
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <MoreVertical className="h-4 w-4" />
-                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label="More options"
+                        >
+                          <MoreVertical className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleViewDocument(doc.id); }}>
+                          <Eye className="h-4 w-4 mr-2" />
+                          View Details
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleDownloadDocument(doc.id, doc.name); }}>
+                          <Download className="h-4 w-4 mr-2" />
+                          Download
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          className="text-destructive focus:text-destructive"
+                          onClick={(e) => { e.stopPropagation(); handleDeleteDocument(doc.id, doc.name); }}
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                   <div className="mt-4">
                     <p className="font-medium truncate">{doc.name}</p>
@@ -404,6 +566,78 @@ export default function DocumentsPage() {
               </Card>
             );
           })}
+        </div>
+      )}
+
+      {/* Pagination Controls */}
+      {filteredDocuments.length > 0 && (
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 py-4">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span>
+              Showing {startIndex + 1}-{Math.min(endIndex, filteredDocuments.length)} of {filteredDocuments.length}
+            </span>
+            <span className="mx-2">•</span>
+            <span>Page size:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+              className="h-8 px-2 rounded-md border bg-background text-sm"
+              aria-label="Items per page"
+            >
+              {PAGE_SIZE_OPTIONS.map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setCurrentPage(1)}
+              disabled={currentPage === 1}
+              aria-label="First page"
+            >
+              <ChevronsLeft className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage === 1}
+              aria-label="Previous page"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <div className="flex items-center gap-1 px-2">
+              <span className="text-sm">
+                Page {currentPage} of {totalPages || 1}
+              </span>
+            </div>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage >= totalPages}
+              aria-label="Next page"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setCurrentPage(totalPages)}
+              disabled={currentPage >= totalPages}
+              aria-label="Last page"
+            >
+              <ChevronsRight className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       )}
 

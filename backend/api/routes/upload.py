@@ -6,6 +6,7 @@ Endpoints for file upload and processing management.
 """
 
 import os
+import asyncio
 import hashlib
 import tempfile
 import shutil
@@ -176,6 +177,25 @@ async def update_processing_status(file_id: str, status: PipelineStatus):
         )
 
 
+def run_async_task(coro):
+    """
+    Run an async coroutine in the current event loop.
+
+    FastAPI's BackgroundTasks can run async functions, but we need to
+    ensure proper exception handling and logging.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If event loop is running, create a task
+            asyncio.create_task(coro)
+        else:
+            # If no loop is running, run until complete
+            loop.run_until_complete(coro)
+    except Exception as e:
+        logger.error("Failed to run async task", error=str(e))
+
+
 async def process_document_background(
     file_id: UUID,
     file_path: str,
@@ -196,8 +216,11 @@ async def process_document_background(
         file_path=file_path,
     )
 
-    # Notify that processing has started
-    await notify_processing_started(file_id_str, filename)
+    try:
+        # Notify that processing has started
+        await notify_processing_started(file_id_str, filename)
+    except Exception as e:
+        logger.warning("Failed to send WebSocket notification", error=str(e))
 
     # Determine processing mode
     if options.enable_ocr and options.enable_image_analysis:

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSession } from "next-auth/react";
 import {
   Globe,
   Plus,
@@ -39,13 +40,16 @@ import {
 type ScrapeMode = "immediate" | "job" | "query" | "links";
 
 export default function ScraperPage() {
+  const { status } = useSession();
+  const isAuthenticated = status === "authenticated";
+
   const [url, setUrl] = useState("");
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<ScrapeMode>("immediate");
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
 
-  // Queries
-  const { data: jobs, isLoading: jobsLoading, refetch: refetchJobs } = useScrapeJobs();
+  // Queries - only fetch when authenticated
+  const { data: jobs, isLoading: jobsLoading, refetch: refetchJobs } = useScrapeJobs(undefined, 50, { enabled: isAuthenticated });
   const { data: selectedJob } = useScrapeJob(selectedJobId || "");
 
   // Mutations

@@ -20,6 +20,18 @@ AIDocumentIndexer can be deployed using:
 - 4GB+ RAM
 - 20GB+ storage
 
+### System Dependencies in Docker
+
+Ensure your Docker images include Tesseract OCR for scanned PDF support:
+
+```dockerfile
+# In your Dockerfile for the backend
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+```
+
 ### 1. Configuration
 
 Create production environment file:

@@ -64,18 +64,19 @@ class CurrentUser(BaseModel):
 # Token Utilities
 # =============================================================================
 
-def decode_jwt_token(token: str) -> dict:
+def decode_jwt_token(token: str, allow_expired: bool = False) -> dict:
     """
     Decode and validate a JWT token.
 
     Args:
         token: JWT token string
+        allow_expired: If True, allow expired tokens (for refresh endpoint)
 
     Returns:
         Decoded token payload
 
     Raises:
-        HTTPException: If token is invalid or expired
+        HTTPException: If token is invalid or expired (when allow_expired=False)
     """
     dev_mode = os.getenv("DEV_MODE", "").lower() == "true"
 
@@ -91,7 +92,12 @@ def decode_jwt_token(token: str) -> dict:
         }
 
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        # Build decode options
+        options = {}
+        if allow_expired:
+            options["verify_exp"] = False
+
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options=options)
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(
@@ -128,6 +134,31 @@ def decode_jwt_token(token: str) -> dict:
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+async def get_current_user_for_refresh(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
+    """
+    Get current user from JWT token, allowing expired tokens.
+    Used specifically for the token refresh endpoint.
+    """
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    payload = decode_jwt_token(credentials.credentials, allow_expired=True)
+
+    if not payload.get("sub"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token: missing user ID",
+        )
+
+    return payload
 
 
 # =============================================================================

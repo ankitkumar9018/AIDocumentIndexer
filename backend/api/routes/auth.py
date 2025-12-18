@@ -140,10 +140,18 @@ def create_access_token(user_id: str, email: str, role: str, access_tier: int) -
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def decode_token(token: str) -> dict:
-    """Decode and validate a JWT token."""
+def decode_token(token: str, allow_expired: bool = False) -> dict:
+    """Decode and validate a JWT token.
+
+    Args:
+        token: JWT token string
+        allow_expired: If True, allow expired tokens (for refresh endpoint)
+    """
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        options = {}
+        if allow_expired:
+            options["verify_exp"] = False
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options=options)
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(
@@ -169,6 +177,39 @@ async def get_current_user(
         )
 
     payload = decode_token(credentials.credentials)
+    email = payload.get("email")
+
+    if not email or email not in _users:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+
+    user = _users[email]
+    if not user["is_active"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is disabled",
+        )
+
+    return user
+
+
+async def get_current_user_for_refresh(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
+    """Get current user from JWT token, allowing expired tokens.
+    Used specifically for the token refresh endpoint.
+    """
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Allow expired tokens for refresh
+    payload = decode_token(credentials.credentials, allow_expired=True)
     email = payload.get("email")
 
     if not email or email not in _users:
@@ -435,11 +476,12 @@ async def oauth_google(request: OAuthRequest):
 
 
 @router.post("/refresh")
-async def refresh_token(user: dict = Depends(get_current_user)):
+async def refresh_token(user: dict = Depends(get_current_user_for_refresh)):
     """
     Refresh the access token.
 
-    Returns a new token with extended expiration.
+    This endpoint accepts expired tokens and returns a new valid token.
+    The signature must still be valid (not tampered with).
     """
     access_token = create_access_token(
         user_id=user["id"],

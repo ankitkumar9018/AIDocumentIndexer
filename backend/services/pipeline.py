@@ -19,15 +19,21 @@ from datetime import datetime
 from enum import Enum
 import hashlib
 import asyncio
+import uuid
+import os
 import structlog
 
 import ray
+from sqlalchemy import select
 
 from backend.processors.universal import UniversalProcessor, ExtractedContent
-from backend.db.models import ProcessingMode
+from backend.db.models import ProcessingMode, Document as DocumentModel, AccessTier, ProcessingStatus as DBProcessingStatus, StorageMode
+from backend.db.database import async_session_context
 from backend.processors.chunker import DocumentChunker, ChunkingConfig, ChunkingStrategy, Chunk
 from backend.services.embeddings import EmbeddingService, RayEmbeddingService, EmbeddingResult
 from backend.services.vectorstore import VectorStore, get_vector_store
+from backend.services.text_preprocessor import TextPreprocessor, PreprocessingConfig, get_text_preprocessor
+from backend.services.summarizer import DocumentSummarizer, SummarizationConfig, get_document_summarizer
 
 logger = structlog.get_logger(__name__)
 
@@ -97,13 +103,21 @@ class PipelineConfig:
         chunk_overlap: int = 200,
         chunking_strategy: ChunkingStrategy = ChunkingStrategy.RECURSIVE,
 
-        # Embedding settings
-        embedding_provider: str = "openai",
-        embedding_model: Optional[str] = None,
+        # Embedding settings (uses env var fallback, can be overridden via Admin UI)
+        embedding_provider: str = None,  # Will use DEFAULT_LLM_PROVIDER env var
+        embedding_model: Optional[str] = None,  # Will use OLLAMA_EMBEDDING_MODEL env var
         embedding_batch_size: int = 100,
 
         # Deduplication
         check_duplicates: bool = True,
+
+        # Text preprocessing (reduces token costs)
+        enable_preprocessing: bool = True,  # ON by default (lightweight)
+        preprocessing_config: Optional[PreprocessingConfig] = None,
+
+        # Document summarization (for large files)
+        enable_summarization: bool = False,  # OFF by default
+        summarization_config: Optional[SummarizationConfig] = None,
 
         # Progress callbacks
         on_status_change: Optional[Callable[[str, ProcessingStatus], None]] = None,
@@ -114,10 +128,21 @@ class PipelineConfig:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.chunking_strategy = chunking_strategy
-        self.embedding_provider = embedding_provider
-        self.embedding_model = embedding_model
+        # Use provided value, or fall back to env var, or default to "openai"
+        self.embedding_provider = embedding_provider or os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+        # Use provided model, or fall back to provider-specific env var
+        if embedding_model:
+            self.embedding_model = embedding_model
+        elif self.embedding_provider == "ollama":
+            self.embedding_model = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+        else:
+            self.embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
         self.embedding_batch_size = embedding_batch_size
         self.check_duplicates = check_duplicates
+        self.enable_preprocessing = enable_preprocessing
+        self.preprocessing_config = preprocessing_config
+        self.enable_summarization = enable_summarization
+        self.summarization_config = summarization_config
         self.on_status_change = on_status_change
         self.on_progress = on_progress
 
@@ -177,6 +202,18 @@ class DocumentPipeline:
                 model=self.config.embedding_model,
             )
 
+        # Text preprocessor (optional, reduces token costs)
+        self._preprocessor: Optional[TextPreprocessor] = None
+        if self.config.enable_preprocessing:
+            preproc_config = self.config.preprocessing_config or PreprocessingConfig()
+            self._preprocessor = TextPreprocessor(preproc_config)
+
+        # Document summarizer (optional, for large files)
+        self._summarizer: Optional[DocumentSummarizer] = None
+        if self.config.enable_summarization:
+            summ_config = self.config.summarization_config or SummarizationConfig(enabled=True)
+            self._summarizer = DocumentSummarizer(summ_config)
+
         # Track processed file hashes for deduplication
         self._processed_hashes: Dict[str, str] = {}
 
@@ -186,6 +223,8 @@ class DocumentPipeline:
             chunking_strategy=self.config.chunking_strategy.value,
             embedding_provider=self.config.embedding_provider,
             use_custom_vectorstore=use_custom_vectorstore,
+            preprocessing_enabled=self.config.enable_preprocessing,
+            summarization_enabled=self.config.enable_summarization,
         )
 
     def _update_status(self, doc_id: str, status: ProcessingStatus):
@@ -267,8 +306,24 @@ class DocumentPipeline:
 
             result.file_hash = self.compute_file_hash(file_path)
 
-            # Check for duplicates
-            if self.config.check_duplicates:
+            # Check if document with this hash already exists (for re-uploads)
+            # Use existing document_id to keep chunks linked correctly
+            existing_doc_id = await self._get_existing_document_id(result.file_hash)
+            if existing_doc_id:
+                logger.info(
+                    "Re-processing existing document",
+                    new_document_id=document_id,
+                    existing_document_id=existing_doc_id,
+                )
+                # Delete old chunks before re-processing
+                if self._custom_vectorstore:
+                    await self._custom_vectorstore.delete_document_chunks(existing_doc_id)
+                # Use the existing document ID so chunks stay linked
+                document_id = existing_doc_id
+                result.document_id = document_id
+
+            # Check for duplicates (only if no existing document found)
+            elif self.config.check_duplicates:
                 existing_id = self.is_duplicate(result.file_hash)
                 if existing_id:
                     logger.info(
@@ -299,6 +354,90 @@ class DocumentPipeline:
                 "language": extracted.language,
             }
 
+            # Step 2.5: Preprocess text (optional, reduces token costs)
+            preprocessing_stats = {}
+            if self._preprocessor:
+                logger.debug("Running text preprocessing", document_id=document_id)
+
+                if extracted.pages:
+                    # Preprocess each page
+                    for page in extracted.pages:
+                        if "text" in page:
+                            preproc_result = self._preprocessor.preprocess(page["text"])
+                            page["text"] = preproc_result.processed_text
+                            preprocessing_stats["total_reduction"] = preprocessing_stats.get("total_reduction", 0) + (
+                                preproc_result.original_length - preproc_result.processed_length
+                            )
+                else:
+                    # Preprocess full text
+                    preproc_result = self._preprocessor.preprocess(extracted.text)
+                    extracted.text = preproc_result.processed_text
+                    preprocessing_stats = preproc_result.stats
+
+                if preprocessing_stats:
+                    result.metadata["preprocessing"] = preprocessing_stats
+                    logger.info(
+                        "Text preprocessing complete",
+                        document_id=document_id,
+                        chars_reduced=preprocessing_stats.get("total_reduction", 0),
+                    )
+
+            # Step 2.75: Generate document summary (optional, for large files)
+            summary_chunks = []
+            if self._summarizer:
+                text_for_summary = extracted.text
+                if not text_for_summary and extracted.pages:
+                    text_for_summary = "\n\n".join(p.get("text", "") for p in extracted.pages)
+
+                if self._summarizer.should_summarize(
+                    text_length_bytes=len(text_for_summary.encode('utf-8')),
+                    page_count=extracted.page_count,
+                ):
+                    logger.info(
+                        "Generating document summary",
+                        document_id=document_id,
+                        page_count=extracted.page_count,
+                    )
+
+                    summary_result = await self._summarizer.summarize_document(
+                        text=text_for_summary,
+                        metadata=result.metadata,
+                    )
+
+                    if summary_result.document_summary:
+                        # Create summary chunk for indexing
+                        summary_chunk_data = self._summarizer.create_summary_chunk(
+                            document_id=document_id,
+                            summary=summary_result.document_summary,
+                            chunk_level=2,  # Document level
+                        )
+                        # Convert to Chunk object
+                        summary_chunk = Chunk(
+                            content=summary_chunk_data["content"],
+                            chunk_index=summary_chunk_data["chunk_index"],
+                            chunk_hash=summary_chunk_data["chunk_hash"],
+                            document_id=document_id,
+                            metadata={
+                                **result.metadata,
+                                **summary_chunk_data["metadata"],
+                            },
+                        )
+                        summary_chunks.append(summary_chunk)
+
+                        result.metadata["summarization"] = {
+                            "summary_length": summary_result.summary_length,
+                            "original_length": summary_result.original_length,
+                            "reduction_percent": round(summary_result.reduction_percent, 2),
+                            "tokens_used": summary_result.tokens_used,
+                        }
+
+                        logger.info(
+                            "Document summary generated",
+                            document_id=document_id,
+                            summary_length=summary_result.summary_length,
+                            reduction_percent=round(summary_result.reduction_percent, 2),
+                        )
+
             # Step 3: Chunk content
             self._update_status(document_id, ProcessingStatus.CHUNKING)
             self._update_progress(document_id, 2, 5)
@@ -317,6 +456,15 @@ class DocumentPipeline:
                     text=extracted.text,
                     metadata=result.metadata,
                     document_id=document_id,
+                )
+
+            # Add summary chunks to beginning (for hierarchical retrieval)
+            if summary_chunks:
+                chunks = summary_chunks + chunks
+                logger.debug(
+                    "Added summary chunks",
+                    document_id=document_id,
+                    summary_count=len(summary_chunks),
                 )
 
             result.chunks = chunks
@@ -348,15 +496,39 @@ class DocumentPipeline:
 
             # Index using custom vector store
             if self._custom_vectorstore and chunks and result.embeddings:
-                await self._index_with_custom_store(
-                    document_id=document_id,
-                    chunks=chunks,
-                    embeddings=result.embeddings,
-                    access_tier_id=str(access_tier),  # Will need actual UUID in production
-                )
+                # Look up actual access tier UUID by level
+                access_tier_id = await self._get_access_tier_id(access_tier)
+                if access_tier_id:
+                    # Use original_filename from metadata if available, fallback to path.name
+                    original_filename = (metadata or {}).get("original_filename") or path.name
+                    await self._index_with_custom_store(
+                        document_id=document_id,
+                        chunks=chunks,
+                        embeddings=result.embeddings,
+                        access_tier_id=access_tier_id,
+                        filename=original_filename,
+                    )
+                else:
+                    logger.warning(
+                        "Could not find access tier, skipping chunk indexing",
+                        document_id=document_id,
+                        access_tier=access_tier,
+                    )
             # Fallback to LangChain vector store
             elif self.vector_store and chunks:
                 await self._index_document(document_id, chunks, result.embeddings)
+
+            # Step 6: Create Document record in database (CRITICAL FIX)
+            # This was the missing step - documents were processed but never recorded
+            await self._create_document_record(
+                document_id=document_id,
+                file_path=file_path,
+                file_hash=result.file_hash,
+                metadata=metadata or {},
+                access_tier=access_tier,
+                collection=collection,
+                processing_result=result,
+            )
 
             # Mark as completed
             self._update_status(document_id, ProcessingStatus.COMPLETED)
@@ -388,12 +560,84 @@ class DocumentPipeline:
 
         return result
 
+    async def _get_existing_document_id(self, file_hash: str) -> Optional[str]:
+        """
+        Check if a document with the given file_hash already exists.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+
+        Returns:
+            Existing document ID string if found, None otherwise
+        """
+        try:
+            async with async_session_context() as db:
+                query = select(DocumentModel).where(DocumentModel.file_hash == file_hash)
+                result = await db.execute(query)
+                existing_doc = result.scalar_one_or_none()
+                if existing_doc:
+                    return str(existing_doc.id)
+                return None
+        except Exception as e:
+            logger.warning("Failed to check for existing document", file_hash=file_hash, error=str(e))
+            return None
+
+    async def _get_access_tier_id(self, access_tier_level: int) -> Optional[str]:
+        """
+        Look up access tier UUID by level.
+
+        Args:
+            access_tier_level: Integer level of the access tier
+
+        Returns:
+            UUID string of the access tier, or None if not found
+        """
+        try:
+            async with async_session_context() as db:
+                tier_query = select(AccessTier).where(AccessTier.level == access_tier_level)
+                result = await db.execute(tier_query)
+                access_tier_obj = result.scalar_one_or_none()
+
+                if access_tier_obj:
+                    return str(access_tier_obj.id)
+
+                # Try to find a suitable tier by closest level
+                all_tiers_query = select(AccessTier).order_by(AccessTier.level)
+                all_result = await db.execute(all_tiers_query)
+                all_tiers = all_result.scalars().all()
+
+                if all_tiers:
+                    # Find closest tier at or below requested level
+                    for tier in reversed(all_tiers):
+                        if tier.level <= access_tier_level:
+                            logger.info(
+                                "Using closest access tier",
+                                requested_level=access_tier_level,
+                                using_tier=tier.name,
+                                using_level=tier.level,
+                            )
+                            return str(tier.id)
+
+                    # If all tiers are above requested level, use the lowest one
+                    logger.info(
+                        "Using lowest available access tier",
+                        requested_level=access_tier_level,
+                        using_tier=all_tiers[0].name,
+                    )
+                    return str(all_tiers[0].id)
+
+                return None
+        except Exception as e:
+            logger.error("Failed to look up access tier", error=str(e))
+            return None
+
     async def _index_with_custom_store(
         self,
         document_id: str,
         chunks: List[Chunk],
         embeddings: List[EmbeddingResult],
         access_tier_id: str,
+        filename: Optional[str] = None,
     ):
         """Index document chunks using our custom VectorStore."""
         if not self._custom_vectorstore:
@@ -410,7 +654,8 @@ class DocumentPipeline:
                     "chunk_index": chunk.chunk_index,
                     "page_number": chunk.page_number,
                     "section_title": chunk.metadata.get("section_title"),
-                    "token_count": embedding.token_count,
+                    # Estimate token count: ~4 chars per token for English text
+                    "token_count": getattr(embedding, 'token_count', None) or len(chunk.content) // 4,
                     "char_count": len(chunk.content),
                 })
 
@@ -419,6 +664,7 @@ class DocumentPipeline:
                 chunks=chunk_data,
                 document_id=document_id,
                 access_tier_id=access_tier_id,
+                document_filename=filename,
             )
 
             logger.debug(
@@ -433,6 +679,8 @@ class DocumentPipeline:
                 document_id=document_id,
                 error=str(e),
             )
+            # Re-raise to fail the document processing
+            raise
 
     async def _index_document(
         self,
@@ -475,6 +723,109 @@ class DocumentPipeline:
                 document_id=document_id,
                 error=str(e),
             )
+
+    async def _create_document_record(
+        self,
+        document_id: str,
+        file_path: str,
+        file_hash: str,
+        metadata: Dict[str, Any],
+        access_tier: int,
+        collection: Optional[str],
+        processing_result: "ProcessingResult",
+    ) -> None:
+        """
+        Create or update Document record in database after successful processing.
+
+        This handles both new documents and re-uploads of previously deleted files.
+        If a document with the same file_hash exists (even if soft-deleted), we
+        update it instead of creating a new one to avoid UNIQUE constraint violations.
+        """
+        try:
+            async with async_session_context() as db:
+                # Find or create access tier by level
+                tier_query = select(AccessTier).where(AccessTier.level == access_tier)
+                result = await db.execute(tier_query)
+                access_tier_obj = result.scalar_one_or_none()
+
+                if not access_tier_obj:
+                    # Create default tier if not exists
+                    access_tier_obj = AccessTier(
+                        name=f"Tier {access_tier}",
+                        level=access_tier,
+                        description=f"Auto-created tier for level {access_tier}",
+                    )
+                    db.add(access_tier_obj)
+                    await db.flush()
+
+                path = Path(file_path)
+
+                # Check if a document with this hash already exists (including soft-deleted)
+                existing_query = select(DocumentModel).where(DocumentModel.file_hash == file_hash)
+                existing_result = await db.execute(existing_query)
+                existing_doc = existing_result.scalar_one_or_none()
+
+                if existing_doc:
+                    # Update existing document (reactivate if soft-deleted)
+                    existing_doc.filename = path.name
+                    existing_doc.original_filename = metadata.get("original_filename", path.name)
+                    existing_doc.file_path = str(file_path)
+                    existing_doc.file_size = path.stat().st_size if path.exists() else processing_result.file_size
+                    existing_doc.processing_status = DBProcessingStatus.COMPLETED
+                    existing_doc.processing_mode = self.config.processing_mode
+                    existing_doc.processing_error = None  # Clear any previous error
+                    existing_doc.page_count = processing_result.page_count
+                    existing_doc.word_count = processing_result.word_count
+                    existing_doc.tags = [collection] if collection else existing_doc.tags
+                    existing_doc.access_tier_id = access_tier_obj.id
+                    existing_doc.processed_at = datetime.now()
+
+                    await db.commit()
+
+                    logger.info(
+                        "Document record updated (reactivated)",
+                        document_id=str(existing_doc.id),
+                        filename=path.name,
+                        access_tier=access_tier,
+                    )
+                else:
+                    # Create new Document record
+                    document = DocumentModel(
+                        id=uuid.UUID(document_id),
+                        file_hash=file_hash,
+                        filename=path.name,
+                        original_filename=metadata.get("original_filename", path.name),
+                        file_path=str(file_path),
+                        file_type=path.suffix.lower().lstrip("."),
+                        file_size=path.stat().st_size if path.exists() else processing_result.file_size,
+                        processing_status=DBProcessingStatus.COMPLETED,
+                        processing_mode=self.config.processing_mode,
+                        storage_mode=StorageMode.RAG,
+                        page_count=processing_result.page_count,
+                        word_count=processing_result.word_count,
+                        tags=[collection] if collection else None,
+                        access_tier_id=access_tier_obj.id,
+                        processed_at=datetime.now(),
+                    )
+
+                    db.add(document)
+                    await db.commit()
+
+                    logger.info(
+                        "Document record created in database",
+                        document_id=document_id,
+                        filename=path.name,
+                        access_tier=access_tier,
+                    )
+
+        except Exception as e:
+            logger.error(
+                "Failed to create/update document record",
+                document_id=document_id,
+                error=str(e),
+            )
+            # Re-raise so the caller knows the record wasn't created
+            raise
 
     async def process_batch(
         self,

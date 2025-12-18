@@ -16,6 +16,8 @@ import chromadb
 from chromadb.config import Settings
 
 from backend.services.vectorstore import SearchResult, VectorStoreConfig, SearchType
+from backend.db.models import Chunk as ChunkModel
+from backend.db.database import async_session_context
 
 logger = structlog.get_logger(__name__)
 
@@ -102,15 +104,17 @@ class ChromaVectorStore:
         chunks: List[Dict[str, Any]],
         document_id: str,
         access_tier_id: str,
+        document_filename: Optional[str] = None,
         session: Optional[Any] = None,  # Ignored for ChromaDB
     ) -> List[str]:
         """
-        Add chunks with embeddings to ChromaDB.
+        Add chunks with embeddings to ChromaDB and SQLite database.
 
         Args:
             chunks: List of chunk dictionaries with 'content', 'embedding', and metadata
             document_id: ID of the parent document
             access_tier_id: Access tier for permission filtering
+            document_filename: Filename of the source document (for display in search results)
             session: Ignored (kept for interface compatibility)
 
         Returns:
@@ -121,6 +125,7 @@ class ChromaVectorStore:
         embeddings = []
         documents = []
         metadatas = []
+        db_chunks = []
 
         for i, chunk_data in enumerate(chunks):
             chunk_id = str(uuid.uuid4())
@@ -134,6 +139,7 @@ class ChromaVectorStore:
             metadatas.append({
                 "document_id": document_id,
                 "access_tier_id": access_tier_id,
+                "document_filename": document_filename or "",
                 "chunk_index": chunk_data.get("chunk_index", i),
                 "page_number": chunk_data.get("page_number") or 0,
                 "section_title": chunk_data.get("section_title") or "",
@@ -141,6 +147,20 @@ class ChromaVectorStore:
                 "char_count": chunk_data.get("char_count", len(chunk_data["content"])),
                 "content_hash": chunk_data.get("content_hash", ""),
             })
+
+            # Prepare SQLite chunk record (without embedding - stored in ChromaDB)
+            db_chunks.append(ChunkModel(
+                id=uuid.UUID(chunk_id),
+                document_id=uuid.UUID(document_id),
+                access_tier_id=uuid.UUID(access_tier_id),
+                content=chunk_data["content"],
+                content_hash=chunk_data.get("content_hash", ""),
+                chunk_index=chunk_data.get("chunk_index", i),
+                page_number=chunk_data.get("page_number"),
+                section_title=chunk_data.get("section_title"),
+                token_count=chunk_data.get("token_count") or len(chunk_data["content"]) // 4,
+                char_count=chunk_data.get("char_count", len(chunk_data["content"])),
+            ))
 
         # Add to ChromaDB
         if ids:
@@ -150,6 +170,24 @@ class ChromaVectorStore:
                 documents=documents,
                 metadatas=metadatas,
             )
+
+        # Also store in SQLite database for chunk counting and metadata queries
+        if db_chunks:
+            try:
+                async with async_session_context() as db:
+                    db.add_all(db_chunks)
+                    await db.commit()
+                logger.info(
+                    "Added chunks to SQLite database",
+                    document_id=document_id,
+                    chunk_count=len(db_chunks),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to store chunks in SQLite (ChromaDB storage succeeded)",
+                    document_id=document_id,
+                    error=str(e),
+                )
 
         logger.info(
             "Added chunks to ChromaDB",
@@ -165,7 +203,7 @@ class ChromaVectorStore:
         session: Optional[Any] = None,
     ) -> int:
         """
-        Delete all chunks for a document.
+        Delete all chunks for a document from both ChromaDB and SQLite.
 
         Args:
             document_id: Document ID
@@ -174,7 +212,7 @@ class ChromaVectorStore:
         Returns:
             Number of chunks deleted
         """
-        # Query to find all chunks for this document
+        # Query to find all chunks for this document in ChromaDB
         results = self._collection.get(
             where={"document_id": document_id},
         )
@@ -184,6 +222,22 @@ class ChromaVectorStore:
         if count > 0:
             self._collection.delete(
                 where={"document_id": document_id},
+            )
+
+        # Also delete from SQLite database
+        try:
+            from sqlalchemy import delete
+            async with async_session_context() as db:
+                stmt = delete(ChunkModel).where(ChunkModel.document_id == uuid.UUID(document_id))
+                result = await db.execute(stmt)
+                await db.commit()
+                sqlite_count = result.rowcount
+                logger.info("Deleted chunks from SQLite", document_id=document_id, count=sqlite_count)
+        except Exception as e:
+            logger.warning(
+                "Failed to delete chunks from SQLite",
+                document_id=document_id,
+                error=str(e),
             )
 
         logger.info("Deleted document chunks from ChromaDB", document_id=document_id, count=count)
@@ -276,6 +330,7 @@ class ChromaVectorStore:
                 search_results.append(SearchResult(
                     chunk_id=chunk_id,
                     document_id=metadata.get("document_id", ""),
+                    document_filename=metadata.get("document_filename") or None,
                     content=content,
                     score=similarity,
                     metadata={
@@ -344,6 +399,7 @@ class ChromaVectorStore:
                     search_results.append(SearchResult(
                         chunk_id=chunk_id,
                         document_id=metadata.get("document_id", ""),
+                        document_filename=metadata.get("document_filename") or None,
                         content=content,
                         score=score,
                         metadata={
@@ -543,6 +599,7 @@ class ChromaVectorStore:
             return SearchResult(
                 chunk_id=chunk_id,
                 document_id=metadata.get("document_id", ""),
+                document_filename=metadata.get("document_filename") or None,
                 content=content,
                 score=1.0,
                 metadata={"chunk_index": metadata.get("chunk_index", 0)},
@@ -578,6 +635,7 @@ class ChromaVectorStore:
                 search_results.append(SearchResult(
                     chunk_id=chunk_id,
                     document_id=document_id,
+                    document_filename=metadata.get("document_filename") or None,
                     content=content,
                     score=1.0,
                     metadata={"chunk_index": chunk_index},

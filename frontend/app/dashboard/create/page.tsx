@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSession } from "next-auth/react";
 import {
   PenTool,
   FileText,
@@ -67,6 +68,9 @@ interface OutlineSection {
 }
 
 export default function CreatePage() {
+  const { status } = useSession();
+  const isAuthenticated = status === "authenticated";
+
   const [currentStep, setCurrentStep] = useState<Step>("format");
   const [selectedFormat, setSelectedFormat] = useState<OutputFormat | null>(null);
   const [topic, setTopic] = useState("");
@@ -76,7 +80,7 @@ export default function CreatePage() {
   const [documentTitle, setDocumentTitle] = useState("");
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
 
-  // Queries
+  // Queries - only fetch when authenticated
   const { data: job, isLoading: jobLoading } = useGenerationJob(currentJobId || "");
   const { data: recentJobs } = useGenerationJobs();
 

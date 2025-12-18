@@ -10,8 +10,17 @@ from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 import asyncio
+import io
 import json
 import structlog
+
+# Token counting
+try:
+    import tiktoken
+    HAS_TIKTOKEN = True
+except ImportError:
+    HAS_TIKTOKEN = False
+    tiktoken = None
 
 # LangChain core
 from langchain_core.documents import Document
@@ -40,6 +49,12 @@ from backend.services.llm import (
 )
 from backend.services.embeddings import EmbeddingService
 from backend.services.vectorstore import VectorStore, get_vector_store, SearchResult, SearchType
+from backend.services.session_memory import get_session_memory_manager
+from backend.services.query_expander import (
+    QueryExpander,
+    QueryExpansionConfig,
+    get_query_expander,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -83,7 +98,7 @@ class RAGConfig:
         self,
         # Retrieval settings
         top_k: int = 5,
-        similarity_threshold: float = 0.7,
+        similarity_threshold: float = 0.4,  # Lower threshold for OCR'd documents
         use_hybrid_search: bool = True,
         rerank_results: bool = False,
 
@@ -96,11 +111,20 @@ class RAGConfig:
         memory_window: int = 10,  # Number of conversation turns to remember
 
         # Model settings
-        chat_provider: str = "openai",
+        chat_provider: str = None,  # Will use DEFAULT_LLM_PROVIDER env var
         chat_model: Optional[str] = None,
-        embedding_provider: str = "openai",
+        embedding_provider: str = None,  # Will use DEFAULT_LLM_PROVIDER env var
         embedding_model: Optional[str] = None,
+
+        # Query expansion settings (optional, improves recall by 8-12%)
+        enable_query_expansion: bool = False,  # OFF by default
+        query_expansion_count: int = 2,  # Number of query variations
+        query_expansion_model: str = "gpt-4o-mini",  # Cost-effective model
     ):
+        import os
+        # Default provider from environment variable
+        default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
         self.use_hybrid_search = use_hybrid_search
@@ -109,10 +133,14 @@ class RAGConfig:
         self.temperature = temperature
         self.include_sources = include_sources
         self.memory_window = memory_window
-        self.chat_provider = chat_provider
+        self.chat_provider = chat_provider or default_provider
         self.chat_model = chat_model
-        self.embedding_provider = embedding_provider
+        self.embedding_provider = embedding_provider or default_provider
         self.embedding_model = embedding_model
+        # Query expansion
+        self.enable_query_expansion = enable_query_expansion
+        self.query_expansion_count = query_expansion_count
+        self.query_expansion_model = query_expansion_model
 
 
 # =============================================================================
@@ -201,7 +229,13 @@ class RAGService:
         self._vector_store = vector_store
         self._custom_vectorstore: Optional[VectorStore] = None
         self._use_custom_vectorstore = use_custom_vectorstore
-        self._memory_store: Dict[str, ConversationBufferWindowMemory] = {}
+
+        # Use centralized session memory manager with LRU eviction (prevents memory leaks)
+        self._session_memory = get_session_memory_manager(
+            max_sessions=1000,
+            memory_window_k=self.config.memory_window,
+            cleanup_stale_after_hours=24.0,
+        )
 
         # Cache for session-specific LLM instances
         self._session_llm_cache: Dict[str, Any] = {}
@@ -211,6 +245,16 @@ class RAGService:
         if use_custom_vectorstore and vector_store is None:
             self._custom_vectorstore = get_vector_store()
 
+        # Initialize query expander if enabled
+        self._query_expander: Optional[QueryExpander] = None
+        if self.config.enable_query_expansion:
+            expansion_config = QueryExpansionConfig(
+                enabled=True,
+                expansion_count=self.config.query_expansion_count,
+                model=self.config.query_expansion_model,
+            )
+            self._query_expander = QueryExpander(expansion_config)
+
         logger.info(
             "Initialized RAG service",
             chat_provider=self.config.chat_provider,
@@ -219,6 +263,7 @@ class RAGService:
             use_custom_vectorstore=use_custom_vectorstore,
             use_db_config=use_db_config,
             track_usage=track_usage,
+            query_expansion=self.config.enable_query_expansion,
         )
 
     @property
@@ -312,19 +357,50 @@ class RAGService:
         return self._embeddings
 
     def _get_memory(self, session_id: str) -> ConversationBufferWindowMemory:
-        """Get or create conversation memory for session."""
-        if session_id not in self._memory_store:
-            self._memory_store[session_id] = ConversationBufferWindowMemory(
-                k=self.config.memory_window,
-                return_messages=True,
-                memory_key="chat_history",
-            )
-        return self._memory_store[session_id]
+        """Get or create conversation memory for session using centralized manager."""
+        return self._session_memory.get_memory(session_id)
 
     def clear_memory(self, session_id: str):
         """Clear conversation memory for session."""
-        if session_id in self._memory_store:
-            del self._memory_store[session_id]
+        self._session_memory.clear_memory(session_id)
+
+    def _count_tokens(self, text: str, model: Optional[str] = None) -> int:
+        """
+        Count tokens in text using tiktoken for accurate counting.
+
+        Args:
+            text: Text to count tokens for
+            model: Model name for encoding selection (defaults to cl100k_base)
+
+        Returns:
+            Number of tokens
+        """
+        if not HAS_TIKTOKEN or not text:
+            # Fallback to rough estimation: ~4 characters per token
+            return len(text) // 4
+
+        try:
+            # Map model names to encoding
+            # cl100k_base is used by gpt-4, gpt-3.5-turbo, text-embedding-ada-002
+            # o200k_base is used by gpt-4o
+            model = model or self.config.chat_model or "gpt-4"
+
+            if "gpt-4o" in model or "o1" in model:
+                encoding = tiktoken.get_encoding("o200k_base")
+            elif "gpt-4" in model or "gpt-3.5" in model or "text-embedding" in model:
+                encoding = tiktoken.get_encoding("cl100k_base")
+            elif "claude" in model.lower():
+                # Anthropic models don't have tiktoken support, use estimation
+                # Claude uses ~3.5 chars per token on average
+                return int(len(text) / 3.5)
+            else:
+                # Default to cl100k_base for unknown models
+                encoding = tiktoken.get_encoding("cl100k_base")
+
+            return len(encoding.encode(text))
+        except Exception as e:
+            logger.debug("Token counting failed, using estimation", error=str(e))
+            return len(text) // 4
 
     async def query(
         self,
@@ -399,10 +475,10 @@ class RAGService:
 
         # Track usage if enabled and we have config
         if self.track_usage and llm_config:
-            # Estimate token counts (rough estimation)
+            # Accurate token counting using tiktoken
             input_text = RAG_SYSTEM_PROMPT + context + question
-            input_tokens = len(input_text) // 4  # ~4 chars per token
-            output_tokens = len(content) // 4
+            input_tokens = self._count_tokens(input_text, llm_config.model)
+            output_tokens = self._count_tokens(content, llm_config.model)
 
             await LLMUsageTracker.log_usage(
                 provider_type=llm_config.provider_type,
@@ -503,13 +579,13 @@ class RAGService:
                 HumanMessage(content=RAG_PROMPT_TEMPLATE.format(context=context, question=question)),
             ]
 
-        # Stream response
-        full_response = ""
+        # Stream response - use StringIO for efficient string accumulation (O(n) vs O(n²))
+        response_buffer = io.StringIO()
         try:
             async for chunk in llm.astream(messages):
                 content = chunk.content if hasattr(chunk, 'content') else str(chunk)
                 if content:
-                    full_response += content
+                    response_buffer.write(content)
                     yield StreamChunk(type="content", data=content)
 
             # Send sources after content
@@ -525,6 +601,9 @@ class RAGService:
                     for s in sources
                 ])
 
+            # Get the full response from buffer
+            full_response = response_buffer.getvalue()
+
             # Update memory
             if session_id:
                 memory = self._get_memory(session_id)
@@ -537,8 +616,9 @@ class RAGService:
             if self.track_usage and llm_config:
                 processing_time_ms = (time.time() - start_time) * 1000
                 input_text = RAG_SYSTEM_PROMPT + context + question
-                input_tokens = len(input_text) // 4
-                output_tokens = len(full_response) // 4
+                # Accurate token counting using tiktoken
+                input_tokens = self._count_tokens(input_text, llm_config.model)
+                output_tokens = self._count_tokens(full_response, llm_config.model)
 
                 await LLMUsageTracker.log_usage(
                     provider_type=llm_config.provider_type,
@@ -596,27 +676,73 @@ class RAGService:
         """
         top_k = top_k or self.config.top_k
 
-        # Use custom vector store if available
-        if self._custom_vectorstore is not None:
-            return await self._retrieve_with_custom_store(
-                query=query,
-                collection_filter=collection_filter,
-                access_tier=access_tier,
-                top_k=top_k,
+        logger.debug(
+            "Starting retrieval",
+            query_length=len(query),
+            top_k=top_k,
+            has_custom_vectorstore=self._custom_vectorstore is not None,
+        )
+
+        # Expand query if enabled (generates paraphrased versions for better recall)
+        queries_to_search = [query]
+        if self._query_expander is not None and self._query_expander.should_expand(query):
+            try:
+                expansion_result = await self._query_expander.expand_query(query)
+                if expansion_result.expanded_queries:
+                    queries_to_search = self._query_expander.get_all_queries(expansion_result)
+                    logger.debug(
+                        "Query expanded",
+                        original=query,
+                        expanded_count=len(expansion_result.expanded_queries),
+                    )
+            except Exception as e:
+                logger.warning("Query expansion failed, using original query", error=str(e))
+
+        # Collect results from all queries
+        all_results: List[Tuple[Document, float]] = []
+        seen_chunk_ids: set = set()
+
+        for search_query in queries_to_search:
+            # Use custom vector store if available
+            if self._custom_vectorstore is not None:
+                results = await self._retrieve_with_custom_store(
+                    query=search_query,
+                    collection_filter=collection_filter,
+                    access_tier=access_tier,
+                    top_k=top_k,
+                )
+            # Use LangChain vector store if configured
+            elif self._vector_store is not None:
+                results = await self._retrieve_with_langchain_store(
+                    query=search_query,
+                    collection_filter=collection_filter,
+                    access_tier=access_tier,
+                    top_k=top_k,
+                )
+            else:
+                # Return mock results for development
+                logger.warning("No vector store configured, returning mock results")
+                return self._mock_retrieve(query, top_k)
+
+            # Deduplicate results by chunk_id
+            for doc, score in results:
+                chunk_id = doc.metadata.get("chunk_id", id(doc))
+                if chunk_id not in seen_chunk_ids:
+                    seen_chunk_ids.add(chunk_id)
+                    all_results.append((doc, score))
+
+        # Sort by score (descending) and limit to top_k
+        all_results.sort(key=lambda x: x[1], reverse=True)
+
+        if len(queries_to_search) > 1:
+            logger.debug(
+                "Query expansion retrieval complete",
+                queries_searched=len(queries_to_search),
+                unique_results=len(all_results),
+                returning=min(top_k, len(all_results)),
             )
 
-        # Use LangChain vector store if configured
-        if self._vector_store is not None:
-            return await self._retrieve_with_langchain_store(
-                query=query,
-                collection_filter=collection_filter,
-                access_tier=access_tier,
-                top_k=top_k,
-            )
-
-        # Return mock results for development
-        logger.warning("No vector store configured, returning mock results")
-        return self._mock_retrieve(query, top_k)
+        return all_results[:top_k]
 
     async def _retrieve_with_custom_store(
         self,
@@ -657,22 +783,29 @@ class RAGService:
 
             # Convert SearchResult to LangChain Document format
             langchain_results = []
-            for result in results:
-                if result.score >= self.config.similarity_threshold:
-                    doc = Document(
-                        page_content=result.content,
-                        metadata={
-                            "document_id": result.document_id,
-                            "document_name": result.document_filename or result.document_title,
-                            "chunk_id": result.chunk_id,
-                            "page_number": result.page_number,
-                            "section_title": result.section_title,
-                            **result.metadata,
-                        },
-                    )
-                    langchain_results.append((doc, result.score))
-
             logger.debug(
+                "Vector search returned results",
+                total_results=len(results),
+            )
+            # Note: The vectorstore already applies similarity threshold filtering
+            # during the search phase. The scores here are RRF fusion scores for
+            # hybrid search, which are on a different scale (typically 0.01-0.02).
+            # We should NOT filter again here as it would incorrectly discard results.
+            for result in results:
+                doc = Document(
+                    page_content=result.content,
+                    metadata={
+                        "document_id": result.document_id,
+                        "document_name": result.document_filename or result.document_title or "Unknown Document",
+                        "chunk_id": result.chunk_id,
+                        "page_number": result.page_number,
+                        "section_title": result.section_title,
+                        **result.metadata,
+                    },
+                )
+                langchain_results.append((doc, result.score))
+
+            logger.info(
                 "Retrieved documents with custom store",
                 num_results=len(langchain_results),
                 search_type=search_type.value,

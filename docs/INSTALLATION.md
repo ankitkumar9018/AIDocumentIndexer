@@ -58,6 +58,7 @@ Run AIDocumentIndexer directly on your system without Docker.
 - **Node.js 20+**
 - **PostgreSQL 15+** with pgvector extension
 - **Redis 7+**
+- **Tesseract OCR** (optional, required for scanned PDF support)
 - **Ollama** (optional, for local LLM)
 
 ### Step 1: Install System Dependencies
@@ -72,6 +73,9 @@ brew install python@3.11 node@20 postgresql@16 redis
 
 # Install pgvector extension
 brew install pgvector
+
+# Install Tesseract OCR (required for scanned PDF support)
+brew install tesseract
 
 # Start services
 brew services start postgresql@16
@@ -96,6 +100,9 @@ sudo apt install postgresql-16 postgresql-16-pgvector
 # Install Redis
 sudo apt install redis-server
 
+# Install Tesseract OCR (required for scanned PDF support)
+sudo apt install tesseract-ocr tesseract-ocr-eng
+
 # Start services
 sudo systemctl start postgresql
 sudo systemctl start redis
@@ -108,6 +115,10 @@ winget install Python.Python.3.11
 winget install OpenJS.NodeJS.LTS
 winget install PostgreSQL.PostgreSQL
 winget install Redis.Redis
+
+# Install Tesseract OCR (required for scanned PDF support)
+winget install UB-Mannheim.TesseractOCR
+# Add to PATH: C:\Program Files\Tesseract-OCR
 
 # Note: pgvector requires manual installation on Windows
 # See: https://github.com/pgvector/pgvector#windows

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useSession } from "next-auth/react";
 import {
   Send,
@@ -19,11 +19,15 @@ import {
   MessageSquare,
   Trash2,
   ChevronDown,
+  ChevronRight,
   Search,
   Sparkles,
   Settings2,
   Cpu,
   Thermometer,
+  Zap,
+  Brain,
+  FileSearch,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +46,9 @@ import {
   useLLMProviders,
   useSessionLLMConfig,
   useSetSessionLLMConfig,
+  useAgentMode,
+  useApproveAgentExecution,
+  useCancelAgentExecution,
 } from "@/lib/api/hooks";
 import {
   DropdownMenu,
@@ -59,6 +66,10 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
+import { AgentModeToggle } from "@/components/agent-mode-toggle";
+import { CostApprovalDialog } from "@/components/cost-approval-dialog";
+import { AgentExecutionProgress } from "@/components/agent-execution-progress";
+import type { PlanStep, ExecutionMode } from "@/lib/api/client";
 
 interface Message {
   id: string;
@@ -67,6 +78,7 @@ interface Message {
   sources?: Source[];
   timestamp: Date;
   isStreaming?: boolean;
+  isGeneralResponse?: boolean;
 }
 
 interface Source {
@@ -100,6 +112,18 @@ export default function ChatPage() {
   const [showHistory, setShowHistory] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [temperature, setTemperature] = useState<number>(0.7);
+  const [agentExecutionMode, setAgentExecutionMode] = useState<ExecutionMode>("agent");
+  const [chatMode, setChatMode] = useState<"chat" | "general" | "agent">("chat");
+  const [showCostApproval, setShowCostApproval] = useState(false);
+  const [pendingPlanId, setPendingPlanId] = useState<string | null>(null);
+  const [pendingPlanSummary, setPendingPlanSummary] = useState<string | null>(null);
+  const [pendingEstimatedCost, setPendingEstimatedCost] = useState<number>(0);
+  const [pendingSteps, setPendingSteps] = useState<PlanStep[] | null>(null);
+  const [agentSteps, setAgentSteps] = useState<PlanStep[]>([]);
+  const [currentAgentStep, setCurrentAgentStep] = useState<number>(0);
+  const [isAgentExecuting, setIsAgentExecuting] = useState(false);
+  const [expandedSourceId, setExpandedSourceId] = useState<string | null>(null);
+  const [shouldLoadHistory, setShouldLoadHistory] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -112,11 +136,32 @@ export default function ChatPage() {
     { enabled: isAuthenticated && !!currentSessionId }
   );
 
+  // Agent mode query
+  const { data: agentModeData } = useAgentMode(currentSessionId || undefined, { enabled: isAuthenticated });
+
+  // Sync messages when session data is loaded from history
+  // Only runs when user explicitly clicks a history session (shouldLoadHistory flag)
+  useEffect(() => {
+    if (shouldLoadHistory && currentSessionId && currentSession?.messages && currentSession.messages.length > 0) {
+      // Transform API messages to local Message format
+      const loadedMessages: Message[] = currentSession.messages.map((msg, index) => ({
+        id: `session-msg-${index}`,
+        role: msg.role as "user" | "assistant",
+        content: msg.content,
+        timestamp: new Date(),
+      }));
+      setMessages(loadedMessages);
+      setShouldLoadHistory(false); // Reset flag after loading
+    }
+  }, [shouldLoadHistory, currentSessionId, currentSession]);
+
   // Mutations
   const createSession = useCreateChatSession();
   const deleteSession = useDeleteChatSession();
   const sendMessage = useSendChatMessage();
   const setSessionLLM = useSetSessionLLMConfig();
+  const approveExecution = useApproveAgentExecution();
+  const cancelExecution = useCancelAgentExecution();
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -124,6 +169,35 @@ export default function ChatPage() {
       scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd/Ctrl + Enter to send message
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && input.trim() && !isLoading) {
+        e.preventDefault();
+        handleSubmit(e as unknown as React.FormEvent);
+      }
+      // Cmd/Ctrl + K to focus input
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        inputRef.current?.focus();
+      }
+      // Cmd/Ctrl + Shift + E to export chat
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "e") {
+        e.preventDefault();
+        handleExportChat();
+      }
+      // Cmd/Ctrl + N for new chat
+      if ((e.metaKey || e.ctrlKey) && e.key === "n") {
+        e.preventDefault();
+        handleNewChat();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [input, isLoading]);
 
   // Sync temperature with session config
   useEffect(() => {
@@ -163,7 +237,32 @@ export default function ChatPage() {
   };
 
   // Get sources from selected message
-  const selectedSources = messages.find((m) => m.id === selectedMessageId)?.sources || [];
+  const selectedMessage = messages.find((m) => m.id === selectedMessageId);
+  const selectedSources = selectedMessage?.sources || [];
+  const isSelectedMessageGeneral = selectedMessage?.isGeneralResponse;
+
+  // Group sources by document for better display
+  const groupedSources = useMemo(() => {
+    const groups: Record<string, Source[]> = {};
+    selectedSources.forEach((source) => {
+      const key = source.documentId;
+      if (!groups[key]) {
+        groups[key] = [];
+      }
+      groups[key].push(source);
+    });
+    return Object.entries(groups).map(([documentId, sources]) => ({
+      documentId,
+      filename: sources[0].filename,
+      sources: sources.sort((a, b) => (a.pageNumber || 0) - (b.pageNumber || 0)),
+      avgSimilarity: sources.reduce((acc, s) => acc + s.similarity, 0) / sources.length,
+    }));
+  }, [selectedSources]);
+
+  // Navigate to document detail page
+  const handleSourceClick = (documentId: string) => {
+    window.open(`/dashboard/documents/${documentId}`, '_blank');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -177,8 +276,16 @@ export default function ChatPage() {
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    const messageText = input.trim();
     setInput("");
     setIsLoading(true);
+
+    // Reset agent state when starting new request
+    if (chatMode === "agent") {
+      setAgentSteps([]);
+      setCurrentAgentStep(0);
+      setIsAgentExecuting(false);
+    }
 
     // Add streaming assistant message
     const assistantId = (Date.now() + 1).toString();
@@ -194,65 +301,206 @@ export default function ChatPage() {
     ]);
 
     try {
-      // Call actual API
-      const response = await sendMessage.mutateAsync({
-        message: input.trim(),
-        session_id: currentSessionId || undefined,
-      });
+      // Use streaming for agent mode to receive real-time updates
+      if (chatMode === "agent") {
+        const { api } = await import("@/lib/api/client");
+        let streamContent = "";
 
-      // Update session ID if new
-      if (response.session_id && !currentSessionId) {
-        setCurrentSessionId(response.session_id);
-      }
-
-      // Transform sources
-      const sources: Source[] =
-        response.sources?.map((s) => ({
-          documentId: s.document_id,
-          filename: s.document_name,
-          pageNumber: s.page_number,
-          snippet: s.snippet,
-          similarity: s.relevance_score,
-          collection: undefined,
-        })) || [];
-
-      // Update message with response
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantId
-            ? {
-                ...m,
-                content: response.content,
-                sources,
-                isStreaming: false,
+        for await (const chunk of api.streamChatCompletion({
+          message: messageText,
+          session_id: currentSessionId || undefined,
+          mode: "agent",
+        })) {
+          switch (chunk.type) {
+            case "session":
+              if (chunk.session_id && !currentSessionId) {
+                setCurrentSessionId(chunk.session_id);
               }
-            : m
-        )
-      );
+              break;
 
-      // Auto-select for source panel
-      if (sources.length > 0) {
-        setSelectedMessageId(assistantId);
+            case "planning":
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? { ...m, content: "Planning execution steps..." }
+                    : m
+                )
+              );
+              break;
+
+            case "plan_created":
+              if (chunk.steps) {
+                setAgentSteps(chunk.steps);
+              }
+              break;
+
+            case "approval_required":
+              // Show cost approval dialog
+              setPendingPlanId(chunk.plan_id || "");
+              setPendingPlanSummary(chunk.plan_summary || null);
+              setPendingEstimatedCost(chunk.estimated_cost || 0);
+              setPendingSteps(chunk.steps || null);
+              setShowCostApproval(true);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? { ...m, content: "Awaiting approval...", isStreaming: false }
+                    : m
+                )
+              );
+              // Keep loading state until user approves/cancels
+              return;
+
+            case "agent_step":
+              setIsAgentExecuting(true);
+              if (chunk.step_index !== undefined) {
+                setCurrentAgentStep(chunk.step_index);
+              }
+              if (chunk.step) {
+                setAgentSteps((prev) => {
+                  const updated = [...prev];
+                  const idx = chunk.step_index ?? prev.length;
+                  if (updated[idx]) {
+                    updated[idx] = { ...updated[idx], ...chunk.step, status: "in_progress" };
+                  }
+                  return updated;
+                });
+              }
+              break;
+
+            case "step_completed":
+              if (chunk.step_index !== undefined) {
+                setAgentSteps((prev) => {
+                  const updated = [...prev];
+                  if (updated[chunk.step_index!]) {
+                    updated[chunk.step_index!] = { ...updated[chunk.step_index!], status: "completed" };
+                  }
+                  return updated;
+                });
+              }
+              break;
+
+            case "content":
+              if (chunk.content) {
+                streamContent += chunk.content;
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? { ...m, content: streamContent }
+                      : m
+                  )
+                );
+              }
+              break;
+
+            case "execution_complete":
+              setIsAgentExecuting(false);
+              if (chunk.result) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? { ...m, content: chunk.result!, isStreaming: false }
+                      : m
+                  )
+                );
+              }
+              break;
+
+            case "done":
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? { ...m, isStreaming: false }
+                    : m
+                )
+              );
+              break;
+
+            case "error":
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? { ...m, content: `Error: ${chunk.error || "Unknown error"}`, isStreaming: false }
+                    : m
+                )
+              );
+              break;
+
+            case "cancelled":
+              setIsAgentExecuting(false);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? { ...m, content: "Execution cancelled.", isStreaming: false }
+                    : m
+                )
+              );
+              break;
+          }
+        }
+      } else {
+        // Use non-streaming for documents/general mode
+        const response = await sendMessage.mutateAsync({
+          message: messageText,
+          session_id: currentSessionId || undefined,
+          mode: chatMode,
+        });
+
+        // Update session ID if new
+        if (response.session_id && !currentSessionId) {
+          setCurrentSessionId(response.session_id);
+        }
+
+        // Transform sources
+        const sources: Source[] =
+          response.sources?.map((s) => ({
+            documentId: s.document_id,
+            filename: s.document_name,
+            pageNumber: s.page_number,
+            snippet: s.snippet,
+            similarity: s.relevance_score,
+            collection: undefined,
+          })) || [];
+
+        // Update message with response
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? {
+                  ...m,
+                  content: response.content,
+                  sources,
+                  isStreaming: false,
+                  isGeneralResponse: response.is_general_response,
+                }
+              : m
+          )
+        );
+
+        // Auto-select for source panel
+        if (sources.length > 0) {
+          setSelectedMessageId(assistantId);
+        }
       }
     } catch (error) {
       console.error("Error:", error);
       // Show error message to user
       const errorMessage = (error as any)?.detail || "Failed to get a response. Please check your connection and try again.";
 
-      const assistantId = Date.now().toString() + "-error";
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: assistantId,
-          role: "assistant",
-          content: `Sorry, I encountered an error: ${errorMessage}`,
-          timestamp: new Date(),
-          isStreaming: false,
-        },
-      ]);
-      setIsLoading(false);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                content: `Sorry, I encountered an error: ${errorMessage}`,
+                isStreaming: false,
+              }
+            : m
+        )
+      );
     } finally {
       setIsLoading(false);
+      setIsAgentExecuting(false);
       inputRef.current?.focus();
     }
   };
@@ -261,6 +509,52 @@ export default function ChatPage() {
     await navigator.clipboard.writeText(content);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  // Export chat as markdown
+  const handleExportChat = async () => {
+    if (messages.length <= 1) return;
+
+    const markdown = messages
+      .filter(m => m.id !== "welcome")
+      .map(m => {
+        const role = m.role === "user" ? "**User:**" : "**Assistant:**";
+        const sources = m.sources?.length
+          ? `\n\n*Sources: ${m.sources.map(s => s.filename).join(", ")}*`
+          : "";
+        return `${role}\n\n${m.content}${sources}`;
+      })
+      .join("\n\n---\n\n");
+
+    const header = `# Chat Export\n\nExported: ${new Date().toLocaleString()}\n\n---\n\n`;
+    const content = header + markdown;
+
+    // Copy to clipboard
+    await navigator.clipboard.writeText(content);
+    setCopiedId("export");
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  // Handle feedback submission
+  const handleFeedback = async (messageId: string, isPositive: boolean) => {
+    try {
+      // Call feedback API
+      const response = await fetch("/api/chat/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message_id: messageId,
+          rating: isPositive ? 5 : 1,
+        }),
+      });
+
+      if (response.ok) {
+        // Visual feedback - you could add a toast notification here
+        console.log("Feedback submitted:", { messageId, isPositive });
+      }
+    } catch (error) {
+      console.error("Failed to submit feedback:", error);
+    }
   };
 
   const handleNewChat = async () => {
@@ -278,9 +572,39 @@ export default function ChatPage() {
   };
 
   const handleLoadSession = (sessionId: string) => {
+    setShouldLoadHistory(true); // Flag that we want to load history messages
     setCurrentSessionId(sessionId);
     setShowHistory(false);
-    // Session messages would be loaded via useChatSession
+  };
+
+  // Agent approval handlers
+  const handleApproveExecution = async () => {
+    if (!pendingPlanId) return;
+    try {
+      await approveExecution.mutateAsync(pendingPlanId);
+      setShowCostApproval(false);
+      setIsAgentExecuting(true);
+      // The execution will continue via streaming or polling
+    } catch (error) {
+      console.error("Failed to approve execution:", error);
+    }
+  };
+
+  const handleCancelExecution = async () => {
+    if (!pendingPlanId) return;
+    try {
+      await cancelExecution.mutateAsync(pendingPlanId);
+      setShowCostApproval(false);
+      setPendingPlanId(null);
+      setPendingSteps(null);
+      setIsLoading(false);
+    } catch (error) {
+      console.error("Failed to cancel execution:", error);
+    }
+  };
+
+  const handleModeChange = (mode: ExecutionMode) => {
+    setAgentExecutionMode(mode);
   };
 
   const suggestedQuestions = [
@@ -346,6 +670,13 @@ export default function ChatPage() {
                 </div>
               </PopoverContent>
             </Popover>
+
+            {/* Agent Mode Toggle */}
+            <AgentModeToggle
+              sessionId={currentSessionId || undefined}
+              showLabel={false}
+              onModeChange={handleModeChange}
+            />
 
             {/* LLM Model Selector */}
             <DropdownMenu>
@@ -455,9 +786,28 @@ export default function ChatPage() {
               <Clock className="h-4 w-4 mr-2" />
               History
             </Button>
-            <Button variant="outline" size="sm" onClick={handleNewChat}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleNewChat}
+              title="New Chat (⌘N)"
+            >
               <RefreshCw className="h-4 w-4 mr-2" />
               New Chat
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExportChat}
+              disabled={messages.length <= 1}
+              title="Export Chat (⌘⇧E)"
+            >
+              {copiedId === "export" ? (
+                <Check className="h-4 w-4 mr-2" />
+              ) : (
+                <Copy className="h-4 w-4 mr-2" />
+              )}
+              {copiedId === "export" ? "Copied!" : "Export"}
             </Button>
             <Button
               variant="outline"
@@ -511,7 +861,7 @@ export default function ChatPage() {
         {/* Chat Messages */}
         <Card className="flex-1 flex flex-col overflow-hidden">
           <ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
-            <div className="space-y-6 max-w-3xl mx-auto">
+            <div className="space-y-6 max-w-3xl mx-auto" role="log" aria-label="Chat messages" aria-live="polite">
               {messages.map((message) => (
                 <div
                   key={message.id}
@@ -573,10 +923,22 @@ export default function ChatPage() {
                             <Copy className="h-3 w-3" />
                           )}
                         </Button>
-                        <Button variant="ghost" size="sm" className="h-7 px-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2"
+                          onClick={() => handleFeedback(message.id, true)}
+                          aria-label="Mark as helpful"
+                        >
                           <ThumbsUp className="h-3 w-3" />
                         </Button>
-                        <Button variant="ghost" size="sm" className="h-7 px-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2"
+                          onClick={() => handleFeedback(message.id, false)}
+                          aria-label="Mark as not helpful"
+                        >
                           <ThumbsDown className="h-3 w-3" />
                         </Button>
                         {message.sources && message.sources.length > 0 && (
@@ -592,6 +954,21 @@ export default function ChatPage() {
                           >
                             <FileText className="h-3 w-3 mr-1" />
                             {message.sources.length} sources
+                          </Button>
+                        )}
+                        {message.isGeneralResponse && (
+                          <Button
+                            variant={selectedMessageId === message.id ? "secondary" : "ghost"}
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            onClick={() =>
+                              setSelectedMessageId(
+                                selectedMessageId === message.id ? null : message.id
+                              )
+                            }
+                          >
+                            <Brain className="h-3 w-3 mr-1" />
+                            General
                           </Button>
                         )}
                       </div>
@@ -610,9 +987,17 @@ export default function ChatPage() {
                   </Avatar>
                   <div className="bg-muted rounded-lg px-4 py-3">
                     <div className="flex items-center gap-2">
-                      <Search className="h-4 w-4 animate-pulse" />
+                      {chatMode === "agent" ? (
+                        <Bot className="h-4 w-4 animate-pulse" />
+                      ) : (
+                        <Search className="h-4 w-4 animate-pulse" />
+                      )}
                       <span className="text-sm text-muted-foreground">
-                        Searching documents...
+                        {chatMode === "agent"
+                          ? "Agents planning task..."
+                          : chatMode === "general"
+                          ? "Thinking..."
+                          : "Searching documents..."}
                       </span>
                     </div>
                   </div>
@@ -643,22 +1028,90 @@ export default function ChatPage() {
 
           {/* Input Area */}
           <div className="p-4 border-t">
-            <form onSubmit={handleSubmit} className="flex gap-2 max-w-3xl mx-auto">
+            {/* Mode Selector */}
+            <div className="flex justify-center mb-3" role="tablist" aria-label="Chat mode">
+              <div className="inline-flex rounded-lg bg-muted p-1">
+                <Button
+                  variant={chatMode === "chat" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setChatMode("chat")}
+                  className="gap-1.5"
+                  role="tab"
+                  aria-selected={chatMode === "chat"}
+                  aria-label="Document chat mode - search your documents"
+                >
+                  <FileSearch className="h-4 w-4" aria-hidden="true" />
+                  Documents
+                </Button>
+                <Button
+                  variant={chatMode === "general" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setChatMode("general")}
+                  className="gap-1.5"
+                  disabled={!agentModeData?.general_chat_enabled}
+                  title={!agentModeData?.general_chat_enabled ? "Enable General Chat in settings" : undefined}
+                  role="tab"
+                  aria-selected={chatMode === "general"}
+                  aria-label="General chat mode - AI knowledge without document search"
+                >
+                  <Brain className="h-4 w-4" aria-hidden="true" />
+                  General
+                </Button>
+                <Button
+                  variant={chatMode === "agent" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setChatMode("agent")}
+                  className="gap-1.5"
+                  disabled={!agentModeData?.agent_mode_enabled}
+                  title={!agentModeData?.agent_mode_enabled ? "Enable Agent Mode in settings" : undefined}
+                  role="tab"
+                  aria-selected={chatMode === "agent"}
+                  aria-label="Agent mode - multi-step task execution with AI agents"
+                >
+                  <Bot className="h-4 w-4" aria-hidden="true" />
+                  Agent
+                </Button>
+              </div>
+            </div>
+            <form onSubmit={handleSubmit} className="flex gap-2 max-w-3xl mx-auto" role="search">
               <Input
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Ask anything about your documents..."
-                disabled={isLoading}
+                placeholder={
+                  chatMode === "agent"
+                    ? "Describe a task for the agents to complete..."
+                    : chatMode === "general"
+                    ? "Ask anything..."
+                    : "Ask anything about your documents..."
+                }
+                disabled={isLoading || isAgentExecuting}
                 className="flex-1"
+                aria-label={
+                  chatMode === "agent"
+                    ? "Describe a task for AI agents"
+                    : chatMode === "general"
+                    ? "Ask a general question"
+                    : "Ask about your documents"
+                }
               />
-              <Button type="submit" disabled={isLoading || !input.trim()}>
+              <Button
+                type="submit"
+                disabled={isLoading || !input.trim()}
+                aria-label="Send message"
+              >
                 <Send className="h-4 w-4" />
               </Button>
             </form>
             <p className="text-xs text-muted-foreground text-center mt-2">
-              Responses are generated from your document archive. Always verify
-              important information.
+              {chatMode === "agent"
+                ? "Multi-agent system will plan and execute complex tasks step by step."
+                : chatMode === "general"
+                ? "Responses use general AI knowledge without document search."
+                : "Responses are generated from your document archive. Always verify important information."}
+              <span className="hidden sm:inline ml-2 opacity-70">
+                Press ⌘Enter to send • ⌘K to focus
+              </span>
             </p>
           </div>
         </Card>
@@ -674,58 +1127,109 @@ export default function ChatPage() {
                 Sources
               </h3>
               <p className="text-xs text-muted-foreground mt-1">
-                {selectedSources.length > 0
-                  ? `${selectedSources.length} documents referenced`
+                {groupedSources.length > 0
+                  ? `${groupedSources.length} ${groupedSources.length === 1 ? 'document' : 'documents'} (${selectedSources.length} chunks)`
                   : "Select a message to view sources"}
               </p>
             </div>
 
             <ScrollArea className="flex-1">
-              {selectedSources.length > 0 ? (
+              {isSelectedMessageGeneral ? (
+                <div className="p-8 text-center">
+                  <Brain className="h-12 w-12 mx-auto mb-3 text-purple-500 opacity-70" />
+                  <p className="text-sm font-medium">General Knowledge</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    This response was generated from AI general knowledge, not from your documents.
+                  </p>
+                </div>
+              ) : groupedSources.length > 0 ? (
                 <div className="p-4 space-y-3">
-                  {selectedSources.map((source, idx) => (
+                  {groupedSources.map((group) => (
                     <Card
-                      key={idx}
-                      className="p-3 hover:bg-muted/50 transition-colors cursor-pointer"
+                      key={group.documentId}
+                      className="overflow-hidden"
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <FileText className="h-4 w-4 text-primary shrink-0" />
-                          <span className="text-sm font-medium truncate">
-                            {source.filename}
-                          </span>
+                      {/* Document Header - Click to expand/collapse */}
+                      <div
+                        className="p-3 hover:bg-muted/50 transition-colors cursor-pointer"
+                        onClick={() => setExpandedSourceId(
+                          expandedSourceId === group.documentId ? null : group.documentId
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            {expandedSourceId === group.documentId ? (
+                              <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+                            ) : (
+                              <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                            )}
+                            <FileText className="h-4 w-4 text-primary shrink-0" />
+                            <span className="text-sm font-medium truncate">
+                              {group.filename}
+                            </span>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 shrink-0"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSourceClick(group.documentId);
+                            }}
+                            title="Open document"
+                          >
+                            <ExternalLink className="h-3 w-3" />
+                          </Button>
                         </div>
-                        <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0">
-                          <ExternalLink className="h-3 w-3" />
-                        </Button>
+
+                        <div className="flex items-center gap-2 mt-2 ml-8">
+                          <Badge variant="secondary" className="text-xs">
+                            {group.sources.length} {group.sources.length === 1 ? 'chunk' : 'chunks'}
+                          </Badge>
+                          <div className="flex items-center gap-1 flex-1">
+                            <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden max-w-20">
+                              <div
+                                className="h-full bg-primary rounded-full"
+                                style={{ width: `${group.avgSimilarity * 100}%` }}
+                              />
+                            </div>
+                            <span className="text-xs text-muted-foreground">
+                              {Math.round(group.avgSimilarity * 100)}% avg
+                            </span>
+                          </div>
+                        </div>
                       </div>
 
-                      {source.pageNumber && (
-                        <p className="text-xs text-muted-foreground mt-1 ml-6">
-                          Page {source.pageNumber}
-                        </p>
-                      )}
-
-                      <p className="text-sm text-muted-foreground mt-2 line-clamp-3">
-                        {source.snippet}
-                      </p>
-
-                      <div className="flex items-center gap-2 mt-2">
-                        <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-primary rounded-full"
-                            style={{ width: `${source.similarity * 100}%` }}
-                          />
+                      {/* Expanded: Show individual chunks */}
+                      {expandedSourceId === group.documentId && (
+                        <div className="border-t bg-muted/30">
+                          {group.sources.map((source, idx) => (
+                            <div
+                              key={idx}
+                              className="p-3 border-b last:border-b-0"
+                            >
+                              {source.pageNumber && (
+                                <p className="text-xs text-muted-foreground mb-1">
+                                  Page {source.pageNumber}
+                                </p>
+                              )}
+                              <p className="text-sm text-muted-foreground line-clamp-3">
+                                {source.snippet}
+                              </p>
+                              <div className="flex items-center gap-2 mt-2">
+                                <div className="flex-1 h-1 bg-muted rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full bg-primary/70 rounded-full"
+                                    style={{ width: `${source.similarity * 100}%` }}
+                                  />
+                                </div>
+                                <span className="text-xs text-muted-foreground">
+                                  {Math.round(source.similarity * 100)}%
+                                </span>
+                              </div>
+                            </div>
+                          ))}
                         </div>
-                        <span className="text-xs font-medium text-primary">
-                          {Math.round(source.similarity * 100)}%
-                        </span>
-                      </div>
-
-                      {source.collection && (
-                        <span className="inline-block text-xs bg-muted px-2 py-0.5 rounded mt-2">
-                          {source.collection}
-                        </span>
                       )}
                     </Card>
                   ))}
@@ -750,9 +1254,34 @@ export default function ChatPage() {
                 </Button>
               </div>
             )}
+
+            {/* Agent Execution Progress - shown when agent is executing */}
+            {isAgentExecuting && agentSteps.length > 0 && (
+              <div className="p-4 border-t">
+                <AgentExecutionProgress
+                  steps={agentSteps}
+                  currentStep={currentAgentStep}
+                  isExecuting={isAgentExecuting}
+                />
+              </div>
+            )}
           </Card>
         </div>
       )}
+
+      {/* Cost Approval Dialog */}
+      <CostApprovalDialog
+        open={showCostApproval}
+        onOpenChange={setShowCostApproval}
+        planId={pendingPlanId || ""}
+        planSummary={pendingPlanSummary}
+        estimatedCost={pendingEstimatedCost}
+        steps={pendingSteps}
+        onApprove={handleApproveExecution}
+        onCancel={handleCancelExecution}
+        isApproving={approveExecution.isPending}
+        isCancelling={cancelExecution.isPending}
+      />
     </div>
   );
 }

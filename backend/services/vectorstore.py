@@ -21,6 +21,14 @@ from backend.db.models import Chunk, Document, AccessTier, HAS_PGVECTOR
 
 logger = structlog.get_logger(__name__)
 
+# Cross-encoder reranking support
+try:
+    from sentence_transformers import CrossEncoder
+    HAS_CROSS_ENCODER = True
+except ImportError:
+    HAS_CROSS_ENCODER = False
+    CrossEncoder = None
+
 
 # =============================================================================
 # Types
@@ -54,16 +62,17 @@ class VectorStoreConfig:
     """Configuration for vector store."""
     # Search settings
     default_top_k: int = 10
-    similarity_threshold: float = 0.7
+    similarity_threshold: float = 0.4  # Lower threshold for OCR'd documents
     search_type: SearchType = SearchType.HYBRID
 
     # Hybrid search weights
     vector_weight: float = 0.7
     keyword_weight: float = 0.3
 
-    # Re-ranking
-    enable_reranking: bool = False
-    rerank_top_k: int = 20
+    # Re-ranking with cross-encoder
+    enable_reranking: bool = True  # Enabled by default for better accuracy
+    rerank_top_k: int = 20  # Fetch more candidates for reranking
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Fast, accurate reranker
 
 
 # =============================================================================
@@ -90,9 +99,21 @@ class VectorStore:
         """
         self.config = config or VectorStoreConfig()
         self._has_pgvector = HAS_PGVECTOR
+        self._reranker = None
 
         if not self._has_pgvector:
             logger.warning("pgvector not available, vector search will be limited")
+
+        # Initialize reranker if enabled and available
+        if self.config.enable_reranking and HAS_CROSS_ENCODER:
+            try:
+                self._reranker = CrossEncoder(self.config.rerank_model)
+                logger.info("Initialized cross-encoder reranker", model=self.config.rerank_model)
+            except Exception as e:
+                logger.warning("Failed to initialize reranker, disabling", error=str(e))
+                self._reranker = None
+        elif self.config.enable_reranking:
+            logger.warning("Reranking enabled but sentence-transformers not installed")
 
     # =========================================================================
     # Storage Operations
@@ -503,7 +524,67 @@ class VectorStore:
             final_count=len(final_results),
         )
 
+        # Apply reranking if enabled and available
+        if self.config.enable_reranking and self._reranker is not None and query:
+            final_results = self._rerank_results(query, final_results, top_k)
+
         return final_results
+
+    def _rerank_results(
+        self,
+        query: str,
+        results: List[SearchResult],
+        top_k: int,
+    ) -> List[SearchResult]:
+        """
+        Rerank search results using cross-encoder model.
+
+        Cross-encoders provide more accurate relevance scores by jointly
+        encoding the query and document, at the cost of being slower.
+
+        Args:
+            query: Original search query
+            results: List of search results to rerank
+            top_k: Number of results to return after reranking
+
+        Returns:
+            Reranked list of SearchResult objects
+        """
+        if not results or self._reranker is None:
+            return results
+
+        try:
+            # Prepare query-document pairs for cross-encoder
+            pairs = [(query, result.content) for result in results]
+
+            # Get reranking scores
+            scores = self._reranker.predict(pairs)
+
+            # Pair results with their rerank scores
+            scored_results = list(zip(results, scores))
+
+            # Sort by rerank score (higher is better)
+            scored_results.sort(key=lambda x: x[1], reverse=True)
+
+            # Update scores and return top_k
+            reranked = []
+            for result, score in scored_results[:top_k]:
+                result.score = float(score)  # Use rerank score
+                result.metadata["reranked"] = True
+                result.metadata["rerank_score"] = float(score)
+                reranked.append(result)
+
+            logger.debug(
+                "Reranked results",
+                original_count=len(results),
+                reranked_count=len(reranked),
+            )
+
+            return reranked
+
+        except Exception as e:
+            logger.warning("Reranking failed, returning original results", error=str(e))
+            return results[:top_k]
 
     async def search(
         self,
