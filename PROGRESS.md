@@ -1,6 +1,6 @@
 # Implementation Progress
 
-> Last updated: 2025-12-11
+> Last updated: 2025-12-19
 
 This document tracks the implementation progress of AIDocumentIndexer. Use this to understand what's been completed, what's in progress, and what's coming next.
 
@@ -185,7 +185,32 @@ Overall Progress: ████████████████████�
 ### Blockers
 - None
 
-### Completed in Latest Update (2025-12-11)
+### Completed in Latest Update (2025-12-19)
+
+- **Agent Mode Improvements**:
+  - Real-time streaming of step outputs via SSE `content` events
+  - Sources streaming in agent mode for document citations
+  - Fallback research step when LLM plan misses document search
+  - Research findings passed as context to Generator agent
+  - Improved Manager Agent prompt with CRITICAL RULES for document handling
+
+- **Collection Context Feature**:
+  - Collection tags now stored in ChromaDB metadata during indexing
+  - Collection info included in LLM context (e.g., `[Source 1: file.pdf [Collection: German Lessons]]`)
+  - `include_collection_context` API parameter to toggle this feature
+  - Frontend toggle in chat settings
+
+- **Documentation Updates**:
+  - Created comprehensive `docs/TECHNICAL_ARCHITECTURE.md` with:
+    - Complete API endpoint reference (197 endpoints)
+    - Data flow diagrams (Upload, RAG Query, Agent Execution)
+    - Service layer architecture
+    - Database schema overview
+    - Scalability analysis and recommendations
+  - Updated `docs/API.md` with new parameters and SSE events
+  - Updated `docs/AGENTS.md` with recent improvements
+
+### Completed in Previous Update (2025-12-11)
 - **Test Infrastructure Fixes**:
   - Fixed pytest.ini pythonpath configuration
   - Fixed Jest ESM/CommonJS import issues
@@ -302,6 +327,11 @@ Overall Progress: ████████████████████�
 | 2025-12-11 | SQLite compatibility | Database-agnostic type decorators for multi-DB support |
 | 2025-12-11 | ChromaDB vector store | Local vector storage alternative to pgvector |
 | 2025-12-11 | Test fixes | All 116 tests passing (60 backend + 56 frontend) |
+| 2025-12-19 | Agent streaming output | Real-time step outputs via SSE content events |
+| 2025-12-19 | Agent sources streaming | Document citations displayed during agent execution |
+| 2025-12-19 | Fallback research step | Auto-prepend research when LLM plan misses it |
+| 2025-12-19 | Collection context | Collection tags in LLM context for better retrieval |
+| 2025-12-19 | Technical Architecture doc | Comprehensive technical documentation with 197 endpoints |
 
 ---
 

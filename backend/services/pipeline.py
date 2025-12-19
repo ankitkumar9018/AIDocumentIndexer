@@ -507,6 +507,7 @@ class DocumentPipeline:
                         embeddings=result.embeddings,
                         access_tier_id=access_tier_id,
                         filename=original_filename,
+                        collection=collection,
                     )
                 else:
                     logger.warning(
@@ -638,6 +639,7 @@ class DocumentPipeline:
         embeddings: List[EmbeddingResult],
         access_tier_id: str,
         filename: Optional[str] = None,
+        collection: Optional[str] = None,
     ):
         """Index document chunks using our custom VectorStore."""
         if not self._custom_vectorstore:
@@ -665,6 +667,7 @@ class DocumentPipeline:
                 document_id=document_id,
                 access_tier_id=access_tier_id,
                 document_filename=filename,
+                collection=collection,
             )
 
             logger.debug(

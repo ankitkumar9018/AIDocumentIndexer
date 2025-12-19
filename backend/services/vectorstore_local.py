@@ -105,6 +105,7 @@ class ChromaVectorStore:
         document_id: str,
         access_tier_id: str,
         document_filename: Optional[str] = None,
+        collection: Optional[str] = None,
         session: Optional[Any] = None,  # Ignored for ChromaDB
     ) -> List[str]:
         """
@@ -115,6 +116,7 @@ class ChromaVectorStore:
             document_id: ID of the parent document
             access_tier_id: Access tier for permission filtering
             document_filename: Filename of the source document (for display in search results)
+            collection: Collection/tag name for document grouping
             session: Ignored (kept for interface compatibility)
 
         Returns:
@@ -140,6 +142,7 @@ class ChromaVectorStore:
                 "document_id": document_id,
                 "access_tier_id": access_tier_id,
                 "document_filename": document_filename or "",
+                "collection": collection or "",  # Collection/tag for document grouping
                 "chunk_index": chunk_data.get("chunk_index", i),
                 "page_number": chunk_data.get("page_number") or 0,
                 "section_title": chunk_data.get("section_title") or "",
@@ -331,6 +334,7 @@ class ChromaVectorStore:
                     chunk_id=chunk_id,
                     document_id=metadata.get("document_id", ""),
                     document_filename=metadata.get("document_filename") or None,
+                    collection=metadata.get("collection") or None,
                     content=content,
                     score=similarity,
                     metadata={
@@ -400,6 +404,7 @@ class ChromaVectorStore:
                         chunk_id=chunk_id,
                         document_id=metadata.get("document_id", ""),
                         document_filename=metadata.get("document_filename") or None,
+                        collection=metadata.get("collection") or None,
                         content=content,
                         score=score,
                         metadata={

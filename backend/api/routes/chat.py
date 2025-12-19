@@ -159,6 +159,7 @@ class ChatRequest(BaseModel):
     query_only: bool = False  # If True, don't store in RAG
     mode: Optional[str] = Field(None, pattern="^(agent|chat|general)$")  # Execution mode: agent, chat (RAG), or general (LLM)
     agent_options: Optional[AgentOptions] = Field(default=None, description="Options for agent mode execution")
+    include_collection_context: bool = Field(default=True, description="Include collection tags in LLM context")
 
 
 class ChatResponse(BaseModel):
@@ -366,6 +367,7 @@ async def create_chat_completion(
                 session_id=str(session_id) if not request.query_only else None,
                 collection_filter=request.collection_filter,
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
+                include_collection_context=request.include_collection_context,
             )
 
             # Convert sources to API format
@@ -592,6 +594,7 @@ async def create_streaming_completion(
                 session_id=str(session_id) if not request.query_only else None,
                 collection_filter=request.collection_filter,
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
+                include_collection_context=request.include_collection_context,
             ):
                 if chunk.type == "content":
                     accumulated_content.append(chunk.data)

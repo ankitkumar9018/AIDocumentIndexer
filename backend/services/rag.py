@@ -65,6 +65,7 @@ class Source:
     document_id: str
     document_name: str
     chunk_id: str
+    collection: Optional[str] = None  # Collection/tag for document grouping
     page_number: Optional[int] = None
     slide_number: Optional[int] = None
     relevance_score: float = 0.0
@@ -467,6 +468,7 @@ class RAGService:
         collection_filter: Optional[str] = None,
         access_tier: int = 100,
         user_id: Optional[str] = None,
+        include_collection_context: bool = True,
     ) -> RAGResponse:
         """
         Query the RAG system.
@@ -477,6 +479,7 @@ class RAGService:
             collection_filter: Filter by document collection
             access_tier: User's access tier for RLS
             user_id: User ID for usage tracking
+            include_collection_context: Whether to include collection tags in LLM context
 
         Returns:
             RAGResponse with answer and sources
@@ -505,7 +508,7 @@ class RAGService:
         )
 
         # Format context from retrieved documents
-        context, sources = self._format_context(retrieved_docs)
+        context, sources = self._format_context(retrieved_docs, include_collection_context)
 
         # Build prompt
         if session_id:
@@ -583,6 +586,7 @@ class RAGService:
         collection_filter: Optional[str] = None,
         access_tier: int = 100,
         user_id: Optional[str] = None,
+        include_collection_context: bool = True,
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Query RAG with streaming response.
@@ -593,6 +597,7 @@ class RAGService:
             collection_filter: Collection filter
             access_tier: User's access tier
             user_id: User ID for usage tracking
+            include_collection_context: Whether to include collection tags in LLM context
 
         Yields:
             StreamChunk objects with response parts
@@ -619,7 +624,7 @@ class RAGService:
             access_tier=access_tier,
         )
 
-        context, sources = self._format_context(retrieved_docs)
+        context, sources = self._format_context(retrieved_docs, include_collection_context)
 
         # Build prompt
         if session_id:
@@ -856,6 +861,7 @@ class RAGService:
                         "document_id": result.document_id,
                         "document_name": result.document_filename or result.document_title or "Unknown Document",
                         "chunk_id": result.chunk_id,
+                        "collection": result.collection,
                         "page_number": result.page_number,
                         "section_title": result.section_title,
                         **result.metadata,
@@ -969,12 +975,14 @@ class RAGService:
     def _format_context(
         self,
         retrieved_docs: List[Tuple[Document, float]],
+        include_collection_context: bool = True,
     ) -> Tuple[str, List[Source]]:
         """
         Format retrieved documents into context string and sources list.
 
         Args:
             retrieved_docs: List of (document, score) tuples
+            include_collection_context: Whether to include collection tags in LLM context
 
         Returns:
             Tuple of (context_string, sources_list)
@@ -990,6 +998,13 @@ class RAGService:
 
             # Build context entry
             doc_name = metadata.get("document_name", "Unknown Document")
+            collection = metadata.get("collection")
+
+            # Include collection info if enabled and available
+            collection_info = ""
+            if include_collection_context and collection:
+                collection_info = f" [Collection: {collection}]"
+
             page_info = ""
             if metadata.get("page_number"):
                 page_info = f" (Page {metadata['page_number']})"
@@ -997,14 +1012,15 @@ class RAGService:
                 page_info = f" (Slide {metadata['slide_number']})"
 
             context_parts.append(
-                f"[Source {i}: {doc_name}{page_info}]\n{doc.page_content}\n"
+                f"[Source {i}: {doc_name}{collection_info}{page_info}]\n{doc.page_content}\n"
             )
 
-            # Build source citation
+            # Build source citation (always include collection for UI display)
             source = Source(
                 document_id=metadata.get("document_id", f"doc-{i}"),
                 document_name=doc_name,
                 chunk_id=metadata.get("chunk_id", f"chunk-{i}"),
+                collection=collection,
                 page_number=metadata.get("page_number"),
                 slide_number=metadata.get("slide_number"),
                 relevance_score=score,

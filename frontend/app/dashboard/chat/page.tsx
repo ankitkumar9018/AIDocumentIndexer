@@ -28,6 +28,7 @@ import {
   Zap,
   Brain,
   FileSearch,
+  Tag,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -122,6 +123,8 @@ export default function ChatPage() {
     max_steps: 5,                // Maximum number of steps in execution plan
     collection: null as string | null,  // Target specific collection (null = all)
   });
+  // Collection context toggle - shows collection tags to LLM for better document disambiguation
+  const [includeCollectionContext, setIncludeCollectionContext] = useState(true);
   const [showCostApproval, setShowCostApproval] = useState(false);
   const [pendingPlanId, setPendingPlanId] = useState<string | null>(null);
   const [pendingPlanSummary, setPendingPlanSummary] = useState<string | null>(null);
@@ -319,6 +322,7 @@ export default function ChatPage() {
           session_id: currentSessionId || undefined,
           mode: "agent",
           agent_options: agentOptions,
+          include_collection_context: includeCollectionContext,
         })) {
           switch (chunk.type) {
             case "session":
@@ -479,6 +483,7 @@ export default function ChatPage() {
           message: messageText,
           session_id: currentSessionId || undefined,
           mode: chatMode,
+          include_collection_context: includeCollectionContext,
         });
 
         // Update session ID if new
@@ -833,6 +838,25 @@ export default function ChatPage() {
                       <p className="text-xs text-muted-foreground">
                         Limit complexity of execution plan
                       </p>
+                    </div>
+
+                    {/* Collection Context Toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium flex items-center gap-2">
+                          <Tag className="h-3 w-3" />
+                          Show Collection Tags
+                        </Label>
+                        <p className="text-xs text-muted-foreground">
+                          Include collection names in AI context for better document grouping
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={includeCollectionContext}
+                        onChange={(e) => setIncludeCollectionContext(e.target.checked)}
+                        className="h-4 w-4 rounded border-gray-300"
+                      />
                     </div>
                   </div>
                 </PopoverContent>

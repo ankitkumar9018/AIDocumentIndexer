@@ -220,9 +220,24 @@ Send a chat message and get a response. Supports three modes:
   "search_type": "hybrid",
   "top_k": 5,
   "stream": false,
-  "mode": "chat"
+  "mode": "chat",
+  "include_collection_context": true
 }
 ```
+
+**Request Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `message` | string | required | The user's question or request |
+| `session_id` | string | null | Session ID for conversation history |
+| `mode` | string | "chat" | Execution mode: `chat`, `general`, or `agent` |
+| `stream` | boolean | false | Enable Server-Sent Events streaming |
+| `document_ids` | array | null | Limit search to specific documents |
+| `collection` | string | null | Limit search to a collection |
+| `include_collection_context` | boolean | true | Include collection tags in LLM context |
+| `search_type` | string | "hybrid" | Search type: `vector`, `keyword`, `hybrid` |
+| `top_k` | int | 5 | Number of chunks to retrieve |
 
 **General Chat Mode Example:**
 ```json
@@ -232,21 +247,65 @@ Send a chat message and get a response. Supports three modes:
 }
 ```
 
+**Agent Mode Example:**
+```json
+{
+  "message": "Create a summary of all German lessons in my documents",
+  "mode": "agent"
+}
+```
+
 **Response:**
 ```json
 {
   "session_id": "uuid",
   "message_id": "uuid",
   "content": "The capital of France is Paris...",
-  "sources": [],
-  "is_general_response": true,
+  "sources": [
+    {
+      "document_id": "uuid",
+      "filename": "document.pdf",
+      "page_number": 5,
+      "snippet": "Relevant text excerpt...",
+      "similarity": 0.92,
+      "collection": "my-collection"
+    }
+  ],
+  "is_general_response": false,
   "created_at": "2025-01-01T00:00:00Z"
 }
 ```
 
 ### POST /chat/completions/stream
 
-Stream a chat response (Server-Sent Events).
+Stream a chat response using Server-Sent Events (SSE).
+
+**Request:** Same parameters as `/chat/completions` with `stream: true`
+
+**SSE Event Types:**
+
+| Event Type | Data Structure | Description |
+|------------|----------------|-------------|
+| `content` | `{ "data": "text chunk" }` | Streaming response text |
+| `sources` | `{ "data": [{ "document_id": "...", ... }] }` | Document sources with metadata |
+| `agent_step` | `{ "step": "Research", "status": "completed" }` | Agent mode step progress |
+| `done` | `{ "message_id": "uuid", "content": "full text" }` | Final message with complete content |
+| `error` | `{ "message": "error description" }` | Error during processing |
+
+**Example SSE Stream (Agent Mode):**
+```
+data: {"type": "agent_step", "step": "Research", "status": "in_progress"}
+
+data: {"type": "content", "data": "**Research**\n\nBased on your documents..."}
+
+data: {"type": "sources", "data": [{"document_id": "...", "filename": "german_lesson.pdf", "collection": "German Lessons"}]}
+
+data: {"type": "agent_step", "step": "Generator", "status": "completed"}
+
+data: {"type": "content", "data": "**Final Summary**\n\nHere is the generated content..."}
+
+data: {"type": "done", "message_id": "uuid", "content": "Complete response text"}
+```
 
 ---
 

@@ -693,6 +693,7 @@ class ResearchAgent(BaseAgent):
             return [
                 {
                     "source": r.get("document_name", "Document"),
+                    "collection": r.get("metadata", {}).get("collection") if r.get("metadata") else None,
                     "document_id": r.get("metadata", {}).get("document_id") if r.get("metadata") else None,
                     "chunk_id": r.get("chunk_id"),
                     "page_number": r.get("metadata", {}).get("page_number") if r.get("metadata") else None,

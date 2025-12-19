@@ -55,6 +55,7 @@ class SearchResult:
     document_filename: Optional[str] = None
     page_number: Optional[int] = None
     section_title: Optional[str] = None
+    collection: Optional[str] = None  # Collection/tag for document grouping
 
 
 @dataclass

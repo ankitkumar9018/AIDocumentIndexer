@@ -90,6 +90,12 @@ The orchestrator that coordinates all worker agents:
 - Monitors progress and handles failures
 - Aggregates results into final output
 
+**Recent Improvements (2025-12):**
+- **Fallback Research Step**: If the user's request contains document-related keywords (e.g., "documents", "files", "my data") but the LLM plan doesn't include a research step, the Manager automatically prepends one
+- **Context Passing**: Research findings are now passed to the Generator agent as context, improving output quality
+- **Streaming Output**: Step outputs are streamed in real-time via SSE `content` events
+- **Source Attribution**: Research agent sources are propagated to the frontend for display
+
 ### Generator Agent
 Handles content creation tasks:
 - Document generation
@@ -110,6 +116,30 @@ Information retrieval and synthesis:
 - Web scraping integration
 - Source aggregation
 - Citation management
+
+**Source Data Returned:**
+```json
+{
+  "findings": "Summary of research findings...",
+  "sources": [
+    {
+      "source": "document_name.pdf",
+      "document_id": "uuid",
+      "chunk_id": "uuid",
+      "page_number": 5,
+      "content": "Relevant excerpt...",
+      "score": 0.92,
+      "collection": "My Collection"
+    }
+  ],
+  "result_count": 10
+}
+```
+
+**Recent Improvements (2025-12):**
+- Sources now include full metadata (document_id, chunk_id, page_number, collection)
+- Sources are streamed to frontend via SSE for real-time display
+- Collection context is included in search results for better LLM context
 
 ### Tool Executor Agent
 File operations and exports:
@@ -300,6 +330,32 @@ Real-time progress display showing:
 - Current step and overall progress
 - Agent status indicators
 - Cost tracking per step
+
+### Streaming Events
+Agent mode streams various events via SSE:
+
+| Event Type | Purpose | Data |
+|------------|---------|------|
+| `agent_step` | Step status updates | `{ step: "Research", status: "in_progress" }` |
+| `content` | Step output display | `{ data: "**Research**\n\nFindings..." }` |
+| `sources` | Document citations | `{ data: [{ document_id, filename, ... }] }` |
+| `done` | Execution complete | `{ message_id, content }` |
+
+**Frontend Integration:**
+```typescript
+// Handle streaming in chat component
+switch (chunk.type) {
+  case "content":
+    streamContent += chunk.data;
+    break;
+  case "sources":
+    message.sources.push(...chunk.data);
+    break;
+  case "agent_step":
+    currentStep = chunk.step;
+    break;
+}
+```
 
 ### Admin Dashboard
 For administrators to:
