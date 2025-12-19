@@ -639,7 +639,8 @@ class ResearchAgent(BaseAgent):
                 status=TaskStatus.COMPLETED,
                 output={
                     "findings": response_text,
-                    "sources": sources,
+                    "sources": search_results,  # Full source objects with metadata
+                    "source_types": sources,  # Original string list for backward compat
                     "result_count": len(search_results),
                 },
                 tokens_used=input_tokens + output_tokens,
@@ -692,6 +693,9 @@ class ResearchAgent(BaseAgent):
             return [
                 {
                     "source": r.get("document_name", "Document"),
+                    "document_id": r.get("metadata", {}).get("document_id") if r.get("metadata") else None,
+                    "chunk_id": r.get("chunk_id"),
+                    "page_number": r.get("metadata", {}).get("page_number") if r.get("metadata") else None,
                     "content": r.get("content", ""),
                     "score": r.get("score", 0),
                 }

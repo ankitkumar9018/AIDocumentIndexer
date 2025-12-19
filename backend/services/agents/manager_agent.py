@@ -679,6 +679,16 @@ class ManagerAgent(BaseAgent):
                             if isinstance(result.output, dict):
                                 # Research agent returns {"findings": ..., "sources": ...}
                                 output_text = result.output.get("findings", str(result.output))
+
+                                # Emit sources if this was a research step with document sources
+                                sources = result.output.get("sources", [])
+                                if sources and isinstance(sources, list) and len(sources) > 0:
+                                    # Only emit if sources have actual document data (not just strings)
+                                    if isinstance(sources[0], dict) and "content" in sources[0]:
+                                        yield {
+                                            "type": "sources",
+                                            "data": sources
+                                        }
                             yield {
                                 "type": "content",
                                 "data": f"**{step.task.name}**\n\n{output_text}\n\n---\n\n"

@@ -524,6 +524,10 @@ async def create_streaming_completion(
                     elif update_type == "content":
                         yield f"data: {json.dumps({'type': 'content', 'data': update.get('data', '')})}\n\n"
 
+                    elif update_type == "sources":
+                        sources_data = update.get("data", [])
+                        yield f"data: {json.dumps({'type': 'sources', 'data': sources_data})}\n\n"
+
                     elif update_type == "plan_completed":
                         output = update.get("output", "")
                         yield f"data: {json.dumps({'type': 'content', 'data': output})}\n\n"

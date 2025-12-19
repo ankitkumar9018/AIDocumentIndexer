@@ -402,6 +402,32 @@ export default function ChatPage() {
               }
               break;
 
+            case "sources":
+              if (chunk.data && Array.isArray(chunk.data)) {
+                const newSources: Source[] = chunk.data.map((s: Record<string, unknown>) => ({
+                  documentId: (s.document_id as string) || (s.source as string) || "unknown",
+                  filename: (s.source as string) || (s.document_name as string) || "Document",
+                  pageNumber: s.page_number as number | undefined,
+                  snippet: ((s.content as string) || "").substring(0, 200),
+                  similarity: (s.score as number) || 0,
+                }));
+
+                // Update message with sources
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? { ...m, sources: [...(m.sources || []), ...newSources] }
+                      : m
+                  )
+                );
+
+                // Auto-select for source panel
+                if (newSources.length > 0) {
+                  setSelectedMessageId(assistantId);
+                }
+              }
+              break;
+
             case "execution_complete":
               setIsAgentExecuting(false);
               if (chunk.result) {
