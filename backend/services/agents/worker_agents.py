@@ -692,7 +692,8 @@ class ResearchAgent(BaseAgent):
 
             return [
                 {
-                    "source": r.get("document_name", "Document"),
+                    "document_name": r.get("document_name", "Document"),  # Primary key for frontend
+                    "source": r.get("document_name", "Document"),  # Backward compatibility
                     "collection": r.get("metadata", {}).get("collection") if r.get("metadata") else None,
                     "document_id": r.get("metadata", {}).get("document_id") if r.get("metadata") else None,
                     "chunk_id": r.get("chunk_id"),

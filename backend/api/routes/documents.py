@@ -7,7 +7,7 @@ All endpoints enforce permission checking based on user access tier.
 """
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -34,6 +34,7 @@ from backend.services.permissions import (
 )
 from backend.services.vectorstore import get_vector_store, SearchType
 from backend.services.audit import AuditAction, get_audit_service
+from backend.services.auto_tagger import AutoTaggerService
 
 logger = structlog.get_logger(__name__)
 
@@ -65,6 +66,20 @@ class DocumentUpdate(BaseModel):
     tags: Optional[List[str]] = None
 
 
+class EnhancedMetadataResponse(BaseModel):
+    """Enhanced metadata response model."""
+    summary_short: Optional[str] = None
+    summary_detailed: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    topics: Optional[List[str]] = None
+    entities: Optional[Dict[str, List[str]]] = None
+    hypothetical_questions: Optional[List[str]] = None
+    language: Optional[str] = None
+    document_type: Optional[str] = None
+    enhanced_at: Optional[str] = None
+    model_used: Optional[str] = None
+
+
 class DocumentResponse(BaseModel):
     """Document response model."""
     id: UUID
@@ -83,6 +98,8 @@ class DocumentResponse(BaseModel):
     updated_at: datetime
     uploaded_by: Optional[UUID] = None
     tags: Optional[List[str]] = None
+    enhanced_metadata: Optional[EnhancedMetadataResponse] = None
+    is_enhanced: bool = False
 
     class Config:
         from_attributes = True
@@ -142,6 +159,32 @@ class CollectionInfo(BaseModel):
     document_count: int
 
 
+class AutoTagRequest(BaseModel):
+    """Auto-tag request for a single document."""
+    max_tags: int = Field(default=5, ge=1, le=10, description="Maximum tags to generate")
+
+
+class AutoTagResponse(BaseModel):
+    """Auto-tag response."""
+    document_id: str
+    tags: List[str]
+    collection: Optional[str] = None  # First tag as primary collection
+
+
+class BulkAutoTagRequest(BaseModel):
+    """Bulk auto-tag request."""
+    document_ids: List[UUID]
+    max_tags: int = Field(default=5, ge=1, le=10)
+
+
+class BulkAutoTagResponse(BaseModel):
+    """Bulk auto-tag response."""
+    status: str
+    total: int
+    processed: int = 0
+    results: Optional[List[AutoTagResponse]] = None
+
+
 class CollectionsResponse(BaseModel):
     """Collections list response."""
     collections: List[CollectionInfo]
@@ -161,6 +204,24 @@ def get_client_ip(request: Request) -> Optional[str]:
 
 def document_to_response(doc: Document, chunk_count: int = 0) -> DocumentResponse:
     """Convert Document model to response."""
+    # Parse enhanced metadata if present
+    enhanced_metadata = None
+    is_enhanced = False
+    if doc.enhanced_metadata:
+        is_enhanced = True
+        enhanced_metadata = EnhancedMetadataResponse(
+            summary_short=doc.enhanced_metadata.get("summary_short"),
+            summary_detailed=doc.enhanced_metadata.get("summary_detailed"),
+            keywords=doc.enhanced_metadata.get("keywords"),
+            topics=doc.enhanced_metadata.get("topics"),
+            entities=doc.enhanced_metadata.get("entities"),
+            hypothetical_questions=doc.enhanced_metadata.get("hypothetical_questions"),
+            language=doc.enhanced_metadata.get("language"),
+            document_type=doc.enhanced_metadata.get("document_type"),
+            enhanced_at=doc.enhanced_metadata.get("enhanced_at"),
+            model_used=doc.enhanced_metadata.get("model_used"),
+        )
+
     return DocumentResponse(
         id=doc.id,
         name=doc.title or doc.original_filename,
@@ -178,6 +239,8 @@ def document_to_response(doc: Document, chunk_count: int = 0) -> DocumentRespons
         updated_at=doc.updated_at,
         uploaded_by=doc.uploaded_by_id,
         tags=doc.tags,
+        enhanced_metadata=enhanced_metadata,
+        is_enhanced=is_enhanced,
     )
 
 
@@ -876,4 +939,253 @@ async def download_document(
         path=str(file_path),
         filename=document.original_filename,
         media_type=mime_type,
+    )
+
+
+# =============================================================================
+# Auto-Tagging Endpoints
+# =============================================================================
+
+@router.post("/{document_id}/auto-tag", response_model=AutoTagResponse)
+async def auto_tag_document(
+    document_id: UUID,
+    request: AutoTagRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Auto-generate tags for a document using LLM analysis.
+
+    Analyzes document content and suggests relevant tags/categories.
+    The first tag is set as the primary collection.
+    """
+    logger.info(
+        "Auto-tagging document",
+        document_id=str(document_id),
+        user_id=user.user_id,
+        max_tags=request.max_tags,
+    )
+
+    # Get document with chunks
+    query = (
+        select(Document)
+        .options(selectinload(Document.chunks))
+        .where(Document.id == document_id)
+    )
+    result = await db.execute(query)
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    # Check write permission (modifying tags)
+    permission_service = get_permission_service()
+    has_access = await permission_service.check_document_access(
+        user_context=user,
+        document_id=str(document_id),
+        permission=Permission.WRITE,
+        session=db,
+    )
+
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to modify this document",
+        )
+
+    # Get content sample from chunks
+    chunks = sorted(document.chunks, key=lambda c: c.chunk_index)[:3]
+    content_sample = "\n".join([chunk.content for chunk in chunks])
+
+    if not content_sample:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document has no indexed content for analysis",
+        )
+
+    # Get existing collections for context
+    collections_query = (
+        select(Document.tags)
+        .join(AccessTier, Document.access_tier_id == AccessTier.id)
+        .where(
+            and_(
+                AccessTier.level <= user.access_tier_level,
+                Document.tags.isnot(None),
+            )
+        )
+    )
+    collections_result = await db.execute(collections_query)
+    all_tags = collections_result.scalars().all()
+
+    # Flatten and deduplicate collections
+    existing_collections = list(set(
+        tag for tags in all_tags if tags for tag in tags
+    ))
+
+    # Generate tags
+    auto_tagger = AutoTaggerService()
+    tags = await auto_tagger.generate_tags(
+        document_name=document.name,
+        content_sample=content_sample,
+        existing_collections=existing_collections,
+        max_tags=request.max_tags,
+    )
+
+    if not tags:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate tags. Please try again.",
+        )
+
+    # Update document tags
+    document.tags = tags
+    await db.commit()
+
+    # Log audit
+    audit_service = get_audit_service()
+    await audit_service.log_action(
+        action=AuditAction.UPDATE,
+        user_id=user.user_id,
+        resource_type="document",
+        resource_id=str(document_id),
+        details={"auto_tags": tags},
+        session=db,
+    )
+
+    logger.info(
+        "Document auto-tagged successfully",
+        document_id=str(document_id),
+        tags=tags,
+    )
+
+    return AutoTagResponse(
+        document_id=str(document_id),
+        tags=tags,
+        collection=tags[0] if tags else None,
+    )
+
+
+@router.post("/bulk-auto-tag", response_model=BulkAutoTagResponse)
+async def bulk_auto_tag_documents(
+    request: BulkAutoTagRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Auto-tag multiple documents using LLM analysis.
+
+    Processes documents synchronously and returns all results.
+    For large batches, consider implementing background processing.
+    """
+    logger.info(
+        "Bulk auto-tagging documents",
+        user_id=user.user_id,
+        document_count=len(request.document_ids),
+    )
+
+    if len(request.document_ids) > 20:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Maximum 20 documents per bulk request. For more, use individual requests.",
+        )
+
+    # Get existing collections for context (once, not per document)
+    collections_query = (
+        select(Document.tags)
+        .join(AccessTier, Document.access_tier_id == AccessTier.id)
+        .where(
+            and_(
+                AccessTier.level <= user.access_tier_level,
+                Document.tags.isnot(None),
+            )
+        )
+    )
+    collections_result = await db.execute(collections_query)
+    all_tags = collections_result.scalars().all()
+    existing_collections = list(set(
+        tag for tags in all_tags if tags for tag in tags
+    ))
+
+    auto_tagger = AutoTaggerService()
+    results = []
+    processed = 0
+
+    for doc_id in request.document_ids:
+        try:
+            # Get document with chunks
+            query = (
+                select(Document)
+                .options(selectinload(Document.chunks))
+                .where(Document.id == doc_id)
+            )
+            result = await db.execute(query)
+            document = result.scalar_one_or_none()
+
+            if not document:
+                logger.warning(f"Document {doc_id} not found, skipping")
+                continue
+
+            # Check permission
+            permission_service = get_permission_service()
+            has_access = await permission_service.check_document_access(
+                user_context=user,
+                document_id=str(doc_id),
+                permission=Permission.WRITE,
+                session=db,
+            )
+
+            if not has_access:
+                logger.warning(f"No write permission for document {doc_id}, skipping")
+                continue
+
+            # Get content sample
+            chunks = sorted(document.chunks, key=lambda c: c.chunk_index)[:3]
+            content_sample = "\n".join([chunk.content for chunk in chunks])
+
+            if not content_sample:
+                logger.warning(f"Document {doc_id} has no content, skipping")
+                continue
+
+            # Generate tags
+            tags = await auto_tagger.generate_tags(
+                document_name=document.name,
+                content_sample=content_sample,
+                existing_collections=existing_collections,
+                max_tags=request.max_tags,
+            )
+
+            if tags:
+                document.tags = tags
+                processed += 1
+                results.append(AutoTagResponse(
+                    document_id=str(doc_id),
+                    tags=tags,
+                    collection=tags[0] if tags else None,
+                ))
+
+                # Add new tags to existing collections for next iterations
+                for tag in tags:
+                    if tag not in existing_collections:
+                        existing_collections.append(tag)
+
+        except Exception as e:
+            logger.error(f"Failed to auto-tag document {doc_id}: {e}")
+            continue
+
+    await db.commit()
+
+    logger.info(
+        "Bulk auto-tagging completed",
+        total=len(request.document_ids),
+        processed=processed,
+    )
+
+    return BulkAutoTagResponse(
+        status="completed",
+        total=len(request.document_ids),
+        processed=processed,
+        results=results,
     )

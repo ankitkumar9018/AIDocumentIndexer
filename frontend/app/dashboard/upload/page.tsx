@@ -31,6 +31,7 @@ import {
   FileSearch,
   Wifi,
   WifiOff,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -124,6 +125,7 @@ export default function UploadPage() {
     smart_image_handling: true,
     smart_chunking: true,
     detect_duplicates: true,
+    auto_generate_tags: false,
     processing_mode: "smart" as "full" | "smart" | "text_only",
   });
 
@@ -553,6 +555,25 @@ export default function UploadPage() {
                       onCheckedChange={(checked) =>
                         setProcessingOptions((prev) => ({ ...prev, detect_duplicates: checked }))
                       }
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-muted/50">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-muted-foreground" />
+                      <div>
+                        <Label className="text-sm">Auto-generate Tags</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Use AI to generate tags (when no collection set)
+                        </p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={processingOptions.auto_generate_tags}
+                      onCheckedChange={(checked) =>
+                        setProcessingOptions((prev) => ({ ...prev, auto_generate_tags: checked }))
+                      }
+                      disabled={!!collection}
                     />
                   </div>
                 </div>

@@ -349,6 +349,11 @@ class Document(Base, UUIDMixin, TimestampMixin):
     word_count: Mapped[Optional[int]] = mapped_column(Integer)
     tags: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
 
+    # Enhanced metadata from LLM analysis (for improved RAG search)
+    # Contains: summary_short, summary_detailed, keywords, topics, entities,
+    # hypothetical_questions, document_type, enhanced_at, model_used
+    enhanced_metadata: Mapped[Optional[dict]] = mapped_column(JSONType())
+
     # Source info (for auto-indexed files)
     source_path: Mapped[Optional[str]] = mapped_column(String(1000))
     is_auto_indexed: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -11,8 +11,8 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urlparse, urljoin
 from uuid import uuid4
 
 import structlog
@@ -440,13 +440,48 @@ class WebScraperService:
         config: Optional[ScrapeConfig] = None,
     ) -> Dict[str, Any]:
         """
-        Scrape a URL and use it as context for a query.
+        Scrape a URL and use LLM to answer query with scraped content as context.
 
-        Returns the scraped content along with the query result.
+        Returns the scraped content along with the LLM-generated answer.
         """
+        import time
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from backend.services.llm import EnhancedLLMFactory
+
+        start_time = time.time()
         page = await self.scrape_url_immediate(url, config)
 
-        # Return content for use in RAG query
+        # Build prompt with scraped content as context
+        system_prompt = """You are a helpful assistant that answers questions based on the provided web page content.
+Answer the user's question using ONLY the information from the provided content.
+If the answer cannot be found in the content, say so clearly."""
+
+        user_prompt = f"""Web page content from {url}:
+
+{page.content}
+
+---
+
+Question: {query}
+
+Please answer the question based on the web page content above."""
+
+        # Get LLM and generate answer
+        llm, llm_config = await EnhancedLLMFactory.get_chat_model_for_operation(
+            operation="rag",
+            track_usage=True,
+        )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        response = await llm.ainvoke(messages)
+        answer = response.content if hasattr(response, 'content') else str(response)
+
+        processing_time = (time.time() - start_time) * 1000
+
         return {
             "url": url,
             "title": page.title,
@@ -454,6 +489,9 @@ class WebScraperService:
             "word_count": page.word_count,
             "scraped_at": page.scraped_at.isoformat(),
             "query": query,
+            "answer": answer,
+            "model": llm_config.model if llm_config else "default",
+            "processing_time_ms": processing_time,
             "context_ready": True,
         }
 
@@ -514,6 +552,198 @@ class WebScraperService:
             links.append(link)
 
         return links[:100]  # Limit to prevent runaway crawling
+
+    async def crawl_with_subpages(
+        self,
+        start_url: str,
+        config: Optional[ScrapeConfig] = None,
+        max_depth: int = 2,
+        same_domain_only: bool = True,
+        rate_limit_seconds: float = 0.5,
+    ) -> List[ScrapedPage]:
+        """
+        Recursively crawl pages following links up to max_depth.
+
+        Args:
+            start_url: The starting URL to crawl
+            config: Scraping configuration
+            max_depth: Maximum depth to crawl (1 = only start page, 2 = start + 1 level, etc.)
+            same_domain_only: Only follow links to the same domain
+            rate_limit_seconds: Delay between requests to avoid overwhelming servers
+
+        Returns:
+            List of scraped pages
+        """
+        if config is None:
+            config = ScrapeConfig()
+
+        visited: Set[str] = set()
+        pages: List[ScrapedPage] = []
+        base_domain = urlparse(start_url).netloc
+
+        async def normalize_url(url: str, base_url: str) -> Optional[str]:
+            """Normalize a URL, handling relative paths."""
+            if not url:
+                return None
+
+            # Handle relative URLs
+            if not url.startswith(('http://', 'https://')):
+                url = urljoin(base_url, url)
+
+            # Parse and validate
+            parsed = urlparse(url)
+            if parsed.scheme not in ['http', 'https']:
+                return None
+
+            # Remove fragments and normalize
+            normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            if parsed.query:
+                normalized += f"?{parsed.query}"
+
+            return normalized
+
+        async def crawl_recursive(url: str, depth: int):
+            """Recursively crawl a URL and its links."""
+            # Stop conditions
+            if depth > max_depth:
+                return
+            if url in visited:
+                return
+            if len(visited) >= config.max_pages:
+                logger.info("Reached max pages limit", max_pages=config.max_pages)
+                return
+
+            # Check domain restriction
+            if same_domain_only:
+                url_domain = urlparse(url).netloc
+                if url_domain != base_domain:
+                    return
+
+            visited.add(url)
+
+            try:
+                logger.debug("Crawling page", url=url, depth=depth, visited=len(visited))
+                page = await self._scrape_url(url, config)
+                pages.append(page)
+
+                # If we haven't reached max depth, crawl child links
+                if depth < max_depth and len(visited) < config.max_pages:
+                    child_links = []
+                    for link in page.links:
+                        normalized = await normalize_url(link, url)
+                        if normalized and normalized not in visited:
+                            child_links.append(normalized)
+
+                    # Crawl child links with rate limiting
+                    for child_url in child_links[:config.max_pages - len(visited)]:
+                        if rate_limit_seconds > 0:
+                            await asyncio.sleep(rate_limit_seconds)
+                        await crawl_recursive(child_url, depth + 1)
+
+            except Exception as e:
+                logger.warning("Failed to crawl page", url=url, error=str(e))
+
+        # Start crawling from depth 1
+        await crawl_recursive(start_url, 1)
+
+        logger.info(
+            "Subpage crawl completed",
+            start_url=start_url,
+            pages_crawled=len(pages),
+            max_depth=max_depth,
+        )
+
+        return pages
+
+    async def run_job_with_subpages(
+        self,
+        job_id: str,
+        crawl_subpages: bool = False,
+        max_depth: int = 2,
+        same_domain_only: bool = True,
+    ) -> ScrapeResult:
+        """
+        Run a scrape job, optionally crawling subpages.
+
+        Args:
+            job_id: The job ID to run
+            crawl_subpages: Whether to crawl linked pages
+            max_depth: Maximum crawl depth if crawl_subpages is True
+            same_domain_only: Only crawl same-domain links
+
+        Returns:
+            ScrapeResult with all scraped pages
+        """
+        job = self._jobs.get(job_id)
+        if not job:
+            raise ValueError(f"Job not found: {job_id}")
+
+        if job.status not in [ScrapeStatus.PENDING, ScrapeStatus.FAILED]:
+            raise ValueError(f"Job is not runnable: {job.status.value}")
+
+        logger.info(
+            "Starting scrape job",
+            job_id=job_id,
+            urls=len(job.urls),
+            crawl_subpages=crawl_subpages,
+            max_depth=max_depth if crawl_subpages else 1,
+        )
+
+        job.status = ScrapeStatus.SCRAPING
+        all_pages: List[ScrapedPage] = []
+        total_words = 0
+
+        for url in job.urls:
+            try:
+                if crawl_subpages:
+                    # Crawl with subpages
+                    pages = await self.crawl_with_subpages(
+                        start_url=url,
+                        config=job.config,
+                        max_depth=max_depth,
+                        same_domain_only=same_domain_only,
+                    )
+                    all_pages.extend(pages)
+                    job.pages_scraped += len(pages)
+                    for page in pages:
+                        total_words += page.word_count
+                else:
+                    # Single page scrape
+                    page = await self._scrape_url(url, job.config)
+                    all_pages.append(page)
+                    job.pages_scraped += 1
+                    total_words += page.word_count
+
+                logger.debug(
+                    "Scraped URL",
+                    url=url,
+                    pages=len(all_pages),
+                )
+
+            except Exception as e:
+                logger.error("Failed to scrape URL", url=url, error=str(e))
+                job.pages_failed += 1
+
+        job.pages = all_pages
+        job.status = ScrapeStatus.COMPLETED
+        job.completed_at = datetime.utcnow()
+
+        logger.info(
+            "Scrape job completed",
+            job_id=job_id,
+            pages_scraped=job.pages_scraped,
+            pages_failed=job.pages_failed,
+            total_words=total_words,
+        )
+
+        return ScrapeResult(
+            success=job.pages_scraped > 0,
+            job_id=job_id,
+            pages_scraped=job.pages_scraped,
+            pages_failed=job.pages_failed,
+            content=all_pages,
+            total_word_count=total_words,
+        )
 
     def to_rag_documents(
         self,

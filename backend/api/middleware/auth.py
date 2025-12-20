@@ -78,19 +78,6 @@ def decode_jwt_token(token: str, allow_expired: bool = False) -> dict:
     Raises:
         HTTPException: If token is invalid or expired (when allow_expired=False)
     """
-    dev_mode = os.getenv("DEV_MODE", "").lower() == "true"
-
-    # Development mode: allow dev tokens
-    if dev_mode and token.startswith("dev-token-"):
-        logger.warning("Using development token bypass - DO NOT USE IN PRODUCTION")
-        return {
-            "sub": "550e8400-e29b-41d4-a716-446655440000",
-            "email": "admin@example.com",
-            "role": "admin",
-            "access_tier": 100,
-            "exp": 9999999999,
-        }
-
     try:
         # Build decode options
         options = {}
@@ -105,30 +92,7 @@ def decode_jwt_token(token: str, allow_expired: bool = False) -> dict:
             detail="Token has expired",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except jwt.InvalidTokenError as e:
-        # In dev mode, try to decode without verification and return mock user
-        if dev_mode:
-            logger.warning(f"DEV MODE: JWT validation failed ({e}), using mock admin user")
-            # Try to decode without verification to get claims
-            try:
-                unverified = jwt.decode(token, options={"verify_signature": False})
-                return {
-                    "sub": unverified.get("id", "550e8400-e29b-41d4-a716-446655440000"),
-                    "email": unverified.get("email", "admin@example.com"),
-                    "role": unverified.get("role", "admin"),
-                    "access_tier": unverified.get("accessTier", 100),
-                    "exp": 9999999999,
-                }
-            except Exception:
-                pass
-            # Fallback to default admin
-            return {
-                "sub": "550e8400-e29b-41d4-a716-446655440000",
-                "email": "admin@example.com",
-                "role": "admin",
-                "access_tier": 100,
-                "exp": 9999999999,
-            }
+    except jwt.InvalidTokenError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",

@@ -7,6 +7,9 @@ Multiple LLMs work together for higher quality output:
 - Generator: Primary LLM creates initial response
 - Critic/Reviewer: Second LLM reviews and suggests improvements
 - Synthesizer: Combines feedback into final output
+
+LLM provider and model are configured via Admin UI (Operation-Level Config).
+Configure the "collaboration" operation in Admin > Settings > LLM Configuration.
 """
 
 import asyncio
@@ -21,7 +24,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
 
-from backend.services.llm import get_chat_model, LLMConfig
+from backend.services.llm import EnhancedLLMFactory
 
 logger = structlog.get_logger(__name__)
 
@@ -281,15 +284,12 @@ class CollaborationService:
         logger.info("Generating initial content", session_id=state["session_id"])
 
         try:
-            config = state["config"]
-            generator_config = config.get("generator", {})
-
-            # Get LLM
-            llm = get_chat_model(
-                provider=generator_config.get("provider", "openai"),
-                model=generator_config.get("model", "gpt-4"),
-                temperature=generator_config.get("temperature", 0.7),
+            # Get LLM using database-driven configuration
+            llm, llm_config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="collaboration",
+                user_id=None,  # System-level operation
             )
+            model_name = llm_config.model if llm_config else "unknown"
 
             # Build prompt
             messages = [
@@ -308,7 +308,7 @@ class CollaborationService:
             state["current_draft"] = response.content
             state["generations"].append({
                 "role": "generator",
-                "model": generator_config.get("model", "gpt-4"),
+                "model": model_name,
                 "content": response.content,
                 "timestamp": datetime.utcnow().isoformat(),
             })
@@ -326,14 +326,13 @@ class CollaborationService:
 
         try:
             config = state["config"]
-            critic_config = config.get("critic", {})
 
-            # Get LLM
-            llm = get_chat_model(
-                provider=critic_config.get("provider", "openai"),
-                model=critic_config.get("model", "gpt-4"),
-                temperature=critic_config.get("temperature", 0.3),
+            # Get LLM using database-driven configuration
+            llm, llm_config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="collaboration",
+                user_id=None,  # System-level operation
             )
+            model_name = llm_config.model if llm_config else "unknown"
 
             # Build prompt
             messages = [
@@ -350,7 +349,7 @@ class CollaborationService:
             # Update state
             state["critiques"].append({
                 "iteration": state["iteration"],
-                "model": critic_config.get("model", "gpt-4"),
+                "model": model_name,
                 "content": response.content,
                 "score": critique.overall_score,
                 "should_revise": critique.should_revise,
@@ -374,15 +373,12 @@ class CollaborationService:
         logger.info("Revising content", session_id=state["session_id"], iteration=state["iteration"])
 
         try:
-            config = state["config"]
-            generator_config = config.get("generator", {})
-
-            # Get LLM
-            llm = get_chat_model(
-                provider=generator_config.get("provider", "openai"),
-                model=generator_config.get("model", "gpt-4"),
-                temperature=generator_config.get("temperature", 0.7),
+            # Get LLM using database-driven configuration
+            llm, llm_config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="collaboration",
+                user_id=None,  # System-level operation
             )
+            model_name = llm_config.model if llm_config else "unknown"
 
             # Get latest critique
             latest_critique = state["critiques"][-1] if state["critiques"] else None
@@ -413,7 +409,7 @@ Please produce an improved version that addresses the feedback while maintaining
             state["current_draft"] = response.content
             state["generations"].append({
                 "role": "reviser",
-                "model": generator_config.get("model", "gpt-4"),
+                "model": model_name,
                 "content": response.content,
                 "iteration": state["iteration"],
                 "timestamp": datetime.utcnow().isoformat(),
@@ -431,15 +427,12 @@ Please produce an improved version that addresses the feedback while maintaining
         logger.info("Synthesizing final output", session_id=state["session_id"])
 
         try:
-            config = state["config"]
-            synthesizer_config = config.get("synthesizer", {})
-
-            # Get LLM
-            llm = get_chat_model(
-                provider=synthesizer_config.get("provider", "openai"),
-                model=synthesizer_config.get("model", "gpt-4"),
-                temperature=synthesizer_config.get("temperature", 0.5),
+            # Get LLM using database-driven configuration
+            llm, llm_config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="collaboration",
+                user_id=None,  # System-level operation
             )
+            model_name = llm_config.model if llm_config else "unknown"
 
             # Build synthesis prompt
             all_critiques = "\n\n".join([
@@ -469,7 +462,7 @@ Produce the best possible final version that incorporates all valuable feedback.
             state["final_output"] = response.content
             state["generations"].append({
                 "role": "synthesizer",
-                "model": synthesizer_config.get("model", "gpt-4"),
+                "model": model_name,
                 "content": response.content,
                 "timestamp": datetime.utcnow().isoformat(),
             })
@@ -696,11 +689,12 @@ Produce the best possible final version that incorporates all valuable feedback.
     async def _run_single(self, session: CollaborationSession) -> CollaborationSession:
         """Run single LLM mode (no collaboration)."""
         try:
-            llm = get_chat_model(
-                provider=session.config.generator.provider,
-                model=session.config.generator.model,
-                temperature=session.config.generator.temperature,
+            # Get LLM using database-driven configuration
+            llm, llm_config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="collaboration",
+                user_id=None,  # System-level operation
             )
+            model_name = llm_config.model if llm_config else "unknown"
 
             messages = [
                 SystemMessage(content=GENERATOR_SYSTEM_PROMPT),
@@ -715,7 +709,7 @@ Produce the best possible final version that incorporates all valuable feedback.
 
             session.initial_generation = GenerationResult(
                 role=CollaborationRole.GENERATOR,
-                model=session.config.generator.model,
+                model=model_name,
                 content=response.content,
             )
             session.final_output = response.content

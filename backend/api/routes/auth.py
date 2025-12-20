@@ -14,8 +14,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
 import structlog
 import jwt
-import hashlib
 import os
+from passlib.context import CryptContext
 
 logger = structlog.get_logger(__name__)
 
@@ -28,6 +28,9 @@ JWT_EXPIRATION_HOURS = 24
 
 # Security
 security = HTTPBearer(auto_error=False)
+
+# Password hashing with bcrypt
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # =============================================================================
@@ -88,12 +91,13 @@ class RefreshTokenRequest(BaseModel):
 # =============================================================================
 
 # In-memory user store for development
+# NOTE: These passwords are hashed with bcrypt for security
 _users: dict = {
     "admin@example.com": {
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "email": "admin@example.com",
         "full_name": "Admin User",
-        "password_hash": hashlib.sha256("admin123".encode()).hexdigest(),
+        "password_hash": pwd_context.hash("admin123"),
         "role": "admin",
         "access_tier": 100,
         "is_active": True,
@@ -103,7 +107,7 @@ _users: dict = {
         "id": "550e8400-e29b-41d4-a716-446655440001",
         "email": "user@example.com",
         "full_name": "Test User",
-        "password_hash": hashlib.sha256("user123".encode()).hexdigest(),
+        "password_hash": pwd_context.hash("user123"),
         "role": "user",
         "access_tier": 30,
         "is_active": True,
@@ -117,13 +121,13 @@ _users: dict = {
 # =============================================================================
 
 def hash_password(password: str) -> str:
-    """Hash a password using SHA-256."""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash a password using bcrypt."""
+    return pwd_context.hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """Verify a password against its hash."""
-    return hash_password(password) == password_hash
+    """Verify a password against its bcrypt hash."""
+    return pwd_context.verify(password, password_hash)
 
 
 def create_access_token(user_id: str, email: str, role: str, access_tier: int) -> str:

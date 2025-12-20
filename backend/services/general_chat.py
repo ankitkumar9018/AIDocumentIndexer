@@ -218,13 +218,23 @@ class GeneralChatService:
         )
 
 
-# Singleton instance
+# Singleton instance with thread-safe initialization
+import threading
+
 _general_chat_service: Optional[GeneralChatService] = None
+_general_chat_lock = threading.Lock()
 
 
 def get_general_chat_service() -> GeneralChatService:
-    """Get or create the general chat service singleton."""
+    """Get or create the general chat service singleton (thread-safe)."""
     global _general_chat_service
-    if _general_chat_service is None:
-        _general_chat_service = GeneralChatService()
-    return _general_chat_service
+
+    # Fast path for existing service
+    if _general_chat_service is not None:
+        return _general_chat_service
+
+    with _general_chat_lock:
+        # Double-check after acquiring lock
+        if _general_chat_service is None:
+            _general_chat_service = GeneralChatService()
+        return _general_chat_service

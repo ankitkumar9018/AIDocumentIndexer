@@ -17,9 +17,13 @@ import {
   Trash2,
   Play,
   RefreshCw,
+  Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Slider } from "@/components/ui/slider";
+import { Label } from "@/components/ui/label";
 import {
   Card,
   CardContent,
@@ -48,6 +52,11 @@ export default function ScraperPage() {
   const [mode, setMode] = useState<ScrapeMode>("immediate");
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
 
+  // Subpage crawling options
+  const [crawlSubpages, setCrawlSubpages] = useState(false);
+  const [maxDepth, setMaxDepth] = useState(2);
+  const [sameDomainOnly, setSameDomainOnly] = useState(true);
+
   // Queries - only fetch when authenticated
   const { data: jobs, isLoading: jobsLoading, refetch: refetchJobs } = useScrapeJobs(undefined, 50, { enabled: isAuthenticated });
   const { data: selectedJob } = useScrapeJob(selectedJobId || "");
@@ -71,9 +80,17 @@ export default function ScraperPage() {
           const job = await createJob.mutateAsync({
             urls: [url],
             storage_mode: "permanent",
+            crawl_subpages: crawlSubpages,
+            max_depth: maxDepth,
+            same_domain_only: sameDomainOnly,
           });
           setSelectedJobId(job.id);
-          await runJob.mutateAsync(job.id);
+          await runJob.mutateAsync({
+            jobId: job.id,
+            crawlSubpages,
+            maxDepth,
+            sameDomainOnly,
+          });
           break;
         case "query":
           if (!query) return;
@@ -200,12 +217,71 @@ export default function ScraperPage() {
             />
           )}
 
+          {/* Subpage Crawling Options (for job mode) */}
+          {mode === "job" && (
+            <div className="space-y-4 p-4 rounded-lg bg-muted/50">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Layers className="h-4 w-4 text-muted-foreground" />
+                  <Label htmlFor="crawl-subpages" className="text-sm font-medium">
+                    Crawl Subpages
+                  </Label>
+                </div>
+                <Switch
+                  id="crawl-subpages"
+                  checked={crawlSubpages}
+                  onCheckedChange={setCrawlSubpages}
+                />
+              </div>
+
+              {crawlSubpages && (
+                <div className="space-y-4 pl-6 border-l-2 border-primary/20">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm">Max Depth: {maxDepth}</Label>
+                      <span className="text-xs text-muted-foreground">
+                        {maxDepth === 1 ? "Only starting page" : `Up to ${maxDepth} levels deep`}
+                      </span>
+                    </div>
+                    <Slider
+                      min={1}
+                      max={5}
+                      step={1}
+                      value={[maxDepth]}
+                      onValueChange={(value) => setMaxDepth(value[0])}
+                      className="w-full"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="same-domain" className="text-sm">
+                      Same domain only
+                    </Label>
+                    <Switch
+                      id="same-domain"
+                      checked={sameDomainOnly}
+                      onCheckedChange={setSameDomainOnly}
+                    />
+                  </div>
+
+                  <p className="text-xs text-muted-foreground">
+                    {sameDomainOnly
+                      ? "Only pages from the same domain will be crawled"
+                      : "Warning: Pages from any domain will be crawled"}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Mode Descriptions */}
           <p className="text-sm text-muted-foreground">
             {mode === "immediate" &&
               "Quick scrape extracts content without saving to the index."}
-            {mode === "job" &&
+            {mode === "job" && !crawlSubpages &&
               "Save to index permanently stores the scraped content for RAG queries."}
+            {mode === "job" && crawlSubpages &&
+              `Crawl and save up to ${maxDepth} levels of linked pages to the index.`}
             {mode === "query" &&
               "Scrape & query extracts content and immediately answers your question."}
             {mode === "links" &&
@@ -295,16 +371,40 @@ export default function ScraperPage() {
               </div>
             ) : scrapeAndQuery.data ? (
               <div className="space-y-4">
-                <div>
-                  <h4 className="font-medium mb-2">Content</h4>
-                  <p className="text-sm">{scrapeAndQuery.data.content?.slice(0, 500)}...</p>
-                </div>
+                {/* Answer - shown first and prominently */}
+                {scrapeAndQuery.data.answer && (
+                  <div>
+                    <h4 className="font-medium mb-2">Answer</h4>
+                    <div className="text-sm bg-muted/50 p-3 rounded-lg whitespace-pre-wrap">
+                      {scrapeAndQuery.data.answer}
+                    </div>
+                  </div>
+                )}
+                {/* Source info */}
                 <div>
                   <h4 className="font-medium mb-2">Source</h4>
-                  <p className="text-sm text-muted-foreground">
-                    {scrapeAndQuery.data.title || "Unknown"}
+                  <a
+                    href={scrapeAndQuery.data.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-primary hover:underline flex items-center gap-1"
+                  >
+                    {scrapeAndQuery.data.title || scrapeAndQuery.data.url}
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {scrapeAndQuery.data.word_count} words | Model: {scrapeAndQuery.data.model || "default"}
                   </p>
                 </div>
+                {/* Collapsible raw content */}
+                <details className="text-sm">
+                  <summary className="cursor-pointer font-medium text-muted-foreground hover:text-foreground">
+                    View scraped content
+                  </summary>
+                  <p className="mt-2 text-muted-foreground line-clamp-6">
+                    {scrapeAndQuery.data.content?.slice(0, 1000)}...
+                  </p>
+                </details>
               </div>
             ) : extractLinks.data ? (
               <div className="space-y-2">

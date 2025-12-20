@@ -41,6 +41,7 @@ import {
   useChatSession,
   useCreateChatSession,
   useDeleteChatSession,
+  useDeleteAllChatSessions,
   useSendChatMessage,
 } from "@/lib/api";
 import {
@@ -140,7 +141,7 @@ export default function ChatPage() {
 
   // Queries - wait for auth to be ready before making API calls
   const { data: sessions } = useChatSessions(undefined, { enabled: isAuthenticated });
-  const { data: currentSession } = useChatSession(currentSessionId || "");
+  const { data: currentSession, error: sessionError } = useChatSession(currentSessionId);
   const { data: providersData } = useLLMProviders({ enabled: isAuthenticated });
   const { data: sessionLLMConfig, refetch: refetchSessionLLM } = useSessionLLMConfig(
     currentSessionId || "",
@@ -149,6 +150,17 @@ export default function ChatPage() {
 
   // Agent mode query
   const { data: agentModeData } = useAgentMode(currentSessionId || undefined, { enabled: isAuthenticated });
+
+  // Handle 404 errors - session doesn't exist, clear and start fresh
+  useEffect(() => {
+    if (sessionError && typeof sessionError === 'object' && 'status' in sessionError) {
+      const status = (sessionError as { status: number }).status;
+      if (status === 404 && currentSessionId) {
+        console.log('[Chat] Session not found, clearing session ID');
+        setCurrentSessionId(null);
+      }
+    }
+  }, [sessionError, currentSessionId]);
 
   // Sync messages when session data is loaded from history
   // Only runs when user explicitly clicks a history session (shouldLoadHistory flag)
@@ -169,6 +181,7 @@ export default function ChatPage() {
   // Mutations
   const createSession = useCreateChatSession();
   const deleteSession = useDeleteChatSession();
+  const deleteAllSessions = useDeleteAllChatSessions();
   const sendMessage = useSendChatMessage();
   const setSessionLLM = useSetSessionLLMConfig();
   const approveExecution = useApproveAgentExecution();
@@ -410,7 +423,7 @@ export default function ChatPage() {
               if (chunk.data && Array.isArray(chunk.data)) {
                 const newSources: Source[] = chunk.data.map((s: Record<string, unknown>) => ({
                   documentId: (s.document_id as string) || (s.source as string) || "unknown",
-                  filename: (s.source as string) || (s.document_name as string) || "Document",
+                  filename: (s.document_name as string) || (s.source as string) || "Document",
                   pageNumber: s.page_number as number | undefined,
                   snippet: ((s.content as string) || "").substring(0, 200),
                   similarity: (s.score as number) || 0,
@@ -1012,8 +1025,33 @@ export default function ChatPage() {
         {/* History Dropdown */}
         {showHistory && sessions && sessions.sessions?.length > 0 && (
           <Card className="absolute z-10 top-32 right-6 w-80 p-2 shadow-lg">
-            <div className="text-sm font-medium px-2 py-1 text-muted-foreground">
-              Recent Conversations
+            <div className="flex items-center justify-between px-2 py-1">
+              <span className="text-sm font-medium text-muted-foreground">
+                Recent Conversations
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 text-xs text-destructive hover:text-destructive"
+                onClick={() => {
+                  if (confirm(`Delete all ${sessions.sessions.length} conversations? This cannot be undone.`)) {
+                    deleteAllSessions.mutate(undefined, {
+                      onSuccess: () => {
+                        setCurrentSessionId(null);
+                        setMessages([{
+                          id: "welcome",
+                          role: "assistant",
+                          content: "Hello! I'm your AI document assistant. I can help you find information across your document archive, answer questions, and even help generate new content. What would you like to know?",
+                          timestamp: new Date(),
+                        }]);
+                      },
+                    });
+                  }
+                }}
+                disabled={deleteAllSessions.isPending}
+              >
+                {deleteAllSessions.isPending ? "Clearing..." : "Clear All"}
+              </Button>
             </div>
             <ScrollArea className="max-h-64">
               {sessions.sessions.map((session: { id: string; title: string; created_at: string }) => (

@@ -22,16 +22,14 @@ from backend.services.response_cache import get_response_cache_service, Response
 from backend.db.database import async_session_context, get_async_session
 from backend.db.models import ChatSession as ChatSessionModel, ChatMessage as ChatMessageModel, MessageRole
 from backend.services.agent_orchestrator import AgentOrchestrator, create_orchestrator
+from backend.api.middleware.auth import AuthenticatedUser
 
 logger = structlog.get_logger(__name__)
-
-# Default user ID for development (will be replaced when auth is enabled)
-DEFAULT_USER_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 router = APIRouter()
 
 
-async def get_or_create_session(db, session_id: UUID, user_id: str = DEFAULT_USER_ID) -> ChatSessionModel:
+async def get_or_create_session(db, session_id: UUID, user_id: str) -> ChatSessionModel:
     """Get existing session or create a new one."""
     query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
     result = await db.execute(query)
@@ -206,7 +204,7 @@ class SessionMessagesResponse(BaseModel):
 @router.post("/completions", response_model=ChatResponse)
 async def create_chat_completion(
     request: ChatRequest,
-    # user = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """
     Create a chat completion.
@@ -253,7 +251,7 @@ async def create_chat_completion(
                 async for update in orchestrator.process_request(
                     request=request.message,
                     session_id=str(session_id),
-                    user_id=DEFAULT_USER_ID,
+                    user_id=user.user_id,
                     show_cost_estimation=True,
                     require_approval_above_usd=1.0,
                     context=agent_context,
@@ -447,7 +445,7 @@ async def create_chat_completion(
 @router.post("/completions/stream")
 async def create_streaming_completion(
     request: ChatRequest,
-    # user = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """
     Create a streaming chat completion.
@@ -469,7 +467,7 @@ async def create_streaming_completion(
     async def generate_agent_stream() -> AsyncGenerator[str, None]:
         """Generate streaming response using Agent orchestrator."""
         session_id = request.session_id or uuid4()
-        user_id = DEFAULT_USER_ID  # TODO: Use actual user from auth
+        user_id = user.user_id
 
         # Send session info first
         yield f"data: {json.dumps({'type': 'session', 'session_id': str(session_id)})}\n\n"
@@ -644,9 +642,9 @@ async def create_streaming_completion(
 
 @router.get("/sessions", response_model=SessionListResponse)
 async def list_sessions(
+    user: AuthenticatedUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
-    # user = Depends(get_current_user),
 ):
     """
     List user's chat sessions.
@@ -657,7 +655,7 @@ async def list_sessions(
         async with async_session_context() as db:
             # Get total count
             count_query = select(func.count(ChatSessionModel.id)).where(
-                ChatSessionModel.user_id == DEFAULT_USER_ID,
+                ChatSessionModel.user_id == user.user_id,
                 ChatSessionModel.is_active == True,
             )
             result = await db.execute(count_query)
@@ -668,7 +666,7 @@ async def list_sessions(
             sessions_query = (
                 select(ChatSessionModel)
                 .where(
-                    ChatSessionModel.user_id == DEFAULT_USER_ID,
+                    ChatSessionModel.user_id == user.user_id,
                     ChatSessionModel.is_active == True,
                 )
                 .order_by(ChatSessionModel.updated_at.desc())
@@ -709,7 +707,7 @@ async def list_sessions(
 @router.get("/sessions/{session_id}", response_model=SessionMessagesResponse)
 async def get_session(
     session_id: UUID,
-    # user = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """
     Get all messages in a chat session.
@@ -758,7 +756,7 @@ async def get_session(
 @router.delete("/sessions/{session_id}")
 async def delete_session(
     session_id: UUID,
-    # user = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """
     Delete a chat session and all its messages.
@@ -788,11 +786,94 @@ async def delete_session(
         raise HTTPException(status_code=500, detail=f"Failed to delete session: {str(e)}")
 
 
+@router.delete("/sessions")
+async def delete_all_sessions(
+    user: AuthenticatedUser,
+    confirm: bool = Query(False, description="Must be true to confirm deletion"),
+):
+    """
+    Delete all chat sessions for the current user.
+
+    Requires confirm=true query parameter to prevent accidental deletion.
+    """
+    logger.info("Deleting all chat sessions for user", user_id=user.user_id, confirm=confirm)
+
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Must confirm deletion with confirm=true query parameter"
+        )
+
+    try:
+        async with async_session_context() as db:
+            from sqlalchemy import delete
+
+            # Delete all sessions for user (cascade will delete messages)
+            result = await db.execute(
+                delete(ChatSessionModel).where(ChatSessionModel.user_id == user.user_id)
+            )
+            await db.commit()
+
+            deleted_count = result.rowcount
+            logger.info("Deleted all sessions for user", user_id=user.user_id, deleted_count=deleted_count)
+
+            return {"message": "All sessions deleted", "deleted_count": deleted_count}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete all sessions", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete all sessions: {str(e)}")
+
+
+class BulkDeleteRequest(BaseModel):
+    """Request to bulk delete sessions."""
+    session_ids: List[UUID]
+
+
+@router.post("/sessions/bulk-delete")
+async def bulk_delete_sessions(
+    request: BulkDeleteRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Delete multiple chat sessions at once.
+
+    Only deletes sessions owned by the current user.
+    """
+    logger.info("Bulk deleting chat sessions", user_id=user.user_id, count=len(request.session_ids))
+
+    if not request.session_ids:
+        return {"message": "No sessions to delete", "deleted_count": 0}
+
+    try:
+        async with async_session_context() as db:
+            from sqlalchemy import delete
+
+            # Delete specified sessions that belong to the user
+            result = await db.execute(
+                delete(ChatSessionModel).where(
+                    ChatSessionModel.id.in_(request.session_ids),
+                    ChatSessionModel.user_id == user.user_id,
+                )
+            )
+            await db.commit()
+
+            deleted_count = result.rowcount
+            logger.info("Bulk deleted sessions", user_id=user.user_id, deleted_count=deleted_count)
+
+            return {"message": "Sessions deleted", "deleted_count": deleted_count}
+
+    except Exception as e:
+        logger.error("Failed to bulk delete sessions", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to bulk delete sessions: {str(e)}")
+
+
 @router.patch("/sessions/{session_id}/title")
 async def update_session_title(
     session_id: UUID,
+    user: AuthenticatedUser,
     title: str = Query(..., min_length=1, max_length=200),
-    # user = Depends(get_current_user),
 ):
     """
     Update the title of a chat session.
@@ -824,8 +905,8 @@ async def update_session_title(
 
 @router.post("/sessions/new", response_model=SessionResponse)
 async def create_session(
+    user: AuthenticatedUser,
     title: Optional[str] = None,
-    # user = Depends(get_current_user),
 ):
     """
     Create a new chat session.
@@ -836,7 +917,7 @@ async def create_session(
         async with async_session_context() as db:
             # Create new session in database
             new_session = ChatSessionModel(
-                user_id=DEFAULT_USER_ID,
+                user_id=user.user_id,
                 title=title or "New Conversation",
                 is_active=True,
             )
@@ -859,10 +940,10 @@ async def create_session(
 
 @router.post("/feedback")
 async def submit_feedback(
+    user: AuthenticatedUser,
     message_id: UUID,
     rating: int = Query(..., ge=1, le=5),
     comment: Optional[str] = None,
-    # user = Depends(get_current_user),
 ):
     """
     Submit feedback for a chat response.
@@ -910,7 +991,7 @@ class SessionLLMOverrideResponse(BaseModel):
 @router.get("/sessions/{session_id}/llm", response_model=SessionLLMOverrideResponse)
 async def get_session_llm_override(
     session_id: UUID,
-    # user = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """
     Get the LLM configuration for a specific chat session.
@@ -969,7 +1050,7 @@ async def get_session_llm_override(
 async def set_session_llm_override(
     session_id: UUID,
     override_data: SessionLLMOverrideRequest,
-    # user = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """
     Set the LLM provider for a specific chat session.
@@ -1045,7 +1126,7 @@ async def set_session_llm_override(
 @router.delete("/sessions/{session_id}/llm")
 async def delete_session_llm_override(
     session_id: UUID,
-    # user = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """
     Remove the LLM override for a chat session.

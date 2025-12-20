@@ -37,6 +37,12 @@ import {
   Clock,
   Zap,
   AlertTriangle,
+  Tag,
+  PenTool,
+  Users,
+  Globe,
+  Workflow,
+  Play,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1888,6 +1894,13 @@ const OPERATION_ICONS: Record<string, React.ReactNode> = {
   document_processing: <FileText className="h-4 w-4" />,
   rag: <Sparkles className="h-4 w-4" />,
   summarization: <FileText className="h-4 w-4" />,
+  document_enhancement: <Sparkles className="h-4 w-4" />,
+  auto_tagging: <Tag className="h-4 w-4" />,
+  content_generation: <PenTool className="h-4 w-4" />,
+  collaboration: <Users className="h-4 w-4" />,
+  web_scraping: <Globe className="h-4 w-4" />,
+  agent_planning: <Workflow className="h-4 w-4" />,
+  agent_execution: <Play className="h-4 w-4" />,
 };
 
 const OPERATION_LABELS: Record<string, string> = {
@@ -1896,6 +1909,13 @@ const OPERATION_LABELS: Record<string, string> = {
   document_processing: "Document Processing",
   rag: "RAG",
   summarization: "Summarization",
+  document_enhancement: "Document Enhancement",
+  auto_tagging: "Auto Tagging",
+  content_generation: "Content Generation",
+  collaboration: "Model Collaboration",
+  web_scraping: "Web Scraping",
+  agent_planning: "Agent Planning",
+  agent_execution: "Agent Execution",
 };
 
 function OperationLevelConfigCard({ providers }: { providers: LLMProvider[] }) {
@@ -1931,7 +1951,6 @@ function OperationLevelConfigCard({ providers }: { providers: LLMProvider[] }) {
     await setOperationConfig.mutateAsync({
       operationType,
       data: {
-        operation_type: operationType,
         provider_id: config.provider_id,
         model_override: config.model_override || undefined,
       },
@@ -2011,6 +2030,15 @@ function OperationLevelConfigCard({ providers }: { providers: LLMProvider[] }) {
                             </option>
                           ))}
                         </select>
+                        <Input
+                          placeholder="Model override (optional)"
+                          className="h-8 w-40"
+                          value={localConfig.model_override || ""}
+                          onChange={(e) => setOperationConfigs(prev => ({
+                            ...prev,
+                            [operationType]: { ...prev[operationType], model_override: e.target.value },
+                          }))}
+                        />
                         <Button
                           size="sm"
                           variant="default"

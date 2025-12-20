@@ -1,12 +1,23 @@
 "use client";
 
 import * as React from "react";
-import { Plus, MessageSquare, Trash2, MoreHorizontal } from "lucide-react";
+import { Plus, MessageSquare, Trash2, AlertTriangle } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { formatRelativeTime } from "@/lib/utils";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 
 export interface ChatSession {
   id: string;
@@ -22,6 +33,8 @@ interface ChatHistoryProps {
   onSelectSession: (sessionId: string) => void;
   onNewSession: () => void;
   onDeleteSession: (sessionId: string) => void;
+  onDeleteAllSessions?: () => void;
+  isDeleting?: boolean;
   className?: string;
 }
 
@@ -31,21 +44,69 @@ export function ChatHistory({
   onSelectSession,
   onNewSession,
   onDeleteSession,
+  onDeleteAllSessions,
+  isDeleting = false,
   className,
 }: ChatHistoryProps) {
+  const [showClearAllDialog, setShowClearAllDialog] = React.useState(false);
+
+  const handleClearAll = () => {
+    if (onDeleteAllSessions) {
+      onDeleteAllSessions();
+    }
+    setShowClearAllDialog(false);
+  };
+
   return (
     <div className={cn("flex flex-col h-full border-r", className)}>
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b">
         <h3 className="font-semibold">Chat History</h3>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onNewSession}
-          title="New chat"
-        >
-          <Plus className="h-5 w-5" />
-        </Button>
+        <div className="flex gap-1">
+          {sessions.length > 0 && onDeleteAllSessions && (
+            <AlertDialog open={showClearAllDialog} onOpenChange={setShowClearAllDialog}>
+              <AlertDialogTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  title="Clear all history"
+                  disabled={isDeleting}
+                >
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle className="flex items-center gap-2">
+                    <AlertTriangle className="h-5 w-5 text-destructive" />
+                    Clear All Chat History
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will permanently delete all {sessions.length} chat session{sessions.length !== 1 ? 's' : ''} and their messages.
+                    This action cannot be undone.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={handleClearAll}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  >
+                    Delete All
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onNewSession}
+            title="New chat"
+          >
+            <Plus className="h-5 w-5" />
+          </Button>
+        </div>
       </div>
 
       {/* Sessions List */}

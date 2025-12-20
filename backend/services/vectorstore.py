@@ -57,6 +57,10 @@ class SearchResult:
     section_title: Optional[str] = None
     collection: Optional[str] = None  # Collection/tag for document grouping
 
+    # Enhanced metadata (from LLM analysis)
+    enhanced_summary: Optional[str] = None
+    enhanced_keywords: Optional[List[str]] = None
+
 
 @dataclass
 class VectorStoreConfig:
@@ -74,6 +78,10 @@ class VectorStoreConfig:
     enable_reranking: bool = True  # Enabled by default for better accuracy
     rerank_top_k: int = 20  # Fetch more candidates for reranking
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # Fast, accurate reranker
+
+    # Enhanced metadata search (from LLM document analysis)
+    use_enhanced_search: bool = True  # Search summaries, keywords, hypothetical questions
+    enhanced_weight: float = 0.3  # Weight for enhanced metadata matches in RRF
 
 
 # =============================================================================
@@ -424,6 +432,140 @@ class VectorStore:
             async with async_session_context() as db:
                 return await _search(db)
 
+    async def enhanced_metadata_search(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        access_tier_level: int = 100,
+        document_ids: Optional[List[str]] = None,
+        session: Optional[AsyncSession] = None,
+    ) -> List[SearchResult]:
+        """
+        Search documents using enhanced metadata (summaries, keywords, questions).
+
+        This searches the LLM-extracted metadata stored in Document.enhanced_metadata
+        including summaries, keywords, topics, and hypothetical questions.
+
+        Args:
+            query: Search query string
+            top_k: Number of results to return
+            access_tier_level: Maximum access tier level for filtering
+            document_ids: Optional list of document IDs to search within
+            session: Optional existing database session
+
+        Returns:
+            List of SearchResult objects (one per matching document)
+        """
+        top_k = top_k or self.config.default_top_k
+
+        async def _search(db: AsyncSession) -> List[SearchResult]:
+            # Get documents with enhanced metadata
+            base_query = (
+                select(Document)
+                .where(Document.enhanced_metadata.isnot(None))
+                .where(Document.processing_status == "completed")
+            )
+
+            # Filter by document IDs if provided
+            if document_ids:
+                doc_uuids = [uuid.UUID(d) for d in document_ids]
+                base_query = base_query.where(Document.id.in_(doc_uuids))
+
+            result = await db.execute(base_query)
+            documents = result.scalars().all()
+
+            if not documents:
+                return []
+
+            # Score each document based on query match to enhanced metadata
+            query_lower = query.lower()
+            query_terms = set(query_lower.split())
+            scored_docs = []
+
+            for doc in documents:
+                metadata = doc.enhanced_metadata or {}
+                score = 0.0
+
+                # Search in summary
+                summary_short = (metadata.get("summary_short") or "").lower()
+                summary_detailed = (metadata.get("summary_detailed") or "").lower()
+                if query_lower in summary_short:
+                    score += 0.5
+                if query_lower in summary_detailed:
+                    score += 0.3
+
+                # Search in keywords
+                keywords = [k.lower() for k in metadata.get("keywords", [])]
+                keyword_matches = sum(1 for term in query_terms if any(term in k for k in keywords))
+                score += keyword_matches * 0.2
+
+                # Search in topics
+                topics = [t.lower() for t in metadata.get("topics", [])]
+                topic_matches = sum(1 for term in query_terms if any(term in t for t in topics))
+                score += topic_matches * 0.15
+
+                # Search in hypothetical questions
+                questions = [q.lower() for q in metadata.get("hypothetical_questions", [])]
+                for question in questions:
+                    # Check for query term overlap with questions
+                    question_terms = set(question.split())
+                    overlap = len(query_terms & question_terms)
+                    if overlap > 0:
+                        score += overlap * 0.1
+
+                # Search in entities
+                entities = metadata.get("entities", {})
+                for entity_type, entity_list in entities.items():
+                    entity_values = [e.lower() for e in entity_list]
+                    entity_matches = sum(1 for term in query_terms if any(term in e for e in entity_values))
+                    score += entity_matches * 0.1
+
+                if score > 0:
+                    scored_docs.append((doc, score, metadata))
+
+            # Sort by score and take top_k
+            scored_docs.sort(key=lambda x: x[1], reverse=True)
+            top_docs = scored_docs[:top_k]
+
+            # Convert to SearchResult (using first chunk as representative)
+            results = []
+            for doc, score, metadata in top_docs:
+                # Get first chunk for content preview
+                chunk_result = await db.execute(
+                    select(Chunk)
+                    .where(Chunk.document_id == doc.id)
+                    .order_by(Chunk.chunk_index)
+                    .limit(1)
+                )
+                first_chunk = chunk_result.scalar_one_or_none()
+
+                summary = metadata.get("summary_detailed") or metadata.get("summary_short") or ""
+                content = summary if summary else (first_chunk.content if first_chunk else "")
+
+                results.append(SearchResult(
+                    chunk_id=str(first_chunk.id) if first_chunk else "",
+                    document_id=str(doc.id),
+                    content=content,
+                    score=score,
+                    metadata={
+                        "search_type": "enhanced",
+                        "topics": metadata.get("topics", []),
+                        "document_type": metadata.get("document_type"),
+                    },
+                    document_title=doc.title or doc.filename,
+                    document_filename=doc.filename,
+                    enhanced_summary=metadata.get("summary_short"),
+                    enhanced_keywords=metadata.get("keywords", []),
+                ))
+
+            return results
+
+        if session:
+            return await _search(session)
+        else:
+            async with async_session_context() as db:
+                return await _search(db)
+
     async def hybrid_search(
         self,
         query: str,
@@ -433,12 +575,14 @@ class VectorStore:
         document_ids: Optional[List[str]] = None,
         vector_weight: Optional[float] = None,
         keyword_weight: Optional[float] = None,
+        use_enhanced: Optional[bool] = None,
         session: Optional[AsyncSession] = None,
     ) -> List[SearchResult]:
         """
-        Perform hybrid search combining vector similarity and keyword matching.
+        Perform hybrid search combining vector similarity, keyword matching,
+        and optionally enhanced metadata search.
 
-        Uses Reciprocal Rank Fusion (RRF) to combine results.
+        Uses Reciprocal Rank Fusion (RRF) to combine results from all sources.
 
         Args:
             query: Search query string
@@ -448,6 +592,7 @@ class VectorStore:
             document_ids: Optional list of document IDs to search within
             vector_weight: Weight for vector results (0-1)
             keyword_weight: Weight for keyword results (0-1)
+            use_enhanced: Whether to include enhanced metadata search
             session: Optional existing database session
 
         Returns:
@@ -456,11 +601,13 @@ class VectorStore:
         top_k = top_k or self.config.default_top_k
         vec_weight = vector_weight or self.config.vector_weight
         kw_weight = keyword_weight or self.config.keyword_weight
+        enhanced_weight = self.config.enhanced_weight
+        use_enhanced = use_enhanced if use_enhanced is not None else self.config.use_enhanced_search
 
         # Get more results from each method for better fusion
         fetch_k = self.config.rerank_top_k if self.config.enable_reranking else top_k * 2
 
-        # Run both searches
+        # Run searches in parallel conceptually (await each)
         vector_results = await self.similarity_search(
             query_embedding=query_embedding,
             top_k=fetch_k,
@@ -476,6 +623,17 @@ class VectorStore:
             document_ids=document_ids,
             session=session,
         )
+
+        # Optionally search enhanced metadata
+        enhanced_results = []
+        if use_enhanced:
+            enhanced_results = await self.enhanced_metadata_search(
+                query=query,
+                top_k=fetch_k,
+                access_tier_level=access_tier_level,
+                document_ids=document_ids,
+                session=session,
+            )
 
         # Reciprocal Rank Fusion
         # RRF(d) = Σ 1/(k + rank(d)) where k is a constant (typically 60)
@@ -504,6 +662,29 @@ class VectorStore:
             else:
                 scores[result.chunk_id] = (rrf_score, result)
 
+        # Process enhanced metadata results
+        # Enhanced results are document-level, so we boost all chunks from matching docs
+        enhanced_doc_scores: Dict[str, float] = {}
+        for rank, result in enumerate(enhanced_results):
+            rrf_score = enhanced_weight * (1.0 / (k + rank + 1))
+            enhanced_doc_scores[result.document_id] = rrf_score
+            # Also add the enhanced result itself if it has a chunk
+            if result.chunk_id:
+                if result.chunk_id in scores:
+                    existing_score, existing_result = scores[result.chunk_id]
+                    # Merge enhanced metadata into existing result
+                    existing_result.enhanced_summary = result.enhanced_summary
+                    existing_result.enhanced_keywords = result.enhanced_keywords
+                    scores[result.chunk_id] = (existing_score + rrf_score, existing_result)
+                else:
+                    scores[result.chunk_id] = (rrf_score, result)
+
+        # Boost existing chunk scores for documents with enhanced metadata matches
+        for chunk_id, (current_score, result) in list(scores.items()):
+            if result.document_id in enhanced_doc_scores:
+                boost = enhanced_doc_scores[result.document_id] * 0.5  # 50% of doc-level score
+                scores[chunk_id] = (current_score + boost, result)
+
         # Sort by combined score and return top_k
         sorted_results = sorted(
             scores.values(),
@@ -516,12 +697,15 @@ class VectorStore:
         for score, result in sorted_results:
             result.score = score
             result.metadata["search_type"] = "hybrid"
+            if use_enhanced and result.document_id in enhanced_doc_scores:
+                result.metadata["enhanced_boost"] = True
             final_results.append(result)
 
         logger.debug(
             "Hybrid search completed",
             vector_count=len(vector_results),
             keyword_count=len(keyword_results),
+            enhanced_count=len(enhanced_results),
             final_count=len(final_results),
         )
 

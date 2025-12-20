@@ -77,6 +77,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await seed_default_agents()
         logger.info("Default agents seeded")
 
+        # Seed admin user
+        from backend.db.seed_users import seed_admin_user
+        await seed_admin_user()
+        logger.info("Admin user seeded")
+
         # Initialize Ray connection
         # from backend.ray.config import init_ray
         # await init_ray()

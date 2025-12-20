@@ -33,6 +33,11 @@ from backend.api.websocket import (
     notify_processing_complete,
     notify_processing_error,
 )
+from backend.services.auto_tagger import AutoTaggerService
+from backend.db.database import get_async_session
+from backend.db.models import Document, Chunk, AccessTier
+from sqlalchemy import select, and_
+from sqlalchemy.orm import selectinload
 
 logger = structlog.get_logger(__name__)
 
@@ -118,6 +123,7 @@ class UploadOptions(BaseModel):
     enable_image_analysis: bool = True
     smart_chunking: bool = True
     detect_duplicates: bool = True
+    auto_generate_tags: bool = False  # Use LLM to auto-generate tags if no collection set
 
 
 # =============================================================================
@@ -196,6 +202,91 @@ def run_async_task(coro):
         logger.error("Failed to run async task", error=str(e))
 
 
+async def _auto_tag_document(document_id: str, filename: str):
+    """
+    Auto-generate tags for a document using LLM.
+
+    Gets document chunks from database, calls AutoTaggerService,
+    and updates the document with generated tags.
+    """
+    try:
+        async for session in get_async_session():
+            # Get document
+            doc_query = select(Document).where(Document.id == document_id)
+            result = await session.execute(doc_query)
+            document = result.scalar_one_or_none()
+
+            if not document:
+                logger.warning("Document not found for auto-tagging", document_id=document_id)
+                return
+
+            # Get first few chunks for content sample
+            chunks_query = (
+                select(Chunk)
+                .where(Chunk.document_id == document_id)
+                .order_by(Chunk.chunk_index)
+                .limit(3)
+            )
+            chunks_result = await session.execute(chunks_query)
+            chunks = chunks_result.scalars().all()
+
+            if not chunks:
+                logger.warning("No chunks found for auto-tagging", document_id=document_id)
+                return
+
+            content_sample = "\n".join([c.content for c in chunks if c.content])
+
+            # Get existing collections for context
+            collections_query = (
+                select(Document.tags)
+                .where(Document.tags.isnot(None))
+                .distinct()
+            )
+            collections_result = await session.execute(collections_query)
+            existing_tags = collections_result.scalars().all()
+
+            # Flatten and deduplicate tags
+            existing_collections = list(set(
+                tag for tags in existing_tags if tags for tag in tags
+            ))
+
+            # Generate tags using LLM
+            auto_tagger = AutoTaggerService()
+            tags = await auto_tagger.generate_tags(
+                document_name=filename,
+                content_sample=content_sample,
+                existing_collections=existing_collections,
+                max_tags=5
+            )
+
+            if tags:
+                # Update document with generated tags
+                document.tags = tags
+                await session.commit()
+
+                logger.info(
+                    "Auto-generated tags for document",
+                    document_id=document_id,
+                    filename=filename,
+                    tags=tags
+                )
+            else:
+                logger.warning(
+                    "No tags generated for document",
+                    document_id=document_id,
+                    filename=filename
+                )
+
+    except Exception as e:
+        logger.error(
+            "Failed to auto-tag document",
+            document_id=document_id,
+            filename=filename,
+            error=str(e),
+            exc_info=True
+        )
+
+
 async def process_document_background(
     file_id: UUID,
     file_path: str,
@@ -264,6 +355,13 @@ async def process_document_background(
             _processing_status[file_id_str]["error"] = result.error_message
             await notify_processing_error(file_id_str, result.error_message)
         else:
+            # Auto-generate tags if enabled and no collection was set
+            if options.auto_generate_tags and not options.collection:
+                await _auto_tag_document(
+                    document_id=result.document_id or file_id_str,
+                    filename=filename,
+                )
+
             # Notify successful completion via WebSocket
             await notify_processing_complete(
                 file_id=file_id_str,
@@ -307,6 +405,7 @@ async def upload_single_file(
     enable_image_analysis: bool = Form(True),
     smart_chunking: bool = Form(True),
     detect_duplicates: bool = Form(True),
+    auto_generate_tags: bool = Form(False),
     # user = Depends(get_current_user),
 ):
     """
@@ -373,6 +472,7 @@ async def upload_single_file(
         enable_image_analysis=enable_image_analysis,
         smart_chunking=smart_chunking,
         detect_duplicates=detect_duplicates,
+        auto_generate_tags=auto_generate_tags,
     )
 
     # Initialize processing status
@@ -581,26 +681,25 @@ async def get_processing_queue(
     """
     logger.info("Getting processing queue")
 
-    # Get all non-completed items from status store
+    # Get all items from status store (including completed and failed)
     items = []
     active_count = 0
 
     for fid, status in _processing_status.items():
         status_value = status.get("status", "")
-        if status_value not in ["completed", "failed"]:
-            items.append(ProcessingStatus(
-                file_id=UUID(fid),
-                filename=status.get("filename", "unknown"),
-                status=status_value,
-                progress=status.get("progress", 0),
-                current_step=status.get("current_step", "Unknown"),
-                error=status.get("error"),
-                created_at=status.get("created_at", datetime.now()),
-                updated_at=status.get("updated_at", datetime.now()),
-            ))
+        items.append(ProcessingStatus(
+            file_id=UUID(fid),
+            filename=status.get("filename", "unknown"),
+            status=status_value,
+            progress=status.get("progress", 0),
+            current_step=status.get("current_step", "Unknown"),
+            error=status.get("error"),
+            created_at=status.get("created_at", datetime.now()),
+            updated_at=status.get("updated_at", datetime.now()),
+        ))
 
-            if status_value not in ["queued", "pending"]:
-                active_count += 1
+        if status_value not in ["queued", "pending", "completed", "failed"]:
+            active_count += 1
 
     # Sort by created_at
     items.sort(key=lambda x: x.created_at, reverse=True)

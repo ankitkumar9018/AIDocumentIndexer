@@ -1067,19 +1067,28 @@ class RAGService:
 # Convenience Functions
 # =============================================================================
 
+import threading
+
 _default_rag_service: Optional[RAGService] = None
+_rag_service_lock = threading.Lock()
 
 
 def get_rag_service(
     config: Optional[RAGConfig] = None,
 ) -> RAGService:
-    """Get or create default RAG service instance."""
+    """Get or create default RAG service instance (thread-safe)."""
     global _default_rag_service
 
-    if _default_rag_service is None or config is not None:
-        _default_rag_service = RAGService(config=config)
+    # Fast path for existing service with no config override
+    if _default_rag_service is not None and config is None:
+        return _default_rag_service
 
-    return _default_rag_service
+    with _rag_service_lock:
+        # Double-check after acquiring lock
+        if _default_rag_service is None or config is not None:
+            _default_rag_service = RAGService(config=config)
+
+        return _default_rag_service
 
 
 async def simple_query(

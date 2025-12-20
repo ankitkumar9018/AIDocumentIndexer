@@ -4,6 +4,9 @@ AIDocumentIndexer - Document Generation Service
 
 Human-in-the-loop document generation using LangGraph.
 Supports PPTX, DOCX, PDF, and other output formats.
+
+LLM provider and model are configured via Admin UI (Operation-Level Config).
+Configure the "content_generation" operation in Admin > Settings > LLM Configuration.
 """
 
 import os
@@ -590,11 +593,14 @@ Generate an outline with {num_sections} sections. For each section, provide:
 
 Format your response as a structured outline."""
 
-        # Use LLM to generate
+        # Use LLM to generate (database-driven configuration)
         try:
-            from backend.services.llm import get_chat_model
+            from backend.services.llm import EnhancedLLMFactory
 
-            llm = get_chat_model(model=self.config.model)
+            llm, config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="content_generation",
+                user_id=None,  # System-level operation
+            )
             response = await llm.ainvoke(prompt)
 
             # Parse response into sections (simplified parsing)
@@ -676,9 +682,12 @@ Write clear, well-structured content that fits the document's purpose.
 Include relevant details and maintain a professional tone."""
 
         try:
-            from backend.services.llm import get_chat_model
+            from backend.services.llm import EnhancedLLMFactory
 
-            llm = get_chat_model(model=self.config.model)
+            llm, config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="content_generation",
+                user_id=None,  # System-level operation
+            )
             response = await llm.ainvoke(prompt)
             content = response.content
 
@@ -712,9 +721,12 @@ Feedback: {section.feedback}
 Please revise the content to address the feedback while maintaining quality and relevance."""
 
         try:
-            from backend.services.llm import get_chat_model
+            from backend.services.llm import EnhancedLLMFactory
 
-            llm = get_chat_model(model=self.config.model)
+            llm, config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="content_generation",
+                user_id=None,  # System-level operation
+            )
             response = await llm.ainvoke(prompt)
 
             return Section(

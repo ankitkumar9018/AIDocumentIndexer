@@ -28,6 +28,7 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,9 +55,40 @@ import {
   useDeleteDocument,
   useSearchDocuments,
   useCollections,
+  useEnhanceDocuments,
+  useEstimateEnhancementCost,
+  useLLMProviders,
+  useLLMOperations,
+  useSetLLMOperationConfig,
   Document,
   api,
 } from "@/lib/api";
+import { Wand2, Zap, Settings, Info, Bot, Tag } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { X, Plus } from "lucide-react";
 
 type ViewMode = "grid" | "list";
 
@@ -104,6 +136,7 @@ export default function DocumentsPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [selectedFileType, setSelectedFileType] = useState<string>("");
+  const [autoTagEnabled, setAutoTagEnabled] = useState(false);
 
   // Queries - only fetch when authenticated
   const { data: documentsData, isLoading, refetch } = useDocuments({
@@ -112,6 +145,23 @@ export default function DocumentsPage() {
     sort_order: sortOrder,
   }, { enabled: isAuthenticated });
   const { data: collections } = useCollections({ enabled: isAuthenticated });
+
+  // LLM configuration for document enhancement
+  const { data: providersData } = useLLMProviders({ enabled: isAuthenticated });
+  const { data: operationsData, refetch: refetchOperations } = useLLMOperations({ enabled: isAuthenticated });
+  const setOperationConfig = useSetLLMOperationConfig();
+
+  // Get the current LLM configured for document enhancement
+  const enhancementConfig = operationsData?.operations?.find(
+    (op: any) => op.operation_type === "document_enhancement"
+  );
+  const enhancementProvider = enhancementConfig?.provider_id
+    ? providersData?.providers?.find((p: any) => p.id === enhancementConfig.provider_id)
+    : providersData?.providers?.find((p: any) => p.is_default);
+  const enhancementModel = enhancementConfig?.model_override || enhancementProvider?.default_chat_model || "default";
+
+  // Get active providers for the dropdown
+  const activeProviders = providersData?.providers?.filter((p: any) => p.is_active) || [];
 
   // Mutations
   const deleteDocument = useDeleteDocument();
@@ -224,6 +274,163 @@ export default function DocumentsPage() {
     window.location.href = `/dashboard/documents/${docId}`;
   };
 
+  const [isAutoTagging, setIsAutoTagging] = useState(false);
+  const [isEnhancing, setIsEnhancing] = useState(false);
+
+  // Edit tags dialog state
+  const [editTagsDialogOpen, setEditTagsDialogOpen] = useState(false);
+  const [editingDocument, setEditingDocument] = useState<Document | null>(null);
+  const [editingTags, setEditingTags] = useState<string[]>([]);
+  const [newTagInput, setNewTagInput] = useState("");
+  const [isSavingTags, setIsSavingTags] = useState(false);
+
+  // Enhancement mutation
+  const enhanceDocuments = useEnhanceDocuments();
+  const updateDocument = useUpdateDocument();
+
+  const handleAutoTagDocument = async (docId: string, docName: string) => {
+    try {
+      setIsAutoTagging(true);
+      const result = await api.autoTagDocument(docId);
+      toast.success("Tags generated", {
+        description: `Generated ${result.tags.length} tags for "${docName}": ${result.tags.join(", ")}`,
+      });
+      refetch();
+    } catch (error: any) {
+      console.error("Auto-tag failed:", error);
+      toast.error("Failed to auto-tag document", {
+        description: error?.detail || error?.message || "An error occurred",
+      });
+    } finally {
+      setIsAutoTagging(false);
+    }
+  };
+
+  const handleBulkAutoTag = async () => {
+    if (selectedDocuments.size === 0) return;
+
+    try {
+      setIsAutoTagging(true);
+      const result = await api.bulkAutoTag(Array.from(selectedDocuments));
+      toast.success("Bulk auto-tagging complete", {
+        description: `Successfully tagged ${result.successful} of ${result.processed} documents`,
+      });
+      setSelectedDocuments(new Set());
+      refetch();
+    } catch (error: any) {
+      console.error("Bulk auto-tag failed:", error);
+      toast.error("Failed to auto-tag documents", {
+        description: error?.detail || error?.message || "An error occurred",
+      });
+    } finally {
+      setIsAutoTagging(false);
+    }
+  };
+
+  const handleBulkEnhance = async () => {
+    if (selectedDocuments.size === 0) return;
+
+    try {
+      setIsEnhancing(true);
+      const result = await enhanceDocuments.mutateAsync({
+        document_ids: Array.from(selectedDocuments),
+        auto_tag: autoTagEnabled,
+      });
+      toast.success("Document enhancement complete", {
+        description: result.message || `Enhanced ${result.successful} of ${result.total} documents. Estimated cost: $${result.estimated_cost_usd.toFixed(4)}`,
+      });
+      setSelectedDocuments(new Set());
+      refetch();
+    } catch (error: any) {
+      console.error("Bulk enhance failed:", error);
+      toast.error("Failed to enhance documents", {
+        description: error?.detail || error?.message || "An error occurred",
+      });
+    } finally {
+      setIsEnhancing(false);
+    }
+  };
+
+  const handleEnhanceAll = async () => {
+    try {
+      setIsEnhancing(true);
+      const result = await enhanceDocuments.mutateAsync({
+        collection: selectedCollection || undefined,
+        auto_tag: autoTagEnabled,
+      });
+      toast.success("Document enhancement complete", {
+        description: result.message || `Enhanced ${result.successful} of ${result.total} documents. Estimated cost: $${result.estimated_cost_usd.toFixed(4)}`,
+      });
+      refetch();
+    } catch (error: any) {
+      console.error("Enhance all failed:", error);
+      toast.error("Failed to enhance documents", {
+        description: error?.detail || error?.message || "An error occurred",
+      });
+    } finally {
+      setIsEnhancing(false);
+    }
+  };
+
+  const handleProviderChange = async (providerId: string) => {
+    try {
+      await setOperationConfig.mutateAsync({
+        operationType: "document_enhancement",
+        data: { provider_id: providerId },
+      });
+      toast.success("Enhancement LLM updated");
+      refetchOperations();
+    } catch (error: any) {
+      toast.error("Failed to update LLM", {
+        description: error?.detail || error?.message || "An error occurred",
+      });
+    }
+  };
+
+  // Edit tags functions
+  const handleOpenEditTags = (doc: Document) => {
+    setEditingDocument(doc);
+    setEditingTags(doc.tags ? [...doc.tags] : []);
+    setNewTagInput("");
+    setEditTagsDialogOpen(true);
+  };
+
+  const handleAddTag = () => {
+    const tag = newTagInput.trim();
+    if (tag && !editingTags.includes(tag)) {
+      setEditingTags([...editingTags, tag]);
+      setNewTagInput("");
+    }
+  };
+
+  const handleRemoveTag = (tagToRemove: string) => {
+    setEditingTags(editingTags.filter((t) => t !== tagToRemove));
+  };
+
+  const handleSaveTags = async () => {
+    if (!editingDocument) return;
+
+    try {
+      setIsSavingTags(true);
+      await updateDocument.mutateAsync({
+        id: editingDocument.id,
+        data: { tags: editingTags },
+      });
+      toast.success("Tags updated", {
+        description: `Updated tags for "${editingDocument.name}"`,
+      });
+      setEditTagsDialogOpen(false);
+      refetch();
+    } catch (error: any) {
+      console.error("Failed to update tags:", error);
+      toast.error("Failed to update tags", {
+        description: error?.detail || error?.message || "An error occurred",
+      });
+    } finally {
+      setIsSavingTags(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -234,10 +441,77 @@ export default function DocumentsPage() {
             Manage your indexed documents and collections
           </p>
         </div>
-        <Button onClick={() => refetch()} variant="outline" size="sm">
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-3">
+          {/* Enhancement Controls */}
+          <div className="flex items-center gap-2 p-2 rounded-lg border bg-muted/30">
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    onClick={handleEnhanceAll}
+                    variant="outline"
+                    size="sm"
+                    disabled={isEnhancing || setOperationConfig.isPending}
+                  >
+                    <Wand2 className="h-4 w-4 mr-2" />
+                    {isEnhancing ? "Enhancing..." : "Enhance All"}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="max-w-xs">
+                  <p className="text-sm">
+                    Enhance documents with LLM-extracted metadata for better RAG search.
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+
+            {/* LLM Provider Selector */}
+            <Select
+              value={enhancementProvider?.id || ""}
+              onValueChange={handleProviderChange}
+              disabled={setOperationConfig.isPending}
+            >
+              <SelectTrigger className="w-[140px] h-8 text-xs">
+                <Bot className="h-3 w-3 mr-1" />
+                <SelectValue placeholder="Select LLM" />
+              </SelectTrigger>
+              <SelectContent>
+                {activeProviders.map((provider: any) => (
+                  <SelectItem key={provider.id} value={provider.id}>
+                    {provider.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            {/* Auto-tag Checkbox */}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="flex items-center gap-1.5">
+                    <Checkbox
+                      id="auto-tag"
+                      checked={autoTagEnabled}
+                      onCheckedChange={(checked: boolean | "indeterminate") => setAutoTagEnabled(checked === true)}
+                    />
+                    <Label htmlFor="auto-tag" className="text-xs cursor-pointer flex items-center gap-1">
+                      <Tag className="h-3 w-3" />
+                      Auto-tag
+                    </Label>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <p className="text-sm">Also generate tags/collections after enhancement</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+
+          <Button onClick={() => refetch()} variant="outline" size="sm">
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Toolbar */}
@@ -318,6 +592,24 @@ export default function DocumentsPage() {
           <span className="text-sm font-medium">
             {selectedDocuments.size} selected
           </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleBulkAutoTag}
+            disabled={isAutoTagging}
+          >
+            <Sparkles className="h-4 w-4 mr-2" />
+            {isAutoTagging ? "Tagging..." : "Auto-tag"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleBulkEnhance}
+            disabled={isEnhancing}
+          >
+            <Wand2 className="h-4 w-4 mr-2" />
+            {isEnhancing ? "Enhancing..." : "Enhance for RAG"}
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -440,7 +732,40 @@ export default function DocumentsPage() {
                           <div className="flex items-center gap-3">
                             <FileIcon className="h-5 w-5 text-muted-foreground shrink-0" />
                             <div>
-                              <p className="font-medium">{doc.name}</p>
+                              <div className="flex items-center gap-2">
+                                <p className="font-medium">{doc.name}</p>
+                                {doc.is_enhanced && (
+                                  <TooltipProvider>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-green-50 text-green-700 border-green-200">
+                                          <Zap className="h-2.5 w-2.5 mr-0.5" />
+                                          Enhanced
+                                        </Badge>
+                                      </TooltipTrigger>
+                                      <TooltipContent side="right" className="max-w-sm">
+                                        <p className="font-medium text-sm mb-1">Enhanced Metadata</p>
+                                        {doc.enhanced_metadata?.summary_short && (
+                                          <p className="text-xs text-muted-foreground mb-1">
+                                            {doc.enhanced_metadata.summary_short}
+                                          </p>
+                                        )}
+                                        {doc.enhanced_metadata?.keywords && doc.enhanced_metadata.keywords.length > 0 && (
+                                          <p className="text-xs">
+                                            <span className="font-medium">Keywords:</span>{" "}
+                                            {doc.enhanced_metadata.keywords.slice(0, 5).join(", ")}
+                                          </p>
+                                        )}
+                                        {doc.enhanced_metadata?.model_used && (
+                                          <p className="text-[10px] text-muted-foreground mt-1">
+                                            Model: {doc.enhanced_metadata.model_used}
+                                          </p>
+                                        )}
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                )}
+                              </div>
                               <p className="text-xs text-muted-foreground">
                                 {doc.chunk_count} chunks
                               </p>
@@ -448,12 +773,26 @@ export default function DocumentsPage() {
                           </div>
                         </td>
                         <td className="p-3">
-                          {doc.collection && (
-                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-muted text-xs">
-                              <FolderOpen className="h-3 w-3" />
-                              {doc.collection}
-                            </span>
-                          )}
+                          <div className="flex flex-wrap gap-1">
+                            {doc.tags && doc.tags.length > 0 ? (
+                              doc.tags.map((tag, idx) => (
+                                <span
+                                  key={idx}
+                                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs ${
+                                    idx === 0 ? 'bg-primary/10 text-primary' : 'bg-muted'
+                                  }`}
+                                >
+                                  {idx === 0 && <FolderOpen className="h-3 w-3" />}
+                                  {tag}
+                                </span>
+                              ))
+                            ) : doc.collection ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-muted text-xs">
+                                <FolderOpen className="h-3 w-3" />
+                                {doc.collection}
+                              </span>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="p-3 text-sm text-muted-foreground">
                           {formatFileSize(doc.file_size)}
@@ -476,6 +815,17 @@ export default function DocumentsPage() {
                               <DropdownMenuItem onClick={() => handleDownloadDocument(doc.id, doc.name)}>
                                 <Download className="h-4 w-4 mr-2" />
                                 Download
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => handleAutoTagDocument(doc.id, doc.name)}
+                                disabled={isAutoTagging}
+                              >
+                                <Sparkles className="h-4 w-4 mr-2" />
+                                Auto-generate Tags
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => handleOpenEditTags(doc)}>
+                                <Edit className="h-4 w-4 mr-2" />
+                                Edit Tags
                               </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
@@ -534,6 +884,17 @@ export default function DocumentsPage() {
                           <Download className="h-4 w-4 mr-2" />
                           Download
                         </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={(e) => { e.stopPropagation(); handleAutoTagDocument(doc.id, doc.name); }}
+                          disabled={isAutoTagging}
+                        >
+                          <Sparkles className="h-4 w-4 mr-2" />
+                          Auto-generate Tags
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleOpenEditTags(doc); }}>
+                          <Edit className="h-4 w-4 mr-2" />
+                          Edit Tags
+                        </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
                           className="text-destructive focus:text-destructive"
@@ -546,18 +907,56 @@ export default function DocumentsPage() {
                     </DropdownMenu>
                   </div>
                   <div className="mt-4">
-                    <p className="font-medium truncate">{doc.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium truncate flex-1">{doc.name}</p>
+                      {doc.is_enhanced && (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-green-50 text-green-700 border-green-200 shrink-0">
+                                <Zap className="h-2.5 w-2.5" />
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-sm">
+                              <p className="font-medium text-sm mb-1">Enhanced</p>
+                              {doc.enhanced_metadata?.summary_short && (
+                                <p className="text-xs text-muted-foreground">
+                                  {doc.enhanced_metadata.summary_short}
+                                </p>
+                              )}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
+                    </div>
                     <p className="text-sm text-muted-foreground mt-1">
                       {formatFileSize(doc.file_size)}
                     </p>
                   </div>
-                  <div className="flex items-center justify-between mt-4 pt-4 border-t">
-                    {doc.collection && (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-muted text-xs">
-                        <FolderOpen className="h-3 w-3" />
-                        {doc.collection}
-                      </span>
-                    )}
+                  <div className="flex flex-col gap-2 mt-4 pt-4 border-t">
+                    <div className="flex flex-wrap gap-1">
+                      {doc.tags && doc.tags.length > 0 ? (
+                        doc.tags.slice(0, 3).map((tag, idx) => (
+                          <span
+                            key={idx}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs ${
+                              idx === 0 ? 'bg-primary/10 text-primary' : 'bg-muted'
+                            }`}
+                          >
+                            {idx === 0 && <FolderOpen className="h-2.5 w-2.5" />}
+                            {tag}
+                          </span>
+                        ))
+                      ) : doc.collection ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-muted text-xs">
+                          <FolderOpen className="h-2.5 w-2.5" />
+                          {doc.collection}
+                        </span>
+                      ) : null}
+                      {doc.tags && doc.tags.length > 3 && (
+                        <span className="text-xs text-muted-foreground">+{doc.tags.length - 3} more</span>
+                      )}
+                    </div>
                     <span className="text-xs text-muted-foreground">
                       {new Date(doc.created_at).toLocaleDateString()}
                     </span>
@@ -679,6 +1078,85 @@ export default function DocumentsPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Edit Tags Dialog */}
+      <Dialog open={editTagsDialogOpen} onOpenChange={setEditTagsDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Edit Tags</DialogTitle>
+            <DialogDescription>
+              Manage tags for &quot;{editingDocument?.name}&quot;
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {/* Current Tags */}
+            <div className="flex flex-wrap gap-2 min-h-[40px] p-2 border rounded-md bg-muted/30">
+              {editingTags.length > 0 ? (
+                editingTags.map((tag, idx) => (
+                  <Badge
+                    key={idx}
+                    variant={idx === 0 ? "default" : "secondary"}
+                    className="flex items-center gap-1 pr-1"
+                  >
+                    {idx === 0 && <FolderOpen className="h-3 w-3 mr-0.5" />}
+                    {tag}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-4 w-4 p-0 hover:bg-transparent"
+                      onClick={() => handleRemoveTag(tag)}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </Badge>
+                ))
+              ) : (
+                <span className="text-sm text-muted-foreground">No tags yet</span>
+              )}
+            </div>
+
+            {/* Add New Tag */}
+            <div className="flex gap-2">
+              <Input
+                placeholder="Add a tag..."
+                value={newTagInput}
+                onChange={(e) => setNewTagInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleAddTag();
+                  }
+                }}
+                className="flex-1"
+              />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={handleAddTag}
+                disabled={!newTagInput.trim()}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </div>
+
+            {/* Hint */}
+            <p className="text-xs text-muted-foreground">
+              The first tag is used as the primary collection. Press Enter or click + to add.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setEditTagsDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleSaveTags} disabled={isSavingTags}>
+              {isSavingTags ? "Saving..." : "Save Tags"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

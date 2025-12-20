@@ -50,6 +50,9 @@ class CreateScrapeJobRequest(BaseModel):
     config: Optional[ScrapeConfigRequest] = None
     access_tier: int = Field(default=1, ge=1, le=100, description="Access tier for stored content")
     collection: Optional[str] = Field(None, description="Collection to store in")
+    crawl_subpages: bool = Field(default=False, description="Whether to crawl linked subpages")
+    max_depth: int = Field(default=2, ge=1, le=5, description="Maximum depth for subpage crawling")
+    same_domain_only: bool = Field(default=True, description="Only crawl links from the same domain")
 
 
 class ScrapeUrlRequest(BaseModel):
@@ -90,6 +93,9 @@ class ScrapeJobResponse(BaseModel):
     created_at: datetime
     completed_at: Optional[datetime]
     error_message: Optional[str]
+    crawl_subpages: bool = False
+    max_depth: int = 1
+    same_domain_only: bool = True
 
 
 class ScrapeJobListResponse(BaseModel):
@@ -116,7 +122,12 @@ def page_to_response(page: ScrapedPage) -> ScrapedPageResponse:
     )
 
 
-def job_to_response(job: ScrapeJob) -> ScrapeJobResponse:
+def job_to_response(
+    job: ScrapeJob,
+    crawl_subpages: bool = False,
+    max_depth: int = 1,
+    same_domain_only: bool = True,
+) -> ScrapeJobResponse:
     """Convert ScrapeJob to response model."""
     return ScrapeJobResponse(
         id=job.id,
@@ -130,6 +141,9 @@ def job_to_response(job: ScrapeJob) -> ScrapeJobResponse:
         created_at=job.created_at,
         completed_at=job.completed_at,
         error_message=job.error_message,
+        crawl_subpages=crawl_subpages,
+        max_depth=max_depth,
+        same_domain_only=same_domain_only,
     )
 
 
@@ -262,15 +276,36 @@ async def get_scrape_job(
     return job_to_response(job)
 
 
+class RunScrapeJobRequest(BaseModel):
+    """Request to run a scrape job with options."""
+    crawl_subpages: bool = Field(default=False, description="Whether to crawl linked subpages")
+    max_depth: int = Field(default=2, ge=1, le=5, description="Maximum depth for subpage crawling")
+    same_domain_only: bool = Field(default=True, description="Only crawl links from the same domain")
+
+
 @router.post("/jobs/{job_id}/run", response_model=ScrapeJobResponse)
 async def run_scrape_job(
     job_id: str,
     user: AuthenticatedUser,
+    request: Optional[RunScrapeJobRequest] = None,
 ):
     """
     Run a pending scrape job.
+
+    If crawl_subpages is True, the scraper will follow links from each URL
+    up to max_depth levels deep, only crawling pages from the same domain
+    if same_domain_only is True.
     """
-    logger.info("Running scrape job", job_id=job_id)
+    crawl_subpages = request.crawl_subpages if request else False
+    max_depth = request.max_depth if request else 2
+    same_domain_only = request.same_domain_only if request else True
+
+    logger.info(
+        "Running scrape job",
+        job_id=job_id,
+        crawl_subpages=crawl_subpages,
+        max_depth=max_depth,
+    )
 
     service = get_scraper_service()
 
@@ -289,7 +324,12 @@ async def run_scrape_job(
         )
 
     try:
-        result = await service.run_job(job_id)
+        result = await service.run_job_with_subpages(
+            job_id=job_id,
+            crawl_subpages=crawl_subpages,
+            max_depth=max_depth,
+            same_domain_only=same_domain_only,
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -304,7 +344,7 @@ async def run_scrape_job(
 
     # Get updated job
     job = service.get_job(job_id)
-    return job_to_response(job)
+    return job_to_response(job, crawl_subpages, max_depth, same_domain_only)
 
 
 @router.post("/scrape", response_model=ScrapedPageResponse)

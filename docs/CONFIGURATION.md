@@ -305,7 +305,6 @@ The default threshold of `0.4` is optimized for OCR'd documents which may have l
 DEBUG=true
 LOG_LEVEL=DEBUG
 APP_ENV=development
-DEV_MODE=true
 
 # Database (SQLite for local dev)
 DATABASE_URL=sqlite:///./aidocindexer.db

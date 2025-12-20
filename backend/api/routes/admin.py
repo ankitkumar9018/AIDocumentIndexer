@@ -2025,7 +2025,20 @@ class LLMOperationConfigResponse(BaseModel):
     updated_at: datetime
 
 
-VALID_OPERATIONS = ["chat", "embeddings", "document_processing", "rag", "summarization"]
+VALID_OPERATIONS = [
+    "chat",
+    "embeddings",
+    "document_processing",
+    "rag",
+    "summarization",
+    "document_enhancement",
+    "auto_tagging",
+    "content_generation",
+    "collaboration",
+    "web_scraping",
+    "agent_planning",
+    "agent_execution",
+]
 
 
 @router.get("/llm/operations")
@@ -3639,3 +3652,242 @@ async def reorder_providers(
     )
 
     return {"message": "Providers reordered successfully"}
+
+
+# =============================================================================
+# Document Enhancement Endpoints
+# =============================================================================
+
+class EnhanceDocumentsRequest(BaseModel):
+    """Request to enhance documents with LLM-extracted metadata."""
+    document_ids: Optional[List[str]] = Field(None, description="Specific documents to enhance (None = all unprocessed)")
+    collection: Optional[str] = Field(None, description="Filter by collection")
+    force: bool = Field(False, description="Re-enhance already enhanced documents")
+    limit: Optional[int] = Field(None, ge=1, le=1000, description="Maximum documents to process")
+    auto_tag: bool = Field(False, description="Also generate tags using AutoTagger after enhancement")
+
+
+class EnhancementStatusResponse(BaseModel):
+    """Response for enhancement status."""
+    document_count: int
+    estimated_tokens: int
+    estimated_cost_usd: float
+    model: str
+    avg_tokens_per_doc: int
+
+
+class EnhancementResultResponse(BaseModel):
+    """Response for enhancement operation."""
+    total: int
+    successful: int
+    failed: int
+    total_tokens: int
+    estimated_cost_usd: float
+    message: str
+
+
+@router.post("/enhance-documents/estimate", response_model=EnhancementStatusResponse)
+async def estimate_enhancement_cost(
+    request: EnhanceDocumentsRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Estimate the cost of enhancing documents.
+
+    Returns token and cost estimates before running enhancement.
+    Admin only.
+    """
+    from backend.services.document_enhancer import get_document_enhancer
+
+    logger.info(
+        "Estimating enhancement cost",
+        document_ids=len(request.document_ids) if request.document_ids else "all",
+        collection=request.collection,
+    )
+
+    enhancer = get_document_enhancer()
+    estimate = await enhancer.estimate_cost(
+        document_ids=request.document_ids,
+        collection=request.collection,
+    )
+
+    return EnhancementStatusResponse(**estimate)
+
+
+@router.post("/enhance-documents", response_model=EnhancementResultResponse)
+async def enhance_documents(
+    request: EnhanceDocumentsRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Enhance documents with LLM-extracted metadata.
+
+    Extracts summaries, keywords, topics, entities, and hypothetical questions
+    from documents to improve RAG search quality.
+
+    Optionally also generates tags using AutoTagger if auto_tag=True.
+
+    Admin only.
+    """
+    from backend.services.document_enhancer import get_document_enhancer
+    from backend.services.auto_tagger import AutoTaggerService
+
+    logger.info(
+        "Starting document enhancement",
+        document_ids=len(request.document_ids) if request.document_ids else "all",
+        collection=request.collection,
+        force=request.force,
+        auto_tag=request.auto_tag,
+    )
+
+    enhancer = get_document_enhancer()
+
+    if request.document_ids:
+        # Enhance specific documents
+        result = await enhancer.enhance_batch(
+            document_ids=request.document_ids,
+            force=request.force,
+        )
+    else:
+        # Enhance all unprocessed documents
+        result = await enhancer.enhance_all_unprocessed(
+            collection=request.collection,
+            limit=request.limit,
+        )
+
+    # If auto_tag is enabled, run auto-tagging on successfully enhanced documents
+    tags_generated = 0
+    if request.auto_tag and result.successful > 0:
+        logger.info("Running auto-tagging on enhanced documents")
+        auto_tagger = AutoTaggerService()
+
+        # Get the document IDs that were successfully enhanced
+        enhanced_doc_ids = result.enhanced_document_ids if hasattr(result, 'enhanced_document_ids') else []
+
+        # If we don't have the list, get documents with enhanced metadata
+        if not enhanced_doc_ids:
+            from backend.db.models import Document
+            from sqlalchemy import select
+
+            query = select(Document.id).where(Document.enhanced_metadata.isnot(None))
+            if request.document_ids:
+                query = query.where(Document.id.in_([UUID(did) for did in request.document_ids]))
+            doc_result = await db.execute(query)
+            enhanced_doc_ids = [str(row[0]) for row in doc_result.fetchall()]
+
+        # Get existing collections for context
+        from backend.db.models import Document, AccessTier
+        from sqlalchemy import select, and_
+
+        collections_query = (
+            select(Document.tags)
+            .where(Document.tags.isnot(None))
+        )
+        collections_result = await db.execute(collections_query)
+        all_tags = collections_result.scalars().all()
+        existing_collections = list(set(
+            tag for tags in all_tags if tags for tag in tags
+        ))
+
+        # Auto-tag each enhanced document
+        for doc_id in enhanced_doc_ids:  # Process all documents
+            try:
+                # Get document with chunks
+                from sqlalchemy.orm import selectinload
+                doc_query = (
+                    select(Document)
+                    .options(selectinload(Document.chunks))
+                    .where(Document.id == UUID(doc_id))
+                )
+                doc_result = await db.execute(doc_query)
+                document = doc_result.scalar_one_or_none()
+
+                if document and document.chunks:
+                    chunks = sorted(document.chunks, key=lambda c: c.chunk_index)[:3]
+                    content_sample = "\n".join([chunk.content for chunk in chunks])
+
+                    if content_sample:
+                        tags = await auto_tagger.generate_tags(
+                            document_name=document.original_filename or document.filename,
+                            content_sample=content_sample,
+                            existing_collections=existing_collections,
+                            max_tags=5,
+                        )
+                        if tags:
+                            document.tags = tags
+                            tags_generated += 1
+                            # Add new tags to existing collections for next iterations
+                            for tag in tags:
+                                if tag not in existing_collections:
+                                    existing_collections.append(tag)
+            except Exception as e:
+                logger.warning(f"Auto-tagging failed for document {doc_id}: {e}")
+                continue
+
+        await db.commit()
+        logger.info(f"Auto-tagging completed: {tags_generated} documents tagged")
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="document_enhancement",
+        changes={
+            "total": result.total,
+            "successful": result.successful,
+            "failed": result.failed,
+            "tokens_used": result.total_tokens,
+            "auto_tag": request.auto_tag,
+            "tags_generated": tags_generated,
+        },
+        session=db,
+    )
+
+    message = f"Enhanced {result.successful}/{result.total} documents"
+    if request.auto_tag:
+        message += f", tagged {tags_generated} documents"
+
+    return EnhancementResultResponse(
+        total=result.total,
+        successful=result.successful,
+        failed=result.failed,
+        total_tokens=result.total_tokens,
+        estimated_cost_usd=result.estimated_cost_usd,
+        message=message,
+    )
+
+
+@router.post("/enhance-documents/{document_id}")
+async def enhance_single_document(
+    document_id: str,
+    admin: AdminUser,
+    force: bool = Query(False, description="Re-enhance if already enhanced"),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Enhance a single document with LLM-extracted metadata.
+
+    Admin only.
+    """
+    from backend.services.document_enhancer import get_document_enhancer
+
+    logger.info("Enhancing single document", document_id=document_id, force=force)
+
+    enhancer = get_document_enhancer()
+    result = await enhancer.enhance_document(document_id, force=force)
+
+    if not result.success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result.error or "Enhancement failed",
+        )
+
+    return {
+        "document_id": result.document_id,
+        "success": result.success,
+        "tokens_used": result.tokens_used,
+        "metadata": result.metadata.model_dump() if result.metadata else None,
+    }

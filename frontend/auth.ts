@@ -84,6 +84,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           });
 
           if (!response.ok) {
+            console.error('[Auth] Login failed:', response.status, response.statusText);
             return null;
           }
 
@@ -99,17 +100,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
             accessToken: data.access_token,
           };
         } catch (error) {
-          // For development, allow mock login
-          if (process.env.NODE_ENV === 'development' && credentials.email === 'admin@example.com') {
-            return {
-              id: '550e8400-e29b-41d4-a716-446655440000',
-              email: 'admin@example.com',
-              name: 'Admin User',
-              role: 'admin',
-              accessTier: 100,
-              accessToken: 'dev-token-' + Date.now(),
-            };
-          }
+          console.error('[Auth] Login error:', error);
           return null;
         }
       },

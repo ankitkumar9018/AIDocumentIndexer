@@ -18,11 +18,9 @@ from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
-
-# Default user ID for development (until proper auth is implemented)
-# This ensures consistent user preferences across requests
-DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"
 from fastapi.responses import StreamingResponse
+
+from backend.api.middleware.auth import AuthenticatedUser
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
@@ -171,6 +169,7 @@ def get_cost_estimator(db: AsyncSession = Depends(get_db)) -> AgentCostEstimator
 @router.post("/execute")
 async def execute_request(
     request: AgentExecutionRequest,
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
@@ -180,7 +179,7 @@ async def execute_request(
     Returns the final result (non-streaming).
     """
     session_id = request.session_id or str(uuid.uuid4())
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     result = None
     async for update in orchestrator.process_request(
@@ -205,6 +204,7 @@ async def execute_request(
 @router.post("/execute/stream")
 async def execute_stream(
     request: AgentExecutionRequest,
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
@@ -214,7 +214,7 @@ async def execute_stream(
     Returns Server-Sent Events with execution progress.
     """
     session_id = request.session_id or str(uuid.uuid4())
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
@@ -245,11 +245,12 @@ async def execute_stream(
 @router.post("/execute/approve/{plan_id}")
 async def approve_execution(
     plan_id: str,
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
     """Approve and execute a plan that was awaiting cost approval."""
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     async def event_generator() -> AsyncGenerator[str, None]:
         async for update in orchestrator.approve_execution(plan_id, user_id):
@@ -264,11 +265,12 @@ async def approve_execution(
 @router.post("/execute/cancel/{plan_id}")
 async def cancel_execution(
     plan_id: str,
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
     """Cancel pending or running execution."""
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     result = await orchestrator.cancel_execution(plan_id, user_id)
 
@@ -299,12 +301,13 @@ async def get_plan_status(
 
 @router.get("/plans")
 async def list_plans(
+    user: AuthenticatedUser,
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
     """List user's execution plans."""
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     plans = await orchestrator.get_execution_history(user_id, limit)
     return {"plans": plans, "count": len(plans)}
@@ -316,12 +319,13 @@ async def list_plans(
 
 @router.get("/mode")
 async def get_mode(
+    user: AuthenticatedUser,
     session_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     mode_router: ModeRouter = Depends(get_mode_router),
 ) -> ModePreferencesResponse:
     """Get current execution mode and preferences."""
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     mode_info = await mode_router.get_current_mode(user_id, session_id)
     return ModePreferencesResponse(**mode_info)
@@ -330,11 +334,12 @@ async def get_mode(
 @router.post("/mode")
 async def set_mode(
     request: SetModeRequest,
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
     mode_router: ModeRouter = Depends(get_mode_router),
 ):
     """Set execution mode preference."""
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     prefs = await mode_router.update_preferences(
         user_id, default_mode=request.mode
@@ -345,11 +350,12 @@ async def set_mode(
 
 @router.post("/mode/toggle")
 async def toggle_agent_mode(
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
     mode_router: ModeRouter = Depends(get_mode_router),
 ):
     """Toggle agent mode on/off."""
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     enabled = await mode_router.toggle_agent_mode(user_id)
 
@@ -358,11 +364,12 @@ async def toggle_agent_mode(
 
 @router.get("/preferences")
 async def get_preferences(
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
     mode_router: ModeRouter = Depends(get_mode_router),
 ) -> ModePreferencesResponse:
     """Get user's agent preferences."""
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     mode_info = await mode_router.get_current_mode(user_id)
     return ModePreferencesResponse(**mode_info)
@@ -371,11 +378,12 @@ async def get_preferences(
 @router.patch("/preferences")
 async def update_preferences(
     request: UpdatePreferencesRequest,
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
     mode_router: ModeRouter = Depends(get_mode_router),
 ):
     """Update agent preferences."""
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     prefs = await mode_router.update_preferences(
         user_id,
@@ -651,12 +659,13 @@ async def get_optimization_job(
 @router.post("/optimization/jobs/{job_id}/approve")
 async def approve_optimization(
     job_id: str,
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
 ):
     """Approve prompt optimization and promote winning variant."""
     from sqlalchemy import select
 
-    user_id = DEFAULT_USER_ID  # TODO: Get from auth
+    user_id = user.user_id
 
     result = await db.execute(
         select(PromptOptimizationJob)

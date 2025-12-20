@@ -476,15 +476,33 @@ Create a scrape job.
 ```json
 {
   "urls": ["https://example.com"],
+  "storage_mode": "permanent",
+  "crawl_subpages": false,
+  "max_depth": 2,
+  "same_domain_only": true,
   "config": {
-    "max_depth": 2,
-    "same_domain_only": true,
-    "extract_links": true
+    "extract_links": true,
+    "extract_images": false,
+    "extract_metadata": true,
+    "timeout": 30,
+    "wait_for_js": true
   },
   "collection": "scraped-content",
   "access_tier": 30
 }
 ```
+
+**Request Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `urls` | array | required | URLs to scrape (max 20) |
+| `storage_mode` | string | "immediate" | `immediate` or `permanent` |
+| `crawl_subpages` | boolean | false | Enable recursive subpage crawling |
+| `max_depth` | int | 2 | Maximum crawl depth (1-5) when crawl_subpages is enabled |
+| `same_domain_only` | boolean | true | Only crawl pages from the same domain |
+| `collection` | string | null | Collection to store scraped content |
+| `access_tier` | int | 1 | Access tier for stored content (1-100) |
 
 ### GET /scraper/jobs
 
@@ -496,7 +514,24 @@ Get job status.
 
 ### POST /scraper/jobs/{job_id}/run
 
-Start the scrape job.
+Run a pending scrape job with optional subpage crawling.
+
+**Request:**
+```json
+{
+  "crawl_subpages": true,
+  "max_depth": 3,
+  "same_domain_only": true
+}
+```
+
+**Request Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `crawl_subpages` | boolean | false | Enable recursive subpage crawling |
+| `max_depth` | int | 2 | Maximum crawl depth (1-5) |
+| `same_domain_only` | boolean | true | Only crawl pages from the same domain |
 
 ### POST /scraper/immediate
 
