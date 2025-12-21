@@ -37,10 +37,12 @@ class ScrapeConfigRequest(BaseModel):
     extract_images: bool = Field(default=False, description="Extract image URLs")
     extract_links: bool = Field(default=True, description="Extract page links")
     extract_metadata: bool = Field(default=True, description="Extract meta tags")
-    max_depth: int = Field(default=1, ge=0, le=3, description="Link follow depth")
-    max_pages: int = Field(default=10, ge=1, le=100, description="Max pages to scrape")
+    max_depth: int = Field(default=3, ge=1, le=10, description="Link follow depth")
+    max_pages: int = Field(default=50, ge=1, le=200, description="Max pages to scrape")
     timeout: int = Field(default=30, ge=5, le=120, description="Timeout in seconds")
     wait_for_js: bool = Field(default=True, description="Wait for JavaScript")
+    crawl_subpages: bool = Field(default=False, description="Whether to crawl linked subpages")
+    same_domain_only: bool = Field(default=True, description="Only crawl links from the same domain")
 
 
 class CreateScrapeJobRequest(BaseModel):
@@ -347,7 +349,14 @@ async def run_scrape_job(
     return job_to_response(job, crawl_subpages, max_depth, same_domain_only)
 
 
-@router.post("/scrape", response_model=ScrapedPageResponse)
+class ScrapedPagesResponse(BaseModel):
+    """Response for multiple scraped pages."""
+    pages: List[ScrapedPageResponse]
+    total_pages: int
+    total_word_count: int
+
+
+@router.post("/scrape")
 async def scrape_url_immediate(
     request: ScrapeUrlRequest,
     user: AuthenticatedUser,
@@ -356,25 +365,51 @@ async def scrape_url_immediate(
     Scrape a single URL immediately.
 
     Returns the scraped content without creating a job.
-    Useful for quick lookups.
+    If crawl_subpages is enabled in config, returns multiple pages.
     """
-    logger.info("Scraping URL", url=request.url, user_id=user.user_id)
+    config = request.config
+    crawl_subpages = config.crawl_subpages if config else False
+    max_depth = config.max_depth if config else 3
+    same_domain_only = config.same_domain_only if config else True
+
+    logger.info(
+        "Scraping URL",
+        url=request.url,
+        user_id=user.user_id,
+        crawl_subpages=crawl_subpages,
+        max_depth=max_depth,
+    )
 
     service = get_scraper_service()
 
     try:
-        page = await service.scrape_url_immediate(
-            url=request.url,
-            config=request_to_config(request.config),
-        )
+        if crawl_subpages:
+            # Crawl with subpages
+            pages = await service.crawl_with_subpages(
+                start_url=request.url,
+                config=request_to_config(config),
+                max_depth=max_depth,
+                same_domain_only=same_domain_only,
+            )
+            total_words = sum(p.word_count for p in pages)
+            return ScrapedPagesResponse(
+                pages=[page_to_response(p) for p in pages],
+                total_pages=len(pages),
+                total_word_count=total_words,
+            )
+        else:
+            # Single page scrape
+            page = await service.scrape_url_immediate(
+                url=request.url,
+                config=request_to_config(config),
+            )
+            return page_to_response(page)
     except Exception as e:
         logger.error("Scrape failed", url=request.url, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to scrape URL: {str(e)}",
         )
-
-    return page_to_response(page)
 
 
 @router.post("/scrape-and-query")
@@ -387,30 +422,105 @@ async def scrape_and_query(
 
     This endpoint scrapes the URL and returns the content
     ready to be used as context for a RAG query.
+    If crawl_subpages is enabled, multiple pages are scraped and combined.
     """
+    config = request.config
+    crawl_subpages = config.crawl_subpages if config else False
+    max_depth = config.max_depth if config else 3
+    same_domain_only = config.same_domain_only if config else True
+
     logger.info(
         "Scrape and query",
         url=request.url,
         query=request.query[:50],
         user_id=user.user_id,
+        crawl_subpages=crawl_subpages,
+        max_depth=max_depth,
     )
 
     service = get_scraper_service()
 
     try:
-        result = await service.scrape_and_query(
-            url=request.url,
-            query=request.query,
-            config=request_to_config(request.config),
-        )
+        if crawl_subpages:
+            # Crawl multiple pages and combine content for query
+            pages = await service.crawl_with_subpages(
+                start_url=request.url,
+                config=request_to_config(config),
+                max_depth=max_depth,
+                same_domain_only=same_domain_only,
+            )
+
+            # Combine content from all pages
+            combined_content = "\n\n---\n\n".join([
+                f"## {p.title}\nURL: {p.url}\n\n{p.content}"
+                for p in pages
+            ])
+            total_words = sum(p.word_count for p in pages)
+
+            # Use combined content for query
+            import time
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from backend.services.llm import EnhancedLLMFactory
+
+            start_time = time.time()
+
+            system_prompt = """You are a helpful assistant that answers questions based on the provided web page content.
+Answer the user's question using ONLY the information from the provided content.
+If the answer cannot be found in the content, say so clearly.
+When citing information, mention which page it came from."""
+
+            user_prompt = f"""Web content from {len(pages)} pages starting at {request.url}:
+
+{combined_content[:50000]}
+
+---
+
+Question: {request.query}
+
+Please answer the question based on the web content above."""
+
+            llm, llm_config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="rag",
+                track_usage=True,
+            )
+
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt),
+            ]
+
+            response = await llm.ainvoke(messages)
+            answer = response.content if hasattr(response, 'content') else str(response)
+
+            processing_time = (time.time() - start_time) * 1000
+
+            return {
+                "url": request.url,
+                "title": pages[0].title if pages else "Unknown",
+                "content": combined_content[:5000] + "..." if len(combined_content) > 5000 else combined_content,
+                "word_count": total_words,
+                "scraped_at": pages[0].scraped_at.isoformat() if pages else None,
+                "query": request.query,
+                "answer": answer,
+                "model": llm_config.model if llm_config else "default",
+                "processing_time_ms": processing_time,
+                "context_ready": True,
+                "pages_scraped": len(pages),
+            }
+        else:
+            # Single page scrape and query
+            result = await service.scrape_and_query(
+                url=request.url,
+                query=request.query,
+                config=request_to_config(config),
+            )
+            return result
     except Exception as e:
         logger.error("Scrape and query failed", url=request.url, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to scrape and query: {str(e)}",
         )
-
-    return result
 
 
 @router.get("/cache")
@@ -459,7 +569,7 @@ async def clear_cache(
 async def extract_links(
     user: AuthenticatedUser,
     url: str = Query(..., description="URL to extract links from"),
-    max_depth: int = Query(default=1, ge=0, le=3),
+    max_depth: int = Query(default=3, ge=1, le=10),
     same_domain_only: bool = Query(default=True),
 ):
     """

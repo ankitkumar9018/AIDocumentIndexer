@@ -67,8 +67,8 @@ class ScrapeConfig:
     extract_images: bool = False
     extract_links: bool = True
     extract_metadata: bool = True
-    max_depth: int = 1  # How many levels to follow links
-    max_pages: int = 10  # Max pages to scrape
+    max_depth: int = 3  # How many levels to follow links
+    max_pages: int = 50  # Max pages to scrape
     timeout: int = 30  # Seconds
     user_agent: Optional[str] = None
     headers: Dict[str, str] = field(default_factory=dict)

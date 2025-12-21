@@ -40,6 +40,7 @@ import {
   useDownloadGeneratedDocument,
   useCancelGenerationJob,
 } from "@/lib/api";
+import { toast } from "sonner";
 
 type Step = "format" | "topic" | "outline" | "content" | "download";
 type OutputFormat = "docx" | "pptx" | "pdf" | "markdown" | "html" | "txt";
@@ -118,7 +119,7 @@ export default function CreatePage() {
       case "outline":
         if (currentJobId) {
           try {
-            await approveOutline.mutateAsync({
+            const approvedJob = await approveOutline.mutateAsync({
               jobId: currentJobId,
               modifications: {
                 title: documentTitle || undefined,
@@ -126,10 +127,31 @@ export default function CreatePage() {
                 tone,
               },
             });
-            await generateContent.mutateAsync(currentJobId);
+            // Only generate content if the job is in the correct state
+            if (approvedJob.status === "outline_approved") {
+              await generateContent.mutateAsync(currentJobId);
+            }
             setCurrentStep("content");
-          } catch (error) {
+          } catch (error: any) {
             console.error("Failed to approve outline:", error);
+            const errorDetail = error?.detail || error?.message || "";
+            // If the job is already completed, just move to download step
+            if (errorDetail.includes("COMPLETED")) {
+              toast.info("Document already generated", {
+                description: "Moving to download step.",
+              });
+              setCurrentStep("download");
+            } else if (errorDetail.includes("OUTLINE_APPROVED") || errorDetail.includes("GENERATING")) {
+              // Job is already approved or generating, move to content step
+              toast.info("Generation in progress", {
+                description: "Please wait for content generation to complete.",
+              });
+              setCurrentStep("content");
+            } else {
+              toast.error("Failed to approve outline", {
+                description: errorDetail || "An error occurred",
+              });
+            }
           }
         }
         break;
