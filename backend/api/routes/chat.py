@@ -167,6 +167,9 @@ class ChatResponse(BaseModel):
     content: str
     sources: List[ChatSource]
     created_at: datetime
+    # Confidence/verification fields
+    confidence_score: Optional[float] = None  # 0-1 confidence in the answer
+    confidence_level: Optional[str] = None  # "high", "medium", "low"
 
 
 class ChatStreamChunk(BaseModel):
@@ -435,6 +438,8 @@ async def create_chat_completion(
                 content=response.content,
                 sources=sources,
                 created_at=datetime.now(),
+                confidence_score=response.confidence_score,
+                confidence_level=response.confidence_level,
             )
 
     except Exception as e:
@@ -614,6 +619,9 @@ async def create_streaming_completion(
                             model_used=rag_service.config.chat_model,
                         )
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                elif chunk.type == "confidence":
+                    # Send confidence information
+                    yield f"data: {json.dumps({'type': 'confidence', 'score': chunk.data.get('score'), 'level': chunk.data.get('level')})}\n\n"
                 elif chunk.type == "error":
                     yield f"data: {json.dumps({'type': 'error', 'data': str(chunk.data)})}\n\n"
 

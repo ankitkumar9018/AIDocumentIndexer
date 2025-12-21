@@ -271,6 +271,94 @@ export default function DashboardPage() {
         </Link>
       </div>
 
+      {/* Usage Analytics Overview */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <BarChart3 className="h-5 w-5" />
+            Usage Analytics
+          </CardTitle>
+          <CardDescription>Overview of your activity and usage patterns</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {/* Documents by Type */}
+            <div className="p-4 rounded-lg border bg-muted/30">
+              <h4 className="text-sm font-medium text-muted-foreground mb-3">Documents by Type</h4>
+              <div className="space-y-2">
+                {(() => {
+                  const typeCounts = (documents?.documents ?? []).reduce((acc, doc) => {
+                    const type = doc.file_type?.toLowerCase() || 'other';
+                    acc[type] = (acc[type] || 0) + 1;
+                    return acc;
+                  }, {} as Record<string, number>);
+                  const types = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).slice(0, 4);
+                  if (types.length === 0) {
+                    return <p className="text-xs text-muted-foreground">No documents yet</p>;
+                  }
+                  return types.map(([type, count]) => (
+                    <div key={type} className="flex items-center justify-between text-sm">
+                      <span className="capitalize">{type}</span>
+                      <span className="font-medium">{count}</span>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </div>
+
+            {/* Storage Usage */}
+            <div className="p-4 rounded-lg border bg-muted/30">
+              <h4 className="text-sm font-medium text-muted-foreground mb-3">Storage Usage</h4>
+              <div className="space-y-2">
+                {(() => {
+                  const totalSize = (documents?.documents ?? []).reduce((sum, doc) => sum + (doc.file_size || 0), 0);
+                  const formattedSize = totalSize < 1024
+                    ? `${totalSize} B`
+                    : totalSize < 1024 * 1024
+                      ? `${(totalSize / 1024).toFixed(1)} KB`
+                      : totalSize < 1024 * 1024 * 1024
+                        ? `${(totalSize / (1024 * 1024)).toFixed(1)} MB`
+                        : `${(totalSize / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+                  return (
+                    <>
+                      <div className="text-2xl font-bold">{formattedSize}</div>
+                      <p className="text-xs text-muted-foreground">Total document size</p>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* Chat Activity */}
+            <div className="p-4 rounded-lg border bg-muted/30">
+              <h4 className="text-sm font-medium text-muted-foreground mb-3">Chat Activity</h4>
+              <div className="space-y-2">
+                <div className="text-2xl font-bold">{formatNumber(activeChats)}</div>
+                <p className="text-xs text-muted-foreground">Total chat sessions</p>
+                <div className="mt-2 flex items-center gap-2 text-xs">
+                  <Brain className="h-3 w-3 text-muted-foreground" />
+                  <span>AI-powered conversations</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Cost Breakdown */}
+            <div className="p-4 rounded-lg border bg-muted/30">
+              <h4 className="text-sm font-medium text-muted-foreground mb-3">Cost Summary</h4>
+              <div className="space-y-2">
+                <div className="text-2xl font-bold">{formatCurrency(costThisMonth)}</div>
+                <p className="text-xs text-muted-foreground">This month</p>
+                <Link href="/dashboard/costs">
+                  <Button variant="link" size="sm" className="h-auto p-0 text-xs">
+                    View detailed costs →
+                  </Button>
+                </Link>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Recent Documents & Activity */}
       <div className="grid gap-6 md:grid-cols-2">
         {/* Recent Documents */}

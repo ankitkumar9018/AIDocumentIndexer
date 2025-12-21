@@ -124,6 +124,14 @@ class UploadOptions(BaseModel):
     smart_chunking: bool = True
     detect_duplicates: bool = True
     auto_generate_tags: bool = False  # Use LLM to auto-generate tags if no collection set
+    chunking_strategy: str = Field(
+        default="semantic",
+        description="Chunking strategy: 'simple', 'semantic', or 'hierarchical'"
+    )
+    enable_contextual_headers: bool = Field(
+        default=True,
+        description="Prepend document context (title, section) to each chunk for better retrieval"
+    )
 
 
 # =============================================================================

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import {
   FileText,
@@ -29,6 +29,11 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Sparkles,
+  Star,
+  Clock,
+  Bookmark,
+  X,
+  Plus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -88,7 +93,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { X, Plus } from "lucide-react";
 
 type ViewMode = "grid" | "list";
 
@@ -123,6 +127,25 @@ const FILE_TYPE_OPTIONS = [
   { value: "image", label: "Images" },
 ];
 
+// File size filter options
+const FILE_SIZE_OPTIONS = [
+  { value: "", label: "Any Size", minBytes: 0, maxBytes: Infinity },
+  { value: "small", label: "< 100 KB", minBytes: 0, maxBytes: 100 * 1024 },
+  { value: "medium", label: "100 KB - 1 MB", minBytes: 100 * 1024, maxBytes: 1024 * 1024 },
+  { value: "large", label: "1 MB - 10 MB", minBytes: 1024 * 1024, maxBytes: 10 * 1024 * 1024 },
+  { value: "xlarge", label: "> 10 MB", minBytes: 10 * 1024 * 1024, maxBytes: Infinity },
+];
+
+// Date range filter options
+const DATE_RANGE_OPTIONS = [
+  { value: "", label: "Any Time" },
+  { value: "today", label: "Today" },
+  { value: "week", label: "Last 7 Days" },
+  { value: "month", label: "Last 30 Days" },
+  { value: "quarter", label: "Last 90 Days" },
+  { value: "year", label: "Last Year" },
+];
+
 export default function DocumentsPage() {
   const { status } = useSession();
   const isAuthenticated = status === "authenticated";
@@ -136,7 +159,153 @@ export default function DocumentsPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [selectedFileType, setSelectedFileType] = useState<string>("");
+  const [selectedSizeFilter, setSelectedSizeFilter] = useState<string>("");
+  const [selectedDateRange, setSelectedDateRange] = useState<string>("");
   const [autoTagEnabled, setAutoTagEnabled] = useState(false);
+
+  // Favorites and recently viewed
+  const [favorites, setFavorites] = useState<Set<string>>(new Set());
+  const [recentlyViewed, setRecentlyViewed] = useState<string[]>([]);
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+
+  // Load favorites and recently viewed from localStorage
+  useEffect(() => {
+    try {
+      const savedFavorites = localStorage.getItem("document_favorites");
+      if (savedFavorites) {
+        setFavorites(new Set(JSON.parse(savedFavorites)));
+      }
+      const savedRecent = localStorage.getItem("document_recent");
+      if (savedRecent) {
+        setRecentlyViewed(JSON.parse(savedRecent));
+      }
+    } catch (error) {
+      console.error("Failed to load favorites/recent from localStorage:", error);
+    }
+  }, []);
+
+  // Save favorites to localStorage
+  const saveFavorites = useCallback((newFavorites: Set<string>) => {
+    try {
+      localStorage.setItem("document_favorites", JSON.stringify([...newFavorites]));
+    } catch (error) {
+      console.error("Failed to save favorites:", error);
+    }
+  }, []);
+
+  // Save recently viewed to localStorage
+  const saveRecentlyViewed = useCallback((recent: string[]) => {
+    try {
+      localStorage.setItem("document_recent", JSON.stringify(recent));
+    } catch (error) {
+      console.error("Failed to save recent:", error);
+    }
+  }, []);
+
+  // Toggle favorite
+  const toggleFavorite = useCallback((docId: string) => {
+    setFavorites((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) {
+        next.delete(docId);
+        toast.info("Removed from favorites");
+      } else {
+        next.add(docId);
+        toast.success("Added to favorites");
+      }
+      saveFavorites(next);
+      return next;
+    });
+  }, [saveFavorites]);
+
+  // Add to recently viewed
+  const addToRecentlyViewed = useCallback((docId: string) => {
+    setRecentlyViewed((prev) => {
+      const filtered = prev.filter((id) => id !== docId);
+      const updated = [docId, ...filtered].slice(0, 10); // Keep last 10
+      saveRecentlyViewed(updated);
+      return updated;
+    });
+  }, [saveRecentlyViewed]);
+
+  // Saved searches
+  interface SavedSearch {
+    id: string;
+    name: string;
+    query: string;
+    fileType: string;
+    sizeFilter: string;
+    dateRange: string;
+    collection: string | null;
+  }
+
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [showSavedSearches, setShowSavedSearches] = useState(false);
+
+  // Load saved searches from localStorage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("document_saved_searches");
+      if (saved) {
+        setSavedSearches(JSON.parse(saved));
+      }
+    } catch (error) {
+      console.error("Failed to load saved searches:", error);
+    }
+  }, []);
+
+  // Save a new search
+  const handleSaveSearch = useCallback(() => {
+    const hasFilters = searchQuery || selectedFileType || selectedSizeFilter || selectedDateRange || selectedCollection;
+    if (!hasFilters) {
+      toast.error("No filters to save", { description: "Apply some filters first" });
+      return;
+    }
+
+    const name = prompt("Enter a name for this search:");
+    if (!name) return;
+
+    const newSearch: SavedSearch = {
+      id: Date.now().toString(),
+      name,
+      query: searchQuery,
+      fileType: selectedFileType,
+      sizeFilter: selectedSizeFilter,
+      dateRange: selectedDateRange,
+      collection: selectedCollection,
+    };
+
+    setSavedSearches((prev) => {
+      const updated = [...prev, newSearch];
+      localStorage.setItem("document_saved_searches", JSON.stringify(updated));
+      return updated;
+    });
+
+    toast.success("Search saved", { description: `"${name}" saved to your searches` });
+  }, [searchQuery, selectedFileType, selectedSizeFilter, selectedDateRange, selectedCollection]);
+
+  // Apply a saved search
+  const handleApplySavedSearch = useCallback((search: SavedSearch) => {
+    setSearchQuery(search.query);
+    setSelectedFileType(search.fileType);
+    setSelectedSizeFilter(search.sizeFilter);
+    setSelectedDateRange(search.dateRange);
+    setSelectedCollection(search.collection);
+    setCurrentPage(1);
+    setShowSavedSearches(false);
+    toast.success("Search applied", { description: `Applied "${search.name}"` });
+  }, []);
+
+  // Delete a saved search
+  const handleDeleteSavedSearch = useCallback((searchId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSavedSearches((prev) => {
+      const updated = prev.filter((s) => s.id !== searchId);
+      localStorage.setItem("document_saved_searches", JSON.stringify(updated));
+      return updated;
+    });
+    toast.info("Search deleted");
+  }, []);
 
   // Queries - only fetch when authenticated
   const { data: documentsData, isLoading, refetch } = useDocuments({
@@ -169,14 +338,56 @@ export default function DocumentsPage() {
   // Use real documents from API (no mock fallback)
   const documents: Document[] = documentsData?.documents ?? [];
 
-  // Filter documents by search query and file type
+  // Filter documents by search query, file type, size, and date
   const filteredDocuments = useMemo(() => {
     return documents.filter((doc) => {
+      // Search filter
       const matchesSearch = doc.name.toLowerCase().includes(searchQuery.toLowerCase());
+
+      // File type filter
       const matchesFileType = !selectedFileType || doc.file_type?.toLowerCase().includes(selectedFileType.toLowerCase());
-      return matchesSearch && matchesFileType;
+
+      // Size filter
+      let matchesSize = true;
+      if (selectedSizeFilter) {
+        const sizeOption = FILE_SIZE_OPTIONS.find((o) => o.value === selectedSizeFilter);
+        if (sizeOption) {
+          matchesSize = doc.file_size >= sizeOption.minBytes && doc.file_size < sizeOption.maxBytes;
+        }
+      }
+
+      // Date range filter
+      let matchesDate = true;
+      if (selectedDateRange) {
+        const now = new Date();
+        const docDate = new Date(doc.created_at);
+        const dayMs = 24 * 60 * 60 * 1000;
+
+        switch (selectedDateRange) {
+          case "today":
+            matchesDate = now.toDateString() === docDate.toDateString();
+            break;
+          case "week":
+            matchesDate = (now.getTime() - docDate.getTime()) < 7 * dayMs;
+            break;
+          case "month":
+            matchesDate = (now.getTime() - docDate.getTime()) < 30 * dayMs;
+            break;
+          case "quarter":
+            matchesDate = (now.getTime() - docDate.getTime()) < 90 * dayMs;
+            break;
+          case "year":
+            matchesDate = (now.getTime() - docDate.getTime()) < 365 * dayMs;
+            break;
+        }
+      }
+
+      // Favorites filter
+      const matchesFavorites = !showFavoritesOnly || favorites.has(doc.id);
+
+      return matchesSearch && matchesFileType && matchesSize && matchesDate && matchesFavorites;
     });
-  }, [documents, searchQuery, selectedFileType]);
+  }, [documents, searchQuery, selectedFileType, selectedSizeFilter, selectedDateRange, showFavoritesOnly, favorites]);
 
   // Pagination calculations
   const totalPages = Math.ceil(filteredDocuments.length / pageSize);
@@ -192,6 +403,16 @@ export default function DocumentsPage() {
 
   const handleFileTypeChange = (value: string) => {
     setSelectedFileType(value);
+    setCurrentPage(1);
+  };
+
+  const handleSizeFilterChange = (value: string) => {
+    setSelectedSizeFilter(value);
+    setCurrentPage(1);
+  };
+
+  const handleDateRangeChange = (value: string) => {
+    setSelectedDateRange(value);
     setCurrentPage(1);
   };
 
@@ -270,12 +491,15 @@ export default function DocumentsPage() {
   };
 
   const handleViewDocument = (docId: string) => {
+    // Track recently viewed
+    addToRecentlyViewed(docId);
     // Navigate to document detail view
     window.location.href = `/dashboard/documents/${docId}`;
   };
 
   const [isAutoTagging, setIsAutoTagging] = useState(false);
   const [isEnhancing, setIsEnhancing] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   // Edit tags dialog state
   const [editTagsDialogOpen, setEditTagsDialogOpen] = useState(false);
@@ -324,6 +548,25 @@ export default function DocumentsPage() {
       });
     } finally {
       setIsAutoTagging(false);
+    }
+  };
+
+  const handleBulkDownload = async () => {
+    if (selectedDocuments.size === 0) return;
+
+    try {
+      setIsDownloading(true);
+      await api.bulkDownloadDocuments(Array.from(selectedDocuments));
+      toast.success("Download started", {
+        description: `Downloading ${selectedDocuments.size} documents as ZIP...`,
+      });
+    } catch (error: any) {
+      console.error("Bulk download failed:", error);
+      toast.error("Failed to download documents", {
+        description: error?.detail || error?.message || "An error occurred",
+      });
+    } finally {
+      setIsDownloading(false);
     }
   };
 
@@ -516,16 +759,81 @@ export default function DocumentsPage() {
 
       {/* Toolbar */}
       <div className="flex flex-col sm:flex-row gap-4">
-        {/* Search */}
+        {/* Search with Saved Searches */}
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search documents..."
             value={searchQuery}
             onChange={(e) => handleSearchChange(e.target.value)}
-            className="pl-9"
+            className="pl-9 pr-20"
             aria-label="Search documents"
           />
+          <div className="absolute right-1 top-1/2 -translate-y-1/2 flex gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleSaveSearch}
+              title="Save current search"
+            >
+              <Bookmark className="h-3.5 w-3.5" />
+            </Button>
+            {savedSearches.length > 0 && (
+              <Button
+                variant={showSavedSearches ? "secondary" : "ghost"}
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => setShowSavedSearches(!showSavedSearches)}
+                title="Saved searches"
+              >
+                <ChevronDown className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
+
+          {/* Saved Searches Dropdown */}
+          {showSavedSearches && savedSearches.length > 0 && (
+            <Card className="absolute z-10 top-full mt-1 w-full p-2 shadow-lg">
+              <div className="flex items-center justify-between px-2 pb-2 border-b mb-2">
+                <span className="text-sm font-medium">Saved Searches</span>
+                <span className="text-xs text-muted-foreground">{savedSearches.length} saved</span>
+              </div>
+              <div className="max-h-48 overflow-y-auto space-y-1">
+                {savedSearches.map((search) => (
+                  <div
+                    key={search.id}
+                    className="flex items-center justify-between p-2 rounded hover:bg-muted cursor-pointer"
+                    onClick={() => handleApplySavedSearch(search)}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Bookmark className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{search.name}</p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          {[
+                            search.query && `"${search.query}"`,
+                            search.fileType && search.fileType,
+                            search.sizeFilter && search.sizeFilter,
+                            search.dateRange && search.dateRange,
+                            search.collection && search.collection,
+                          ].filter(Boolean).join(" • ") || "No filters"}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 shrink-0"
+                      onClick={(e) => handleDeleteSavedSearch(search.id, e)}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
         </div>
 
         {/* Filters */}
@@ -538,6 +846,34 @@ export default function DocumentsPage() {
             aria-label="Filter by file type"
           >
             {FILE_TYPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+
+          {/* Size Filter */}
+          <select
+            value={selectedSizeFilter}
+            onChange={(e) => handleSizeFilterChange(e.target.value)}
+            className="h-10 px-3 rounded-md border bg-background text-sm"
+            aria-label="Filter by file size"
+          >
+            {FILE_SIZE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+
+          {/* Date Range Filter */}
+          <select
+            value={selectedDateRange}
+            onChange={(e) => handleDateRangeChange(e.target.value)}
+            className="h-10 px-3 rounded-md border bg-background text-sm"
+            aria-label="Filter by date"
+          >
+            {DATE_RANGE_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
               </option>
@@ -562,6 +898,21 @@ export default function DocumentsPage() {
             ))}
           </select>
 
+          {/* Favorites Toggle */}
+          <Button
+            variant={showFavoritesOnly ? "default" : "outline"}
+            size="sm"
+            className="h-10"
+            onClick={() => {
+              setShowFavoritesOnly(!showFavoritesOnly);
+              setCurrentPage(1);
+            }}
+            aria-label="Show favorites only"
+          >
+            <Star className={`h-4 w-4 mr-1 ${showFavoritesOnly ? "fill-current" : ""}`} />
+            Favorites {favorites.size > 0 && `(${favorites.size})`}
+          </Button>
+
           {/* View Toggle */}
           <div className="flex rounded-lg border bg-muted p-1">
             <Button
@@ -585,6 +936,60 @@ export default function DocumentsPage() {
           </div>
         </div>
       </div>
+
+      {/* Recently Viewed Section */}
+      {recentlyViewed.length > 0 && !showFavoritesOnly && !searchQuery && (
+        <Card className="bg-muted/30">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Clock className="h-4 w-4" />
+              Recently Viewed
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex gap-3 overflow-x-auto pb-2">
+              {recentlyViewed
+                .slice(0, 5)
+                .map((docId) => {
+                  const doc = documents.find((d) => d.id === docId);
+                  if (!doc) return null;
+                  const FileIcon = getFileIcon(doc.file_type);
+                  return (
+                    <div
+                      key={docId}
+                      className="flex items-center gap-2 px-3 py-2 rounded-lg border bg-background hover:bg-muted cursor-pointer shrink-0"
+                      onClick={() => handleViewDocument(doc.id)}
+                    >
+                      <FileIcon className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-sm font-medium truncate max-w-[150px]">
+                        {doc.name}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleFavorite(doc.id);
+                        }}
+                        aria-label={favorites.has(doc.id) ? "Remove from favorites" : "Add to favorites"}
+                      >
+                        <Star
+                          className={`h-3 w-3 ${
+                            favorites.has(doc.id)
+                              ? "fill-yellow-400 text-yellow-400"
+                              : "text-muted-foreground"
+                          }`}
+                        />
+                      </Button>
+                    </div>
+                  );
+                })
+                .filter(Boolean)}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Bulk Actions */}
       {selectedDocuments.size > 0 && (
@@ -619,9 +1024,14 @@ export default function DocumentsPage() {
             <Trash2 className="h-4 w-4 mr-2" />
             Delete
           </Button>
-          <Button variant="outline" size="sm">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleBulkDownload}
+            disabled={isDownloading}
+          >
             <Download className="h-4 w-4 mr-2" />
-            Download
+            {isDownloading ? "Downloading..." : "Download"}
           </Button>
           <Button
             variant="ghost"
@@ -733,6 +1143,9 @@ export default function DocumentsPage() {
                             <FileIcon className="h-5 w-5 text-muted-foreground shrink-0" />
                             <div>
                               <div className="flex items-center gap-2">
+                                {favorites.has(doc.id) && (
+                                  <Star className="h-4 w-4 fill-yellow-400 text-yellow-400 shrink-0" />
+                                )}
                                 <p className="font-medium">{doc.name}</p>
                                 {doc.is_enhanced && (
                                   <TooltipProvider>
@@ -808,6 +1221,10 @@ export default function DocumentsPage() {
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={() => toggleFavorite(doc.id)}>
+                                <Star className={`h-4 w-4 mr-2 ${favorites.has(doc.id) ? "fill-yellow-400 text-yellow-400" : ""}`} />
+                                {favorites.has(doc.id) ? "Remove from Favorites" : "Add to Favorites"}
+                              </DropdownMenuItem>
                               <DropdownMenuItem onClick={() => handleViewDocument(doc.id)}>
                                 <Eye className="h-4 w-4 mr-2" />
                                 View Details
@@ -876,6 +1293,10 @@ export default function DocumentsPage() {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={(e) => { e.stopPropagation(); toggleFavorite(doc.id); }}>
+                          <Star className={`h-4 w-4 mr-2 ${favorites.has(doc.id) ? "fill-yellow-400 text-yellow-400" : ""}`} />
+                          {favorites.has(doc.id) ? "Remove from Favorites" : "Add to Favorites"}
+                        </DropdownMenuItem>
                         <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleViewDocument(doc.id); }}>
                           <Eye className="h-4 w-4 mr-2" />
                           View Details

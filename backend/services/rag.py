@@ -55,6 +55,12 @@ from backend.services.query_expander import (
     QueryExpansionConfig,
     get_query_expander,
 )
+from backend.services.rag_verifier import (
+    RAGVerifier,
+    VerifierConfig,
+    VerificationLevel,
+    VerificationResult,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -83,6 +89,10 @@ class RAGResponse:
     tokens_used: Optional[int] = None
     processing_time_ms: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Verification/confidence fields
+    confidence_score: Optional[float] = None  # 0-1 confidence
+    confidence_level: Optional[str] = None  # "high", "medium", "low"
+    verification_result: Optional[VerificationResult] = None
 
 
 @dataclass
@@ -121,6 +131,10 @@ class RAGConfig:
         enable_query_expansion: bool = False,  # OFF by default
         query_expansion_count: int = 2,  # Number of query variations
         query_expansion_model: str = "gpt-4o-mini",  # Cost-effective model
+
+        # Verification settings (Self-RAG)
+        enable_verification: bool = True,  # Enable answer verification
+        verification_level: str = "quick",  # "none", "quick", "standard", "thorough"
     ):
         import os
         # Default provider from environment variable
@@ -142,6 +156,9 @@ class RAGConfig:
         self.enable_query_expansion = enable_query_expansion
         self.query_expansion_count = query_expansion_count
         self.query_expansion_model = query_expansion_model
+        # Verification
+        self.enable_verification = enable_verification
+        self.verification_level = verification_level
 
 
 # =============================================================================
@@ -256,6 +273,20 @@ class RAGService:
             )
             self._query_expander = QueryExpander(expansion_config)
 
+        # Initialize verifier if enabled
+        self._verifier: Optional[RAGVerifier] = None
+        if self.config.enable_verification:
+            level_map = {
+                "none": VerificationLevel.NONE,
+                "quick": VerificationLevel.QUICK,
+                "standard": VerificationLevel.STANDARD,
+                "thorough": VerificationLevel.THOROUGH,
+            }
+            verifier_config = VerifierConfig(
+                level=level_map.get(self.config.verification_level, VerificationLevel.QUICK),
+            )
+            self._verifier = RAGVerifier(verifier_config)
+
         logger.info(
             "Initialized RAG service",
             chat_provider=self.config.chat_provider,
@@ -265,6 +296,8 @@ class RAGService:
             use_db_config=use_db_config,
             track_usage=track_usage,
             query_expansion=self.config.enable_query_expansion,
+            verification=self.config.enable_verification,
+            verification_level=self.config.verification_level,
         )
 
     @property
@@ -507,6 +540,29 @@ class RAGService:
             access_tier=access_tier,
         )
 
+        # Verify retrieved documents if enabled
+        verification_result = None
+        if self._verifier is not None:
+            try:
+                verification_result = await self._verifier.verify(
+                    query=question,
+                    retrieved_docs=retrieved_docs,
+                )
+                # Filter to only relevant documents
+                retrieved_docs = self._verifier.filter_by_relevance(
+                    retrieved_docs, verification_result
+                )
+                logger.debug(
+                    "Verification complete",
+                    confidence=verification_result.confidence_score,
+                    relevant=verification_result.num_relevant,
+                    filtered=verification_result.num_filtered,
+                )
+            except Exception as e:
+                # Log error but continue without verification
+                logger.warning("Verification failed, continuing without filtering", error=str(e))
+                verification_result = None
+
         # Format context from retrieved documents
         context, sources = self._format_context(retrieved_docs, include_collection_context)
 
@@ -565,6 +621,10 @@ class RAGService:
         # Get model name from config or fallback
         model_name = llm_config.model if llm_config else (self.config.chat_model or "default")
 
+        # Extract confidence from verification
+        confidence_score = verification_result.confidence_score if verification_result else None
+        confidence_level = verification_result.confidence_level if verification_result else None
+
         return RAGResponse(
             content=content,
             sources=sources if self.config.include_sources else [],
@@ -577,6 +637,9 @@ class RAGService:
                 "provider": llm_config.provider_type if llm_config else self.config.chat_provider,
                 "config_source": llm_config.source if llm_config else "static",
             },
+            confidence_score=confidence_score,
+            confidence_level=confidence_level,
+            verification_result=verification_result,
         )
 
     async def query_stream(

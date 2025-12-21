@@ -687,7 +687,9 @@ The AIDocumentIndexer API provides 197 endpoints across 11 categories. All endpo
 | Service | File | Responsibility |
 |---------|------|----------------|
 | **Pipeline** | `services/pipeline.py` | End-to-end document processing |
-| **RAG** | `services/rag.py` | Retrieval-augmented generation |
+| **RAG** | `services/rag.py` | Retrieval-augmented generation with Self-RAG verification |
+| **RAG Verifier** | `services/rag_verifier.py` | Answer verification and confidence scoring |
+| **Semantic Chunker** | `services/semantic_chunker.py` | Context-aware chunking with section headers |
 | **LLM** | `services/llm.py` | Multi-provider LLM management |
 | **Embeddings** | `services/embeddings.py` | Vector embedding generation |
 | **VectorStore** | `services/vectorstore.py` | Vector similarity search |
@@ -709,9 +711,38 @@ The AIDocumentIndexer API provides 197 endpoints across 11 categories. All endpo
 | Service | File | Responsibility |
 |---------|------|----------------|
 | **Universal Processor** | `processors/universal.py` | Multi-format extraction |
-| **Chunker** | `processors/chunker.py` | Text splitting strategies |
+| **Chunker** | `processors/chunker.py` | Text splitting strategies (simple, semantic, hierarchical) |
+| **Semantic Chunker** | `services/semantic_chunker.py` | Advanced chunking with contextual headers |
 | **Text Preprocessor** | `services/text_preprocessor.py` | Text normalization |
 | **Summarizer** | `services/summarizer.py` | Document summarization |
+
+### RAG Enhancement Services
+
+| Service | File | Responsibility |
+|---------|------|----------------|
+| **RAG Verifier** | `services/rag_verifier.py` | Self-RAG verification and confidence scoring |
+| **Query Expander** | `services/query_expander.py` | Multi-query expansion for improved recall |
+
+#### RAG Verification Levels
+
+| Level | Description | Use Case |
+|-------|-------------|----------|
+| `none` | No verification (fastest) | High-throughput, trusted queries |
+| `quick` | Embedding-based relevance only | Default for most queries |
+| `standard` | + LLM relevance check | Important queries |
+| `thorough` | + Answer grounding verification | High-stakes responses |
+
+#### Confidence Scoring
+
+The RAG Verifier calculates confidence scores (0-1) based on:
+- Average relevance score of retrieved chunks
+- Ratio of relevant to total retrieved documents
+- Number of supporting sources (more sources = higher confidence)
+
+Confidence levels:
+- **High** (80%+): Answer is well-supported by retrieved documents
+- **Medium** (50-80%): Some relevant information found, may be incomplete
+- **Low** (<50%): Limited source support, verification recommended
 
 ---
 
@@ -816,6 +847,10 @@ The AIDocumentIndexer API provides 197 endpoints across 11 categories. All endpo
 | Adaptive OCR | ON | Reduced memory for large files |
 | Document Summarization | OFF by default | Optional token reduction |
 | Hierarchical Chunking | OFF by default | Better for 100+ page docs |
+| Semantic Chunking | ON by default | Context-aware splitting |
+| Contextual Headers | ON by default | Improved retrieval accuracy |
+| Self-RAG Verification | ON (quick mode) | Filters irrelevant chunks |
+| Confidence Scoring | ON | Transparency for users |
 
 ### Recommended Scaling Path
 
@@ -925,4 +960,4 @@ The AIDocumentIndexer API provides 197 endpoints across 11 categories. All endpo
 
 ---
 
-*Last updated: 2025-12-19*
+*Last updated: 2025-12-21*

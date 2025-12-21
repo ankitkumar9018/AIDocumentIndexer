@@ -29,6 +29,9 @@ import {
   Brain,
   FileSearch,
   Tag,
+  ShieldCheck,
+  ShieldAlert,
+  ShieldQuestion,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -81,6 +84,8 @@ interface Message {
   timestamp: Date;
   isStreaming?: boolean;
   isGeneralResponse?: boolean;
+  confidenceScore?: number;  // 0-1 confidence score
+  confidenceLevel?: "high" | "medium" | "low";  // Confidence level
 }
 
 interface Source {
@@ -136,6 +141,7 @@ export default function ChatPage() {
   const [isAgentExecuting, setIsAgentExecuting] = useState(false);
   const [expandedSourceId, setExpandedSourceId] = useState<string | null>(null);
   const [shouldLoadHistory, setShouldLoadHistory] = useState(false);
+  const [historySearchQuery, setHistorySearchQuery] = useState("");
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -238,6 +244,34 @@ export default function ChatPage() {
     return "Very Creative";
   };
 
+  // Helper to get confidence icon and color
+  const getConfidenceDisplay = (level?: "high" | "medium" | "low", score?: number) => {
+    if (!level) return null;
+
+    const config = {
+      high: {
+        icon: ShieldCheck,
+        color: "text-green-500",
+        bgColor: "bg-green-500/10",
+        label: "High Confidence",
+      },
+      medium: {
+        icon: ShieldQuestion,
+        color: "text-yellow-500",
+        bgColor: "bg-yellow-500/10",
+        label: "Medium Confidence",
+      },
+      low: {
+        icon: ShieldAlert,
+        color: "text-red-500",
+        bgColor: "bg-red-500/10",
+        label: "Low Confidence",
+      },
+    };
+
+    return { ...config[level], score: score ? Math.round(score * 100) : null };
+  };
+
   // Handle temperature change
   const handleTemperatureChange = async (value: number[]) => {
     const newTemp = value[0];
@@ -264,6 +298,17 @@ export default function ChatPage() {
   const selectedMessage = messages.find((m) => m.id === selectedMessageId);
   const selectedSources = selectedMessage?.sources || [];
   const isSelectedMessageGeneral = selectedMessage?.isGeneralResponse;
+
+  // Filter sessions by search query
+  const filteredSessions = useMemo(() => {
+    if (!sessions?.sessions) return [];
+    if (!historySearchQuery.trim()) return sessions.sessions;
+
+    const query = historySearchQuery.toLowerCase();
+    return sessions.sessions.filter((session: { title: string }) =>
+      session.title.toLowerCase().includes(query)
+    );
+  }, [sessions?.sessions, historySearchQuery]);
 
   // Group sources by document for better display
   const groupedSources = useMemo(() => {
@@ -515,7 +560,7 @@ export default function ChatPage() {
             collection: undefined,
           })) || [];
 
-        // Update message with response
+        // Update message with response including confidence
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
@@ -525,6 +570,8 @@ export default function ChatPage() {
                   sources,
                   isStreaming: false,
                   isGeneralResponse: response.is_general_response,
+                  confidenceScore: response.confidence_score,
+                  confidenceLevel: response.confidence_level as "high" | "medium" | "low" | undefined,
                 }
               : m
           )
@@ -1025,7 +1072,7 @@ export default function ChatPage() {
         {/* History Dropdown */}
         {showHistory && sessions && sessions.sessions?.length > 0 && (
           <Card className="absolute z-10 top-32 right-6 w-80 p-2 shadow-lg">
-            <div className="flex items-center justify-between px-2 py-1">
+            <div className="flex items-center justify-between px-2 py-1 mb-2">
               <span className="text-sm font-medium text-muted-foreground">
                 Recent Conversations
               </span>
@@ -1053,30 +1100,51 @@ export default function ChatPage() {
                 {deleteAllSessions.isPending ? "Clearing..." : "Clear All"}
               </Button>
             </div>
+
+            {/* Search History */}
+            <div className="px-2 pb-2">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <Input
+                  value={historySearchQuery}
+                  onChange={(e) => setHistorySearchQuery(e.target.value)}
+                  placeholder="Search conversations..."
+                  className="h-8 pl-8 text-sm"
+                  aria-label="Search chat history"
+                />
+              </div>
+            </div>
+
             <ScrollArea className="max-h-64">
-              {sessions.sessions.map((session: { id: string; title: string; created_at: string }) => (
-                <div
-                  key={session.id}
-                  className="flex items-center justify-between p-2 rounded hover:bg-muted cursor-pointer"
-                  onClick={() => handleLoadSession(session.id)}
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <MessageSquare className="h-4 w-4 text-muted-foreground shrink-0" />
-                    <span className="text-sm truncate">{session.title}</span>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6 shrink-0"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteSession.mutate(session.id);
-                    }}
+              {filteredSessions.length > 0 ? (
+                filteredSessions.map((session: { id: string; title: string; created_at: string }) => (
+                  <div
+                    key={session.id}
+                    className="flex items-center justify-between p-2 rounded hover:bg-muted cursor-pointer"
+                    onClick={() => handleLoadSession(session.id)}
                   >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <MessageSquare className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <span className="text-sm truncate">{session.title}</span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 shrink-0"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteSession.mutate(session.id);
+                      }}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ))
+              ) : (
+                <div className="p-4 text-center text-sm text-muted-foreground">
+                  No conversations match "{historySearchQuery}"
                 </div>
-              ))}
+              )}
             </ScrollArea>
           </Card>
         )}
@@ -1194,6 +1262,49 @@ export default function ChatPage() {
                             General
                           </Button>
                         )}
+                        {/* Confidence Indicator */}
+                        {message.confidenceLevel && (() => {
+                          const confidence = getConfidenceDisplay(message.confidenceLevel, message.confidenceScore);
+                          if (!confidence) return null;
+                          const Icon = confidence.icon;
+                          return (
+                            <Popover>
+                              <PopoverTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className={cn("h-7 px-2 text-xs gap-1", confidence.color)}
+                                  title={confidence.label}
+                                >
+                                  <Icon className="h-3 w-3" />
+                                  {confidence.score !== null && `${confidence.score}%`}
+                                </Button>
+                              </PopoverTrigger>
+                              <PopoverContent className="w-64" align="start">
+                                <div className="space-y-2">
+                                  <div className="flex items-center gap-2">
+                                    <Icon className={cn("h-5 w-5", confidence.color)} />
+                                    <div>
+                                      <p className="font-medium text-sm">{confidence.label}</p>
+                                      {confidence.score !== null && (
+                                        <p className="text-xs text-muted-foreground">
+                                          Confidence score: {confidence.score}%
+                                        </p>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <p className="text-xs text-muted-foreground">
+                                    {message.confidenceLevel === "high"
+                                      ? "The answer is well-supported by the retrieved documents."
+                                      : message.confidenceLevel === "medium"
+                                      ? "Some relevant information found, but answer may be incomplete."
+                                      : "Limited source support. Please verify this information."}
+                                  </p>
+                                </div>
+                              </PopoverContent>
+                            </Popover>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>

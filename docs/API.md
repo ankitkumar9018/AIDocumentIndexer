@@ -272,9 +272,19 @@ Send a chat message and get a response. Supports three modes:
     }
   ],
   "is_general_response": false,
+  "confidence_score": 0.85,
+  "confidence_level": "high",
   "created_at": "2025-01-01T00:00:00Z"
 }
 ```
+
+**Confidence Levels:**
+
+| Level | Score Range | Description |
+|-------|-------------|-------------|
+| `high` | 80%+ | Answer is well-supported by retrieved documents |
+| `medium` | 50-80% | Some relevant information found, may be incomplete |
+| `low` | <50% | Limited source support, verification recommended |
 
 ### POST /chat/completions/stream
 
@@ -288,6 +298,7 @@ Stream a chat response using Server-Sent Events (SSE).
 |------------|----------------|-------------|
 | `content` | `{ "data": "text chunk" }` | Streaming response text |
 | `sources` | `{ "data": [{ "document_id": "...", ... }] }` | Document sources with metadata |
+| `confidence` | `{ "score": 0.85, "level": "high" }` | Confidence score for the response |
 | `agent_step` | `{ "step": "Research", "status": "completed" }` | Agent mode step progress |
 | `done` | `{ "message_id": "uuid", "content": "full text" }` | Final message with complete content |
 | `error` | `{ "message": "error description" }` | Error during processing |
@@ -325,6 +336,8 @@ Upload a single file.
 - `smart_chunking` (optional, default: true): Use semantic chunking
 - `detect_duplicates` (optional, default: true): Skip duplicate files
 - `processing_mode` (optional): "full", "smart" (default), or "text_only"
+- `chunking_strategy` (optional, default: "semantic"): "simple", "semantic", or "hierarchical"
+- `enable_contextual_headers` (optional, default: true): Prepend document context to each chunk
 
 ### POST /upload/batch
 

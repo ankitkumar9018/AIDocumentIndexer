@@ -9,9 +9,13 @@ All endpoints enforce permission checking based on user access tier.
 from datetime import datetime
 from typing import Optional, List, Dict
 from uuid import UUID
+import io
+import zipfile
+import tempfile
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pathlib import Path
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, and_, or_, desc, asc
@@ -175,6 +179,11 @@ class BulkAutoTagRequest(BaseModel):
     """Bulk auto-tag request."""
     document_ids: List[UUID]
     max_tags: int = Field(default=5, ge=1, le=10)
+
+
+class BulkDownloadRequest(BaseModel):
+    """Bulk download request."""
+    document_ids: List[UUID] = Field(..., min_length=1, max_length=100)
 
 
 class BulkAutoTagResponse(BaseModel):
@@ -939,6 +948,107 @@ async def download_document(
         path=str(file_path),
         filename=document.original_filename,
         media_type=mime_type,
+    )
+
+
+@router.post("/bulk-download")
+async def bulk_download_documents(
+    request: BulkDownloadRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Download multiple documents as a ZIP file.
+
+    Returns a ZIP archive containing all requested documents.
+    Only documents the user has read access to will be included.
+    """
+    logger.info(
+        "Bulk downloading documents",
+        user_id=user.user_id,
+        document_count=len(request.document_ids),
+    )
+
+    if not request.document_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No document IDs provided",
+        )
+
+    # Get documents the user has access to
+    query = (
+        select(Document)
+        .join(AccessTier, Document.access_tier_id == AccessTier.id)
+        .where(
+            and_(
+                Document.id.in_(request.document_ids),
+                AccessTier.level <= user.access_tier_level,
+            )
+        )
+    )
+
+    result = await db.execute(query)
+    documents = result.scalars().all()
+
+    if not documents:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No accessible documents found",
+        )
+
+    # Create ZIP file in memory
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        files_added = 0
+        for doc in documents:
+            file_path = Path(doc.file_path)
+            if file_path.exists():
+                # Use original filename, handle duplicates
+                filename = doc.original_filename
+                # Check for duplicates and add suffix if needed
+                base_name = Path(filename).stem
+                extension = Path(filename).suffix
+                counter = 1
+                while filename in [info.filename for info in zip_file.filelist]:
+                    filename = f"{base_name}_{counter}{extension}"
+                    counter += 1
+
+                zip_file.write(file_path, filename)
+                files_added += 1
+            else:
+                logger.warning(
+                    "Document file not found on disk",
+                    document_id=str(doc.id),
+                    file_path=str(file_path),
+                )
+
+    if files_added == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No document files found on disk",
+        )
+
+    # Reset buffer position
+    zip_buffer.seek(0)
+
+    # Generate filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_filename = f"documents_{timestamp}.zip"
+
+    logger.info(
+        "Bulk download completed",
+        user_id=user.user_id,
+        files_added=files_added,
+        zip_filename=zip_filename,
+    )
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_filename}"',
+        },
     )
 
 

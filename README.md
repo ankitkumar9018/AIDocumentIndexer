@@ -24,12 +24,16 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 |---------|-------------|
 | **Universal File Support** | PDF, PPTX, DOCX, XLSX, images, and 20+ more formats |
 | **Multi-LLM Support** | OpenAI GPT-4, Ollama (local), Claude, and 100+ providers via LiteLLM |
-| **Smart RAG** | LangChain-powered retrieval with hybrid search (vector + keyword) |
+| **Smart RAG with Self-Verification** | LangChain-powered retrieval with hybrid search + answer confidence scoring |
+| **Semantic Chunking** | Context-aware document chunking with section headers for better retrieval |
 | **Source Citations** | Every answer shows exactly which documents were used |
+| **Confidence Indicators** | See how confident the AI is in each response (high/medium/low) |
 | **Permission Tiers** | Dynamic access control - CEO sees all, interns see only authorized files |
 | **Document Generation** | Create PPTX, DOCX, PDF with human-in-the-loop approval workflow |
 | **Multi-LLM Collaboration** | Multiple AI models working together for higher quality output |
-| **Web Scraping** | Import content from websites into your knowledge base |
+| **Agent Mode** | Multi-step task execution with planning and approval workflows |
+| **Web Scraping** | Import content from websites with depth control and job scheduling |
+| **Cost Tracking** | Monitor LLM usage costs with detailed analytics dashboard |
 | **File Watcher** | Automatically index new files from monitored directories |
 | **Beautiful UI** | Modern, responsive interface built with Next.js 15 and shadcn/ui |
 
@@ -427,10 +431,22 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for more solutions.
 - [x] Phase 1: Core infrastructure
 - [x] Phase 2: Document processing
 - [x] Phase 3: RAG & Search
-- [ ] Phase 4: Permission system
-- [ ] Phase 5: Document generation
-- [ ] Phase 6: Advanced features (Multi-LLM, Web scraping)
-- [ ] Phase 7: UI/UX polish
+- [x] Phase 4: Permission system (Tier-based RLS)
+- [x] Phase 5: Document generation (PPTX, DOCX, PDF with approval workflow)
+- [x] Phase 6: Advanced features
+  - [x] Multi-LLM Collaboration
+  - [x] Web scraping with depth control
+  - [x] Agent Mode with multi-step execution
+  - [x] Cost tracking and analytics
+  - [x] Self-RAG with answer verification
+  - [x] Semantic chunking with contextual headers
+  - [x] Confidence scoring for responses
+- [x] Phase 7: UI/UX polish
+  - [x] Dashboard with usage analytics
+  - [x] Keyboard shortcuts
+  - [x] Document favorites and recently viewed
+  - [x] Chat history search
+  - [x] Bulk operations for documents
 
 ---
 

@@ -29,6 +29,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Input } from "@/components/ui/input";
+import { KeyboardShortcutsDialog } from "@/components/keyboard-shortcuts-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -275,6 +276,9 @@ export default function DashboardLayout({
           {children}
         </main>
       </div>
+
+      {/* Global Keyboard Shortcuts Dialog */}
+      <KeyboardShortcutsDialog />
     </div>
   );
 }
