@@ -78,7 +78,9 @@ class VerifierConfig:
     level: VerificationLevel = VerificationLevel.STANDARD
 
     # Relevance thresholds
-    embedding_relevance_threshold: float = 0.5  # For embedding similarity
+    # Note: For hybrid search with RRF, scores are typically 0.01-0.03 (1/(k+rank) where k=60)
+    # For cosine similarity, scores are 0-1. We use a low default to support both.
+    embedding_relevance_threshold: float = 0.005  # For RRF/embedding scores
     llm_relevance_threshold: float = 0.6  # For LLM-assessed relevance
 
     # Confidence thresholds

@@ -20,7 +20,7 @@ import json
 from backend.services.rag import RAGService, RAGConfig, get_rag_service
 from backend.services.response_cache import get_response_cache_service, ResponseCacheService
 from backend.db.database import async_session_context, get_async_session
-from backend.db.models import ChatSession as ChatSessionModel, ChatMessage as ChatMessageModel, MessageRole
+from backend.db.models import ChatSession as ChatSessionModel, ChatMessage as ChatMessageModel, MessageRole, User
 from backend.services.agent_orchestrator import AgentOrchestrator, create_orchestrator
 from backend.api.middleware.auth import AuthenticatedUser
 
@@ -29,17 +29,59 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 
-async def get_or_create_session(db, session_id: UUID, user_id: str) -> ChatSessionModel:
+async def get_db_user_id(db, user_id: str, user_email: str = None) -> UUID:
+    """
+    Get a valid database user UUID from user_id string or email.
+    Returns UUID of the user in the database.
+    """
+    db_user_id = None
+
+    # First try: check if user_id is already a valid UUID
+    try:
+        db_user_id = UUID(user_id)
+        # Verify it exists in users table
+        user_query = select(User).where(User.id == db_user_id)
+        user_result = await db.execute(user_query)
+        if not user_result.scalar_one_or_none():
+            db_user_id = None
+    except (ValueError, TypeError):
+        pass
+
+    # Second try: look up user by email
+    if not db_user_id and user_email:
+        user_query = select(User).where(User.email == user_email)
+        user_result = await db.execute(user_query)
+        user = user_result.scalar_one_or_none()
+        if user:
+            db_user_id = user.id
+
+    # If still no user, use the first admin user as fallback
+    if not db_user_id:
+        admin_query = select(User).where(User.email.like('%admin%')).limit(1)
+        admin_result = await db.execute(admin_query)
+        admin_user = admin_result.scalar_one_or_none()
+        if admin_user:
+            db_user_id = admin_user.id
+
+    return db_user_id
+
+
+async def get_or_create_session(db, session_id: UUID, user_id: str, user_email: str = None) -> ChatSessionModel:
     """Get existing session or create a new one."""
     query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
     result = await db.execute(query)
     session = result.scalar_one_or_none()
 
     if not session:
+        db_user_id = await get_db_user_id(db, user_id, user_email)
+
+        if not db_user_id:
+            raise ValueError(f"Could not find valid user for session creation")
+
         # Create new session
         session = ChatSessionModel(
             id=session_id,
-            user_id=user_id,
+            user_id=db_user_id,
             title="New Conversation",
             is_active=True,
         )
@@ -54,6 +96,8 @@ async def save_chat_messages(
     session_id: UUID,
     user_message: str,
     assistant_response: str,
+    user_id: str,
+    user_email: str = None,
     sources: Optional[List[dict]] = None,
     model_used: Optional[str] = None,
     tokens_used: Optional[int] = None,
@@ -62,7 +106,7 @@ async def save_chat_messages(
     try:
         async with async_session_context() as db:
             # Ensure session exists
-            await get_or_create_session(db, session_id)
+            await get_or_create_session(db, session_id, user_id, user_email)
 
             # Save user message
             user_msg = ChatMessageModel(
@@ -136,6 +180,8 @@ class ChatSource(BaseModel):
     page_number: Optional[int] = None
     relevance_score: float
     snippet: str
+    full_content: Optional[str] = None  # Full chunk content for source viewer modal
+    collection: Optional[str] = None  # Collection/tag for grouping
 
 
 class AgentOptions(BaseModel):
@@ -153,11 +199,27 @@ class ChatRequest(BaseModel):
     session_id: Optional[UUID] = None
     include_sources: bool = True
     max_sources: int = Field(default=5, ge=1, le=20)
-    collection_filter: Optional[str] = None
+    collection_filter: Optional[str] = None  # Single collection filter (backward compatible)
+    collection_filters: Optional[List[str]] = None  # Multiple collection filters
     query_only: bool = False  # If True, don't store in RAG
     mode: Optional[str] = Field(None, pattern="^(agent|chat|general)$")  # Execution mode: agent, chat (RAG), or general (LLM)
     agent_options: Optional[AgentOptions] = Field(default=None, description="Options for agent mode execution")
     include_collection_context: bool = Field(default=True, description="Include collection tags in LLM context")
+
+    @property
+    def effective_collection_filters(self) -> Optional[List[str]]:
+        """Get effective collection filter(s) from either single or multi filter."""
+        if self.collection_filters:
+            return self.collection_filters
+        elif self.collection_filter:
+            return [self.collection_filter]
+        return None
+
+    @property
+    def first_collection_filter(self) -> Optional[str]:
+        """Get the first collection filter for backward-compatible single-filter APIs."""
+        filters = self.effective_collection_filters
+        return filters[0] if filters else None
 
 
 class ChatResponse(BaseModel):
@@ -246,7 +308,7 @@ async def create_chat_completion(
                 orchestrator = await create_orchestrator(db=db, rag_service=rag_service)
 
                 # Build context with agent options
-                agent_context = {"collection_filter": request.collection_filter}
+                agent_context = {"collection_filter": request.first_collection_filter}
                 if request.agent_options:
                     agent_context["options"] = request.agent_options.model_dump()
 
@@ -329,6 +391,8 @@ async def create_chat_completion(
                     session_id=session_id,
                     user_message=request.message,
                     assistant_response=response.content,
+                    user_id=user.user_id,
+                    user_email=user.email,
                     model_used="general-chat",
                 )
 
@@ -348,7 +412,7 @@ async def create_chat_completion(
             if request.query_only:
                 async with async_session_context() as db:
                     temperature = rag_service.config.temperature
-                    cache_key = f"{request.message}|{request.collection_filter or ''}"
+                    cache_key = f"{request.message}|{request.first_collection_filter or ''}"
                     if await cache_service.is_cache_eligible(db, temperature, "rag", len(cache_key)):
                         cached = await cache_service.get_cached_response(
                             db, cache_key, f"rag-{rag_service.config.chat_model or 'default'}", temperature
@@ -366,7 +430,7 @@ async def create_chat_completion(
             response = await rag_service.query(
                 question=request.message,
                 session_id=str(session_id) if not request.query_only else None,
-                collection_filter=request.collection_filter,
+                collection_filter=request.first_collection_filter,
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
                 include_collection_context=request.include_collection_context,
             )
@@ -393,12 +457,14 @@ async def create_chat_completion(
                         page_number=source.page_number,
                         relevance_score=source.relevance_score,
                         snippet=source.snippet,
+                        full_content=source.full_content if hasattr(source, 'full_content') else None,
+                        collection=source.collection if hasattr(source, 'collection') else None,
                     ))
 
             # Cache the response for query_only requests
             if request.query_only:
                 async with async_session_context() as db:
-                    cache_key = f"{request.message}|{request.collection_filter or ''}"
+                    cache_key = f"{request.message}|{request.first_collection_filter or ''}"
                     await cache_service.cache_response(
                         db=db,
                         prompt=cache_key,
@@ -419,6 +485,8 @@ async def create_chat_completion(
                         "page_number": s.page_number,
                         "relevance_score": s.relevance_score,
                         "snippet": s.snippet,
+                        "full_content": s.full_content,
+                        "collection": s.collection,
                     }
                     for s in sources
                 ] if sources else None
@@ -427,6 +495,8 @@ async def create_chat_completion(
                     session_id=session_id,
                     user_message=request.message,
                     assistant_response=response.content,
+                    user_id=user.user_id,
+                    user_email=user.email,
                     sources=source_data,
                     model_used=response.model,
                     tokens_used=response.tokens_used,
@@ -443,7 +513,8 @@ async def create_chat_completion(
             )
 
     except Exception as e:
-        logger.error("Chat completion failed", error=str(e))
+        import traceback
+        logger.error("Chat completion failed", error=str(e), traceback=traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Chat completion failed: {str(e)}")
 
 
@@ -487,7 +558,7 @@ async def create_streaming_completion(
                 )
 
                 # Build context with agent options
-                agent_context = {"collection_filter": request.collection_filter}
+                agent_context = {"collection_filter": request.first_collection_filter}
                 if request.agent_options:
                     agent_context["options"] = request.agent_options.model_dump()
 
@@ -503,28 +574,55 @@ async def create_streaming_completion(
                     update_type = update.get("type", "unknown")
 
                     if update_type == "planning":
-                        yield f"data: {json.dumps({'type': 'agent_status', 'status': 'planning', 'message': update.get('message', 'Planning...')})}\n\n"
+                        # Send planning event that frontend expects
+                        yield f"data: {json.dumps({'type': 'planning', 'message': update.get('message', 'Planning...')})}\n\n"
 
                     elif update_type == "plan_created":
-                        yield f"data: {json.dumps({'type': 'agent_plan', 'plan_id': update.get('plan_id'), 'summary': update.get('summary'), 'step_count': update.get('step_count')})}\n\n"
+                        # Build steps array for frontend with expected format
+                        step_count = update.get("step_count", 0)
+                        summary = update.get("summary", "")
+                        plan_id = update.get("plan_id", "")
+
+                        # Create steps array in frontend-expected format
+                        steps = []
+                        for i in range(step_count):
+                            steps.append({
+                                "step_id": f"{plan_id}-step-{i}",
+                                "step_number": i + 1,
+                                "agent": "research" if i == 0 else "synthesis",
+                                "task": f"Step {i + 1}",
+                                "name": f"Step {i + 1}",
+                                "status": "pending",
+                                "estimated_cost_usd": 0.0,
+                            })
+
+                        yield f"data: {json.dumps({'type': 'plan_created', 'plan_id': plan_id, 'plan_summary': summary, 'steps': steps})}\n\n"
 
                     elif update_type == "estimating_cost":
-                        yield f"data: {json.dumps({'type': 'agent_status', 'status': 'estimating', 'message': update.get('message', 'Estimating cost...')})}\n\n"
+                        yield f"data: {json.dumps({'type': 'planning', 'message': update.get('message', 'Estimating cost...')})}\n\n"
 
                     elif update_type == "cost_estimated":
-                        yield f"data: {json.dumps({'type': 'agent_cost', 'estimated_cost_usd': update.get('estimated_cost_usd')})}\n\n"
+                        yield f"data: {json.dumps({'type': 'cost_estimated', 'estimated_cost_usd': update.get('estimated_cost_usd')})}\n\n"
 
                     elif update_type == "approval_required":
-                        yield f"data: {json.dumps({'type': 'approval_required', 'plan_id': update.get('plan_id'), 'estimated_cost_usd': update.get('estimated_cost_usd'), 'threshold_usd': update.get('threshold_usd')})}\n\n"
+                        yield f"data: {json.dumps({'type': 'approval_required', 'plan_id': update.get('plan_id'), 'estimated_cost': update.get('estimated_cost_usd'), 'threshold_usd': update.get('threshold_usd')})}\n\n"
 
                     elif update_type == "budget_exceeded":
-                        yield f"data: {json.dumps({'type': 'error', 'data': update.get('message', 'Budget exceeded')})}\n\n"
+                        yield f"data: {json.dumps({'type': 'error', 'error': update.get('message', 'Budget exceeded')})}\n\n"
 
                     elif update_type == "step_started":
-                        yield f"data: {json.dumps({'type': 'agent_step', 'step': update.get('step_name'), 'agent': update.get('agent_type'), 'status': 'started'})}\n\n"
+                        # Send agent_step event with step details
+                        step_index = update.get("step_index", 0)
+                        yield f"data: {json.dumps({'type': 'agent_step', 'step_index': step_index, 'step': {'name': update.get('step_name', 'Processing'), 'agent': update.get('agent_type', 'research'), 'status': 'in_progress'}})}\n\n"
 
                     elif update_type == "step_completed":
-                        yield f"data: {json.dumps({'type': 'agent_step', 'step': update.get('step_name'), 'agent': update.get('agent_type'), 'status': 'completed'})}\n\n"
+                        # Send step_completed event
+                        step_index = update.get("step_index", 0)
+                        yield f"data: {json.dumps({'type': 'step_completed', 'step_index': step_index, 'status': 'completed'})}\n\n"
+
+                    elif update_type == "thinking":
+                        # Forward thinking/reasoning content
+                        yield f"data: {json.dumps({'type': 'thinking', 'content': update.get('content', '')})}\n\n"
 
                     elif update_type == "content":
                         yield f"data: {json.dumps({'type': 'content', 'data': update.get('data', '')})}\n\n"
@@ -535,11 +633,12 @@ async def create_streaming_completion(
 
                     elif update_type == "plan_completed":
                         output = update.get("output", "")
-                        yield f"data: {json.dumps({'type': 'content', 'data': output})}\n\n"
+                        # Send execution_complete first, then final content
+                        yield f"data: {json.dumps({'type': 'execution_complete', 'result': output, 'total_cost_usd': update.get('total_cost_usd')})}\n\n"
                         yield f"data: {json.dumps({'type': 'done', 'total_cost_usd': update.get('total_cost_usd')})}\n\n"
 
                     elif update_type == "error":
-                        yield f"data: {json.dumps({'type': 'error', 'data': update.get('error', 'Unknown error')})}\n\n"
+                        yield f"data: {json.dumps({'type': 'error', 'error': update.get('error', 'Unknown error')})}\n\n"
 
         except Exception as e:
             logger.error("Agent streaming error", error=str(e), exc_info=True)
@@ -569,6 +668,8 @@ async def create_streaming_completion(
                     session_id=session_id,
                     user_message=request.message,
                     assistant_response=response.content,
+                    user_id=user.user_id,
+                    user_email=user.email,
                     model_used="general-chat",
                 )
 
@@ -595,7 +696,7 @@ async def create_streaming_completion(
             async for chunk in rag_service.query_stream(
                 question=request.message,
                 session_id=str(session_id) if not request.query_only else None,
-                collection_filter=request.collection_filter,
+                collection_filter=request.first_collection_filter,
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
                 include_collection_context=request.include_collection_context,
             ):
@@ -615,6 +716,8 @@ async def create_streaming_completion(
                             session_id=session_id,
                             user_message=request.message,
                             assistant_response=full_response,
+                            user_id=user.user_id,
+                            user_email=user.email,
                             sources=accumulated_sources if accumulated_sources else None,
                             model_used=rag_service.config.chat_model,
                         )
@@ -661,9 +764,15 @@ async def list_sessions(
 
     try:
         async with async_session_context() as db:
+            # Get valid database user ID
+            db_user_id = await get_db_user_id(db, user.user_id, user.email)
+            if not db_user_id:
+                # No valid user found, return empty list
+                return SessionListResponse(sessions=[], total=0, page=page, page_size=page_size)
+
             # Get total count
             count_query = select(func.count(ChatSessionModel.id)).where(
-                ChatSessionModel.user_id == user.user_id,
+                ChatSessionModel.user_id == db_user_id,
                 ChatSessionModel.is_active == True,
             )
             result = await db.execute(count_query)
@@ -674,7 +783,7 @@ async def list_sessions(
             sessions_query = (
                 select(ChatSessionModel)
                 .where(
-                    ChatSessionModel.user_id == user.user_id,
+                    ChatSessionModel.user_id == db_user_id,
                     ChatSessionModel.is_active == True,
                 )
                 .order_by(ChatSessionModel.updated_at.desc())
@@ -1285,7 +1394,8 @@ async def export_chat_session(
                         lines.append("**Sources:**")
                         for source in msg.source_chunks or []:
                             if isinstance(source, dict):
-                                doc_name = source.get("document_name", "Unknown")
+                                doc_id = source.get("document_id", "unknown")
+                                doc_name = source.get("document_name") or f"Document {doc_id[:8]}"
                                 lines.append(f"- {doc_name}")
                         lines.append("")
 

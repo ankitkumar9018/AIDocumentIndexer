@@ -123,6 +123,10 @@ class GenerationConfig:
     include_sources: bool = True
     include_toc: bool = True
 
+    # Image generation settings (DISABLED by default)
+    include_images: bool = False  # Disabled by default
+    image_backend: str = "ollama"  # "ollama" or "unsplash"
+
     # Workflow settings
     require_outline_approval: bool = True
     require_section_approval: bool = False
@@ -580,18 +584,35 @@ class DocumentGenerationService:
                 context += f"- {source.snippet}...\n\n"
 
         # Create prompt for outline generation
-        prompt = f"""Create a document outline for the following:
+        prompt = f"""Create a professional document outline for the following:
 
 Title: {title}
 Description: {description}
 
 {context}
 
-Generate an outline with {num_sections} sections. For each section, provide:
-1. A clear, descriptive title
-2. A brief description of what the section should cover
+Generate exactly {num_sections} sections with specific, descriptive titles.
 
-Format your response as a structured outline."""
+IMPORTANT RULES:
+- Each section title MUST be specific and descriptive (e.g., "Market Analysis and Trends", "Implementation Strategy")
+- DO NOT use generic titles like "Section 1", "Introduction", "Overview", "Conclusion"
+- Titles should clearly indicate what the section covers
+- Each title should be 3-7 words long
+
+Format each section EXACTLY like this:
+## [Specific Descriptive Title]
+Description: [2-3 sentences explaining what this section covers]
+
+Example of good titles:
+- "Strategic Growth Opportunities"
+- "Technical Architecture Overview"
+- "Cost-Benefit Analysis"
+- "Implementation Timeline and Milestones"
+
+Example of bad titles (DO NOT USE):
+- "Section 1", "Introduction", "Overview", "Summary", "Conclusion"
+
+Generate the outline now:"""
 
         # Use LLM to generate (database-driven configuration)
         try:
@@ -603,28 +624,76 @@ Format your response as a structured outline."""
             )
             response = await llm.ainvoke(prompt)
 
-            # Parse response into sections (simplified parsing)
+            # Parse response into sections with improved parsing
+            import re
             sections = []
             lines = response.content.split("\n")
             current_section = None
 
+            # Generic title patterns to reject
+            generic_patterns = [
+                r'^section\s*\d*$',
+                r'^introduction$',
+                r'^overview$',
+                r'^summary$',
+                r'^conclusion$',
+                r'^part\s*\d+$',
+            ]
+
             for line in lines:
                 line = line.strip()
-                if line and (line.startswith("Section") or line.startswith("#") or line[0].isdigit()):
-                    if current_section:
-                        sections.append(current_section)
-                    current_section = {"title": line.lstrip("#0123456789. "), "description": ""}
-                elif current_section and line:
-                    current_section["description"] += line + " "
+                if not line:
+                    continue
 
-            if current_section:
+                # Check for section header (## Title or numbered)
+                if line.startswith("##") or (line[0].isdigit() and "." in line[:3]):
+                    if current_section and current_section["title"]:
+                        sections.append(current_section)
+
+                    # Extract title, removing markdown and numbering
+                    title = re.sub(r'^[#\d.\s]+', '', line).strip()
+
+                    # Check if title is generic
+                    is_generic = any(
+                        re.match(pattern, title.lower().strip())
+                        for pattern in generic_patterns
+                    )
+
+                    if is_generic or not title:
+                        # Generate a better title based on document topic
+                        title = f"Key Aspect {len(sections) + 1} of {description[:30].split()[0].title() if description else 'Topic'}"
+
+                    current_section = {"title": title, "description": ""}
+
+                elif current_section and line:
+                    # Handle description lines
+                    if line.lower().startswith("description:"):
+                        current_section["description"] = line[12:].strip() + " "
+                    elif not current_section["description"]:
+                        current_section["description"] += line + " "
+
+            if current_section and current_section["title"]:
                 sections.append(current_section)
 
-            # Ensure we have the requested number of sections
+            # Ensure we have the requested number of sections with meaningful titles
+            topic_words = title.split()[:3] if title else ["Document"]
+            topic_prefix = " ".join(topic_words)
+
             while len(sections) < num_sections:
+                section_num = len(sections) + 1
+                # Generate contextual fallback titles
+                fallback_titles = [
+                    f"Key Findings and Insights",
+                    f"Analysis and Recommendations",
+                    f"Implementation Approach",
+                    f"Strategic Considerations",
+                    f"Supporting Details",
+                    f"Additional Context",
+                ]
+                fallback_title = fallback_titles[min(section_num - 1, len(fallback_titles) - 1)]
                 sections.append({
-                    "title": f"Section {len(sections) + 1}",
-                    "description": "Additional content",
+                    "title": f"{fallback_title} for {topic_prefix}",
+                    "description": f"Detailed content covering {fallback_title.lower()}",
                 })
 
             return DocumentOutline(
@@ -635,12 +704,23 @@ Format your response as a structured outline."""
 
         except Exception as e:
             logger.error("Failed to generate outline with LLM", error=str(e))
-            # Return a basic outline
+            # Return a more descriptive fallback outline
+            fallback_section_templates = [
+                ("Background and Context", f"Overview and background information about {title}"),
+                ("Key Analysis and Findings", f"Main analysis and findings related to {title}"),
+                ("Strategic Recommendations", f"Recommendations and action items for {title}"),
+                ("Implementation Details", f"How to implement the strategies for {title}"),
+                ("Conclusion and Next Steps", f"Summary and suggested next steps for {title}"),
+                ("Supporting Information", f"Additional details and references for {title}"),
+            ]
             return DocumentOutline(
                 title=title,
                 description=description,
                 sections=[
-                    {"title": f"Section {i+1}", "description": f"Content for section {i+1}"}
+                    {
+                        "title": fallback_section_templates[min(i, len(fallback_section_templates) - 1)][0],
+                        "description": fallback_section_templates[min(i, len(fallback_section_templates) - 1)][1]
+                    }
                     for i in range(num_sections)
                 ],
             )
@@ -763,50 +843,275 @@ Please revise the content to address the feedback while maintaining quality and 
         return output_path
 
     async def _generate_pptx(self, job: GenerationJob, filename: str) -> str:
-        """Generate PowerPoint file."""
+        """Generate professional PowerPoint file with modern styling."""
         try:
             from pptx import Presentation
-            from pptx.util import Inches, Pt
+            from pptx.util import Inches, Pt, Emu
+            from pptx.dml.color import RgbColor
+            from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+            from pptx.enum.shapes import MSO_SHAPE
 
             prs = Presentation()
+            prs.slide_width = Inches(13.333)  # 16:9 aspect ratio
+            prs.slide_height = Inches(7.5)
 
-            # Title slide
-            title_slide_layout = prs.slide_layouts[0]
-            slide = prs.slides.add_slide(title_slide_layout)
-            title = slide.shapes.title
-            subtitle = slide.placeholders[1]
-            title.text = job.title
-            subtitle.text = job.outline.description if job.outline else job.description
+            # Define professional color scheme
+            PRIMARY_COLOR = RgbColor(0x1E, 0x3A, 0x5F)  # Deep blue
+            SECONDARY_COLOR = RgbColor(0x3D, 0x5A, 0x80)  # Medium blue
+            ACCENT_COLOR = RgbColor(0xE0, 0xE1, 0xDD)  # Light gray
+            TEXT_COLOR = RgbColor(0x2D, 0x3A, 0x45)  # Dark gray
+            WHITE = RgbColor(0xFF, 0xFF, 0xFF)
 
-            # Content slides
-            bullet_layout = prs.slide_layouts[1]
+            def apply_title_style(shape, font_size=44, bold=True, color=WHITE):
+                """Apply consistent title styling."""
+                for paragraph in shape.text_frame.paragraphs:
+                    paragraph.font.name = "Calibri"
+                    paragraph.font.size = Pt(font_size)
+                    paragraph.font.bold = bold
+                    paragraph.font.color.rgb = color
+                    paragraph.alignment = PP_ALIGN.LEFT
+
+            def apply_body_style(shape, font_size=18, color=TEXT_COLOR):
+                """Apply consistent body text styling."""
+                for paragraph in shape.text_frame.paragraphs:
+                    paragraph.font.name = "Calibri"
+                    paragraph.font.size = Pt(font_size)
+                    paragraph.font.color.rgb = color
+                    paragraph.line_spacing = 1.5
+
+            def add_header_bar(slide, text=""):
+                """Add a colored header bar to slide."""
+                header = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE,
+                    Inches(0), Inches(0),
+                    prs.slide_width, Inches(1.2)
+                )
+                header.fill.solid()
+                header.fill.fore_color.rgb = PRIMARY_COLOR
+                header.line.fill.background()
+
+            def add_footer(slide, page_num, total_pages):
+                """Add footer with page number."""
+                footer_text = f"{page_num} / {total_pages}"
+                footer = slide.shapes.add_textbox(
+                    Inches(12.3), Inches(7.1),
+                    Inches(0.8), Inches(0.3)
+                )
+                tf = footer.text_frame
+                tf.paragraphs[0].text = footer_text
+                tf.paragraphs[0].font.size = Pt(10)
+                tf.paragraphs[0].font.color.rgb = RgbColor(0x88, 0x88, 0x88)
+                tf.paragraphs[0].alignment = PP_ALIGN.RIGHT
+
+            total_slides = len(job.sections) + 2  # Title + sections + sources
+            if self.config.include_toc:
+                total_slides += 1
+
+            current_slide = 0
+
+            # ========== TITLE SLIDE ==========
+            current_slide += 1
+            slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
+
+            # Full background gradient effect
+            bg_shape = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                Inches(0), Inches(0),
+                prs.slide_width, prs.slide_height
+            )
+            bg_shape.fill.solid()
+            bg_shape.fill.fore_color.rgb = PRIMARY_COLOR
+            bg_shape.line.fill.background()
+
+            # Accent bar at bottom
+            accent_bar = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                Inches(0), Inches(6.5),
+                prs.slide_width, Inches(1)
+            )
+            accent_bar.fill.solid()
+            accent_bar.fill.fore_color.rgb = SECONDARY_COLOR
+            accent_bar.line.fill.background()
+
+            # Title text
+            title_box = slide.shapes.add_textbox(
+                Inches(0.8), Inches(2.5),
+                Inches(11), Inches(1.5)
+            )
+            tf = title_box.text_frame
+            tf.word_wrap = True
+            p = tf.paragraphs[0]
+            p.text = job.title
+            p.font.name = "Calibri"
+            p.font.size = Pt(48)
+            p.font.bold = True
+            p.font.color.rgb = WHITE
+
+            # Subtitle/description
+            desc_box = slide.shapes.add_textbox(
+                Inches(0.8), Inches(4.2),
+                Inches(11), Inches(1)
+            )
+            tf = desc_box.text_frame
+            tf.word_wrap = True
+            p = tf.paragraphs[0]
+            p.text = job.outline.description if job.outline else job.description
+            p.font.name = "Calibri"
+            p.font.size = Pt(20)
+            p.font.color.rgb = ACCENT_COLOR
+
+            # Date
+            from datetime import datetime
+            date_box = slide.shapes.add_textbox(
+                Inches(0.8), Inches(6.7),
+                Inches(4), Inches(0.4)
+            )
+            tf = date_box.text_frame
+            p = tf.paragraphs[0]
+            p.text = datetime.now().strftime("%B %d, %Y")
+            p.font.name = "Calibri"
+            p.font.size = Pt(14)
+            p.font.color.rgb = WHITE
+
+            # ========== TABLE OF CONTENTS SLIDE ==========
+            if self.config.include_toc:
+                current_slide += 1
+                slide = prs.slides.add_slide(prs.slide_layouts[6])
+                add_header_bar(slide)
+
+                # TOC Title
+                toc_title = slide.shapes.add_textbox(
+                    Inches(0.8), Inches(0.3),
+                    Inches(8), Inches(0.8)
+                )
+                tf = toc_title.text_frame
+                p = tf.paragraphs[0]
+                p.text = "Contents"
+                p.font.name = "Calibri"
+                p.font.size = Pt(36)
+                p.font.bold = True
+                p.font.color.rgb = WHITE
+
+                # TOC items
+                toc_box = slide.shapes.add_textbox(
+                    Inches(0.8), Inches(1.8),
+                    Inches(11), Inches(5)
+                )
+                tf = toc_box.text_frame
+                tf.word_wrap = True
+
+                for idx, section in enumerate(job.sections):
+                    if idx > 0:
+                        p = tf.add_paragraph()
+                    else:
+                        p = tf.paragraphs[0]
+                    p.text = f"{idx + 1}.  {section.title}"
+                    p.font.name = "Calibri"
+                    p.font.size = Pt(20)
+                    p.font.color.rgb = TEXT_COLOR
+                    p.space_after = Pt(12)
+
+                add_footer(slide, current_slide, total_slides)
+
+            # ========== CONTENT SLIDES ==========
             for section in job.sections:
-                slide = prs.slides.add_slide(bullet_layout)
-                title = slide.shapes.title
-                body = slide.placeholders[1]
+                current_slide += 1
+                slide = prs.slides.add_slide(prs.slide_layouts[6])
+                add_header_bar(slide)
 
-                title.text = section.title
+                # Section title
+                section_title = slide.shapes.add_textbox(
+                    Inches(0.8), Inches(0.3),
+                    Inches(11), Inches(0.8)
+                )
+                tf = section_title.text_frame
+                p = tf.paragraphs[0]
+                p.text = section.title
+                p.font.name = "Calibri"
+                p.font.size = Pt(32)
+                p.font.bold = True
+                p.font.color.rgb = WHITE
 
-                tf = body.text_frame
-                tf.text = section.revised_content or section.content
+                # Content
+                content = section.revised_content or section.content
+                content_box = slide.shapes.add_textbox(
+                    Inches(0.8), Inches(1.6),
+                    Inches(11.5), Inches(5.2)
+                )
+                tf = content_box.text_frame
+                tf.word_wrap = True
 
-            # Sources slide if configured
+                # Split content into bullet points or paragraphs
+                paragraphs = content.split('\n')
+                for idx, para_text in enumerate(paragraphs[:12]):  # Limit to 12 items
+                    para_text = para_text.strip()
+                    if not para_text:
+                        continue
+
+                    if idx > 0:
+                        p = tf.add_paragraph()
+                    else:
+                        p = tf.paragraphs[0]
+
+                    # Add bullet if content looks like a list item
+                    if para_text.startswith(('- ', '• ', '* ', '1.', '2.', '3.')):
+                        p.text = para_text.lstrip('-•* 0123456789.')
+                        p.level = 0
+                    else:
+                        p.text = para_text
+
+                    p.font.name = "Calibri"
+                    p.font.size = Pt(16)
+                    p.font.color.rgb = TEXT_COLOR
+                    p.space_after = Pt(8)
+
+                add_footer(slide, current_slide, total_slides)
+
+            # ========== SOURCES SLIDE ==========
             if self.config.include_sources and job.sources_used:
-                slide = prs.slides.add_slide(bullet_layout)
-                title = slide.shapes.title
-                body = slide.placeholders[1]
+                current_slide += 1
+                slide = prs.slides.add_slide(prs.slide_layouts[6])
+                add_header_bar(slide)
 
-                title.text = "Sources"
-                tf = body.text_frame
-                for source in job.sources_used[:10]:
-                    p = tf.add_paragraph()
-                    p.text = f"• Document: {source.document_name or source.document_id}"
-                    p.level = 0
+                # Sources title
+                sources_title = slide.shapes.add_textbox(
+                    Inches(0.8), Inches(0.3),
+                    Inches(8), Inches(0.8)
+                )
+                tf = sources_title.text_frame
+                p = tf.paragraphs[0]
+                p.text = "Sources & References"
+                p.font.name = "Calibri"
+                p.font.size = Pt(32)
+                p.font.bold = True
+                p.font.color.rgb = WHITE
+
+                # Sources list
+                sources_box = slide.shapes.add_textbox(
+                    Inches(0.8), Inches(1.6),
+                    Inches(11), Inches(5)
+                )
+                tf = sources_box.text_frame
+                tf.word_wrap = True
+
+                for idx, source in enumerate(job.sources_used[:10]):
+                    if idx > 0:
+                        p = tf.add_paragraph()
+                    else:
+                        p = tf.paragraphs[0]
+                    doc_name = source.document_name or source.document_id[:20]
+                    p.text = f"•  {doc_name}"
+                    p.font.name = "Calibri"
+                    p.font.size = Pt(14)
+                    p.font.color.rgb = TEXT_COLOR
+                    p.space_after = Pt(6)
+
+                add_footer(slide, current_slide, total_slides)
 
             output_path = os.path.join(self.config.output_dir, f"{filename}.pptx")
             prs.save(output_path)
 
-            logger.info("PPTX generated", path=output_path)
+            logger.info("Professional PPTX generated", path=output_path)
             return output_path
 
         except ImportError:
@@ -814,55 +1119,198 @@ Please revise the content to address the feedback while maintaining quality and 
             return await self._generate_txt(job, filename)
 
     async def _generate_docx(self, job: GenerationJob, filename: str) -> str:
-        """Generate Word document."""
+        """Generate professional Word document with cover page and proper styling."""
         try:
             from docx import Document
-            from docx.shared import Pt, Inches
+            from docx.shared import Pt, Inches, RGBColor, Cm
+            from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+            from docx.enum.style import WD_STYLE_TYPE
+            from docx.enum.table import WD_TABLE_ALIGNMENT
 
             doc = Document()
 
-            # Title
-            doc.add_heading(job.title, 0)
+            # Define professional colors
+            PRIMARY_COLOR = RGBColor(0x1E, 0x3A, 0x5F)  # Deep blue
+            SECONDARY_COLOR = RGBColor(0x3D, 0x5A, 0x80)  # Medium blue
+            TEXT_COLOR = RGBColor(0x2D, 0x3A, 0x45)  # Dark gray
+            LIGHT_GRAY = RGBColor(0x88, 0x88, 0x88)
 
-            # Description
+            # Configure document margins
+            for section in doc.sections:
+                section.top_margin = Inches(1)
+                section.bottom_margin = Inches(1)
+                section.left_margin = Inches(1.25)
+                section.right_margin = Inches(1.25)
+
+            # ========== COVER PAGE ==========
+            # Add spacing before title
+            for _ in range(8):
+                doc.add_paragraph()
+
+            # Document title
+            title_para = doc.add_paragraph()
+            title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            title_run = title_para.add_run(job.title)
+            title_run.font.name = "Calibri"
+            title_run.font.size = Pt(36)
+            title_run.font.bold = True
+            title_run.font.color.rgb = PRIMARY_COLOR
+
+            # Subtitle / description
+            doc.add_paragraph()
             if job.outline:
-                doc.add_paragraph(job.outline.description)
+                desc_para = doc.add_paragraph()
+                desc_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                desc_run = desc_para.add_run(job.outline.description)
+                desc_run.font.name = "Calibri"
+                desc_run.font.size = Pt(14)
+                desc_run.font.color.rgb = SECONDARY_COLOR
+                desc_run.font.italic = True
 
-            # Table of contents placeholder
+            # Add more spacing
+            for _ in range(6):
+                doc.add_paragraph()
+
+            # Decorative line
+            line_para = doc.add_paragraph()
+            line_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            line_run = line_para.add_run("─" * 40)
+            line_run.font.color.rgb = SECONDARY_COLOR
+
+            # Date
+            from datetime import datetime
+            doc.add_paragraph()
+            date_para = doc.add_paragraph()
+            date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            date_run = date_para.add_run(datetime.now().strftime("%B %d, %Y"))
+            date_run.font.name = "Calibri"
+            date_run.font.size = Pt(12)
+            date_run.font.color.rgb = LIGHT_GRAY
+
+            # Page break after cover
+            doc.add_page_break()
+
+            # ========== TABLE OF CONTENTS ==========
             if self.config.include_toc:
-                doc.add_heading("Table of Contents", level=1)
-                for section in job.sections:
-                    doc.add_paragraph(section.title, style='TOC Heading')
+                toc_heading = doc.add_heading("Table of Contents", level=1)
+                toc_heading.runs[0].font.color.rgb = PRIMARY_COLOR
+                toc_heading.runs[0].font.size = Pt(24)
+
+                doc.add_paragraph()
+
+                for idx, section in enumerate(job.sections):
+                    toc_entry = doc.add_paragraph()
+                    toc_entry.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+                    toc_entry.paragraph_format.space_after = Pt(6)
+
+                    # Section number
+                    num_run = toc_entry.add_run(f"{idx + 1}.  ")
+                    num_run.font.name = "Calibri"
+                    num_run.font.size = Pt(12)
+                    num_run.font.bold = True
+                    num_run.font.color.rgb = SECONDARY_COLOR
+
+                    # Section title
+                    title_run = toc_entry.add_run(section.title)
+                    title_run.font.name = "Calibri"
+                    title_run.font.size = Pt(12)
+                    title_run.font.color.rgb = TEXT_COLOR
+
                 doc.add_page_break()
 
-            # Content
-            for section in job.sections:
-                doc.add_heading(section.title, level=1)
+            # ========== CONTENT SECTIONS ==========
+            for idx, section in enumerate(job.sections):
+                # Section heading
+                heading = doc.add_heading(section.title, level=1)
+                heading.runs[0].font.color.rgb = PRIMARY_COLOR
+                heading.runs[0].font.size = Pt(20)
+                heading.paragraph_format.space_before = Pt(12)
+                heading.paragraph_format.space_after = Pt(12)
+
                 content = section.revised_content or section.content
-                doc.add_paragraph(content)
 
-                # Add sources for this section
+                # Split content into paragraphs and format
+                paragraphs = content.split('\n\n')
+                for para_text in paragraphs:
+                    para_text = para_text.strip()
+                    if not para_text:
+                        continue
+
+                    # Check if it's a subheading (starts with ## or ###)
+                    if para_text.startswith('###'):
+                        sub = doc.add_heading(para_text.lstrip('#').strip(), level=3)
+                        sub.runs[0].font.color.rgb = SECONDARY_COLOR
+                        sub.runs[0].font.size = Pt(13)
+                    elif para_text.startswith('##'):
+                        sub = doc.add_heading(para_text.lstrip('#').strip(), level=2)
+                        sub.runs[0].font.color.rgb = SECONDARY_COLOR
+                        sub.runs[0].font.size = Pt(15)
+                    # Check if it's a bullet list
+                    elif para_text.startswith(('- ', '• ', '* ')):
+                        lines = para_text.split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            if line.startswith(('- ', '• ', '* ')):
+                                bullet_para = doc.add_paragraph(style='List Bullet')
+                                bullet_run = bullet_para.add_run(line.lstrip('-•* ').strip())
+                                bullet_run.font.name = "Calibri"
+                                bullet_run.font.size = Pt(11)
+                                bullet_run.font.color.rgb = TEXT_COLOR
+                    # Regular paragraph
+                    else:
+                        para = doc.add_paragraph()
+                        para.paragraph_format.line_spacing = 1.5
+                        para.paragraph_format.space_after = Pt(8)
+
+                        run = para.add_run(para_text)
+                        run.font.name = "Calibri"
+                        run.font.size = Pt(11)
+                        run.font.color.rgb = TEXT_COLOR
+
+                # Add section sources
                 if self.config.include_sources and section.sources:
-                    doc.add_paragraph("Sources:", style='Intense Quote')
-                    for source in section.sources[:3]:
-                        doc.add_paragraph(
-                            f"• {source.document_name or source.document_id}",
-                            style='List Bullet'
-                        )
+                    doc.add_paragraph()
+                    source_label = doc.add_paragraph()
+                    label_run = source_label.add_run("Sources for this section:")
+                    label_run.font.name = "Calibri"
+                    label_run.font.size = Pt(9)
+                    label_run.font.italic = True
+                    label_run.font.color.rgb = LIGHT_GRAY
 
-            # References section
+                    for source in section.sources[:3]:
+                        src_para = doc.add_paragraph()
+                        src_para.paragraph_format.left_indent = Inches(0.25)
+                        src_run = src_para.add_run(f"• {source.document_name or source.document_id}")
+                        src_run.font.name = "Calibri"
+                        src_run.font.size = Pt(9)
+                        src_run.font.color.rgb = LIGHT_GRAY
+
+                # Add page break between sections (except last)
+                if idx < len(job.sections) - 1:
+                    doc.add_page_break()
+
+            # ========== REFERENCES SECTION ==========
             if self.config.include_sources and job.sources_used:
-                doc.add_heading("References", level=1)
+                doc.add_page_break()
+
+                ref_heading = doc.add_heading("References", level=1)
+                ref_heading.runs[0].font.color.rgb = PRIMARY_COLOR
+                ref_heading.runs[0].font.size = Pt(20)
+
+                doc.add_paragraph()
+
                 for source in job.sources_used:
-                    doc.add_paragraph(
-                        f"• {source.document_name or source.document_id}",
-                        style='List Bullet'
-                    )
+                    ref_para = doc.add_paragraph()
+                    ref_para.paragraph_format.space_after = Pt(4)
+                    ref_run = ref_para.add_run(f"• {source.document_name or source.document_id}")
+                    ref_run.font.name = "Calibri"
+                    ref_run.font.size = Pt(10)
+                    ref_run.font.color.rgb = TEXT_COLOR
 
             output_path = os.path.join(self.config.output_dir, f"{filename}.docx")
             doc.save(output_path)
 
-            logger.info("DOCX generated", path=output_path)
+            logger.info("Professional DOCX generated", path=output_path)
             return output_path
 
         except ImportError:
@@ -870,56 +1318,286 @@ Please revise the content to address the feedback while maintaining quality and 
             return await self._generate_txt(job, filename)
 
     async def _generate_pdf(self, job: GenerationJob, filename: str) -> str:
-        """Generate PDF document."""
+        """Generate professional PDF document with cover page and styling."""
         try:
             from reportlab.lib.pagesizes import letter
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-            from reportlab.lib.units import inch
+            from reportlab.lib.colors import HexColor, Color
+            from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
+            from reportlab.platypus import (
+                SimpleDocTemplate, Paragraph, Spacer, PageBreak,
+                Table, TableStyle, ListFlowable, ListItem
+            )
+            from reportlab.lib.units import inch, cm
+
+            # Define professional colors
+            PRIMARY_COLOR = HexColor('#1E3A5F')  # Deep blue
+            SECONDARY_COLOR = HexColor('#3D5A80')  # Medium blue
+            TEXT_COLOR = HexColor('#2D3A45')  # Dark gray
+            LIGHT_GRAY = HexColor('#888888')
+            ACCENT_BG = HexColor('#F5F5F5')  # Light background
 
             output_path = os.path.join(self.config.output_dir, f"{filename}.pdf")
-            doc = SimpleDocTemplate(output_path, pagesize=letter)
 
-            styles = getSampleStyleSheet()
-            title_style = ParagraphStyle(
-                'CustomTitle',
-                parent=styles['Heading1'],
-                fontSize=24,
-                spaceAfter=30,
+            # Custom page template for headers/footers
+            def add_page_number(canvas, doc):
+                """Add page number to footer."""
+                canvas.saveState()
+                canvas.setFont('Helvetica', 9)
+                canvas.setFillColor(LIGHT_GRAY)
+                page_num = canvas.getPageNumber()
+                text = f"Page {page_num}"
+                canvas.drawRightString(letter[0] - 0.75*inch, 0.5*inch, text)
+                canvas.restoreState()
+
+            doc = SimpleDocTemplate(
+                output_path,
+                pagesize=letter,
+                rightMargin=0.75*inch,
+                leftMargin=0.75*inch,
+                topMargin=0.75*inch,
+                bottomMargin=0.75*inch,
             )
-            heading_style = styles['Heading2']
-            body_style = styles['BodyText']
+
+            # Create custom styles
+            styles = getSampleStyleSheet()
+
+            # Cover title style
+            cover_title_style = ParagraphStyle(
+                'CoverTitle',
+                parent=styles['Title'],
+                fontSize=36,
+                textColor=PRIMARY_COLOR,
+                alignment=TA_CENTER,
+                spaceAfter=20,
+                fontName='Helvetica-Bold',
+            )
+
+            # Cover subtitle style
+            cover_subtitle_style = ParagraphStyle(
+                'CoverSubtitle',
+                parent=styles['Normal'],
+                fontSize=14,
+                textColor=SECONDARY_COLOR,
+                alignment=TA_CENTER,
+                fontName='Helvetica-Oblique',
+                spaceAfter=12,
+            )
+
+            # Section heading style
+            heading_style = ParagraphStyle(
+                'SectionHeading',
+                parent=styles['Heading1'],
+                fontSize=20,
+                textColor=PRIMARY_COLOR,
+                spaceBefore=16,
+                spaceAfter=12,
+                fontName='Helvetica-Bold',
+            )
+
+            # Subheading style
+            subheading_style = ParagraphStyle(
+                'SubHeading',
+                parent=styles['Heading2'],
+                fontSize=14,
+                textColor=SECONDARY_COLOR,
+                spaceBefore=12,
+                spaceAfter=8,
+                fontName='Helvetica-Bold',
+            )
+
+            # Body text style
+            body_style = ParagraphStyle(
+                'BodyText',
+                parent=styles['Normal'],
+                fontSize=11,
+                textColor=TEXT_COLOR,
+                alignment=TA_JUSTIFY,
+                spaceBefore=4,
+                spaceAfter=8,
+                leading=16,
+                fontName='Helvetica',
+            )
+
+            # TOC style
+            toc_style = ParagraphStyle(
+                'TOCEntry',
+                parent=styles['Normal'],
+                fontSize=12,
+                textColor=TEXT_COLOR,
+                spaceBefore=6,
+                spaceAfter=6,
+                leftIndent=20,
+                fontName='Helvetica',
+            )
+
+            # Source/reference style
+            source_style = ParagraphStyle(
+                'SourceStyle',
+                parent=styles['Normal'],
+                fontSize=9,
+                textColor=LIGHT_GRAY,
+                fontName='Helvetica-Oblique',
+                spaceBefore=4,
+                spaceAfter=2,
+            )
 
             story = []
 
+            # ========== COVER PAGE ==========
+            story.append(Spacer(1, 2.5*inch))
+
             # Title
-            story.append(Paragraph(job.title, title_style))
-            story.append(Spacer(1, 0.5 * inch))
+            story.append(Paragraph(job.title, cover_title_style))
+            story.append(Spacer(1, 0.3*inch))
+
+            # Decorative line
+            line_data = [['─' * 50]]
+            line_table = Table(line_data, colWidths=[5*inch])
+            line_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('TEXTCOLOR', (0, 0), (-1, -1), SECONDARY_COLOR),
+            ]))
+            story.append(line_table)
+            story.append(Spacer(1, 0.3*inch))
 
             # Description
             if job.outline:
-                story.append(Paragraph(job.outline.description, body_style))
-                story.append(Spacer(1, 0.25 * inch))
+                story.append(Paragraph(job.outline.description, cover_subtitle_style))
+
+            story.append(Spacer(1, 2*inch))
+
+            # Date
+            from datetime import datetime
+            date_style = ParagraphStyle(
+                'DateStyle',
+                parent=styles['Normal'],
+                fontSize=12,
+                textColor=LIGHT_GRAY,
+                alignment=TA_CENTER,
+                fontName='Helvetica',
+            )
+            story.append(Paragraph(datetime.now().strftime("%B %d, %Y"), date_style))
 
             story.append(PageBreak())
 
-            # Content
-            for section in job.sections:
-                story.append(Paragraph(section.title, heading_style))
-                story.append(Spacer(1, 0.1 * inch))
+            # ========== TABLE OF CONTENTS ==========
+            if self.config.include_toc:
+                toc_title_style = ParagraphStyle(
+                    'TOCTitle',
+                    parent=styles['Heading1'],
+                    fontSize=24,
+                    textColor=PRIMARY_COLOR,
+                    spaceAfter=20,
+                    fontName='Helvetica-Bold',
+                )
+                story.append(Paragraph("Table of Contents", toc_title_style))
+                story.append(Spacer(1, 0.3*inch))
+
+                for idx, section in enumerate(job.sections):
+                    toc_entry = f"<b><font color='#3D5A80'>{idx + 1}.</font></b>  {section.title}"
+                    story.append(Paragraph(toc_entry, toc_style))
+
+                story.append(PageBreak())
+
+            # ========== CONTENT SECTIONS ==========
+            for idx, section in enumerate(job.sections):
+                # Section heading with number
+                heading_text = f"{idx + 1}. {section.title}"
+                story.append(Paragraph(heading_text, heading_style))
 
                 content = section.revised_content or section.content
-                # Split into paragraphs
-                for para in content.split('\n\n'):
-                    if para.strip():
-                        story.append(Paragraph(para.strip(), body_style))
-                        story.append(Spacer(1, 0.1 * inch))
 
-                story.append(Spacer(1, 0.25 * inch))
+                # Split content and format
+                paragraphs = content.split('\n')
+                current_list = []
 
-            doc.build(story)
+                for para_text in paragraphs:
+                    para_text = para_text.strip()
+                    if not para_text:
+                        # Flush any pending list
+                        if current_list:
+                            story.append(ListFlowable(
+                                current_list,
+                                bulletType='bullet',
+                                leftIndent=20,
+                            ))
+                            current_list = []
+                        continue
 
-            logger.info("PDF generated", path=output_path)
+                    # Handle markdown-style headers
+                    if para_text.startswith('###'):
+                        if current_list:
+                            story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
+                            current_list = []
+                        story.append(Paragraph(para_text.lstrip('#').strip(), subheading_style))
+                    elif para_text.startswith('##'):
+                        if current_list:
+                            story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
+                            current_list = []
+                        story.append(Paragraph(para_text.lstrip('#').strip(), subheading_style))
+                    # Handle bullet points
+                    elif para_text.startswith(('- ', '• ', '* ')):
+                        bullet_text = para_text.lstrip('-•* ').strip()
+                        current_list.append(ListItem(Paragraph(bullet_text, body_style)))
+                    # Handle numbered lists
+                    elif para_text[:2].replace('.', '').isdigit():
+                        if current_list:
+                            story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
+                            current_list = []
+                        import re
+                        num_match = re.match(r'^(\d+\.)\s*(.+)', para_text)
+                        if num_match:
+                            story.append(Paragraph(f"<b>{num_match.group(1)}</b> {num_match.group(2)}", body_style))
+                        else:
+                            story.append(Paragraph(para_text, body_style))
+                    # Regular paragraph
+                    else:
+                        if current_list:
+                            story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
+                            current_list = []
+                        # Escape XML special characters
+                        para_text = para_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        story.append(Paragraph(para_text, body_style))
+
+                # Flush remaining list items
+                if current_list:
+                    story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
+
+                # Section sources
+                if self.config.include_sources and section.sources:
+                    story.append(Spacer(1, 0.2*inch))
+                    story.append(Paragraph("Sources for this section:", source_style))
+                    for source in section.sources[:3]:
+                        doc_name = source.document_name or source.document_id
+                        story.append(Paragraph(f"• {doc_name}", source_style))
+
+                story.append(Spacer(1, 0.3*inch))
+
+            # ========== REFERENCES ==========
+            if self.config.include_sources and job.sources_used:
+                story.append(PageBreak())
+                story.append(Paragraph("References", heading_style))
+                story.append(Spacer(1, 0.2*inch))
+
+                for source in job.sources_used:
+                    doc_name = source.document_name or source.document_id
+                    ref_style = ParagraphStyle(
+                        'RefStyle',
+                        parent=styles['Normal'],
+                        fontSize=10,
+                        textColor=TEXT_COLOR,
+                        spaceBefore=4,
+                        spaceAfter=4,
+                        leftIndent=15,
+                        fontName='Helvetica',
+                    )
+                    story.append(Paragraph(f"• {doc_name}", ref_style))
+
+            # Build PDF with page numbers
+            doc.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+
+            logger.info("Professional PDF generated", path=output_path)
             return output_path
 
         except ImportError:

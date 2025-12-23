@@ -771,7 +771,10 @@ class DocumentPipeline:
                 if existing_doc:
                     # Update existing document (reactivate if soft-deleted)
                     existing_doc.filename = path.name
-                    existing_doc.original_filename = metadata.get("original_filename", path.name)
+                    # Preserve original_filename if it's already set and not "unknown"
+                    new_original_filename = metadata.get("original_filename", path.name)
+                    if not existing_doc.original_filename or existing_doc.original_filename == "unknown":
+                        existing_doc.original_filename = new_original_filename
                     existing_doc.file_path = str(file_path)
                     existing_doc.file_size = path.stat().st_size if path.exists() else processing_result.file_size
                     existing_doc.processing_status = DBProcessingStatus.COMPLETED
@@ -779,7 +782,12 @@ class DocumentPipeline:
                     existing_doc.processing_error = None  # Clear any previous error
                     existing_doc.page_count = processing_result.page_count
                     existing_doc.word_count = processing_result.word_count
-                    existing_doc.tags = [collection] if collection else existing_doc.tags
+                    # Merge collection tag with existing tags instead of replacing
+                    if collection:
+                        existing_tags = existing_doc.tags or []
+                        if collection not in existing_tags:
+                            existing_doc.tags = [collection] + existing_tags
+                    # else: keep existing tags unchanged
                     existing_doc.access_tier_id = access_tier_obj.id
                     existing_doc.processed_at = datetime.now()
 
@@ -806,7 +814,7 @@ class DocumentPipeline:
                         storage_mode=StorageMode.RAG,
                         page_count=processing_result.page_count,
                         word_count=processing_result.word_count,
-                        tags=[collection] if collection else None,
+                        tags=[collection] if collection else [],  # Initialize with collection, auto-tag will merge more
                         access_tier_id=access_tier_obj.id,
                         processed_at=datetime.now(),
                     )

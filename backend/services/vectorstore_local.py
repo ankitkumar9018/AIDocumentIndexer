@@ -308,12 +308,28 @@ class ChromaVectorStore:
         if document_ids:
             where_clause = {"document_id": {"$in": document_ids}}
 
+        logger.info(
+            "ChromaDB similarity search starting",
+            document_ids_count=len(document_ids) if document_ids else 0,
+            document_ids_sample=document_ids[:3] if document_ids else None,
+            where_clause=where_clause,
+            top_k=top_k,
+            embedding_dims=len(query_embedding) if query_embedding else 0,
+        )
+
         # Query ChromaDB
         results = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
             where=where_clause,
             include=["documents", "metadatas", "distances"],
+        )
+
+        logger.info(
+            "ChromaDB query results",
+            result_ids_count=len(results["ids"][0]) if results["ids"] and results["ids"][0] else 0,
+            has_distances=bool(results.get("distances")),
+            has_documents=bool(results.get("documents")),
         )
 
         search_results = []

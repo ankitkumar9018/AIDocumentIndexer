@@ -82,10 +82,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await seed_admin_user()
         logger.info("Admin user seeded")
 
-        # Initialize Ray connection
-        # from backend.ray.config import init_ray
-        # await init_ray()
-        logger.info("Ray cluster connected")
+        # Initialize Ray connection for parallel document processing
+        try:
+            from backend.ray_workers.config import init_ray
+            init_ray()
+            logger.info("Ray cluster connected")
+        except Exception as ray_error:
+            logger.warning("Ray initialization failed, falling back to local processing", error=str(ray_error))
 
         # Initialize Redis connection
         # from backend.services.cache import init_cache
@@ -114,8 +117,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # await close_db()
 
         # Disconnect from Ray
-        # import ray
-        # ray.shutdown()
+        try:
+            from backend.ray_workers.config import shutdown_ray
+            shutdown_ray()
+            logger.info("Ray cluster disconnected")
+        except Exception as ray_error:
+            logger.warning("Ray shutdown failed", error=str(ray_error))
 
         # Close Redis connection
         # from backend.services.cache import close_cache

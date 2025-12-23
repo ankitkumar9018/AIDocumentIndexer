@@ -19,6 +19,8 @@ import {
   Plus,
   Trash2,
   GripVertical,
+  Image,
+  AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -77,6 +79,7 @@ export default function CreatePage() {
   const [topic, setTopic] = useState("");
   const [context, setContext] = useState("");
   const [tone, setTone] = useState("professional");
+  const [includeImages, setIncludeImages] = useState(false); // Disabled by default
   const [outline, setOutline] = useState<OutlineSection[]>([]);
   const [documentTitle, setDocumentTitle] = useState("");
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
@@ -365,6 +368,46 @@ export default function CreatePage() {
                     <option value="technical">Technical</option>
                     <option value="creative">Creative</option>
                   </select>
+                </div>
+
+                {/* Image Generation Toggle */}
+                <div className="space-y-2 pt-2">
+                  <div
+                    className={`flex items-center justify-between p-4 rounded-lg border cursor-pointer transition-colors ${
+                      includeImages
+                        ? "bg-primary/5 border-primary/30"
+                        : "bg-muted/30 border-border hover:bg-muted/50"
+                    }`}
+                    onClick={() => setIncludeImages(!includeImages)}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`p-2 rounded-lg ${includeImages ? "bg-primary/10" : "bg-muted"}`}>
+                        <Image className={`h-5 w-5 ${includeImages ? "text-primary" : "text-muted-foreground"}`} />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium">Include AI-Generated Images</p>
+                        <p className="text-xs text-muted-foreground">
+                          Add relevant images to each section using local AI
+                        </p>
+                      </div>
+                    </div>
+                    <div
+                      className={`w-11 h-6 rounded-full transition-colors flex items-center ${
+                        includeImages ? "bg-primary justify-end" : "bg-muted-foreground/30 justify-start"
+                      }`}
+                    >
+                      <div className="w-5 h-5 bg-white rounded-full shadow-sm mx-0.5" />
+                    </div>
+                  </div>
+                  {includeImages && (
+                    <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50">
+                      <AlertCircle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                      <p className="text-xs text-amber-700 dark:text-amber-300">
+                        Image generation requires Ollama with a Stable Diffusion model installed locally.
+                        Generation may take longer and images will be placeholders if unavailable.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

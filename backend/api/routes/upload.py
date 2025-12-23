@@ -268,8 +268,11 @@ async def _auto_tag_document(document_id: str, filename: str):
             )
 
             if tags:
-                # Update document with generated tags
-                document.tags = tags
+                # Merge auto-generated tags with existing user tags (preserve user tags)
+                existing_tags = document.tags or []
+                # Use dict.fromkeys to preserve order and remove duplicates (existing tags first)
+                merged_tags = list(dict.fromkeys(existing_tags + tags))
+                document.tags = merged_tags
                 await session.commit()
 
                 logger.info(
@@ -363,8 +366,8 @@ async def process_document_background(
             _processing_status[file_id_str]["error"] = result.error_message
             await notify_processing_error(file_id_str, result.error_message)
         else:
-            # Auto-generate tags if enabled and no collection was set
-            if options.auto_generate_tags and not options.collection:
+            # Auto-generate tags if enabled (always run, will merge with existing tags including collection)
+            if options.auto_generate_tags:
                 await _auto_tag_document(
                     document_id=result.document_id or file_id_str,
                     filename=filename,

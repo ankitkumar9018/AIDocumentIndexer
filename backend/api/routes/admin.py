@@ -3816,10 +3816,13 @@ async def enhance_documents(
                             max_tags=5,
                         )
                         if tags:
-                            document.tags = tags
+                            # Merge auto-generated tags with existing user tags (preserve user tags)
+                            existing_tags = document.tags or []
+                            merged_tags = list(dict.fromkeys(existing_tags + tags))
+                            document.tags = merged_tags
                             tags_generated += 1
                             # Add new tags to existing collections for next iterations
-                            for tag in tags:
+                            for tag in merged_tags:
                                 if tag not in existing_collections:
                                     existing_collections.append(tag)
             except Exception as e:

@@ -32,6 +32,7 @@ import {
   ShieldCheck,
   ShieldAlert,
   ShieldQuestion,
+  Filter,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,6 +55,7 @@ import {
   useAgentMode,
   useApproveAgentExecution,
   useCancelAgentExecution,
+  useCollections,
 } from "@/lib/api/hooks";
 import {
   DropdownMenu,
@@ -71,9 +73,16 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { AgentModeToggle } from "@/components/agent-mode-toggle";
 import { CostApprovalDialog } from "@/components/cost-approval-dialog";
 import { AgentExecutionProgress } from "@/components/agent-execution-progress";
+import { AgentResponseSections } from "@/components/agent-response-sections";
+import { SourceDocumentViewer } from "@/components/source-document-viewer";
+import { DocumentFilterPanel } from "@/components/chat/document-filter-panel";
+import { VoiceInput } from "@/components/chat/voice-input";
+import { TextToSpeech } from "@/components/chat/text-to-speech";
 import type { PlanStep, ExecutionMode } from "@/lib/api/client";
 
 interface Message {
@@ -86,6 +95,12 @@ interface Message {
   isGeneralResponse?: boolean;
   confidenceScore?: number;  // 0-1 confidence score
   confidenceLevel?: "high" | "medium" | "low";  // Confidence level
+  // Agent mode specific fields
+  isAgentResponse?: boolean;  // Whether this is from agent mode
+  planningDetails?: string;  // Planning phase summary
+  executionSteps?: PlanStep[];  // Steps executed
+  thinkingContent?: string;  // Agent's reasoning/thinking process
+  query?: string;  // Original user query for this response (used for source highlighting)
 }
 
 interface Source {
@@ -93,6 +108,7 @@ interface Source {
   filename: string;
   pageNumber?: number;
   snippet: string;
+  fullContent?: string;  // Full chunk content for source viewer modal
   similarity: number;
   collection?: string;
 }
@@ -140,8 +156,13 @@ export default function ChatPage() {
   const [currentAgentStep, setCurrentAgentStep] = useState<number>(0);
   const [isAgentExecuting, setIsAgentExecuting] = useState(false);
   const [expandedSourceId, setExpandedSourceId] = useState<string | null>(null);
+  const [sourceViewerOpen, setSourceViewerOpen] = useState(false);
+  const [sourceViewerIndex, setSourceViewerIndex] = useState(0);
+  const [lastUserQuery, setLastUserQuery] = useState<string>("");
   const [shouldLoadHistory, setShouldLoadHistory] = useState(false);
   const [historySearchQuery, setHistorySearchQuery] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
+  const [selectedCollections, setSelectedCollections] = useState<string[]>([]);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -156,6 +177,9 @@ export default function ChatPage() {
 
   // Agent mode query
   const { data: agentModeData } = useAgentMode(currentSessionId || undefined, { enabled: isAuthenticated });
+
+  // Collections for filtering
+  const { data: collectionsData, refetch: refetchCollections, isLoading: isLoadingCollections } = useCollections({ enabled: isAuthenticated });
 
   // Handle 404 errors - session doesn't exist, clear and start fresh
   useEffect(() => {
@@ -346,6 +370,7 @@ export default function ChatPage() {
 
     setMessages((prev) => [...prev, userMessage]);
     const messageText = input.trim();
+    setLastUserQuery(messageText); // Track the last user query for source highlighting
     setInput("");
     setIsLoading(true);
 
@@ -366,6 +391,7 @@ export default function ChatPage() {
         content: "",
         timestamp: new Date(),
         isStreaming: true,
+        query: messageText, // Store the user query for source highlighting
       },
     ]);
 
@@ -381,6 +407,7 @@ export default function ChatPage() {
           mode: "agent",
           agent_options: agentOptions,
           include_collection_context: includeCollectionContext,
+          collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
         })) {
           switch (chunk.type) {
             case "session":
@@ -393,7 +420,12 @@ export default function ChatPage() {
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === assistantId
-                    ? { ...m, content: "Planning execution steps..." }
+                    ? {
+                        ...m,
+                        content: "Planning execution steps...",
+                        isAgentResponse: true,
+                        planningDetails: "Analyzing request and creating execution plan..."
+                      }
                     : m
                 )
               );
@@ -402,6 +434,19 @@ export default function ChatPage() {
             case "plan_created":
               if (chunk.steps) {
                 setAgentSteps(chunk.steps);
+                // Update message with plan details
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? {
+                          ...m,
+                          isAgentResponse: true,
+                          planningDetails: chunk.plan_summary || `Created plan with ${chunk.steps?.length || 0} steps`,
+                          executionSteps: chunk.steps
+                        }
+                      : m
+                  )
+                );
               }
               break;
 
@@ -448,6 +493,19 @@ export default function ChatPage() {
                   }
                   return updated;
                 });
+                // Update message with completed steps
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? {
+                          ...m,
+                          executionSteps: prev.find(msg => msg.id === assistantId)?.executionSteps?.map((step, idx) =>
+                            idx === chunk.step_index ? { ...step, status: "completed" as const } : step
+                          )
+                        }
+                      : m
+                  )
+                );
               }
               break;
 
@@ -466,13 +524,18 @@ export default function ChatPage() {
 
             case "sources":
               if (chunk.data && Array.isArray(chunk.data)) {
-                const newSources: Source[] = chunk.data.map((s: Record<string, unknown>) => ({
-                  documentId: (s.document_id as string) || (s.source as string) || "unknown",
-                  filename: (s.document_name as string) || (s.source as string) || "Document",
-                  pageNumber: s.page_number as number | undefined,
-                  snippet: ((s.content as string) || "").substring(0, 200),
-                  similarity: (s.score as number) || 0,
-                }));
+                const newSources: Source[] = chunk.data.map((s: Record<string, unknown>) => {
+                  const docId = (s.document_id as string) || (s.source as string) || "unknown";
+                  return {
+                    documentId: docId,
+                    filename: (s.document_name as string) || (s.source as string) || `Document ${docId.slice(0, 8)}`,
+                    pageNumber: s.page_number as number | undefined,
+                    snippet: ((s.snippet as string) || (s.content as string) || "").substring(0, 200),
+                    fullContent: (s.full_content as string) || (s.content as string) || "",
+                    similarity: (s.score as number) || (s.relevance_score as number) || 0,
+                    collection: (s.collection as string) || undefined,
+                  };
+                });
 
                 // Update message with sources
                 setMessages((prev) =>
@@ -496,7 +559,17 @@ export default function ChatPage() {
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === assistantId
-                      ? { ...m, content: chunk.result!, isStreaming: false }
+                      ? {
+                          ...m,
+                          content: chunk.result!,
+                          isStreaming: false,
+                          isAgentResponse: true,
+                          // Mark all steps as completed
+                          executionSteps: m.executionSteps?.map(step => ({
+                            ...step,
+                            status: "completed" as const
+                          }))
+                        }
                       : m
                   )
                 );
@@ -511,6 +584,23 @@ export default function ChatPage() {
                     : m
                 )
               );
+              break;
+
+            case "thinking":
+              // Append thinking/reasoning content
+              if (chunk.content) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? {
+                          ...m,
+                          thinkingContent: (m.thinkingContent || "") + chunk.content,
+                          isAgentResponse: true,
+                        }
+                      : m
+                  )
+                );
+              }
               break;
 
             case "error":
@@ -542,6 +632,7 @@ export default function ChatPage() {
           session_id: currentSessionId || undefined,
           mode: chatMode,
           include_collection_context: includeCollectionContext,
+          collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
         });
 
         // Update session ID if new
@@ -553,11 +644,12 @@ export default function ChatPage() {
         const sources: Source[] =
           response.sources?.map((s) => ({
             documentId: s.document_id,
-            filename: s.document_name,
+            filename: s.document_name || `Document ${s.document_id?.slice(0, 8) || 'unknown'}`,
             pageNumber: s.page_number,
             snippet: s.snippet,
+            fullContent: s.full_content,
             similarity: s.relevance_score,
-            collection: undefined,
+            collection: s.collection,
           })) || [];
 
         // Update message with response including confidence
@@ -1188,20 +1280,44 @@ export default function ChatPage() {
                         "inline-block rounded-lg px-4 py-2 max-w-full",
                         message.role === "user"
                           ? "bg-primary text-primary-foreground"
+                          : message.isAgentResponse
+                          ? "bg-transparent p-0"
                           : "bg-muted"
                       )}
                     >
-                      <div className="prose-chat whitespace-pre-wrap text-left">
-                        {message.content}
-                        {message.isStreaming && (
-                          <span className="inline-block w-2 h-4 ml-1 bg-current animate-pulse" />
-                        )}
-                      </div>
+                      {/* Agent mode responses use collapsible sections */}
+                      {message.isAgentResponse && !message.isStreaming ? (
+                        <AgentResponseSections
+                          planningDetails={message.planningDetails}
+                          executionSteps={message.executionSteps}
+                          finalAnswer={message.content}
+                          isExecuting={false}
+                          thinkingContent={message.thinkingContent}
+                        />
+                      ) : (
+                        <div className="prose prose-sm dark:prose-invert max-w-none prose-chat text-left">
+                          {message.isStreaming ? (
+                            <>
+                              {message.content}
+                              <span className="inline-block w-2 h-4 ml-1 bg-current animate-pulse" />
+                            </>
+                          ) : (
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {message.content}
+                            </ReactMarkdown>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {/* Message Actions */}
                     {message.role === "assistant" && !message.isStreaming && message.content && (
                       <div className="flex items-center gap-2">
+                        <TextToSpeech
+                          text={message.content}
+                          size="sm"
+                          className="h-7 px-2"
+                        />
                         <Button
                           variant="ghost"
                           size="sm"
@@ -1364,9 +1480,9 @@ export default function ChatPage() {
 
           {/* Input Area */}
           <div className="p-4 border-t">
-            {/* Mode Selector */}
-            <div className="flex justify-center mb-3" role="tablist" aria-label="Chat mode">
-              <div className="inline-flex rounded-lg bg-muted p-1">
+            {/* Mode Selector with Filter Toggle */}
+            <div className="flex items-center justify-center gap-3 mb-3">
+              <div className="inline-flex rounded-lg bg-muted p-1" role="tablist" aria-label="Chat mode">
                 <Button
                   variant={chatMode === "chat" ? "default" : "ghost"}
                   size="sm"
@@ -1408,7 +1524,40 @@ export default function ChatPage() {
                   Agent
                 </Button>
               </div>
+              {/* Filter Toggle Button - Only visible for document-aware modes */}
+              {(chatMode === "chat" || chatMode === "agent") && (
+                <Button
+                  variant={showFilters ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setShowFilters(!showFilters)}
+                  className="gap-1.5"
+                  aria-label="Toggle document filters"
+                  aria-expanded={showFilters}
+                >
+                  <Filter className="h-4 w-4" aria-hidden="true" />
+                  <span className="hidden sm:inline">Filters</span>
+                  {selectedCollections.length > 0 && (
+                    <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-xs">
+                      {selectedCollections.length}
+                    </Badge>
+                  )}
+                </Button>
+              )}
             </div>
+
+            {/* Document Filter Panel */}
+            {showFilters && (chatMode === "chat" || chatMode === "agent") && (
+              <div className="max-w-3xl mx-auto mb-3">
+                <DocumentFilterPanel
+                  collections={collectionsData?.collections || []}
+                  selectedCollections={selectedCollections}
+                  onCollectionsChange={setSelectedCollections}
+                  totalDocuments={collectionsData?.total_documents}
+                  isLoading={isLoadingCollections}
+                  onRefresh={() => refetchCollections()}
+                />
+              </div>
+            )}
             <form onSubmit={handleSubmit} className="flex gap-2 max-w-3xl mx-auto" role="search">
               <Input
                 ref={inputRef}
@@ -1430,6 +1579,13 @@ export default function ChatPage() {
                     ? "Ask a general question"
                     : "Ask about your documents"
                 }
+              />
+              <VoiceInput
+                onTranscript={(transcript) => {
+                  setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+                  inputRef.current?.focus();
+                }}
+                disabled={isLoading || isAgentExecuting}
               />
               <Button
                 type="submit"
@@ -1539,32 +1695,43 @@ export default function ChatPage() {
                       {/* Expanded: Show individual chunks */}
                       {expandedSourceId === group.documentId && (
                         <div className="border-t bg-muted/30">
-                          {group.sources.map((source, idx) => (
-                            <div
-                              key={idx}
-                              className="p-3 border-b last:border-b-0"
-                            >
-                              {source.pageNumber && (
-                                <p className="text-xs text-muted-foreground mb-1">
-                                  Page {source.pageNumber}
+                          {group.sources.map((source, idx) => {
+                            // Calculate global index for this source across all groups
+                            const globalIndex = selectedSources.findIndex(
+                              s => s.documentId === source.documentId && s.snippet === source.snippet
+                            );
+                            return (
+                              <div
+                                key={idx}
+                                className="p-3 border-b last:border-b-0 cursor-pointer hover:bg-muted/50 transition-colors"
+                                onClick={() => {
+                                  setSourceViewerIndex(globalIndex >= 0 ? globalIndex : 0);
+                                  setSourceViewerOpen(true);
+                                }}
+                                title="Click to view full content"
+                              >
+                                {source.pageNumber && (
+                                  <p className="text-xs text-muted-foreground mb-1">
+                                    Page {source.pageNumber}
+                                  </p>
+                                )}
+                                <p className="text-sm text-muted-foreground line-clamp-3">
+                                  {source.snippet}
                                 </p>
-                              )}
-                              <p className="text-sm text-muted-foreground line-clamp-3">
-                                {source.snippet}
-                              </p>
-                              <div className="flex items-center gap-2 mt-2">
-                                <div className="flex-1 h-1 bg-muted rounded-full overflow-hidden">
-                                  <div
-                                    className="h-full bg-primary/70 rounded-full"
-                                    style={{ width: `${source.similarity * 100}%` }}
-                                  />
+                                <div className="flex items-center gap-2 mt-2">
+                                  <div className="flex-1 h-1 bg-muted rounded-full overflow-hidden">
+                                    <div
+                                      className="h-full bg-primary/70 rounded-full"
+                                      style={{ width: `${source.similarity * 100}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-xs text-muted-foreground">
+                                    {Math.round(source.similarity * 100)}%
+                                  </span>
                                 </div>
-                                <span className="text-xs text-muted-foreground">
-                                  {Math.round(source.similarity * 100)}%
-                                </span>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </Card>
@@ -1617,6 +1784,24 @@ export default function ChatPage() {
         onCancel={handleCancelExecution}
         isApproving={approveExecution.isPending}
         isCancelling={cancelExecution.isPending}
+      />
+
+      {/* Source Document Viewer Modal */}
+      <SourceDocumentViewer
+        open={sourceViewerOpen}
+        onOpenChange={setSourceViewerOpen}
+        sources={selectedSources.map(s => ({
+          documentId: s.documentId,
+          filename: s.filename,
+          pageNumber: s.pageNumber,
+          snippet: s.snippet,
+          fullContent: s.fullContent,
+          similarity: s.similarity,
+          collection: s.collection,
+        }))}
+        currentIndex={sourceViewerIndex}
+        query={selectedMessage?.query || lastUserQuery}
+        onOpenDocument={handleSourceClick}
       />
     </div>
   );

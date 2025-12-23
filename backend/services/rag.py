@@ -50,6 +50,9 @@ from backend.services.llm import (
 from backend.services.embeddings import EmbeddingService
 from backend.services.vectorstore import VectorStore, get_vector_store, SearchResult, SearchType
 from backend.services.session_memory import get_session_memory_manager
+from backend.db.database import async_session_context
+from backend.db.models import Document as DBDocument
+from sqlalchemy import select, or_
 from backend.services.query_expander import (
     QueryExpander,
     QueryExpansionConfig,
@@ -76,6 +79,7 @@ class Source:
     slide_number: Optional[int] = None
     relevance_score: float = 0.0
     snippet: str = ""
+    full_content: str = ""  # Full chunk content for source viewer
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -273,8 +277,9 @@ class RAGService:
             )
             self._query_expander = QueryExpander(expansion_config)
 
-        # Initialize verifier if enabled
+        # Initialize verifier if enabled (lazy initialization to use shared embedding service)
         self._verifier: Optional[RAGVerifier] = None
+        self._verifier_config: Optional[VerifierConfig] = None
         if self.config.enable_verification:
             level_map = {
                 "none": VerificationLevel.NONE,
@@ -282,10 +287,9 @@ class RAGService:
                 "standard": VerificationLevel.STANDARD,
                 "thorough": VerificationLevel.THOROUGH,
             }
-            verifier_config = VerifierConfig(
+            self._verifier_config = VerifierConfig(
                 level=level_map.get(self.config.verification_level, VerificationLevel.QUICK),
             )
-            self._verifier = RAGVerifier(verifier_config)
 
         logger.info(
             "Initialized RAG service",
@@ -389,6 +393,17 @@ class RAGService:
                 config=self.llm_config,
             )
         return self._embeddings
+
+    @property
+    def verifier(self) -> Optional[RAGVerifier]:
+        """Get or create verifier instance with proper embedding service."""
+        if self._verifier_config is not None and self._verifier is None:
+            # Lazy initialize verifier with shared embedding service
+            self._verifier = RAGVerifier(
+                config=self._verifier_config,
+                embedding_service=self.embeddings,  # Pass the configured embedding service
+            )
+        return self._verifier
 
     def _get_memory(self, session_id: str) -> ConversationBufferWindowMemory:
         """Get or create conversation memory for session using centralized manager."""
@@ -539,17 +554,18 @@ class RAGService:
             collection_filter=collection_filter,
             access_tier=access_tier,
         )
+        logger.debug("Retrieved documents from vectorstore", count=len(retrieved_docs))
 
         # Verify retrieved documents if enabled
         verification_result = None
-        if self._verifier is not None:
+        if self.verifier is not None:
             try:
-                verification_result = await self._verifier.verify(
+                verification_result = await self.verifier.verify(
                     query=question,
                     retrieved_docs=retrieved_docs,
                 )
                 # Filter to only relevant documents
-                retrieved_docs = self._verifier.filter_by_relevance(
+                retrieved_docs = self.verifier.filter_by_relevance(
                     retrieved_docs, verification_result
                 )
                 logger.debug(
@@ -565,6 +581,7 @@ class RAGService:
 
         # Format context from retrieved documents
         context, sources = self._format_context(retrieved_docs, include_collection_context)
+        logger.debug("Formatted context", context_length=len(context), sources_count=len(sources))
 
         # Build prompt
         if session_id:
@@ -830,6 +847,12 @@ class RAGService:
 
         for search_query in queries_to_search:
             # Use custom vector store if available
+            logger.info(
+                "RAG retrieval starting",
+                has_custom_vectorstore=self._custom_vectorstore is not None,
+                vectorstore_type=type(self._custom_vectorstore).__name__ if self._custom_vectorstore else None,
+                collection_filter=collection_filter,
+            )
             if self._custom_vectorstore is not None:
                 results = await self._retrieve_with_custom_store(
                     query=search_query,
@@ -882,7 +905,7 @@ class RAGService:
 
         Args:
             query: Search query
-            collection_filter: Filter by collection
+            collection_filter: Filter by collection (or "(Untagged)" for untagged docs)
             access_tier: User's access tier
             top_k: Number of results
 
@@ -896,22 +919,68 @@ class RAGService:
             # Determine search type
             search_type = SearchType.HYBRID if self.config.use_hybrid_search else SearchType.VECTOR
 
+            # Get document IDs matching the collection filter
+            document_ids = None
+            if collection_filter:
+                async with async_session_context() as db:
+                    if collection_filter == "(Untagged)":
+                        # Filter for untagged documents
+                        query_stmt = select(DBDocument.id).where(
+                            or_(
+                                DBDocument.tags.is_(None),
+                                DBDocument.tags == [],
+                            )
+                        )
+                    else:
+                        # Filter for documents with matching tag
+                        # SQLite stores JSON arrays as text, so we use raw SQL LIKE
+                        # to avoid the custom StringArrayType's JSON encoding of the pattern.
+                        # e.g., tags = '["German", "Marketing"]' LIKE '%"German"%'
+                        from sqlalchemy import text, cast, String
+                        pattern = "%" + '"' + collection_filter + '"' + "%"
+                        # Cast tags column to String to bypass StringArrayType processing
+                        # and use a literal pattern to avoid parameter binding issues
+                        query_stmt = select(DBDocument.id).where(
+                            cast(DBDocument.tags, String).like(pattern)
+                        )
+                    result = await db.execute(query_stmt)
+                    document_ids = [str(row[0]) for row in result.fetchall()]
+                    logger.info(
+                        "Collection filter results",
+                        document_ids=document_ids[:5] if document_ids else [],
+                        count=len(document_ids),
+                    )
+
+                    if not document_ids:
+                        logger.debug(
+                            "No documents match collection filter",
+                            collection_filter=collection_filter,
+                        )
+                        return []
+
             # Perform search
-            # Note: collection_filter can be passed to search() once the vectorstore
-            # supports filtering by collection/tags in the metadata
+            logger.info(
+                "Calling vectorstore search",
+                query_length=len(query),
+                has_embedding=query_embedding is not None and len(query_embedding) > 0,
+                search_type=search_type.value,
+                document_ids_count=len(document_ids) if document_ids else 0,
+            )
             results = await self._custom_vectorstore.search(
                 query=query,
                 query_embedding=query_embedding,
                 search_type=search_type,
                 top_k=top_k,
                 access_tier_level=access_tier,
+                document_ids=document_ids,
             )
 
             # Convert SearchResult to LangChain Document format
             langchain_results = []
-            logger.debug(
+            logger.info(
                 "Vector search returned results",
                 total_results=len(results),
+                first_result_doc_id=results[0].document_id if results else None,
             )
             # Note: The vectorstore already applies similarity threshold filtering
             # during the search phase. The scores here are RRF fusion scores for
@@ -922,7 +991,7 @@ class RAGService:
                     page_content=result.content,
                     metadata={
                         "document_id": result.document_id,
-                        "document_name": result.document_filename or result.document_title or "Unknown Document",
+                        "document_name": result.document_filename or result.document_title or f"Document {result.document_id[:8]}",
                         "chunk_id": result.chunk_id,
                         "collection": result.collection,
                         "page_number": result.page_number,
@@ -941,7 +1010,7 @@ class RAGService:
             return langchain_results
 
         except Exception as e:
-            logger.error("Custom vectorstore retrieval failed", error=str(e))
+            logger.error("Custom vectorstore retrieval failed", error=str(e), exc_info=True)
             return []
 
     async def _retrieve_with_langchain_store(
@@ -1060,7 +1129,7 @@ class RAGService:
             metadata = doc.metadata or {}
 
             # Build context entry
-            doc_name = metadata.get("document_name", "Unknown Document")
+            doc_name = metadata.get("document_filename") or metadata.get("document_name") or f"Document {metadata.get('document_id', 'unknown')[:8]}"
             collection = metadata.get("collection")
 
             # Include collection info if enabled and available
@@ -1088,6 +1157,7 @@ class RAGService:
                 slide_number=metadata.get("slide_number"),
                 relevance_score=score,
                 snippet=doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+                full_content=doc.page_content,  # Full content for source viewer modal
                 metadata=metadata,
             )
             sources.append(source)

@@ -14,7 +14,7 @@ import zipfile
 import tempfile
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -197,6 +197,7 @@ class BulkAutoTagResponse(BaseModel):
 class CollectionsResponse(BaseModel):
     """Collections list response."""
     collections: List[CollectionInfo]
+    total_documents: int = 0  # Actual unique document count
 
 
 # =============================================================================
@@ -786,6 +787,7 @@ async def search_documents(
 @router.post("/{document_id}/reprocess")
 async def reprocess_document(
     document_id: UUID,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser,
     db: AsyncSession = Depends(get_async_session),
 ):
@@ -816,8 +818,12 @@ async def reprocess_document(
             detail="You don't have write access to this document",
         )
 
-    # Get document
-    query = select(Document).where(Document.id == document_id)
+    # Get document with eagerly loaded access_tier to avoid lazy loading issues
+    query = (
+        select(Document)
+        .options(selectinload(Document.access_tier))
+        .where(Document.id == document_id)
+    )
     result = await db.execute(query)
     document = result.scalar_one_or_none()
 
@@ -827,23 +833,48 @@ async def reprocess_document(
             detail="Document not found",
         )
 
+    # Get file path
+    file_path = document.file_path
+    if not file_path or not Path(file_path).exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document file not found on disk",
+        )
+
+    # Extract needed values before committing (avoid lazy loading in background task)
+    doc_tags = list(document.tags) if document.tags else []
+    doc_access_tier = document.access_tier.level if document.access_tier else 1
+
     # Reset processing status
     document.processing_status = ProcessingStatus.PENDING
     document.processing_error = None
     await db.commit()
 
-    # Document is marked as pending; Ray worker will pick it up automatically
-    # when scanning for documents with PENDING status
+    # Import and trigger background processing
+    from backend.api.routes.upload import process_document_background, UploadOptions
+
+    options = UploadOptions(
+        collection=doc_tags[0] if doc_tags else None,
+        access_tier=doc_access_tier,
+    )
+
+    background_tasks.add_task(
+        process_document_background,
+        file_id=document_id,
+        file_path=file_path,
+        options=options,
+    )
+
     logger.info(
         "Document queued for reprocessing",
         document_id=str(document_id),
-        status="pending",
+        status="processing",
     )
 
     return {
         "message": "Document queued for reprocessing",
         "document_id": str(document_id),
-        "status": "pending",
+        "status": "processing",
     }
 
 
@@ -859,6 +890,9 @@ async def list_collections(
     collections from documents the user can access.
     """
     # Get all tags from accessible documents
+    # Exclude soft-deleted documents (those marked as failed with "Deleted by user" error)
+    # to match the filtering behavior of list_documents
+    # Note: Empty arrays are filtered in Python (if tags:) since SQLite lacks array_length
     query = (
         select(Document.tags)
         .join(AccessTier, Document.access_tier_id == AccessTier.id)
@@ -866,6 +900,11 @@ async def list_collections(
             and_(
                 AccessTier.level <= user.access_tier_level,
                 Document.tags.isnot(None),
+                # Exclude soft-deleted documents
+                ~(
+                    (Document.processing_status == ProcessingStatus.FAILED)
+                    & (Document.processing_error == "Deleted by user")
+                ),
             )
         )
     )
@@ -880,13 +919,67 @@ async def list_collections(
             for tag in tags:
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
 
+    # Debug logging
+    logger.info(
+        "list_collections query result",
+        documents_with_tags=len(all_tags),
+        unique_tags=len(tag_counts),
+        tag_counts=tag_counts,
+        user_access_tier=user.access_tier_level,
+    )
+
     # Build response
     collections = [
         CollectionInfo(name=tag, document_count=count)
         for tag, count in sorted(tag_counts.items(), key=lambda x: -x[1])
     ]
 
-    return CollectionsResponse(collections=collections)
+    # Count untagged documents (null or empty tags)
+    # Exclude soft-deleted documents to match list_documents behavior
+    untagged_query = (
+        select(func.count(Document.id))
+        .join(AccessTier, Document.access_tier_id == AccessTier.id)
+        .where(
+            and_(
+                AccessTier.level <= user.access_tier_level,
+                or_(
+                    Document.tags.is_(None),
+                    Document.tags == [],
+                ),
+                # Exclude soft-deleted documents
+                ~(
+                    (Document.processing_status == ProcessingStatus.FAILED)
+                    & (Document.processing_error == "Deleted by user")
+                ),
+            )
+        )
+    )
+    untagged_result = await db.execute(untagged_query)
+    untagged_count = untagged_result.scalar() or 0
+
+    # Add "(Untagged)" pseudo-collection if there are untagged documents
+    if untagged_count > 0:
+        collections.append(CollectionInfo(name="(Untagged)", document_count=untagged_count))
+
+    # Count total unique documents (with tags + untagged)
+    total_query = (
+        select(func.count(Document.id))
+        .join(AccessTier, Document.access_tier_id == AccessTier.id)
+        .where(
+            and_(
+                AccessTier.level <= user.access_tier_level,
+                # Exclude soft-deleted documents
+                ~(
+                    (Document.processing_status == ProcessingStatus.FAILED)
+                    & (Document.processing_error == "Deleted by user")
+                ),
+            )
+        )
+    )
+    total_result = await db.execute(total_query)
+    total_documents = total_result.scalar() or 0
+
+    return CollectionsResponse(collections=collections, total_documents=total_documents)
 
 
 @router.get("/{document_id}/download")
@@ -1150,8 +1243,10 @@ async def auto_tag_document(
             detail="Failed to generate tags. Please try again.",
         )
 
-    # Update document tags
-    document.tags = tags
+    # Merge auto-generated tags with existing user tags (preserve user tags)
+    existing_tags = document.tags or []
+    merged_tags = list(dict.fromkeys(existing_tags + tags))
+    document.tags = merged_tags
     await db.commit()
 
     # Log audit
@@ -1260,20 +1355,24 @@ async def bulk_auto_tag_documents(
                 continue
 
             # Generate tags
+            doc_name = document.title or document.original_filename or document.filename
             tags = await auto_tagger.generate_tags(
-                document_name=document.name,
+                document_name=doc_name,
                 content_sample=content_sample,
                 existing_collections=existing_collections,
                 max_tags=request.max_tags,
             )
 
             if tags:
-                document.tags = tags
+                # Merge auto-generated tags with existing user tags (preserve user tags)
+                existing_tags = document.tags or []
+                merged_tags = list(dict.fromkeys(existing_tags + tags))
+                document.tags = merged_tags
                 processed += 1
                 results.append(AutoTagResponse(
                     document_id=str(doc_id),
-                    tags=tags,
-                    collection=tags[0] if tags else None,
+                    tags=merged_tags,
+                    collection=merged_tags[0] if merged_tags else None,
                 ))
 
                 # Add new tags to existing collections for next iterations
@@ -1297,5 +1396,155 @@ async def bulk_auto_tag_documents(
         status="completed",
         total=len(request.document_ids),
         processed=processed,
+        results=results,
+    )
+
+
+# =============================================================================
+# Document Name Extraction from File Metadata
+# =============================================================================
+
+
+class FixDocumentNamesRequest(BaseModel):
+    """Request to fix document names from file metadata."""
+    document_ids: Optional[List[UUID]] = None  # If None, fix all documents with "unknown" name
+
+
+class FixDocumentNamesResponse(BaseModel):
+    """Response after fixing document names."""
+    status: str
+    total: int
+    fixed: int
+    results: List[Dict[str, str]]
+
+
+def _extract_name_from_pdf(file_path: str) -> Optional[str]:
+    """Extract title from PDF metadata."""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(file_path)
+        if reader.metadata:
+            # Try /Title first, then /Subject
+            title = reader.metadata.get("/Title") or reader.metadata.get("/Subject")
+            if title and title.strip() and title.strip().lower() != "untitled":
+                return title.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _extract_name_from_pptx(file_path: str) -> Optional[str]:
+    """Extract title from PowerPoint metadata."""
+    try:
+        from pptx import Presentation
+        prs = Presentation(file_path)
+        if prs.core_properties.title:
+            return prs.core_properties.title.strip()
+        if prs.core_properties.subject:
+            return prs.core_properties.subject.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _extract_name_from_file(file_path: str, file_type: str) -> Optional[str]:
+    """Extract document name from file metadata based on type."""
+    if file_type in ["pdf"]:
+        return _extract_name_from_pdf(file_path)
+    elif file_type in ["pptx", "ppt"]:
+        return _extract_name_from_pptx(file_path)
+    # For other types, we can't extract metadata - use filename
+    return None
+
+
+@router.post("/fix-names", response_model=FixDocumentNamesResponse)
+async def fix_document_names(
+    request: FixDocumentNamesRequest,
+    user: AdminUser,  # Admin only
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Fix document names by extracting from file metadata.
+
+    For documents with "unknown" as original_filename, attempts to:
+    1. Extract title from PDF/PPTX metadata
+    2. Fall back to using the file's base name with extension
+
+    Admin only endpoint.
+    """
+    logger.info(
+        "Fixing document names",
+        user_id=user.user_id,
+        document_ids=len(request.document_ids) if request.document_ids else "all",
+    )
+
+    # Build query for documents to fix
+    if request.document_ids:
+        query = (
+            select(Document)
+            .options(selectinload(Document.access_tier))
+            .where(Document.id.in_(request.document_ids))
+        )
+    else:
+        # Fix all documents with "unknown" name
+        query = (
+            select(Document)
+            .options(selectinload(Document.access_tier))
+            .where(
+                or_(
+                    Document.original_filename == "unknown",
+                    Document.original_filename.is_(None),
+                )
+            )
+        )
+
+    result = await db.execute(query)
+    documents = result.scalars().all()
+
+    fixed = 0
+    results = []
+
+    for document in documents:
+        old_name = document.original_filename or "unknown"
+        new_name = None
+
+        # Try to extract from file metadata
+        if document.file_path and Path(document.file_path).exists():
+            file_type = document.file_type or Path(document.file_path).suffix.lstrip(".")
+            new_name = _extract_name_from_file(document.file_path, file_type.lower())
+
+        # Fallback: use filename with proper formatting
+        if not new_name:
+            if document.filename:
+                # Remove UUID prefix if present (e.g., "abc123.pdf" -> keep as is, or extract meaningful part)
+                base_name = Path(document.filename).stem
+                ext = Path(document.filename).suffix
+                # If the stem looks like a UUID, create a readable name
+                if len(base_name) == 36 and "-" in base_name:
+                    new_name = f"Document{ext}"
+                else:
+                    new_name = document.filename
+
+        if new_name and new_name != old_name:
+            document.original_filename = new_name
+            fixed += 1
+            results.append({
+                "document_id": str(document.id),
+                "old_name": old_name,
+                "new_name": new_name,
+            })
+
+    await db.commit()
+
+    logger.info(
+        "Document names fixed",
+        total=len(documents),
+        fixed=fixed,
+    )
+
+    return FixDocumentNamesResponse(
+        status="completed",
+        total=len(documents),
+        fixed=fixed,
         results=results,
     )
