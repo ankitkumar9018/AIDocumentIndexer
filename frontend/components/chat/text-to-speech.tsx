@@ -11,6 +11,9 @@ interface TextToSpeechProps {
   disabled?: boolean;
   className?: string;
   size?: "default" | "sm" | "lg" | "icon";
+  autoPlay?: boolean;  // Automatically start speaking when text changes
+  onComplete?: () => void;  // Callback when speech finishes
+  onStart?: () => void;  // Callback when speech starts
 }
 
 // Check if Web Speech Synthesis is available
@@ -24,6 +27,9 @@ export function TextToSpeech({
   disabled = false,
   className,
   size = "icon",
+  autoPlay = false,
+  onComplete,
+  onStart,
 }: TextToSpeechProps) {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -86,11 +92,13 @@ export function TextToSpeech({
       setIsLoading(false);
       setIsSpeaking(true);
       setIsPaused(false);
+      onStart?.();
     };
 
     utterance.onend = () => {
       setIsSpeaking(false);
       setIsPaused(false);
+      onComplete?.();
     };
 
     utterance.onerror = (event) => {
@@ -120,7 +128,16 @@ export function TextToSpeech({
     } else {
       window.speechSynthesis.speak(utterance);
     }
-  }, [text]);
+  }, [text, onStart, onComplete]);
+
+  // Auto-play effect: start speaking when text changes and autoPlay is enabled
+  const lastTextRef = useRef<string>("");
+  useEffect(() => {
+    if (autoPlay && text && text !== lastTextRef.current && !isSpeaking && !disabled) {
+      lastTextRef.current = text;
+      speak();
+    }
+  }, [autoPlay, text, isSpeaking, disabled, speak]);
 
   const stop = useCallback(() => {
     window.speechSynthesis.cancel();

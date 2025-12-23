@@ -2,6 +2,7 @@
 
 import { useParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
+import { getErrorMessage } from "@/lib/errors";
 import {
   ArrowLeft,
   FileText,
@@ -89,9 +90,9 @@ export default function DocumentDetailPage() {
       await deleteDocument.mutateAsync(documentId);
       toast.success("Document deleted");
       router.push("/dashboard/documents");
-    } catch (error: any) {
+    } catch (error) {
       toast.error("Failed to delete document", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     }
   };
@@ -101,9 +102,9 @@ export default function DocumentDetailPage() {
       await reprocessDocument.mutateAsync(documentId);
       toast.success("Document queued for reprocessing");
       refetch();
-    } catch (error: any) {
+    } catch (error) {
       toast.error("Failed to reprocess document", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     }
   };
@@ -115,10 +116,10 @@ export default function DocumentDetailPage() {
       toast.success("Download started", {
         description: `Downloading "${document.name}"...`,
       });
-    } catch (error: any) {
+    } catch (error) {
       console.error("Download failed:", error);
       toast.error("Failed to download document", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     }
   };

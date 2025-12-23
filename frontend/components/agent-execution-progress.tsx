@@ -153,11 +153,11 @@ export function AgentExecutionProgress({
 
                   {/* Cost Info */}
                   <div className="flex items-center gap-2 mt-1">
-                    {step.actual_cost_usd !== null ? (
+                    {step.actual_cost_usd != null ? (
                       <Badge variant="outline" className="text-xs">
                         ${step.actual_cost_usd.toFixed(4)}
                       </Badge>
-                    ) : step.estimated_cost_usd !== null ? (
+                    ) : step.estimated_cost_usd != null ? (
                       <Badge variant="outline" className="text-xs text-muted-foreground">
                         ~${step.estimated_cost_usd.toFixed(4)}
                       </Badge>

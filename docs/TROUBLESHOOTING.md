@@ -506,6 +506,35 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 localStorage.getItem('theme')
 ```
 
+### Document Names Showing "unknown"
+
+**Problem:** Documents page shows "unknown" as document name, or Sources panel in Chat shows "unknown" instead of actual filenames.
+
+**Causes & Solutions:**
+
+1. **Sources panel showing "unknown":**
+   This was caused by a metadata key mismatch in `backend/services/rag.py`. The vector store uses `document_filename` but RAG service was looking for `document_name`. Fixed in December 2024 to check both keys.
+
+2. **Documents page showing "unknown":**
+   The `original_filename` field was "unknown" in the database. This can happen when:
+   - Documents were reprocessed without preserving original filenames
+   - Files were uploaded with missing metadata
+
+3. **Fix for existing documents:**
+   ```bash
+   # Match files from input_files folder by hash
+   # This admin endpoint recovers original filenames
+   curl -X POST "http://localhost:8000/api/v1/documents/fix-names" \
+     -H "Authorization: Bearer $TOKEN"
+   ```
+
+4. **PDF metadata showing instead of filename:**
+   If documents show titles like "Document.pdf" or "Mastervorlage 16:9", this is PDF metadata. The fix prioritizes `original_filename` over `title`:
+   ```python
+   # In backend/api/routes/documents.py
+   name=doc.original_filename or doc.title  # Filename first
+   ```
+
 ### Search/Chat Not Returning Results
 
 **Problem:** Chat says "no relevant documents found" even though documents are indexed.
@@ -557,6 +586,42 @@ localStorage.getItem('theme')
 **Problem:** Backend logs show `'EmbeddingService' object has no attribute 'embed_query'`
 
 **Solution:** This was a bug that has been fixed. The `EmbeddingService` class now has the `embed_query` async method. Update your code to the latest version.
+
+### Chat History Not Appearing
+
+**Problem:** Clicking "History" button shows no conversations. Chat sessions are not persisting.
+
+**Causes & Solutions:**
+
+1. **Sessions not being created:**
+   ```bash
+   # Check if sessions exist in database
+   sqlite3 aidocindexer.db "SELECT id, title, created_at FROM chat_sessions LIMIT 5"
+   ```
+
+2. **User ID mismatch:**
+   The JWT token's `sub` field may contain a non-UUID identifier (e.g., "test-user-123") while the database expects UUID foreign keys. This was fixed in December 2024 with a `get_db_user_id()` helper that:
+   - Looks up user by email in database
+   - Falls back to admin user if not found
+   - Returns valid UUID for session creation
+
+3. **Database error in session creation:**
+   ```bash
+   # Check backend logs for errors
+   grep -i "session\|chat" /tmp/backend.log | tail -20
+   ```
+
+4. **Fix applied:** If you're running an older version, update to get the `get_db_user_id()` helper in `backend/api/routes/chat.py`.
+
+**Verification:**
+```bash
+# After chatting, verify sessions are created
+sqlite3 aidocindexer.db "SELECT COUNT(*) FROM chat_sessions"
+# Should show > 0
+
+# Check messages are saved
+sqlite3 aidocindexer.db "SELECT COUNT(*) FROM chat_messages"
+```
 
 ### Documents Found But Not Relevant
 

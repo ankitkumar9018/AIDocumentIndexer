@@ -33,6 +33,8 @@ import {
   ShieldAlert,
   ShieldQuestion,
   Filter,
+  Mic,
+  Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,6 +42,7 @@ import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
+import { getErrorMessage } from "@/lib/errors";
 import {
   useChatSessions,
   useChatSession,
@@ -83,7 +86,20 @@ import { SourceDocumentViewer } from "@/components/source-document-viewer";
 import { DocumentFilterPanel } from "@/components/chat/document-filter-panel";
 import { VoiceInput } from "@/components/chat/voice-input";
 import { TextToSpeech } from "@/components/chat/text-to-speech";
-import type { PlanStep, ExecutionMode } from "@/lib/api/client";
+import { VoiceConversationIndicator, type VoiceState } from "@/components/chat/voice-conversation-indicator";
+import { TempDocumentPanel } from "@/components/chat/temp-document-panel";
+import { api, type PlanStep, type ExecutionMode } from "@/lib/api/client";
+
+// Temp document interface matching backend response
+interface TempDocument {
+  id: string;
+  filename: string;
+  token_count: number;
+  file_size: number;
+  file_type: string;
+  has_chunks: boolean;
+  has_embeddings: boolean;
+}
 
 interface Message {
   id: string;
@@ -163,6 +179,16 @@ export default function ChatPage() {
   const [historySearchQuery, setHistorySearchQuery] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [selectedCollections, setSelectedCollections] = useState<string[]>([]);
+  // Voice conversation mode
+  const [voiceModeEnabled, setVoiceModeEnabled] = useState(false);
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [lastAssistantMessage, setLastAssistantMessage] = useState<string | null>(null);
+  // Temp document upload (Quick Upload)
+  const [showTempPanel, setShowTempPanel] = useState(false);
+  const [tempSessionId, setTempSessionId] = useState<string | null>(null);
+  const [tempDocuments, setTempDocuments] = useState<TempDocument[]>([]);
+  const [tempTotalTokens, setTempTotalTokens] = useState(0);
+  const [isTempUploading, setIsTempUploading] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -357,6 +383,91 @@ export default function ChatPage() {
     window.open(`/dashboard/documents/${documentId}`, '_blank');
   };
 
+  // Temp document handlers
+  const handleTempUpload = async (file: File) => {
+    try {
+      let sessionId = tempSessionId;
+
+      // Create session if needed
+      if (!sessionId) {
+        const sessionData = await api.createTempSession();
+        sessionId = sessionData.session_id;
+        setTempSessionId(sessionId);
+      }
+
+      // Upload file
+      setIsTempUploading(true);
+      await api.uploadTempDocument(sessionId, file, true);
+
+      // Refresh session info
+      await refreshTempSession(sessionId);
+    } catch (error) {
+      console.error("Temp upload failed:", error);
+      throw error;
+    } finally {
+      setIsTempUploading(false);
+    }
+  };
+
+  const refreshTempSession = async (sessionId: string | null) => {
+    if (!sessionId) return;
+
+    try {
+      const data = await api.getTempSessionInfo(sessionId);
+      setTempDocuments(data.documents || []);
+      setTempTotalTokens(data.total_tokens || 0);
+    } catch (error: unknown) {
+      // Session expired or not found
+      if (error && typeof error === 'object' && 'status' in error && (error as {status: number}).status === 404) {
+        setTempSessionId(null);
+        setTempDocuments([]);
+        setTempTotalTokens(0);
+      } else {
+        console.error("Failed to refresh temp session:", error);
+      }
+    }
+  };
+
+  const handleTempRemove = async (docId: string) => {
+    if (!tempSessionId) return;
+
+    try {
+      await api.removeTempDocument(tempSessionId, docId);
+      await refreshTempSession(tempSessionId);
+    } catch (error) {
+      console.error("Failed to remove temp document:", error);
+      throw error;
+    }
+  };
+
+  const handleTempSave = async (docId: string, collection?: string) => {
+    if (!tempSessionId) return;
+
+    try {
+      await api.saveTempDocument(tempSessionId, docId, collection);
+      await refreshTempSession(tempSessionId);
+      // Refresh collections since a new document was added
+      refetchCollections();
+    } catch (error) {
+      console.error("Failed to save temp document:", error);
+      throw error;
+    }
+  };
+
+  const handleTempDiscard = async () => {
+    if (!tempSessionId) return;
+
+    try {
+      await api.deleteTempSession(tempSessionId);
+      setTempSessionId(null);
+      setTempDocuments([]);
+      setTempTotalTokens(0);
+    } catch (error) {
+      console.error("Failed to discard temp session:", error);
+      throw error;
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
@@ -373,6 +484,11 @@ export default function ChatPage() {
     setLastUserQuery(messageText); // Track the last user query for source highlighting
     setInput("");
     setIsLoading(true);
+
+    // Update voice state when submitting in voice mode
+    if (voiceModeEnabled) {
+      setVoiceState("thinking");
+    }
 
     // Reset agent state when starting new request
     if (chatMode === "agent") {
@@ -633,6 +749,7 @@ export default function ChatPage() {
           mode: chatMode,
           include_collection_context: includeCollectionContext,
           collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
+          temp_session_id: tempSessionId || undefined,
         });
 
         // Update session ID if new
@@ -677,7 +794,7 @@ export default function ChatPage() {
     } catch (error) {
       console.error("Error:", error);
       // Show error message to user
-      const errorMessage = (error as any)?.detail || "Failed to get a response. Please check your connection and try again.";
+      const errorMessage = getErrorMessage(error, "Failed to get a response. Please check your connection and try again.");
 
       setMessages((prev) =>
         prev.map((m) =>
@@ -811,14 +928,14 @@ export default function ChatPage() {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
-        <div className="flex items-center justify-between mb-4">
-          <div>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+          <div className="shrink-0">
             <h1 className="text-2xl font-bold">Chat with Documents</h1>
             <p className="text-muted-foreground">
               Ask questions and get answers from your knowledge base
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-end">
             {/* Temperature Settings */}
             <Popover>
               <PopoverTrigger asChild>
@@ -869,6 +986,32 @@ export default function ChatPage() {
               showLabel={false}
               onModeChange={handleModeChange}
             />
+
+            {/* Voice Mode Toggle */}
+            <Button
+              variant={voiceModeEnabled ? "default" : "outline"}
+              size="sm"
+              onClick={() => {
+                setVoiceModeEnabled(!voiceModeEnabled);
+                if (!voiceModeEnabled) {
+                  setVoiceState("idle");
+                } else {
+                  setVoiceState("idle");
+                }
+              }}
+              className="gap-2"
+              title={voiceModeEnabled ? "Disable voice conversation mode" : "Enable voice conversation mode"}
+            >
+              <Mic className={cn("h-4 w-4", voiceModeEnabled && "text-primary-foreground")} />
+              <span className="hidden sm:inline">
+                {voiceModeEnabled ? "Voice On" : "Voice"}
+              </span>
+            </Button>
+
+            {/* Voice State Indicator - Only show when voice mode is enabled */}
+            {voiceModeEnabled && voiceState !== "idle" && (
+              <VoiceConversationIndicator state={voiceState} />
+            )}
 
             {/* Agent Options Popover - Only show when in agent mode */}
             {chatMode === "agent" && (
@@ -1245,7 +1388,7 @@ export default function ChatPage() {
         <Card className="flex-1 flex flex-col overflow-hidden">
           <ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
             <div className="space-y-6 max-w-3xl mx-auto" role="log" aria-label="Chat messages" aria-live="polite">
-              {messages.map((message) => (
+              {messages.map((message, index) => (
                 <div
                   key={message.id}
                   className={cn(
@@ -1317,6 +1460,18 @@ export default function ChatPage() {
                           text={message.content}
                           size="sm"
                           className="h-7 px-2"
+                          autoPlay={voiceModeEnabled && index === messages.length - 1 && message.content !== lastAssistantMessage}
+                          onStart={() => {
+                            if (voiceModeEnabled) {
+                              setVoiceState("speaking");
+                              setLastAssistantMessage(message.content);
+                            }
+                          }}
+                          onComplete={() => {
+                            if (voiceModeEnabled) {
+                              setVoiceState("listening");
+                            }
+                          }}
                         />
                         <Button
                           variant="ghost"
@@ -1480,50 +1635,8 @@ export default function ChatPage() {
 
           {/* Input Area */}
           <div className="p-4 border-t">
-            {/* Mode Selector with Filter Toggle */}
-            <div className="flex items-center justify-center gap-3 mb-3">
-              <div className="inline-flex rounded-lg bg-muted p-1" role="tablist" aria-label="Chat mode">
-                <Button
-                  variant={chatMode === "chat" ? "default" : "ghost"}
-                  size="sm"
-                  onClick={() => setChatMode("chat")}
-                  className="gap-1.5"
-                  role="tab"
-                  aria-selected={chatMode === "chat"}
-                  aria-label="Document chat mode - search your documents"
-                >
-                  <FileSearch className="h-4 w-4" aria-hidden="true" />
-                  Documents
-                </Button>
-                <Button
-                  variant={chatMode === "general" ? "default" : "ghost"}
-                  size="sm"
-                  onClick={() => setChatMode("general")}
-                  className="gap-1.5"
-                  disabled={!agentModeData?.general_chat_enabled}
-                  title={!agentModeData?.general_chat_enabled ? "Enable General Chat in settings" : undefined}
-                  role="tab"
-                  aria-selected={chatMode === "general"}
-                  aria-label="General chat mode - AI knowledge without document search"
-                >
-                  <Brain className="h-4 w-4" aria-hidden="true" />
-                  General
-                </Button>
-                <Button
-                  variant={chatMode === "agent" ? "default" : "ghost"}
-                  size="sm"
-                  onClick={() => setChatMode("agent")}
-                  className="gap-1.5"
-                  disabled={!agentModeData?.agent_mode_enabled}
-                  title={!agentModeData?.agent_mode_enabled ? "Enable Agent Mode in settings" : undefined}
-                  role="tab"
-                  aria-selected={chatMode === "agent"}
-                  aria-label="Agent mode - multi-step task execution with AI agents"
-                >
-                  <Bot className="h-4 w-4" aria-hidden="true" />
-                  Agent
-                </Button>
-              </div>
+            {/* Input Controls - Filters and Quick Upload */}
+            <div className="flex items-center justify-center gap-2 mb-3">
               {/* Filter Toggle Button - Only visible for document-aware modes */}
               {(chatMode === "chat" || chatMode === "agent") && (
                 <Button
@@ -1543,7 +1656,31 @@ export default function ChatPage() {
                   )}
                 </Button>
               )}
+              {/* Quick Upload Toggle Button */}
+              <Button
+                variant={showTempPanel ? "default" : "outline"}
+                size="sm"
+                onClick={() => setShowTempPanel(!showTempPanel)}
+                className="gap-1.5"
+                aria-label="Toggle quick document upload"
+                aria-expanded={showTempPanel}
+              >
+                <Upload className="h-4 w-4" aria-hidden="true" />
+                <span className="hidden sm:inline">Quick Upload</span>
+                {tempDocuments.length > 0 && (
+                  <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-xs">
+                    {tempDocuments.length}
+                  </Badge>
+                )}
+              </Button>
             </div>
+
+            {/* Voice Conversation Indicator */}
+            {voiceModeEnabled && voiceState !== "idle" && (
+              <div className="max-w-3xl mx-auto mb-3 flex justify-center">
+                <VoiceConversationIndicator state={voiceState} />
+              </div>
+            )}
 
             {/* Document Filter Panel */}
             {showFilters && (chatMode === "chat" || chatMode === "agent") && (
@@ -1558,6 +1695,23 @@ export default function ChatPage() {
                 />
               </div>
             )}
+
+            {/* Temp Document Panel (Quick Upload) */}
+            {showTempPanel && (
+              <div className="max-w-3xl mx-auto mb-3">
+                <TempDocumentPanel
+                  sessionId={tempSessionId}
+                  documents={tempDocuments}
+                  totalTokens={tempTotalTokens}
+                  isLoading={isTempUploading}
+                  onUpload={handleTempUpload}
+                  onRemove={handleTempRemove}
+                  onSave={handleTempSave}
+                  onDiscard={handleTempDiscard}
+                />
+              </div>
+            )}
+
             <form onSubmit={handleSubmit} className="flex gap-2 max-w-3xl mx-auto" role="search">
               <Input
                 ref={inputRef}
@@ -1582,10 +1736,39 @@ export default function ChatPage() {
               />
               <VoiceInput
                 onTranscript={(transcript) => {
-                  setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
-                  inputRef.current?.focus();
+                  if (voiceModeEnabled) {
+                    // In voice mode, set input and trigger auto-send
+                    setInput(transcript);
+                  } else {
+                    // Normal mode: append transcript
+                    setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+                    inputRef.current?.focus();
+                  }
                 }}
                 disabled={isLoading || isAgentExecuting}
+                continuousMode={voiceModeEnabled}
+                autoSend={voiceModeEnabled}
+                onAutoSend={() => {
+                  // Auto-send triggered by voice input
+                  if (voiceModeEnabled && input.trim()) {
+                    setVoiceState("thinking");
+                    // Submit the form programmatically
+                    const form = inputRef.current?.form;
+                    if (form) {
+                      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                    }
+                  }
+                }}
+                onListeningStart={() => {
+                  if (voiceModeEnabled) {
+                    setVoiceState("listening");
+                  }
+                }}
+                onListeningEnd={() => {
+                  if (voiceModeEnabled && voiceState === "listening") {
+                    setVoiceState("idle");
+                  }
+                }}
               />
               <Button
                 type="submit"

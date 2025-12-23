@@ -273,7 +273,7 @@ export function AgentResponseSections({
                       <p className="text-sm text-foreground mt-0.5 line-clamp-2">
                         {step.name || step.task}
                       </p>
-                      {step.actual_cost_usd !== undefined && (
+                      {step.actual_cost_usd != null && (
                         <span className="text-xs text-muted-foreground">
                           Cost: ${step.actual_cost_usd.toFixed(4)}
                         </span>

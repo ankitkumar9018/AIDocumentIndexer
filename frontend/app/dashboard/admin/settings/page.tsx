@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { getErrorMessage } from "@/lib/errors";
 import {
   Database,
   Server,
@@ -579,7 +580,7 @@ export default function AdminSettingsPage() {
         <AlertCircle className="h-12 w-12 text-red-500 mb-4" />
         <h3 className="text-lg font-semibold mb-2">Failed to load settings</h3>
         <p className="text-muted-foreground mb-4">
-          {(settingsError as any)?.detail || "Unable to fetch settings. Please try again."}
+          {getErrorMessage(settingsError, "Unable to fetch settings. Please try again.")}
         </p>
         <Button onClick={() => refetchSettings()}>
           <RefreshCw className="h-4 w-4 mr-2" />

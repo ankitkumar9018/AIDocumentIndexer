@@ -374,8 +374,8 @@ export default function ScraperPage() {
           <CardContent>
             {scrapeImmediate.data ? (
               <div className="space-y-4">
-                {/* Check if it's a multi-page response */}
-                {scrapeImmediate.data.pages ? (
+                {/* Check if it's a multi-page response (has 'pages' property) */}
+                {'pages' in scrapeImmediate.data ? (
                   <>
                     <div className="flex items-center gap-2 text-sm font-medium">
                       <Layers className="h-4 w-4" />
@@ -385,7 +385,7 @@ export default function ScraperPage() {
                       </span>
                     </div>
                     <div className="max-h-64 overflow-y-auto space-y-3">
-                      {scrapeImmediate.data.pages.slice(0, 10).map((page: any, i: number) => (
+                      {scrapeImmediate.data.pages.slice(0, 10).map((page, i: number) => (
                         <div key={i} className="p-3 rounded-lg bg-muted/30 border">
                           <a
                             href={page.url}
@@ -453,9 +453,6 @@ export default function ScraperPage() {
                     <ExternalLink className="h-3 w-3" />
                   </a>
                   <p className="text-xs text-muted-foreground mt-1">
-                    {scrapeAndQuery.data.pages_scraped && scrapeAndQuery.data.pages_scraped > 1
-                      ? `${scrapeAndQuery.data.pages_scraped} pages | `
-                      : ""}
                     {scrapeAndQuery.data.word_count} words | Model: {scrapeAndQuery.data.model || "default"}
                   </p>
                 </div>

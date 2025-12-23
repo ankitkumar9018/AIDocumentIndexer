@@ -86,7 +86,7 @@ export default function DashboardLayout({
   const user = {
     name: authUser?.name || "Unknown User",
     email: authUser?.email || "",
-    role: (authUser as any)?.role || "user",
+    role: authUser?.role || "user",
     avatar: authUser?.image || null,
   };
 

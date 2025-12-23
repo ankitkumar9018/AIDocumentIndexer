@@ -32,6 +32,7 @@ class OutputFormat(str, Enum):
     PPTX = "pptx"
     DOCX = "docx"
     PDF = "pdf"
+    XLSX = "xlsx"
     MARKDOWN = "markdown"
     HTML = "html"
     TXT = "txt"
@@ -832,6 +833,8 @@ Please revise the content to address the feedback while maintaining quality and 
             output_path = await self._generate_docx(job, filename)
         elif job.output_format == OutputFormat.PDF:
             output_path = await self._generate_pdf(job, filename)
+        elif job.output_format == OutputFormat.XLSX:
+            output_path = await self._generate_xlsx(job, filename)
         elif job.output_format == OutputFormat.MARKDOWN:
             output_path = await self._generate_markdown(job, filename)
         elif job.output_format == OutputFormat.HTML:
@@ -1699,6 +1702,137 @@ Please revise the content to address the feedback while maintaining quality and 
         logger.info("HTML generated", path=output_path)
         return output_path
 
+    async def _generate_xlsx(self, job: GenerationJob, filename: str) -> str:
+        """
+        Generate Excel spreadsheet with document content.
+
+        Creates a structured Excel file with:
+        - Summary sheet with document overview
+        - Content sheet with all sections
+        - Sources sheet with references
+        """
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+            from openpyxl.utils import get_column_letter
+
+            wb = Workbook()
+
+            # Define styles
+            header_font = Font(bold=True, size=12, color="FFFFFF")
+            header_fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+            header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell_alignment = Alignment(vertical="top", wrap_text=True)
+            thin_border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+
+            # Sheet 1: Summary
+            ws_summary = wb.active
+            ws_summary.title = "Summary"
+
+            # Title row
+            ws_summary.merge_cells('A1:B1')
+            ws_summary['A1'] = job.title
+            ws_summary['A1'].font = Font(bold=True, size=16)
+            ws_summary['A1'].alignment = Alignment(horizontal="center")
+
+            # Summary data
+            summary_data = [
+                ("Description", job.outline.description if job.outline else ""),
+                ("Status", job.status.value),
+                ("Created", job.created_at.strftime("%Y-%m-%d %H:%M")),
+                ("Completed", job.completed_at.strftime("%Y-%m-%d %H:%M") if job.completed_at else "In Progress"),
+                ("Total Sections", str(len(job.sections))),
+                ("Sources Used", str(len(job.sources_used))),
+            ]
+
+            for i, (label, value) in enumerate(summary_data, start=3):
+                ws_summary[f'A{i}'] = label
+                ws_summary[f'A{i}'].font = Font(bold=True)
+                ws_summary[f'B{i}'] = value
+                ws_summary[f'A{i}'].border = thin_border
+                ws_summary[f'B{i}'].border = thin_border
+
+            # Adjust column widths
+            ws_summary.column_dimensions['A'].width = 20
+            ws_summary.column_dimensions['B'].width = 60
+
+            # Sheet 2: Content
+            ws_content = wb.create_sheet("Content")
+
+            # Headers
+            headers = ["Section #", "Title", "Content", "Approved", "Feedback"]
+            for col, header in enumerate(headers, start=1):
+                cell = ws_content.cell(row=1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+                cell.border = thin_border
+
+            # Content rows
+            for i, section in enumerate(job.sections, start=2):
+                content = section.revised_content or section.content
+                ws_content.cell(row=i, column=1, value=section.order).border = thin_border
+                ws_content.cell(row=i, column=2, value=section.title).border = thin_border
+                ws_content.cell(row=i, column=3, value=content).border = thin_border
+                ws_content.cell(row=i, column=3).alignment = cell_alignment
+                ws_content.cell(row=i, column=4, value="Yes" if section.approved else "No").border = thin_border
+                ws_content.cell(row=i, column=5, value=section.feedback or "").border = thin_border
+
+            # Adjust column widths
+            ws_content.column_dimensions['A'].width = 12
+            ws_content.column_dimensions['B'].width = 30
+            ws_content.column_dimensions['C'].width = 80
+            ws_content.column_dimensions['D'].width = 12
+            ws_content.column_dimensions['E'].width = 40
+
+            # Sheet 3: Sources
+            if job.sources_used:
+                ws_sources = wb.create_sheet("Sources")
+
+                # Headers
+                source_headers = ["#", "Document Name", "Page", "Relevance", "Snippet"]
+                for col, header in enumerate(source_headers, start=1):
+                    cell = ws_sources.cell(row=1, column=col, value=header)
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = header_alignment
+                    cell.border = thin_border
+
+                # Source rows
+                for i, source in enumerate(job.sources_used, start=2):
+                    ws_sources.cell(row=i, column=1, value=i-1).border = thin_border
+                    ws_sources.cell(row=i, column=2, value=source.document_name).border = thin_border
+                    ws_sources.cell(row=i, column=3, value=source.page_number or "N/A").border = thin_border
+                    ws_sources.cell(row=i, column=4, value=f"{source.relevance_score:.2f}").border = thin_border
+                    ws_sources.cell(row=i, column=5, value=source.snippet[:200] + "..." if len(source.snippet) > 200 else source.snippet).border = thin_border
+                    ws_sources.cell(row=i, column=5).alignment = cell_alignment
+
+                # Adjust column widths
+                ws_sources.column_dimensions['A'].width = 8
+                ws_sources.column_dimensions['B'].width = 40
+                ws_sources.column_dimensions['C'].width = 10
+                ws_sources.column_dimensions['D'].width = 12
+                ws_sources.column_dimensions['E'].width = 60
+
+            # Save workbook
+            output_path = os.path.join(self.config.output_dir, f"{filename}.xlsx")
+            wb.save(output_path)
+
+            logger.info("XLSX generated", path=output_path)
+            return output_path
+
+        except ImportError:
+            logger.error("openpyxl not installed, falling back to TXT")
+            return await self._generate_txt(job, filename)
+        except Exception as e:
+            logger.error("XLSX generation failed", error=str(e))
+            raise
+
     async def _generate_txt(self, job: GenerationJob, filename: str) -> str:
         """Generate plain text document."""
         lines = []
@@ -1734,6 +1868,7 @@ Please revise the content to address the feedback while maintaining quality and 
             OutputFormat.PPTX: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             OutputFormat.DOCX: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             OutputFormat.PDF: "application/pdf",
+            OutputFormat.XLSX: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             OutputFormat.MARKDOWN: "text/markdown",
             OutputFormat.HTML: "text/html",
             OutputFormat.TXT: "text/plain",

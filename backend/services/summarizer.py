@@ -24,16 +24,23 @@ from langchain_core.messages import HumanMessage, SystemMessage
 logger = structlog.get_logger(__name__)
 
 
+import os
+
 @dataclass
 class SummarizationConfig:
     """Configuration for document summarization."""
 
-    # Master toggle
-    enabled: bool = False
+    # Master toggle - reads from env if not set
+    enabled: bool = None
 
     # Thresholds for when to summarize (either triggers summarization)
     threshold_pages: int = 50
     threshold_kb: int = 100
+
+    def __post_init__(self):
+        """Read from environment if not explicitly set."""
+        if self.enabled is None:
+            self.enabled = os.getenv("ENABLE_SUMMARIZATION", "true").lower() == "true"
 
     # Summary generation
     model: str = "gpt-4o-mini"  # Cost-effective model

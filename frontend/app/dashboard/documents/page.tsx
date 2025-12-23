@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
+import { getErrorMessage } from "@/lib/errors";
 import {
   FileText,
   Search,
@@ -468,10 +469,10 @@ export default function DocumentsPage() {
         description: `"${docName}" has been deleted.`,
       });
       refetch();
-    } catch (error: any) {
+    } catch (error) {
       console.error("Delete failed:", error);
       toast.error("Failed to delete document", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     }
   };
@@ -482,10 +483,10 @@ export default function DocumentsPage() {
       toast.success("Download started", {
         description: `Downloading "${docName}"...`,
       });
-    } catch (error: any) {
+    } catch (error) {
       console.error("Download failed:", error);
       toast.error("Failed to download document", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     }
   };
@@ -520,10 +521,10 @@ export default function DocumentsPage() {
         description: `Generated ${result.tags.length} tags for "${docName}": ${result.tags.join(", ")}`,
       });
       refetch();
-    } catch (error: any) {
+    } catch (error) {
       console.error("Auto-tag failed:", error);
       toast.error("Failed to auto-tag document", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     } finally {
       setIsAutoTagging(false);
@@ -541,10 +542,10 @@ export default function DocumentsPage() {
       });
       setSelectedDocuments(new Set());
       refetch();
-    } catch (error: any) {
+    } catch (error) {
       console.error("Bulk auto-tag failed:", error);
       toast.error("Failed to auto-tag documents", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     } finally {
       setIsAutoTagging(false);
@@ -560,10 +561,10 @@ export default function DocumentsPage() {
       toast.success("Download started", {
         description: `Downloading ${selectedDocuments.size} documents as ZIP...`,
       });
-    } catch (error: any) {
+    } catch (error) {
       console.error("Bulk download failed:", error);
       toast.error("Failed to download documents", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     } finally {
       setIsDownloading(false);
@@ -584,10 +585,10 @@ export default function DocumentsPage() {
       });
       setSelectedDocuments(new Set());
       refetch();
-    } catch (error: any) {
+    } catch (error) {
       console.error("Bulk enhance failed:", error);
       toast.error("Failed to enhance documents", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     } finally {
       setIsEnhancing(false);
@@ -605,10 +606,10 @@ export default function DocumentsPage() {
         description: result.message || `Enhanced ${result.successful} of ${result.total} documents. Estimated cost: $${result.estimated_cost_usd.toFixed(4)}`,
       });
       refetch();
-    } catch (error: any) {
+    } catch (error) {
       console.error("Enhance all failed:", error);
       toast.error("Failed to enhance documents", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     } finally {
       setIsEnhancing(false);
@@ -623,9 +624,9 @@ export default function DocumentsPage() {
       });
       toast.success("Enhancement LLM updated");
       refetchOperations();
-    } catch (error: any) {
+    } catch (error) {
       toast.error("Failed to update LLM", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     }
   };
@@ -664,10 +665,10 @@ export default function DocumentsPage() {
       });
       setEditTagsDialogOpen(false);
       refetch();
-    } catch (error: any) {
+    } catch (error) {
       console.error("Failed to update tags:", error);
       toast.error("Failed to update tags", {
-        description: error?.detail || error?.message || "An error occurred",
+        description: getErrorMessage(error, "An error occurred"),
       });
     } finally {
       setIsSavingTags(false);

@@ -1,6 +1,6 @@
 # Implementation Progress
 
-> Last updated: 2025-12-19
+> Last updated: 2025-12-23
 
 This document tracks the implementation progress of AIDocumentIndexer. Use this to understand what's been completed, what's in progress, and what's coming next.
 
@@ -185,7 +185,32 @@ Overall Progress: ████████████████████�
 ### Blockers
 - None
 
-### Completed in Latest Update (2025-12-19)
+### Completed in Latest Update (2025-12-23)
+
+- **Chat History Fix**:
+  - Fixed chat sessions not being saved to database
+  - Root cause: `save_chat_messages()` was missing required `user_id` parameter
+  - Added `get_db_user_id()` helper to handle JWT `sub` field vs database UUID mismatch
+  - Sessions now persist correctly and appear in History panel
+  - Fixed `list_sessions` endpoint to also use the UUID lookup helper
+
+- **Document Display Fixes**:
+  - Fixed documents showing "unknown" as name in Documents page
+  - Fixed Sources panel in Chat showing "unknown" instead of document names
+  - Root cause: Metadata key mismatch (`document_filename` vs `document_name`)
+  - Fixed in `backend/services/rag.py` to check both keys for compatibility
+
+- **Document Name Priority**:
+  - Changed display priority to show original uploaded filename first
+  - Previously showed PDF metadata titles like "Document.pdf" or "Mastervorlage 16:9"
+  - Now shows actual uploaded filename (e.g., "A1_Lesson.pdf")
+
+- **Tag Handling**:
+  - Fixed documents showing only one tag when collection was specified
+  - Changed from tag replacement to tag merging in pipeline
+  - Auto-tagging now runs alongside collection assignment
+
+### Completed in Previous Update (2025-12-19)
 
 - **Agent Mode Improvements**:
   - Real-time streaming of step outputs via SSE `content` events
@@ -332,6 +357,10 @@ Overall Progress: ████████████████████�
 | 2025-12-19 | Fallback research step | Auto-prepend research when LLM plan misses it |
 | 2025-12-19 | Collection context | Collection tags in LLM context for better retrieval |
 | 2025-12-19 | Technical Architecture doc | Comprehensive technical documentation with 197 endpoints |
+| 2025-12-23 | Chat history fix | Fixed session persistence with user_id UUID handling |
+| 2025-12-23 | Document name display fix | Fixed "unknown" names in Documents page and Chat sources |
+| 2025-12-23 | Document name priority | Show original filename instead of PDF metadata title |
+| 2025-12-23 | Tag merging | Tags now merge instead of replace when collection is set |
 
 ---
 

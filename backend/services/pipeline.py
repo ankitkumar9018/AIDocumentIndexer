@@ -115,8 +115,8 @@ class PipelineConfig:
         enable_preprocessing: bool = True,  # ON by default (lightweight)
         preprocessing_config: Optional[PreprocessingConfig] = None,
 
-        # Document summarization (for large files)
-        enable_summarization: bool = False,  # OFF by default
+        # Document summarization (for large files) - reads from env if not set
+        enable_summarization: bool = None,  # Read from ENABLE_SUMMARIZATION env var
         summarization_config: Optional[SummarizationConfig] = None,
 
         # Progress callbacks
@@ -141,7 +141,11 @@ class PipelineConfig:
         self.check_duplicates = check_duplicates
         self.enable_preprocessing = enable_preprocessing
         self.preprocessing_config = preprocessing_config
-        self.enable_summarization = enable_summarization
+        # Read summarization from env if not explicitly set
+        if enable_summarization is None:
+            self.enable_summarization = os.getenv("ENABLE_SUMMARIZATION", "true").lower() == "true"
+        else:
+            self.enable_summarization = enable_summarization
         self.summarization_config = summarization_config
         self.on_status_change = on_status_change
         self.on_progress = on_progress

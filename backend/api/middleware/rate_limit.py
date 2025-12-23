@@ -77,6 +77,7 @@ class UserRateLimitState:
     day_bucket: TokenBucket
     token_minute_bucket: TokenBucket
     token_day_bucket: TokenBucket
+    operation_buckets: Dict[str, TokenBucket] = field(default_factory=dict)
 
 
 class InMemoryRateLimitStorage:
@@ -126,6 +127,18 @@ class InMemoryRateLimitStorage:
     def _create_user_state(self, config: "RateLimitSettings") -> UserRateLimitState:
         """Create fresh rate limit state for a user."""
         now = time.time()
+
+        # Create operation-specific buckets if configured
+        operation_buckets: Dict[str, TokenBucket] = {}
+        if config.operation_limits:
+            for operation, limit_per_minute in config.operation_limits.items():
+                operation_buckets[operation] = TokenBucket(
+                    capacity=limit_per_minute,
+                    tokens=float(limit_per_minute),
+                    last_refill=now,
+                    refill_rate=limit_per_minute / 60.0  # Per minute
+                )
+
         return UserRateLimitState(
             minute_bucket=TokenBucket(
                 capacity=config.requests_per_minute,
@@ -157,6 +170,7 @@ class InMemoryRateLimitStorage:
                 last_refill=now,
                 refill_rate=config.tokens_per_day / 86400.0
             ),
+            operation_buckets=operation_buckets,
         )
 
     async def _cleanup_stale_entries(self) -> None:
@@ -385,8 +399,22 @@ class RateLimitChecker:
         if operation and settings.operation_limits:
             op_limit = settings.operation_limits.get(operation)
             if op_limit is not None:
-                # For simplicity, use minute bucket logic for operation limits
-                pass  # TODO: Implement operation-specific buckets if needed
+                # Check operation-specific bucket
+                op_bucket = state.operation_buckets.get(operation)
+                if op_bucket:
+                    allowed, retry_after = op_bucket.consume()
+                    if not allowed:
+                        return RateLimitResult(
+                            allowed=False,
+                            limit_type=f'operation:{operation}',
+                            retry_after=retry_after,
+                            remaining_minute=int(state.minute_bucket.tokens),
+                            remaining_hour=int(state.hour_bucket.tokens),
+                            remaining_day=int(state.day_bucket.tokens),
+                            limit_minute=settings.requests_per_minute,
+                            limit_hour=settings.requests_per_hour,
+                            limit_day=settings.requests_per_day,
+                        )
 
         # Check minute limit
         allowed, retry_after = state.minute_bucket.consume()

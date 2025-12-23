@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useSession } from "next-auth/react";
 import { toast } from "sonner";
+import { getErrorMessage } from "@/lib/errors";
 import { useWebSocket, FileUpdateMessage, WebSocketMessage } from "@/lib/websocket";
 import {
   Upload,
@@ -256,10 +257,11 @@ export default function UploadPage() {
       }
       setSelectedFiles([]);
       refetchQueue();
-    } catch (error: any) {
+    } catch (error) {
       console.error("Upload failed:", error);
-      const errorMessage = error?.detail || error?.message || "Upload failed";
-      if (error?.status === 401) {
+      const errorMessage = getErrorMessage(error, "Upload failed");
+      // Check if it's an auth error by looking for 401 in the message or specific error patterns
+      if (errorMessage.toLowerCase().includes("unauthorized") || errorMessage.includes("401")) {
         toast.error("Authentication error", {
           description: "Your session may have expired. Please sign out and sign in again.",
         });
@@ -276,10 +278,10 @@ export default function UploadPage() {
       await cancelProcessing.mutateAsync(id);
       toast.success("Processing cancelled");
       refetchQueue();
-    } catch (error: any) {
+    } catch (error) {
       console.error("Cancel failed:", error);
       toast.error("Failed to cancel processing", {
-        description: error?.detail || error?.message,
+        description: getErrorMessage(error),
       });
     }
   };
@@ -289,10 +291,10 @@ export default function UploadPage() {
       await retryProcessing.mutateAsync(id);
       toast.success("Retrying processing");
       refetchQueue();
-    } catch (error: any) {
+    } catch (error) {
       console.error("Retry failed:", error);
       toast.error("Failed to retry processing", {
-        description: error?.detail || error?.message,
+        description: getErrorMessage(error),
       });
     }
   };

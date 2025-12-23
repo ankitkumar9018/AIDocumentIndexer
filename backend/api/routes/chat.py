@@ -55,9 +55,16 @@ async def get_db_user_id(db, user_id: str, user_email: str = None) -> UUID:
         if user:
             db_user_id = user.id
 
-    # If still no user, use the first admin user as fallback
+    # If still no user, use the user with highest access tier level as fallback
     if not db_user_id:
-        admin_query = select(User).where(User.email.like('%admin%')).limit(1)
+        from backend.db.models import AccessTier
+        admin_query = (
+            select(User)
+            .join(AccessTier, User.access_tier_id == AccessTier.id)
+            .where(User.is_active == True)
+            .order_by(AccessTier.level.desc())
+            .limit(1)
+        )
         admin_result = await db.execute(admin_query)
         admin_user = admin_result.scalar_one_or_none()
         if admin_user:
@@ -205,6 +212,7 @@ class ChatRequest(BaseModel):
     mode: Optional[str] = Field(None, pattern="^(agent|chat|general)$")  # Execution mode: agent, chat (RAG), or general (LLM)
     agent_options: Optional[AgentOptions] = Field(default=None, description="Options for agent mode execution")
     include_collection_context: bool = Field(default=True, description="Include collection tags in LLM context")
+    temp_session_id: Optional[str] = Field(default=None, description="Temporary document session ID for quick chat")
 
     @property
     def effective_collection_filters(self) -> Optional[List[str]]:
@@ -408,6 +416,24 @@ async def create_chat_completion(
             # Default: Use RAG service
             rag_service = get_rag()
 
+            # Get temp document context if provided
+            temp_context = None
+            if request.temp_session_id:
+                from backend.services.temp_documents import get_temp_document_service
+                temp_service = get_temp_document_service()
+                temp_session = await temp_service.get_session(request.temp_session_id)
+                if temp_session and temp_session.user_id == user.user_id:
+                    temp_context = await temp_service.get_context(
+                        session_id=request.temp_session_id,
+                        query=request.message,
+                        max_tokens=50000,
+                    )
+                    logger.info(
+                        "Using temp document context",
+                        temp_session_id=request.temp_session_id,
+                        context_length=len(temp_context) if temp_context else 0,
+                    )
+
             # Check cache for RAG queries (only for query_only mode)
             if request.query_only:
                 async with async_session_context() as db:
@@ -433,6 +459,7 @@ async def create_chat_completion(
                 collection_filter=request.first_collection_filter,
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
                 include_collection_context=request.include_collection_context,
+                additional_context=temp_context,  # Include temporary document context if available
             )
 
             # Convert sources to API format
@@ -687,6 +714,19 @@ async def create_streaming_completion(
         # Send session info first
         yield f"data: {json.dumps({'type': 'session', 'session_id': str(session_id)})}\n\n"
 
+        # Get temp document context if available
+        temp_context = None
+        if request.temp_session_id:
+            from backend.services.temp_documents import get_temp_document_service
+            temp_service = get_temp_document_service()
+            temp_session = await temp_service.get_session(request.temp_session_id)
+            if temp_session and temp_session.user_id == user.user_id:
+                temp_context = await temp_service.get_context(
+                    session_id=request.temp_session_id,
+                    query=request.message,
+                    max_tokens=50000,
+                )
+
         # Accumulate content and sources for saving
         accumulated_content = []
         accumulated_sources = []
@@ -699,6 +739,7 @@ async def create_streaming_completion(
                 collection_filter=request.first_collection_filter,
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
                 include_collection_context=request.include_collection_context,
+                additional_context=temp_context,  # Include temporary document context
             ):
                 if chunk.type == "content":
                     accumulated_content.append(chunk.data)

@@ -27,6 +27,13 @@ from backend.services.generator import (
     SourceReference,
     get_generation_service,
 )
+from backend.services.image_generator import (
+    ImageGeneratorService,
+    ImageGeneratorConfig,
+    ImageBackend,
+    GeneratedImage,
+    get_image_generator,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -608,8 +615,133 @@ def _get_format_description(format: OutputFormat) -> str:
         OutputFormat.PPTX: "PowerPoint presentation (.pptx)",
         OutputFormat.DOCX: "Word document (.docx)",
         OutputFormat.PDF: "PDF document (.pdf)",
+        OutputFormat.XLSX: "Excel spreadsheet (.xlsx)",
         OutputFormat.MARKDOWN: "Markdown text (.md)",
         OutputFormat.HTML: "HTML web page (.html)",
         OutputFormat.TXT: "Plain text (.txt)",
     }
     return descriptions.get(format, "")
+
+
+# =============================================================================
+# Image Generation Models
+# =============================================================================
+
+class ImageGenerateRequest(BaseModel):
+    """Request to generate an image."""
+    prompt: str = Field(..., min_length=5, max_length=1000)
+    width: int = Field(default=800, ge=256, le=2048)
+    height: int = Field(default=600, ge=256, le=2048)
+
+
+class ImageGenerateResponse(BaseModel):
+    """Response from image generation."""
+    success: bool
+    path: Optional[str] = None
+    width: int
+    height: int
+    prompt: str
+    backend: str
+    error: Optional[str] = None
+
+
+class ImageConfigResponse(BaseModel):
+    """Image generation configuration."""
+    enabled: bool
+    backend: str
+    available_backends: List[str]
+    sd_webui_available: bool
+
+
+# =============================================================================
+# Image Generation Endpoints
+# =============================================================================
+
+@router.post("/image", response_model=ImageGenerateResponse)
+async def generate_image(
+    request: ImageGenerateRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Generate an image using AI.
+
+    Uses Stable Diffusion WebUI (Automatic1111) if available,
+    falls back to Unsplash placeholder images.
+    """
+    logger.info(
+        "Generating image",
+        user_id=user.user_id,
+        prompt_preview=request.prompt[:50],
+    )
+
+    service = get_image_generator()
+
+    # Check if image generation is enabled
+    if not service.config.enabled:
+        return ImageGenerateResponse(
+            success=False,
+            path=None,
+            width=request.width,
+            height=request.height,
+            prompt=request.prompt,
+            backend="disabled",
+            error="Image generation is disabled. Enable with include_images=true in generation config.",
+        )
+
+    try:
+        result = await service.generate_for_section(
+            section_title="Custom Generation",
+            section_content=request.prompt,
+            width=request.width,
+            height=request.height,
+        )
+
+        if result and result.success:
+            return ImageGenerateResponse(
+                success=True,
+                path=result.path,
+                width=result.width,
+                height=result.height,
+                prompt=result.prompt,
+                backend=result.backend.value,
+            )
+        else:
+            return ImageGenerateResponse(
+                success=False,
+                path=None,
+                width=request.width,
+                height=request.height,
+                prompt=request.prompt,
+                backend=result.backend.value if result else "unknown",
+                error=result.error if result else "Unknown error",
+            )
+
+    except Exception as e:
+        logger.error("Image generation failed", error=str(e))
+        return ImageGenerateResponse(
+            success=False,
+            path=None,
+            width=request.width,
+            height=request.height,
+            prompt=request.prompt,
+            backend="error",
+            error=str(e),
+        )
+
+
+@router.get("/image/config", response_model=ImageConfigResponse)
+async def get_image_config(user: AuthenticatedUser):
+    """
+    Get image generation configuration and availability.
+    """
+    service = get_image_generator()
+
+    # Check SD WebUI availability
+    sd_available = await service.check_sd_webui_available()
+
+    return ImageConfigResponse(
+        enabled=service.config.enabled,
+        backend=service.config.backend.value,
+        available_backends=[b.value for b in ImageBackend],
+        sd_webui_available=sd_available,
+    )

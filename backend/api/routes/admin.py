@@ -3894,3 +3894,134 @@ async def enhance_single_document(
         "tokens_used": result.tokens_used,
         "metadata": result.metadata.model_dump() if result.metadata else None,
     }
+
+
+# =============================================================================
+# Provider Health Check Endpoints
+# =============================================================================
+
+class ProviderHealthResponse(BaseModel):
+    """Response for provider health check."""
+    provider_id: str
+    provider_type: str
+    provider_name: str
+    is_healthy: bool
+    status: str
+    latency_ms: Optional[int] = None
+    error_message: Optional[str] = None
+    checked_at: datetime
+
+
+class AllProvidersHealthResponse(BaseModel):
+    """Response for all providers health check."""
+    providers: List[ProviderHealthResponse]
+    healthy_count: int
+    unhealthy_count: int
+    degraded_count: int
+    checked_at: datetime
+
+
+@router.get("/health/providers", response_model=AllProvidersHealthResponse)
+async def check_all_providers_health(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Check health status of all configured LLM providers.
+
+    Admin only endpoint. Returns health status for each provider
+    including latency and any error messages.
+    """
+    from backend.services.provider_health import ProviderHealthChecker
+    from backend.db.models import LLMProvider
+
+    logger.info("Checking health of all providers", admin_id=admin.user_id)
+
+    # Get all active providers
+    result = await db.execute(
+        select(LLMProvider).where(LLMProvider.is_active == True)
+    )
+    providers = result.scalars().all()
+
+    health_results = []
+    for provider in providers:
+        try:
+            check_result = await ProviderHealthChecker.check_provider_health(
+                provider_id=str(provider.id),
+                check_type="ping",
+            )
+            health_results.append(ProviderHealthResponse(
+                provider_id=str(provider.id),
+                provider_type=provider.provider_type,
+                provider_name=provider.name,
+                is_healthy=check_result.is_healthy,
+                status=check_result.status,
+                latency_ms=check_result.latency_ms,
+                error_message=check_result.error_message,
+                checked_at=check_result.checked_at,
+            ))
+        except Exception as e:
+            logger.error("Health check failed", provider_id=str(provider.id), error=str(e))
+            health_results.append(ProviderHealthResponse(
+                provider_id=str(provider.id),
+                provider_type=provider.provider_type,
+                provider_name=provider.name,
+                is_healthy=False,
+                status="error",
+                error_message=str(e),
+                checked_at=datetime.utcnow(),
+            ))
+
+    # Calculate counts
+    healthy_count = sum(1 for r in health_results if r.is_healthy and r.status == "healthy")
+    unhealthy_count = sum(1 for r in health_results if not r.is_healthy)
+    degraded_count = sum(1 for r in health_results if r.status == "degraded")
+
+    return AllProvidersHealthResponse(
+        providers=health_results,
+        healthy_count=healthy_count,
+        unhealthy_count=unhealthy_count,
+        degraded_count=degraded_count,
+        checked_at=datetime.utcnow(),
+    )
+
+
+@router.get("/health/providers/{provider_id}", response_model=ProviderHealthResponse)
+async def check_provider_health(
+    provider_id: UUID,
+    admin: AdminUser,
+    check_type: str = Query("ping", regex="^(ping|completion|embedding)$"),
+):
+    """
+    Check health status of a specific LLM provider.
+
+    Admin only endpoint.
+
+    Args:
+        provider_id: UUID of the provider to check
+        check_type: Type of health check (ping, completion, or embedding)
+    """
+    from backend.services.provider_health import ProviderHealthChecker
+
+    logger.info(
+        "Checking provider health",
+        provider_id=str(provider_id),
+        check_type=check_type,
+        admin_id=admin.user_id,
+    )
+
+    check_result = await ProviderHealthChecker.check_provider_health(
+        provider_id=str(provider_id),
+        check_type=check_type,
+    )
+
+    return ProviderHealthResponse(
+        provider_id=check_result.provider_id,
+        provider_type=check_result.provider_type,
+        provider_name=check_result.provider_name,
+        is_healthy=check_result.is_healthy,
+        status=check_result.status,
+        latency_ms=check_result.latency_ms,
+        error_message=check_result.error_message,
+        checked_at=check_result.checked_at,
+    )

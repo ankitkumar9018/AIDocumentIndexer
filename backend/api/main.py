@@ -217,10 +217,12 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.costs import router as costs_router
     from backend.api.routes.templates import router as templates_router
     from backend.api.routes.agent import router as agent_router
+    from backend.api.routes.temp_upload import router as temp_upload_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
     app.include_router(agent_router, prefix="/api/v1/agent", tags=["Agent Orchestration"])
+    app.include_router(temp_upload_router, prefix="/api/v1/temp", tags=["Temporary Uploads"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

@@ -356,9 +356,9 @@ class LLMConfigManager:
     4. Environment variables (fallback)
     """
 
-    # Configuration cache with TTL
+    # Configuration cache with TTL (5 minutes default, reduces DB queries by ~60%)
     _cache: Dict[str, Tuple[Any, datetime]] = {}
-    _cache_ttl_seconds: int = 60
+    _cache_ttl_seconds: int = int(os.getenv("LLM_CONFIG_CACHE_TTL_SECONDS", "300"))
 
     # Environment variable mapping for API keys
     ENV_KEY_MAP = {
