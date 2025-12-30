@@ -171,5 +171,13 @@ input_files/
 *.gguf
 *.safetensors
 
+# PaddleOCR model cache
+data/paddle_models/
+*.pdparams
+*.pdiparams
+*.pdmodel
+*.pdimodel
+.paddlex/
+
 # ChromaDB data
 chroma_data/

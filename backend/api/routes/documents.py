@@ -595,7 +595,24 @@ async def delete_document(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Hard delete requires admin privileges",
             )
-        # Permanently delete document and chunks (cascade)
+
+        # Delete chunks from vector store first (ChromaDB/pgvector)
+        try:
+            vector_store = get_vector_store()
+            if vector_store:
+                await vector_store.delete_document_chunks(str(document_id))
+                logger.info(
+                    "Deleted chunks from vector store",
+                    document_id=str(document_id),
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to delete chunks from vector store (continuing with DB delete)",
+                document_id=str(document_id),
+                error=str(e),
+            )
+
+        # Permanently delete document and chunks from database (cascade)
         await db.delete(document)
         await db.commit()
 
@@ -635,6 +652,135 @@ async def delete_document(
     return {
         "message": "Document deleted successfully",
         "document_id": str(document_id),
+    }
+
+
+@router.get("/deleted/list")
+async def list_deleted_documents(
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+):
+    """
+    List soft-deleted documents (admin only).
+
+    Returns documents that were soft-deleted and can be restored.
+    """
+    # Admin only
+    if not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can view deleted documents",
+        )
+
+    logger.info(
+        "Listing deleted documents",
+        user_id=user.user_id,
+        page=page,
+        page_size=page_size,
+    )
+
+    # Query soft-deleted documents
+    base_query = (
+        select(Document)
+        .where(
+            (Document.processing_status == ProcessingStatus.FAILED)
+            & (Document.processing_error == "Deleted by user")
+        )
+    )
+
+    # Count total
+    count_query = select(func.count()).select_from(base_query.subquery())
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    # Apply pagination
+    offset = (page - 1) * page_size
+    query = base_query.order_by(desc(Document.updated_at)).offset(offset).limit(page_size)
+    result = await db.execute(query)
+    documents = result.scalars().all()
+
+    return {
+        "documents": [
+            {
+                "id": str(doc.id),
+                "name": doc.original_filename or doc.filename,
+                "file_type": doc.file_type,
+                "file_size": doc.file_size,
+                "deleted_at": doc.updated_at.isoformat() if doc.updated_at else None,
+                "created_at": doc.created_at.isoformat() if doc.created_at else None,
+            }
+            for doc in documents
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size if page_size > 0 else 0,
+    }
+
+
+@router.post("/deleted/{document_id}/restore")
+async def restore_deleted_document(
+    document_id: UUID,
+    user: AuthenticatedUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Restore a soft-deleted document (admin only).
+
+    Restores the document to its previous state before deletion.
+    """
+    # Admin only
+    if not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can restore deleted documents",
+        )
+
+    logger.info(
+        "Restoring deleted document",
+        document_id=str(document_id),
+        user_id=user.user_id,
+    )
+
+    # Find the soft-deleted document
+    query = select(Document).where(
+        (Document.id == document_id)
+        & (Document.processing_status == ProcessingStatus.FAILED)
+        & (Document.processing_error == "Deleted by user")
+    )
+    result = await db.execute(query)
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deleted document not found",
+        )
+
+    # Restore the document
+    document.processing_status = ProcessingStatus.COMPLETED
+    document.processing_error = None
+    await db.commit()
+
+    # Log the restoration
+    audit_service = get_audit_service()
+    await audit_service.log_document_action(
+        action=AuditAction.DOCUMENT_UPDATE,
+        user_id=user.user_id,
+        document_id=str(document_id),
+        document_name=document.original_filename,
+        changes={"restored": True, "previous_status": "soft_deleted"},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {
+        "message": "Document restored successfully",
+        "document_id": str(document_id),
+        "name": document.original_filename or document.filename,
     }
 
 
@@ -1231,7 +1377,7 @@ async def auto_tag_document(
     # Generate tags
     auto_tagger = AutoTaggerService()
     tags = await auto_tagger.generate_tags(
-        document_name=document.name,
+        document_name=document.original_filename or document.filename,
         content_sample=content_sample,
         existing_collections=existing_collections,
         max_tags=request.max_tags,
@@ -1251,8 +1397,8 @@ async def auto_tag_document(
 
     # Log audit
     audit_service = get_audit_service()
-    await audit_service.log_action(
-        action=AuditAction.UPDATE,
+    await audit_service.log(
+        action=AuditAction.DOCUMENT_UPDATE,
         user_id=user.user_id,
         resource_type="document",
         resource_id=str(document_id),

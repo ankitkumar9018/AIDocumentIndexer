@@ -128,13 +128,36 @@ class AuditService:
             ID of the created audit log entry
         """
         async def _log(db: AsyncSession) -> str:
+            # Create a copy of details to avoid modifying the parameter
+            log_details = dict(details) if details else {}
+
+            # Safely convert user_id to UUID (may be a non-UUID string from JWT)
+            parsed_user_id = None
+            if user_id:
+                try:
+                    parsed_user_id = uuid.UUID(user_id)
+                except ValueError:
+                    # Non-UUID user_id (e.g., "test-user-123") - store in details instead
+                    log_details["user_id_string"] = user_id
+                    logger.debug("Non-UUID user_id stored in details", user_id=user_id)
+
+            # Safely convert resource_id to UUID
+            parsed_resource_id = None
+            if resource_id:
+                try:
+                    parsed_resource_id = uuid.UUID(resource_id)
+                except ValueError:
+                    # Non-UUID resource_id - store in details instead
+                    log_details["resource_id_string"] = resource_id
+                    logger.debug("Non-UUID resource_id stored in details", resource_id=resource_id)
+
             audit_entry = AuditLog(
                 id=uuid.uuid4(),
                 action=action.value,
-                user_id=uuid.UUID(user_id) if user_id else None,
+                user_id=parsed_user_id,
                 resource_type=resource_type,
-                resource_id=uuid.UUID(resource_id) if resource_id else None,
-                details=details,
+                resource_id=parsed_resource_id,
+                details=log_details if log_details else None,
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
@@ -357,11 +380,19 @@ class AuditService:
             if action:
                 conditions.append(AuditLog.action == action.value)
             if user_id:
-                conditions.append(AuditLog.user_id == uuid.UUID(user_id))
+                try:
+                    conditions.append(AuditLog.user_id == uuid.UUID(user_id))
+                except ValueError:
+                    # Non-UUID user_id - won't match any records (stored in details)
+                    pass
             if resource_type:
                 conditions.append(AuditLog.resource_type == resource_type)
             if resource_id:
-                conditions.append(AuditLog.resource_id == uuid.UUID(resource_id))
+                try:
+                    conditions.append(AuditLog.resource_id == uuid.UUID(resource_id))
+                except ValueError:
+                    # Non-UUID resource_id - won't match any records
+                    pass
             if start_date:
                 conditions.append(AuditLog.created_at >= start_date)
             if end_date:

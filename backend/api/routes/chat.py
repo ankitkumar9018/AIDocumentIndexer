@@ -185,7 +185,8 @@ class ChatSource(BaseModel):
     document_name: str
     chunk_id: UUID
     page_number: Optional[int] = None
-    relevance_score: float
+    relevance_score: float  # RRF score for ranking (may be tiny ~0.01-0.03)
+    similarity_score: Optional[float] = None  # Original vector cosine similarity (0-1) for display
     snippet: str
     full_content: Optional[str] = None  # Full chunk content for source viewer modal
     collection: Optional[str] = None  # Collection/tag for grouping
@@ -213,6 +214,7 @@ class ChatRequest(BaseModel):
     agent_options: Optional[AgentOptions] = Field(default=None, description="Options for agent mode execution")
     include_collection_context: bool = Field(default=True, description="Include collection tags in LLM context")
     temp_session_id: Optional[str] = Field(default=None, description="Temporary document session ID for quick chat")
+    top_k: Optional[int] = Field(default=None, ge=3, le=25, description="Number of documents to search (3-25). Uses admin setting if not specified.")
 
     @property
     def effective_collection_filters(self) -> Optional[List[str]]:
@@ -460,6 +462,7 @@ async def create_chat_completion(
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
                 include_collection_context=request.include_collection_context,
                 additional_context=temp_context,  # Include temporary document context if available
+                top_k=request.top_k,  # Per-query document count override
             )
 
             # Convert sources to API format
@@ -483,6 +486,7 @@ async def create_chat_completion(
                         chunk_id=chunk_uuid,
                         page_number=source.page_number,
                         relevance_score=source.relevance_score,
+                        similarity_score=source.similarity_score if hasattr(source, 'similarity_score') else None,
                         snippet=source.snippet,
                         full_content=source.full_content if hasattr(source, 'full_content') else None,
                         collection=source.collection if hasattr(source, 'collection') else None,
@@ -511,6 +515,7 @@ async def create_chat_completion(
                         "chunk_id": str(s.chunk_id),
                         "page_number": s.page_number,
                         "relevance_score": s.relevance_score,
+                        "similarity_score": s.similarity_score,  # Original vector similarity (0-1)
                         "snippet": s.snippet,
                         "full_content": s.full_content,
                         "collection": s.collection,
@@ -739,7 +744,7 @@ async def create_streaming_completion(
                 collection_filter=request.first_collection_filter,
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
                 include_collection_context=request.include_collection_context,
-                additional_context=temp_context,  # Include temporary document context
+                top_k=request.top_k,  # Per-query document count override
             ):
                 if chunk.type == "content":
                     accumulated_content.append(chunk.data)

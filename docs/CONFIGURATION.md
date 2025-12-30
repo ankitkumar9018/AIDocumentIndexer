@@ -127,31 +127,65 @@ postgresql://username:password@host:port/database?sslmode=require
 | `MIN_CHUNK_SIZE` | Minimum chunk size | `100` |
 | `MAX_CHUNK_SIZE` | Maximum chunk size | `2000` |
 
-### OCR (Tesseract)
+### OCR Configuration
 
+**⚡ NEW: Admin UI Configuration Available!**
+
+OCR is now fully configurable via the Admin Settings UI. Navigate to **Dashboard → Admin → Settings → OCR Configuration** to manage OCR providers, models, and languages through a visual interface.
+
+For complete OCR configuration details, see [OCR_CONFIGURATION.md](./OCR_CONFIGURATION.md).
+
+#### Quick Reference
+
+**Admin UI (Recommended):**
+- Provider selection (PaddleOCR, Tesseract, Auto)
+- Model variant (Server/Mobile)
+- Multi-language support (8+ languages)
+- One-click model downloads
+- Real-time model status
+
+**Database Settings (via Admin UI or API):**
+| Setting Key | Description | Default |
+|------------|-------------|---------|
+| `ocr.provider` | OCR engine (paddleocr/tesseract/auto) | `paddleocr` |
+| `ocr.paddle.variant` | Model variant (server/mobile) | `server` |
+| `ocr.paddle.languages` | Language codes array | `["en", "de"]` |
+| `ocr.paddle.auto_download` | Auto-download models on startup | `true` |
+| `ocr.tesseract.fallback_enabled` | Fallback to Tesseract | `true` |
+
+**Environment Variables (Legacy - Still Supported):**
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `ENABLE_OCR` | Enable OCR for images/PDFs | `true` |
-| `TESSDATA_PREFIX` | Path to Tesseract language data files | `/opt/homebrew/share/tessdata` (macOS) |
-| `OCR_LANGUAGE` | OCR language(s) - use `+` for multiple | `eng` |
+| `PADDLEX_HOME` | PaddleOCR model directory | `./data/paddle_models` |
+| `TESSDATA_PREFIX` | Tesseract language data path | `/opt/homebrew/share/tessdata` (macOS) |
+| `OCR_LANGUAGE` | Tesseract language(s) | `eng` |
 | `OCR_CONFIDENCE_THRESHOLD` | Minimum confidence | `0.6` |
 
-**Multi-language OCR Example:**
+**PaddleOCR (Recommended):**
 ```bash
-# German + English
-OCR_LANGUAGE=deu+eng
-
-# French + English
-OCR_LANGUAGE=fra+eng
+# Model storage (project-local)
+PADDLEX_HOME=./data/paddle_models
+PADDLE_HUB_HOME=./data/paddle_models/official_models
+PADDLE_PDX_MODEL_SOURCE=HF  # Use HuggingFace mirror
 ```
 
-**Installing Additional Languages (macOS):**
+**Tesseract (Legacy):**
 ```bash
-# Install all languages
-brew install tesseract-lang
+# Multi-language example
+OCR_LANGUAGE=deu+eng  # German + English
 
-# Or download specific language from:
-# https://github.com/tesseract-ocr/tessdata
+# Install additional languages (macOS)
+brew install tesseract-lang
+```
+
+**Model Management:**
+```bash
+# Download PaddleOCR models
+python backend/scripts/download_paddle_models.py
+
+# Migrate existing models to project directory
+python backend/scripts/migrate_paddle_models.py
 ```
 
 ### Image Optimization
@@ -194,8 +228,10 @@ brew install tesseract-lang
 | `CHROMA_PERSIST_DIRECTORY` | ChromaDB storage path | `./data/chroma` |
 | `CHROMA_COLLECTION_NAME` | ChromaDB collection name | `documents` |
 | `VECTOR_SIMILARITY_THRESHOLD` | Minimum similarity score | `0.4` |
-| `DEFAULT_TOP_K` | Default results count | `5` |
-| `MAX_TOP_K` | Maximum results count | `20` |
+| `DEFAULT_TOP_K` | Default results count | `10` |
+| `MAX_TOP_K` | Maximum results count | `25` |
+
+> **Note:** The `DEFAULT_TOP_K` has been increased from 5 to 10 for better search coverage. This can be configured per-query in the chat UI or globally in Admin Settings.
 
 **Backend Selection:**
 - `auto` - Automatically select based on `DATABASE_URL` (ChromaDB for SQLite, pgvector for PostgreSQL)
@@ -218,6 +254,101 @@ The default threshold of `0.4` is optimized for OCR'd documents which may have l
 - `vector` - Pure vector similarity search
 - `keyword` - Full-text keyword search
 - `hybrid` - Combines vector and keyword using Reciprocal Rank Fusion (RRF)
+
+### Advanced RAG Features
+
+These settings are configurable via the Admin UI (Settings > RAG Features tab) or database.
+
+#### Retrieval Settings
+
+**⚡ NEW: Per-Query Override in Chat UI**
+
+Users can now adjust the number of documents to search directly in the chat interface using the "Documents to Search" control. This allows fine-tuning retrieval on a per-query basis without changing global settings.
+
+| Setting | Description | Default | Range |
+|---------|-------------|---------|-------|
+| `rag.top_k` | Documents to retrieve per query | `10` | 3-25 |
+| `rag.rerank_results` | Enable cross-encoder reranking | `true` | - |
+| `rag.query_expansion_count` | Query variations to generate | `3` | 1-5 |
+| `rag.similarity_threshold` | Minimum similarity score | `0.4` | 0.1-0.9 |
+
+**How These Settings Improve Search Quality:**
+
+1. **Documents to Retrieve (top_k):** Higher values cast a wider net, finding more potentially relevant documents. Use higher values (15-20) when searching across many collections without filters.
+
+2. **Result Reranking:** Uses a cross-encoder model (`ms-marco-MiniLM-L-6-v2`) to re-score results by semantic relevance. Significantly improves result ordering at the cost of ~100-200ms latency.
+
+3. **Query Expansions:** Generates paraphrased versions of the query to improve recall. For example, "German verbs" might also search "verben in German" and "German verb conjugation".
+
+4. **Similarity Threshold:** Filters out results below this score. Lower values (0.3-0.4) are better for OCR'd documents with potential text artifacts.
+
+**Per-Query Override (Chat UI):**
+
+Users can click the "Documents to Search" button in the chat header to:
+- Adjust top_k from 3-25 for the current query
+- Reset to use the admin-configured default
+- See "Auto" when using the default setting
+
+#### GraphRAG (Knowledge Graph)
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.graphrag_enabled` | Enable knowledge graph-based retrieval | `true` |
+| `rag.graph_max_hops` | Max traversal depth for multi-hop reasoning (1-5) | `2` |
+| `rag.graph_weight` | Weight for graph results in hybrid search (0-1) | `0.3` |
+| `rag.entity_extraction_enabled` | Extract entities when processing documents | `true` |
+
+**How GraphRAG Works:**
+1. Entities (people, organizations, locations, concepts) are extracted from documents
+2. Relationships between entities are identified and stored
+3. Queries traverse the knowledge graph to find related information
+4. Results combine vector similarity with graph-based relevance
+
+#### Agentic RAG (Complex Query Handling)
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.agentic_enabled` | Enable agentic RAG for complex queries | `false` |
+| `rag.agentic_max_iterations` | Max ReAct loop iterations (1-10) | `5` |
+| `rag.auto_detect_complexity` | Auto-detect when to use agentic mode | `true` |
+
+**How Agentic RAG Works:**
+1. Complex queries are decomposed into sub-questions
+2. ReAct loop: Reason → Act → Observe → Iterate
+3. Each sub-question retrieves relevant context
+4. Final answer synthesizes all retrieved information
+
+#### Multimodal RAG (Images & Tables)
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.multimodal_enabled` | Enable image/table processing | `true` |
+| `rag.vision_provider` | Vision model provider | `auto` |
+| `rag.ollama_vision_model` | Ollama vision model name | `llava` |
+| `rag.caption_images` | Generate captions for images | `true` |
+| `rag.extract_tables` | Extract and structure tables | `true` |
+
+**Vision Provider Options:**
+- `auto` - Automatically select based on available providers
+- `ollama` - Use Ollama with LLaVA (free, local)
+- `openai` - Use OpenAI GPT-4V (requires API key)
+- `anthropic` - Use Anthropic Claude Vision (requires API key)
+
+#### Real-Time Updates
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.incremental_indexing` | Only re-index changed content | `true` |
+| `rag.freshness_tracking` | Track document freshness | `true` |
+| `rag.freshness_threshold_days` | Days before content is considered aging | `30` |
+| `rag.stale_threshold_days` | Days before content is marked stale | `90` |
+
+#### Query Suggestions
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.suggested_questions_enabled` | Show follow-up suggestions | `true` |
+| `rag.suggestions_count` | Number of suggestions to show (1-5) | `3` |
 
 ---
 

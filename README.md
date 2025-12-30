@@ -25,16 +25,23 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 | **Universal File Support** | PDF, PPTX, DOCX, XLSX, images, and 20+ more formats |
 | **Multi-LLM Support** | OpenAI GPT-4, Ollama (local), Claude, and 100+ providers via LiteLLM |
 | **Smart RAG with Self-Verification** | LangChain-powered retrieval with hybrid search + answer confidence scoring |
+| **GraphRAG** | Knowledge graph-based retrieval for multi-hop reasoning across entities |
+| **Agentic RAG** | Complex query decomposition with ReAct loop for iterative reasoning |
+| **Multimodal RAG** | Image captioning and table extraction with free local (Ollama LLaVA) or cloud providers |
 | **Semantic Chunking** | Context-aware document chunking with section headers for better retrieval |
 | **Source Citations** | Every answer shows exactly which documents were used |
 | **Confidence Indicators** | See how confident the AI is in each response (high/medium/low) |
+| **Query Suggestions** | Intelligent follow-up question suggestions after each answer |
 | **Permission Tiers** | Dynamic access control - CEO sees all, interns see only authorized files |
 | **Document Generation** | Create PPTX, DOCX, PDF with human-in-the-loop approval workflow |
 | **Multi-LLM Collaboration** | Multiple AI models working together for higher quality output |
 | **Agent Mode** | Multi-step task execution with planning and approval workflows |
 | **Web Scraping** | Import content from websites with depth control and job scheduling |
 | **Cost Tracking** | Monitor LLM usage costs with detailed analytics dashboard |
+| **Real-Time Indexing** | Incremental updates with content freshness tracking |
 | **File Watcher** | Automatically index new files from monitored directories |
+| **Advanced OCR Management** | PaddleOCR, EasyOCR, Tesseract with performance metrics & batch downloads |
+| **Tabbed Admin Settings** | Organized settings UI with 8 tabs for easy configuration |
 | **Beautiful UI** | Modern, responsive interface built with Next.js 15 and shadcn/ui |
 
 ---

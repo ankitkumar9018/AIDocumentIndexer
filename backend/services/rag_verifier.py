@@ -37,7 +37,8 @@ class ChunkRelevance:
     """Relevance assessment for a single chunk."""
     chunk_id: str
     content_snippet: str
-    relevance_score: float  # 0-1, how relevant to query
+    relevance_score: float  # 0-1, how relevant to query (may be RRF score for ranking)
+    similarity_score: float  # 0-1, original vector cosine similarity for display/confidence
     is_relevant: bool  # Passes threshold
     reasoning: Optional[str] = None  # LLM explanation
 
@@ -270,6 +271,9 @@ Respond with ONLY a JSON object:
         for doc, retrieval_score in docs:
             chunk_id = doc.metadata.get("chunk_id", "unknown")
             content = doc.page_content[:500]  # Snippet for display
+            # Get original vector similarity from metadata (0-1 range)
+            # Falls back to retrieval_score if not available
+            similarity = doc.metadata.get("similarity_score", retrieval_score)
 
             # Quick mode: embedding similarity only
             if self.config.level == VerificationLevel.QUICK:
@@ -279,6 +283,7 @@ Respond with ONLY a JSON object:
                     chunk_id=chunk_id,
                     content_snippet=content[:200],
                     relevance_score=min(retrieval_score, 1.0),
+                    similarity_score=similarity,  # Original vector similarity for display
                     is_relevant=is_relevant,
                 ))
                 continue
@@ -293,6 +298,7 @@ Respond with ONLY a JSON object:
                     chunk_id=chunk_id,
                     content_snippet=content[:200],
                     relevance_score=combined_score,
+                    similarity_score=similarity,  # Original vector similarity for display
                     is_relevant=is_relevant,
                     reasoning=reasoning,
                 ))
@@ -303,6 +309,7 @@ Respond with ONLY a JSON object:
                     chunk_id=chunk_id,
                     content_snippet=content[:200],
                     relevance_score=min(retrieval_score, 1.0),
+                    similarity_score=similarity,  # Original vector similarity for display
                     is_relevant=retrieval_score >= self.config.embedding_relevance_threshold,
                 ))
 
@@ -392,8 +399,9 @@ Respond with ONLY a JSON object:
             return 0.0
 
         # Factors:
-        # 1. Average relevance score of relevant chunks
-        avg_relevance = sum(cr.relevance_score for cr in relevant_chunks) / len(relevant_chunks)
+        # 1. Average similarity score of relevant chunks (use original vector similarity, not RRF)
+        # similarity_score is 0-1 (cosine similarity), while relevance_score may be tiny RRF scores
+        avg_similarity = sum(cr.similarity_score for cr in relevant_chunks) / len(relevant_chunks)
 
         # 2. Ratio of relevant to total retrieved
         relevance_ratio = len(relevant_chunks) / max(total_retrieved, 1)
@@ -402,7 +410,7 @@ Respond with ONLY a JSON object:
         source_bonus = min(len(relevant_chunks) / 3, 1.0) * 0.2  # Up to 0.2 bonus for 3+ sources
 
         # Weighted combination
-        confidence = (avg_relevance * 0.5) + (relevance_ratio * 0.3) + source_bonus
+        confidence = (avg_similarity * 0.5) + (relevance_ratio * 0.3) + source_bonus
 
         return min(confidence, 1.0)
 
@@ -424,6 +432,7 @@ Respond with ONLY a JSON object:
                 chunk_id=doc.metadata.get("chunk_id", "unknown"),
                 content_snippet=doc.page_content[:200],
                 relevance_score=min(score, 1.0),
+                similarity_score=doc.metadata.get("similarity_score", score),  # Original vector similarity
                 is_relevant=True,
             )
             for doc, score in docs

@@ -7,7 +7,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
 # -----------------------------------------------------------------------------
-FROM python:3.11-slim as runtime
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
@@ -53,8 +53,9 @@ ENV PATH=/root/.local/bin:$PATH
 # Copy application code
 COPY backend/ /app/backend/
 
-# Create storage directory
-RUN mkdir -p /app/storage
+# Create storage and model directories
+RUN mkdir -p /app/storage /app/data/paddle_models && \
+    chown -R root:root /app/data
 
 # Set environment variables
 ENV PYTHONPATH=/app

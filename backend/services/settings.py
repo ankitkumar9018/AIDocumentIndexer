@@ -34,6 +34,8 @@ class SettingCategory(str, Enum):
     SECURITY = "security"
     NOTIFICATIONS = "notifications"
     GENERAL = "general"
+    RAG = "rag"  # Advanced RAG features
+    OCR = "ocr"  # OCR configuration
 
 
 class ValueType(str, Enum):
@@ -163,6 +165,244 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Notify when API costs exceed threshold"
+    ),
+
+    # ==========================================================================
+    # Advanced RAG Configuration
+    # ==========================================================================
+
+    # GraphRAG Settings
+    SettingDefinition(
+        key="rag.graphrag_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable GraphRAG for knowledge graph-based retrieval"
+    ),
+    SettingDefinition(
+        key="rag.graph_max_hops",
+        category=SettingCategory.RAG,
+        default_value=2,
+        value_type=ValueType.NUMBER,
+        description="Maximum hops for graph traversal (1-3)"
+    ),
+    SettingDefinition(
+        key="rag.entity_extraction_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Extract entities during document processing"
+    ),
+
+    # Agentic RAG Settings
+    SettingDefinition(
+        key="rag.agentic_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable Agentic RAG for complex multi-step queries"
+    ),
+    SettingDefinition(
+        key="rag.agentic_max_iterations",
+        category=SettingCategory.RAG,
+        default_value=5,
+        value_type=ValueType.NUMBER,
+        description="Maximum ReAct loop iterations (1-10)"
+    ),
+    SettingDefinition(
+        key="rag.auto_detect_complexity",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Auto-detect complex queries for agentic mode"
+    ),
+
+    # Multimodal RAG Settings
+    SettingDefinition(
+        key="rag.multimodal_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable multimodal RAG for images/tables/charts"
+    ),
+    SettingDefinition(
+        key="rag.vision_provider",
+        category=SettingCategory.RAG,
+        default_value="auto",
+        value_type=ValueType.STRING,
+        description="Vision model provider (auto, ollama, openai, anthropic)"
+    ),
+    SettingDefinition(
+        key="rag.ollama_vision_model",
+        category=SettingCategory.RAG,
+        default_value="llava",
+        value_type=ValueType.STRING,
+        description="Ollama vision model for free multimodal (llava, bakllava)"
+    ),
+    SettingDefinition(
+        key="rag.extract_tables",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Extract and index tables from documents"
+    ),
+    SettingDefinition(
+        key="rag.caption_images",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Generate captions for images during indexing"
+    ),
+
+    # Real-Time Updates Settings
+    SettingDefinition(
+        key="rag.incremental_indexing",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable incremental indexing (update only changed chunks)"
+    ),
+    SettingDefinition(
+        key="rag.freshness_tracking",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Track document freshness and flag stale content"
+    ),
+    SettingDefinition(
+        key="rag.freshness_threshold_days",
+        category=SettingCategory.RAG,
+        default_value=30,
+        value_type=ValueType.NUMBER,
+        description="Days until content is considered aging"
+    ),
+    SettingDefinition(
+        key="rag.stale_threshold_days",
+        category=SettingCategory.RAG,
+        default_value=90,
+        value_type=ValueType.NUMBER,
+        description="Days until content is considered stale"
+    ),
+
+    # Query Suggestions
+    SettingDefinition(
+        key="rag.suggested_questions_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Generate follow-up question suggestions after answers"
+    ),
+    SettingDefinition(
+        key="rag.suggestions_count",
+        category=SettingCategory.RAG,
+        default_value=3,
+        value_type=ValueType.NUMBER,
+        description="Number of suggested questions to generate (1-5)"
+    ),
+
+    # Hybrid Search Settings
+    SettingDefinition(
+        key="rag.graph_weight",
+        category=SettingCategory.RAG,
+        default_value=0.3,
+        value_type=ValueType.NUMBER,
+        description="Weight for graph results in hybrid search (0-1)"
+    ),
+    SettingDefinition(
+        key="rag.vector_weight",
+        category=SettingCategory.RAG,
+        default_value=0.7,
+        value_type=ValueType.NUMBER,
+        description="Weight for vector results in hybrid search (0-1)"
+    ),
+
+    # Retrieval Settings
+    SettingDefinition(
+        key="rag.top_k",
+        category=SettingCategory.RAG,
+        default_value=10,
+        value_type=ValueType.NUMBER,
+        description="Number of documents to retrieve per query (higher = broader search)"
+    ),
+    SettingDefinition(
+        key="rag.rerank_results",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable cross-encoder reranking for better relevance ordering"
+    ),
+    SettingDefinition(
+        key="rag.query_expansion_count",
+        category=SettingCategory.RAG,
+        default_value=3,
+        value_type=ValueType.NUMBER,
+        description="Number of query variations to generate (improves recall)"
+    ),
+    SettingDefinition(
+        key="rag.similarity_threshold",
+        category=SettingCategory.RAG,
+        default_value=0.4,
+        value_type=ValueType.NUMBER,
+        description="Minimum similarity score for document retrieval (0.0-1.0)"
+    ),
+
+    # OCR Configuration
+    SettingDefinition(
+        key="ocr.provider",
+        category=SettingCategory.OCR,
+        default_value="paddleocr",
+        value_type=ValueType.STRING,
+        description="OCR provider (paddleocr, easyocr, tesseract, auto)"
+    ),
+    SettingDefinition(
+        key="ocr.paddle.variant",
+        category=SettingCategory.OCR,
+        default_value="server",
+        value_type=ValueType.STRING,
+        description="PaddleOCR model variant (server=accurate, mobile=fast)"
+    ),
+    SettingDefinition(
+        key="ocr.paddle.languages",
+        category=SettingCategory.OCR,
+        default_value=["en", "de"],
+        value_type=ValueType.JSON,
+        description="List of language codes for OCR"
+    ),
+    SettingDefinition(
+        key="ocr.paddle.model_dir",
+        category=SettingCategory.OCR,
+        default_value="./data/paddle_models",
+        value_type=ValueType.STRING,
+        description="Directory for PaddleOCR model cache"
+    ),
+    SettingDefinition(
+        key="ocr.paddle.auto_download",
+        category=SettingCategory.OCR,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Auto-download models on startup"
+    ),
+    SettingDefinition(
+        key="ocr.tesseract.fallback_enabled",
+        category=SettingCategory.OCR,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Fall back to Tesseract if PaddleOCR fails"
+    ),
+    # EasyOCR Settings
+    SettingDefinition(
+        key="ocr.easyocr.languages",
+        category=SettingCategory.OCR,
+        default_value=["en"],
+        value_type=ValueType.JSON,
+        description="List of language codes for EasyOCR"
+    ),
+    SettingDefinition(
+        key="ocr.easyocr.use_gpu",
+        category=SettingCategory.OCR,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Use GPU acceleration for EasyOCR (if available)"
     ),
 ]
 
@@ -435,6 +675,16 @@ class SettingsService:
 
         async with async_session_context() as db:
             return await _reset(db)
+
+    def get_default_value(self, key: str) -> Any:
+        """
+        Get the default value for a setting (synchronous).
+
+        This doesn't read from the database - just returns the hardcoded default.
+        Useful for initialization when async DB access isn't available.
+        """
+        definition = SETTINGS_DEFINITIONS.get(key)
+        return definition.default_value if definition else None
 
     def get_setting_definitions(self) -> List[Dict[str, Any]]:
         """

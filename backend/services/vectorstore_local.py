@@ -16,7 +16,7 @@ import chromadb
 from chromadb.config import Settings
 
 from backend.services.vectorstore import SearchResult, VectorStoreConfig, SearchType
-from backend.db.models import Chunk as ChunkModel, Document
+from backend.db.models import Chunk as ChunkModel, Document, ProcessingStatus
 from backend.db.database import async_session_context
 from sqlalchemy import select
 
@@ -278,6 +278,54 @@ class ChromaVectorStore:
     # Search Operations
     # =========================================================================
 
+    async def _filter_soft_deleted(
+        self,
+        results: List[SearchResult],
+    ) -> List[SearchResult]:
+        """
+        Filter out results from soft-deleted documents.
+
+        Soft-deleted documents have processing_status=FAILED and
+        processing_error="Deleted by user".
+
+        Args:
+            results: List of search results to filter
+
+        Returns:
+            Filtered list excluding soft-deleted documents
+        """
+        if not results:
+            return results
+
+        # Get unique document IDs
+        doc_ids = list(set(r.document_id for r in results if r.document_id))
+        if not doc_ids:
+            return results
+
+        # Query database to find soft-deleted documents
+        async with async_session_context() as db:
+            try:
+                doc_uuids = [uuid.UUID(d) for d in doc_ids]
+                query = (
+                    select(Document.id)
+                    .where(Document.id.in_(doc_uuids))
+                    .where(Document.processing_status == ProcessingStatus.FAILED)
+                    .where(Document.processing_error == "Deleted by user")
+                )
+                result = await db.execute(query)
+                deleted_doc_ids = {str(row[0]) for row in result.all()}
+
+                if deleted_doc_ids:
+                    logger.debug(
+                        "Filtering soft-deleted documents from search results",
+                        deleted_count=len(deleted_doc_ids),
+                    )
+                    return [r for r in results if r.document_id not in deleted_doc_ids]
+            except Exception as e:
+                logger.warning("Failed to filter soft-deleted documents", error=str(e))
+
+        return results
+
     async def similarity_search(
         self,
         query_embedding: List[float],
@@ -354,6 +402,7 @@ class ChromaVectorStore:
                     collection=metadata.get("collection") or None,
                     content=content,
                     score=similarity,
+                    similarity_score=similarity,  # Original cosine similarity (0-1) for display
                     metadata={
                         "chunk_index": metadata.get("chunk_index", 0),
                         "token_count": metadata.get("token_count", 0),
@@ -362,7 +411,8 @@ class ChromaVectorStore:
                     section_title=metadata.get("section_title"),
                 ))
 
-        return search_results
+        # Filter out soft-deleted documents
+        return await self._filter_soft_deleted(search_results)
 
     async def keyword_search(
         self,
@@ -424,6 +474,7 @@ class ChromaVectorStore:
                         collection=metadata.get("collection") or None,
                         content=content,
                         score=score,
+                        similarity_score=score,  # Use keyword relevance score for display
                         metadata={
                             "chunk_index": metadata.get("chunk_index", 0),
                             "search_type": "keyword",
@@ -434,7 +485,9 @@ class ChromaVectorStore:
 
         # Sort by score and limit
         search_results.sort(key=lambda x: x.score, reverse=True)
-        return search_results[:top_k]
+        # Filter out soft-deleted documents
+        filtered_results = await self._filter_soft_deleted(search_results[:top_k])
+        return filtered_results
 
     async def enhanced_metadata_search(
         self,
@@ -465,10 +518,11 @@ class ChromaVectorStore:
 
         async with async_session_context() as db:
             # Get documents with enhanced metadata
+            # Only include completed documents (excludes soft-deleted which are FAILED)
             base_query = (
                 select(Document)
                 .where(Document.enhanced_metadata.isnot(None))
-                .where(Document.processing_status == "completed")
+                .where(Document.processing_status == ProcessingStatus.COMPLETED)
             )
 
             # Filter by document IDs if provided
@@ -557,6 +611,7 @@ class ChromaVectorStore:
                     document_id=doc_id_str,
                     content=content,
                     score=score,
+                    similarity_score=min(score, 1.0),  # Metadata match score for display
                     metadata={
                         "search_type": "enhanced",
                         "topics": metadata.get("topics", []),
@@ -640,26 +695,27 @@ class ChromaVectorStore:
         k = 60
         scores: Dict[str, Tuple[float, SearchResult]] = {}
 
-        # Process vector results
+        # Process vector results - preserve original similarity scores
         for rank, result in enumerate(vector_results):
             rrf_score = vec_weight * (1.0 / (k + rank + 1))
+            original_similarity = result.similarity_score  # Preserve before RRF overwrites
             if result.chunk_id in scores:
-                scores[result.chunk_id] = (
-                    scores[result.chunk_id][0] + rrf_score,
-                    result,
-                )
+                existing_rrf, existing_result = scores[result.chunk_id]
+                # Keep max similarity from vector search
+                existing_result.similarity_score = max(existing_result.similarity_score, original_similarity)
+                scores[result.chunk_id] = (existing_rrf + rrf_score, existing_result)
             else:
+                # Ensure similarity_score is preserved
                 scores[result.chunk_id] = (rrf_score, result)
 
         # Process keyword results
         for rank, result in enumerate(keyword_results):
             rrf_score = kw_weight * (1.0 / (k + rank + 1))
             if result.chunk_id in scores:
-                scores[result.chunk_id] = (
-                    scores[result.chunk_id][0] + rrf_score,
-                    result,
-                )
+                existing_rrf, existing_result = scores[result.chunk_id]
+                scores[result.chunk_id] = (existing_rrf + rrf_score, existing_result)
             else:
+                # Keyword results don't have high similarity score - leave as-is
                 scores[result.chunk_id] = (rrf_score, result)
 
         # Process enhanced metadata results
@@ -832,6 +888,7 @@ class ChromaVectorStore:
                     document_filename=metadata.get("document_filename") or None,
                     content=content,
                     score=1.0,
+                    similarity_score=1.0,  # Direct document access = 100% match
                     metadata={"chunk_index": chunk_index},
                     page_number=metadata.get("page_number"),
                     section_title=metadata.get("section_title"),

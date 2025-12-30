@@ -79,7 +79,8 @@ class Source:
     collection: Optional[str] = None  # Collection/tag for document grouping
     page_number: Optional[int] = None
     slide_number: Optional[int] = None
-    relevance_score: float = 0.0
+    relevance_score: float = 0.0  # RRF score for ranking (may be tiny ~0.01-0.03)
+    similarity_score: float = 0.0  # Original vector cosine similarity (0-1) for display
     snippet: str = ""
     full_content: str = ""  # Full chunk content for source viewer
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -99,6 +100,8 @@ class RAGResponse:
     confidence_score: Optional[float] = None  # 0-1 confidence
     confidence_level: Optional[str] = None  # "high", "medium", "low"
     verification_result: Optional[VerificationResult] = None
+    # Suggested follow-up questions
+    suggested_questions: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -113,11 +116,11 @@ class RAGConfig:
 
     def __init__(
         self,
-        # Retrieval settings
-        top_k: int = 5,
-        similarity_threshold: float = 0.4,  # Lower threshold for OCR'd documents
+        # Retrieval settings - None means "read from settings service"
+        top_k: int = None,
+        similarity_threshold: float = None,
         use_hybrid_search: bool = True,
-        rerank_results: bool = False,
+        rerank_results: bool = None,
 
         # Response settings
         max_response_tokens: int = 2048,
@@ -143,14 +146,31 @@ class RAGConfig:
         verification_level: str = None,  # "none", "quick", "standard", "thorough"
     ):
         import os
+        from backend.services.settings import get_settings_service
+
         # Default provider from environment variable
         default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+        settings = get_settings_service()
+
+        # Read retrieval settings from settings service defaults
+        # These are synchronous reads of default values; async DB values applied at runtime
+        if top_k is None:
+            top_k = settings.get_default_value("rag.top_k") or 10
+        if similarity_threshold is None:
+            similarity_threshold = settings.get_default_value("rag.similarity_threshold") or 0.4
+        if rerank_results is None:
+            rerank_results = settings.get_default_value("rag.rerank_results")
+            if rerank_results is None:
+                rerank_results = True
 
         # Read RAG settings from environment with sensible defaults
         if enable_query_expansion is None:
             enable_query_expansion = os.getenv("ENABLE_QUERY_EXPANSION", "true").lower() == "true"
         if query_expansion_count is None:
-            query_expansion_count = int(os.getenv("QUERY_EXPANSION_COUNT", "2"))
+            # Try settings service first, fall back to env
+            query_expansion_count = settings.get_default_value("rag.query_expansion_count")
+            if query_expansion_count is None:
+                query_expansion_count = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))
         if enable_verification is None:
             enable_verification = os.getenv("ENABLE_VERIFICATION", "true").lower() == "true"
         if verification_level is None:
@@ -201,7 +221,10 @@ Context:
 
 Question: {question}
 
-Provide a helpful, accurate answer based on the context. Cite specific documents when referencing information."""
+Provide a helpful, accurate answer based on the context. Cite specific documents when referencing information.
+
+At the end of your response, on a new line, suggest 2-3 related follow-up questions the user might want to ask, prefixed with "SUGGESTED_QUESTIONS:" and separated by "|". Example:
+SUGGESTED_QUESTIONS: What are the key benefits?|How does this compare to alternatives?|When was this implemented?"""
 
 CONVERSATIONAL_RAG_TEMPLATE = """You are having a conversation with a user about their document archive.
 Use the retrieved context and conversation history to provide helpful answers.
@@ -210,7 +233,39 @@ Retrieved Context:
 {context}
 
 Based on this context and our conversation, please answer the user's latest question.
-If the context doesn't contain relevant information, acknowledge that and provide what help you can."""
+If the context doesn't contain relevant information, acknowledge that and provide what help you can.
+
+At the end of your response, on a new line, suggest 2-3 related follow-up questions the user might want to ask, prefixed with "SUGGESTED_QUESTIONS:" and separated by "|". Example:
+SUGGESTED_QUESTIONS: What are the key benefits?|How does this compare to alternatives?|When was this implemented?"""
+
+
+def _parse_suggested_questions(content: str) -> Tuple[str, List[str]]:
+    """
+    Parse suggested questions from response content.
+
+    Args:
+        content: Full response content from LLM
+
+    Returns:
+        Tuple of (cleaned_content, list_of_suggested_questions)
+    """
+    suggested_questions = []
+    cleaned_content = content
+
+    # Look for SUGGESTED_QUESTIONS: line
+    if "SUGGESTED_QUESTIONS:" in content:
+        lines = content.split("\n")
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith("SUGGESTED_QUESTIONS:"):
+                # Extract questions from this line
+                questions_part = line.split("SUGGESTED_QUESTIONS:", 1)[1].strip()
+                suggested_questions = [q.strip() for q in questions_part.split("|") if q.strip()]
+            else:
+                new_lines.append(line)
+        cleaned_content = "\n".join(new_lines).rstrip()
+
+    return cleaned_content, suggested_questions
 
 
 # =============================================================================
@@ -418,6 +473,28 @@ class RAGService:
             verification=self.config.enable_verification,
             verification_level=self.config.verification_level,
         )
+
+    async def get_runtime_settings(self) -> Dict[str, Any]:
+        """
+        Load RAG settings from the database at runtime.
+
+        Returns settings dict with keys:
+        - top_k: Number of documents to retrieve
+        - rerank_results: Whether to rerank results
+        - query_expansion_count: Number of query expansions
+        - similarity_threshold: Minimum similarity score
+        """
+        from backend.services.settings import get_settings_service
+
+        settings_service = get_settings_service()
+        settings = await settings_service.get_all_settings()
+
+        return {
+            "top_k": settings.get("rag.top_k", self.config.top_k),
+            "rerank_results": settings.get("rag.rerank_results", self.config.rerank_results),
+            "query_expansion_count": settings.get("rag.query_expansion_count", self.config.query_expansion_count),
+            "similarity_threshold": settings.get("rag.similarity_threshold", self.config.similarity_threshold),
+        }
 
     @property
     def llm(self):
@@ -633,6 +710,7 @@ class RAGService:
         user_id: Optional[str] = None,
         include_collection_context: bool = True,
         additional_context: Optional[str] = None,
+        top_k: Optional[int] = None,  # Override documents to retrieve per query
     ) -> RAGResponse:
         """
         Query the RAG system.
@@ -645,6 +723,7 @@ class RAGService:
             user_id: User ID for usage tracking
             include_collection_context: Whether to include collection tags in LLM context
             additional_context: Additional context to include (e.g., from temp documents)
+            top_k: Optional override for number of documents to retrieve
 
         Returns:
             RAGResponse with answer and sources
@@ -652,11 +731,17 @@ class RAGService:
         import time
         start_time = time.time()
 
+        # Load runtime settings from database if top_k not specified
+        if top_k is None:
+            runtime_settings = await self.get_runtime_settings()
+            top_k = runtime_settings.get("top_k", self.config.top_k)
+
         logger.info(
             "Processing RAG query",
             question_length=len(question),
             session_id=session_id,
             collection_filter=collection_filter,
+            top_k=top_k,
         )
 
         # Get LLM for this session (with database-driven config)
@@ -670,6 +755,7 @@ class RAGService:
             question,
             collection_filter=collection_filter,
             access_tier=access_tier,
+            top_k=top_k,
         )
         logger.debug("Retrieved documents from vectorstore", count=len(retrieved_docs))
 
@@ -725,7 +811,10 @@ class RAGService:
 
         # Generate response
         response = await llm.ainvoke(messages)
-        content = response.content if hasattr(response, 'content') else str(response)
+        raw_content = response.content if hasattr(response, 'content') else str(response)
+
+        # Parse suggested questions from the response
+        content, suggested_questions = _parse_suggested_questions(raw_content)
 
         processing_time_ms = (time.time() - start_time) * 1000
 
@@ -779,6 +868,7 @@ class RAGService:
             confidence_score=confidence_score,
             confidence_level=confidence_level,
             verification_result=verification_result,
+            suggested_questions=suggested_questions,
         )
 
     async def query_stream(
@@ -789,6 +879,7 @@ class RAGService:
         access_tier: int = 100,
         user_id: Optional[str] = None,
         include_collection_context: bool = True,
+        top_k: Optional[int] = None,  # Override documents to retrieve per query
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Query RAG with streaming response.
@@ -800,6 +891,7 @@ class RAGService:
             access_tier: User's access tier
             user_id: User ID for usage tracking
             include_collection_context: Whether to include collection tags in LLM context
+            top_k: Optional override for number of documents to retrieve
 
         Yields:
             StreamChunk objects with response parts
@@ -807,10 +899,16 @@ class RAGService:
         import time
         start_time = time.time()
 
+        # Load runtime settings from database if top_k not specified
+        if top_k is None:
+            runtime_settings = await self.get_runtime_settings()
+            top_k = runtime_settings.get("top_k", self.config.top_k)
+
         logger.info(
             "Processing streaming RAG query",
             question_length=len(question),
             session_id=session_id,
+            top_k=top_k,
         )
 
         # Get LLM for this session (with database-driven config)
@@ -824,6 +922,7 @@ class RAGService:
             question,
             collection_filter=collection_filter,
             access_tier=access_tier,
+            top_k=top_k,
         )
 
         context, sources = self._format_context(retrieved_docs, include_collection_context)
@@ -861,13 +960,21 @@ class RAGService:
                         "document_name": s.document_name,
                         "page_number": s.page_number,
                         "relevance_score": s.relevance_score,
+                        "similarity_score": s.similarity_score,  # Original vector similarity (0-1)
                         "snippet": s.snippet,
+                        "full_content": s.full_content,
+                        "collection": s.collection,
                     }
                     for s in sources
                 ])
 
             # Get the full response from buffer
             full_response = response_buffer.getvalue()
+
+            # Parse and yield suggested questions
+            _, suggested_questions = _parse_suggested_questions(full_response)
+            if suggested_questions:
+                yield StreamChunk(type="suggestions", data=suggested_questions)
 
             # Update memory
             if session_id:
@@ -1133,6 +1240,7 @@ class RAGService:
                         "collection": result.collection,
                         "page_number": result.page_number,
                         "section_title": result.section_title,
+                        "similarity_score": result.similarity_score,  # Original vector similarity (0-1)
                         **result.metadata,
                     },
                 )
@@ -1285,6 +1393,8 @@ class RAGService:
             )
 
             # Build source citation (always include collection for UI display)
+            # Get original similarity score from metadata (0-1), fallback to score
+            similarity = metadata.get("similarity_score", score)
             source = Source(
                 document_id=metadata.get("document_id", f"doc-{i}"),
                 document_name=doc_name,
@@ -1292,7 +1402,8 @@ class RAGService:
                 collection=collection,
                 page_number=metadata.get("page_number"),
                 slide_number=metadata.get("slide_number"),
-                relevance_score=score,
+                relevance_score=score,  # RRF score for ranking
+                similarity_score=similarity,  # Original vector similarity (0-1) for display
                 snippet=doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
                 full_content=doc.page_content,  # Full content for source viewer modal
                 metadata=metadata,
@@ -1305,6 +1416,118 @@ class RAGService:
     def set_vector_store(self, vector_store: Any):
         """Set vector store for retrieval."""
         self._vector_store = vector_store
+
+    # -------------------------------------------------------------------------
+    # Advanced RAG Methods (GraphRAG, Agentic RAG)
+    # -------------------------------------------------------------------------
+
+    async def enhanced_query(
+        self,
+        question: str,
+        session_id: Optional[str] = None,
+        collection_filter: Optional[str] = None,
+        access_tier: int = 100,
+        user_id: Optional[str] = None,
+        use_graph: bool = True,
+        use_agentic: bool = False,
+        db_session=None,
+    ) -> RAGResponse:
+        """
+        Enhanced RAG query with optional GraphRAG and Agentic RAG.
+
+        Args:
+            question: User's question
+            session_id: Session ID for memory
+            collection_filter: Collection filter
+            access_tier: User's access tier
+            user_id: User ID for tracking
+            use_graph: Enable GraphRAG (knowledge graph)
+            use_agentic: Enable Agentic RAG (for complex queries)
+            db_session: Database session for graph operations
+
+        Returns:
+            RAGResponse with answer and sources
+        """
+        import time
+        start_time = time.time()
+
+        # Check if we should use agentic RAG
+        if use_agentic:
+            try:
+                from services.agentic_rag import get_agentic_rag_service
+
+                # Initialize agentic RAG
+                graph_service = None
+                if use_graph and db_session:
+                    from services.knowledge_graph import get_knowledge_graph_service
+                    graph_service = await get_knowledge_graph_service(db_session)
+
+                agentic_service = get_agentic_rag_service(
+                    rag_service=self,
+                    knowledge_graph_service=graph_service,
+                )
+
+                result = await agentic_service.process_query(
+                    query=question,
+                    collection_filter=collection_filter,
+                    access_tier=access_tier,
+                    user_id=user_id,
+                )
+
+                # Convert to RAGResponse
+                return RAGResponse(
+                    content=result.final_answer,
+                    sources=[],  # Agentic RAG handles sources differently
+                    query=question,
+                    model="agentic",
+                    processing_time_ms=result.processing_time_ms,
+                    metadata={
+                        "agentic": True,
+                        "iterations": result.iterations,
+                        "sub_queries": len(result.sub_queries),
+                    },
+                    confidence_score=result.confidence,
+                    confidence_level="high" if result.confidence > 0.8 else "medium" if result.confidence > 0.5 else "low",
+                )
+
+            except ImportError:
+                logger.warning("Agentic RAG not available, falling back to standard RAG")
+
+        # Standard RAG with optional graph enhancement
+        response = await self.query(
+            question=question,
+            session_id=session_id,
+            collection_filter=collection_filter,
+            access_tier=access_tier,
+            user_id=user_id,
+        )
+
+        # Optionally enhance with graph context
+        if use_graph and db_session:
+            try:
+                from services.knowledge_graph import get_knowledge_graph_service
+                graph_service = await get_knowledge_graph_service(db_session)
+
+                # Get graph context
+                graph_context = await graph_service.graph_search(question, max_hops=2, top_k=5)
+
+                if graph_context.entities:
+                    # Add graph summary to metadata
+                    response.metadata["graph_entities"] = len(graph_context.entities)
+                    response.metadata["graph_relations"] = len(graph_context.relations)
+
+                    logger.debug(
+                        "Graph context added",
+                        entities=len(graph_context.entities),
+                        relations=len(graph_context.relations),
+                    )
+
+            except ImportError:
+                logger.debug("Knowledge graph service not available")
+            except Exception as e:
+                logger.warning("Graph enhancement failed", error=str(e))
+
+        return response
 
     async def create_pgvector_store(
         self,

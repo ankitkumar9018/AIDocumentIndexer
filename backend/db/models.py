@@ -1622,6 +1622,297 @@ class ExecutionModePreference(Base, UUIDMixin, TimestampMixin):
 
 
 # =============================================================================
+# GraphRAG Models - Knowledge Graph for Multi-Hop Reasoning
+# =============================================================================
+
+class EntityType(str, PyEnum):
+    """Types of entities that can be extracted."""
+    PERSON = "person"
+    ORGANIZATION = "organization"
+    LOCATION = "location"
+    CONCEPT = "concept"
+    EVENT = "event"
+    PRODUCT = "product"
+    TECHNOLOGY = "technology"
+    DATE = "date"
+    METRIC = "metric"
+    OTHER = "other"
+
+
+class RelationType(str, PyEnum):
+    """Types of relationships between entities."""
+    WORKS_FOR = "works_for"
+    LOCATED_IN = "located_in"
+    RELATED_TO = "related_to"
+    PART_OF = "part_of"
+    CREATED_BY = "created_by"
+    USES = "uses"
+    MENTIONS = "mentions"
+    BEFORE = "before"
+    AFTER = "after"
+    CAUSES = "causes"
+    CONTAINS = "contains"
+    SIMILAR_TO = "similar_to"
+    OTHER = "other"
+
+
+class Entity(Base, UUIDMixin):
+    """
+    Knowledge graph entity extracted from documents.
+
+    Represents a named entity (person, org, concept, etc.) that appears
+    in one or more documents. Entities form nodes in the knowledge graph.
+    """
+    __tablename__ = "entities"
+
+    # Entity identification
+    name: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    name_normalized: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    entity_type: Mapped[EntityType] = mapped_column(
+        Enum(EntityType),
+        nullable=False,
+        index=True,
+    )
+
+    # Description and context
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    aliases: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+
+    # Embedding for semantic search
+    embedding: Mapped[Optional[List[float]]] = mapped_column(
+        Vector(1536) if HAS_PGVECTOR else Text,
+        nullable=True,
+    )
+
+    # Metadata
+    properties: Mapped[Optional[dict]] = mapped_column(JSONType())
+    mention_count: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    source_mentions: Mapped[List["EntityMention"]] = relationship(
+        "EntityMention",
+        back_populates="entity",
+        cascade="all, delete-orphan",
+    )
+    outgoing_relations: Mapped[List["EntityRelation"]] = relationship(
+        "EntityRelation",
+        foreign_keys="EntityRelation.source_entity_id",
+        back_populates="source_entity",
+        cascade="all, delete-orphan",
+    )
+    incoming_relations: Mapped[List["EntityRelation"]] = relationship(
+        "EntityRelation",
+        foreign_keys="EntityRelation.target_entity_id",
+        back_populates="target_entity",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<Entity(name='{self.name}', type='{self.entity_type}')>"
+
+
+class EntityMention(Base, UUIDMixin):
+    """
+    Records where an entity is mentioned in a document/chunk.
+
+    Links entities to their source documents for provenance tracking.
+    """
+    __tablename__ = "entity_mentions"
+
+    # Foreign keys
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("entities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chunk_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("chunks.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Context
+    context_snippet: Mapped[Optional[str]] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+
+    # Position in document
+    page_number: Mapped[Optional[int]] = mapped_column(Integer)
+    char_offset: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    entity: Mapped["Entity"] = relationship("Entity", back_populates="source_mentions")
+    document: Mapped["Document"] = relationship("Document")
+    chunk: Mapped[Optional["Chunk"]] = relationship("Chunk")
+
+    def __repr__(self) -> str:
+        return f"<EntityMention(entity_id='{self.entity_id}', document_id='{self.document_id}')>"
+
+
+class EntityRelation(Base, UUIDMixin):
+    """
+    Relationship between two entities in the knowledge graph.
+
+    Represents edges in the knowledge graph, enabling multi-hop reasoning.
+    """
+    __tablename__ = "entity_relations"
+
+    # Source and target entities
+    source_entity_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("entities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    target_entity_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("entities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Relation properties
+    relation_type: Mapped[RelationType] = mapped_column(
+        Enum(RelationType),
+        nullable=False,
+        index=True,
+    )
+    relation_label: Mapped[Optional[str]] = mapped_column(String(200))
+    description: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Confidence and weight
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
+
+    # Source document for provenance
+    document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Metadata
+    properties: Mapped[Optional[dict]] = mapped_column(JSONType())
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    source_entity: Mapped["Entity"] = relationship(
+        "Entity",
+        foreign_keys=[source_entity_id],
+        back_populates="outgoing_relations",
+    )
+    target_entity: Mapped["Entity"] = relationship(
+        "Entity",
+        foreign_keys=[target_entity_id],
+        back_populates="incoming_relations",
+    )
+    document: Mapped[Optional["Document"]] = relationship("Document")
+
+    def __repr__(self) -> str:
+        return f"<EntityRelation('{self.source_entity_id}' --{self.relation_type}--> '{self.target_entity_id}')>"
+
+
+# =============================================================================
+# OCR Performance Metrics
+# =============================================================================
+
+class OCRMetrics(Base, UUIDMixin, TimestampMixin):
+    """
+    OCR performance and usage tracking.
+
+    Records every OCR operation with performance metrics, accuracy indicators,
+    and cost tracking for analytics and optimization.
+    """
+    __tablename__ = "ocr_metrics"
+
+    # Provider info
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)  # paddleocr, tesseract, auto
+    variant: Mapped[Optional[str]] = mapped_column(String(50))  # server, mobile (for PaddleOCR)
+    language: Mapped[str] = mapped_column(String(10), nullable=False)  # en, de, fr, etc.
+
+    # Document context
+    document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Performance metrics
+    processing_time_ms: Mapped[int] = mapped_column(Integer, nullable=False)  # Time in milliseconds
+    page_count: Mapped[int] = mapped_column(Integer, default=1)  # Number of pages processed
+    character_count: Mapped[Optional[int]] = mapped_column(Integer)  # Characters extracted
+
+    # Quality indicators
+    confidence_score: Mapped[Optional[float]] = mapped_column(Float)  # Average confidence (0-1)
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)  # Whether fallback to Tesseract was used
+
+    # Cost estimation (if applicable for cloud OCR providers)
+    cost_usd: Mapped[Optional[float]] = mapped_column(Float)
+
+    # Additional data
+    extra_data: Mapped[Optional[dict]] = mapped_column(JSONType())  # Additional provider-specific data
+
+    # Relationships
+    document: Mapped[Optional["Document"]] = relationship("Document")
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_ocr_metrics_provider", "provider"),
+        Index("idx_ocr_metrics_document", "document_id"),
+        Index("idx_ocr_metrics_user", "user_id"),
+        Index("idx_ocr_metrics_created", "created_at"),
+        Index("idx_ocr_metrics_provider_date", "provider", "created_at"),
+        Index("idx_ocr_metrics_success", "success", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OCRMetrics(provider='{self.provider}', language='{self.language}', time={self.processing_time_ms}ms)>"
+
+
+# =============================================================================
 # Indexes (defined after models)
 # =============================================================================
 
@@ -1637,3 +1928,9 @@ Index("idx_documents_tier_created", Document.access_tier_id, Document.created_at
 Index("idx_chunks_tier_created", Chunk.access_tier_id, Chunk.created_at.desc())
 # ChatMessages: session + created_at for conversation history retrieval
 Index("idx_chat_messages_session_created", ChatMessage.session_id, ChatMessage.created_at.asc())
+
+# GraphRAG indexes for knowledge graph traversal
+Index("idx_entity_name_type", Entity.name_normalized, Entity.entity_type)
+Index("idx_entity_relation_source", EntityRelation.source_entity_id, EntityRelation.relation_type)
+Index("idx_entity_relation_target", EntityRelation.target_entity_id, EntityRelation.relation_type)
+Index("idx_entity_mention_doc", EntityMention.document_id, EntityMention.entity_id)

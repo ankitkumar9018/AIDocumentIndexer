@@ -100,6 +100,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # await init_llm()
         logger.info("LLM services initialized")
 
+        # Auto-download OCR models if enabled
+        try:
+            from backend.services.settings import SettingsService
+            from backend.services.ocr_manager import OCRManager
+
+            settings_service = SettingsService()
+            all_settings = await settings_service.get_all_settings()
+
+            if all_settings.get("ocr.paddle.auto_download", True):
+                logger.info("Auto-downloading OCR models")
+                ocr_manager = OCRManager(settings_service)
+
+                languages = all_settings.get("ocr.paddle.languages", ["en", "de"])
+                variant = all_settings.get("ocr.paddle.variant", "server")
+
+                download_result = await ocr_manager.download_models(
+                    languages=languages,
+                    variant=variant,
+                )
+
+                if download_result.get("status") == "success":
+                    logger.info("OCR models downloaded successfully", result=download_result)
+                elif download_result.get("status") == "partial":
+                    logger.warning("OCR models partially downloaded", result=download_result)
+                else:
+                    logger.warning("OCR model download failed, will retry on first use", result=download_result)
+        except Exception as ocr_error:
+            logger.warning("OCR model auto-download failed, models will be downloaded on first use", error=str(ocr_error))
+
         logger.info("AIDocumentIndexer API started successfully")
 
     except Exception as e:

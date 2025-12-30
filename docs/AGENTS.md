@@ -128,18 +128,29 @@ Information retrieval and synthesis:
       "chunk_id": "uuid",
       "page_number": 5,
       "content": "Relevant excerpt...",
+      "full_content": "Complete chunk content...",
       "score": 0.92,
+      "relevance_score": 0.88,
       "collection": "My Collection"
     }
   ],
-  "result_count": 10
+  "result_count": 10,
+  "suggested_questions": ["Follow-up question 1?", "Follow-up question 2?"]
 }
 ```
 
-**Recent Improvements (2025-12):**
+**Advanced RAG Features (2025-12):**
+- **GraphRAG Integration**: Research agent can leverage knowledge graph for multi-hop reasoning
+- **Agentic RAG**: Complex research queries are automatically decomposed into sub-questions
+- **Multimodal Support**: Can retrieve and reason about images and tables in documents
+- **Confidence Scoring**: Each source has relevance scores for transparency
+- **Query Suggestions**: Intelligent follow-up questions generated after research
+
+**Recent Improvements:**
 - Sources now include full metadata (document_id, chunk_id, page_number, collection)
 - Sources are streamed to frontend via SSE for real-time display
 - Collection context is included in search results for better LLM context
+- Full chunk content available for detailed source viewing
 
 ### Tool Executor Agent
 File operations and exports:

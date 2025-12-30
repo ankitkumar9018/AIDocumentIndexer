@@ -44,6 +44,7 @@ import {
   Globe,
   Workflow,
   Play,
+  Scan,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,6 +55,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
 import {
   useSettings,
   useUpdateSettings,
@@ -90,11 +97,24 @@ import {
   useCostAlertsAdmin,
   useAcknowledgeCostAlert,
   useOllamaModels,
+  useOCRSettings,
+  useUpdateOCRSettings,
+  useDownloadOCRModels,
+  useOCRModelInfo,
 } from "@/lib/api/hooks";
 import type { LLMProvider, LLMProviderType, DatabaseConnectionType } from "@/lib/api/client";
 import { useUser } from "@/lib/auth";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import {
   PieChart,
   Pie,
@@ -153,6 +173,22 @@ export default function AdminSettingsPage() {
   });
   const [connectionTestResults, setConnectionTestResults] = useState<Record<string, { success: boolean; message?: string; error?: string }>>({});
 
+  // Deleted Documents state
+  const [deletedDocs, setDeletedDocs] = useState<Array<{
+    id: string;
+    name: string;
+    file_type: string;
+    file_size: number;
+    deleted_at: string | null;
+    created_at: string | null;
+  }>>([]);
+  const [deletedDocsTotal, setDeletedDocsTotal] = useState(0);
+  const [deletedDocsPage, setDeletedDocsPage] = useState(1);
+  const [deletedDocsLoading, setDeletedDocsLoading] = useState(false);
+  const [deletedDocsError, setDeletedDocsError] = useState<string | null>(null);
+  const [restoringDocId, setRestoringDocId] = useState<string | null>(null);
+  const [hardDeletingDocId, setHardDeletingDocId] = useState<string | null>(null);
+
   // Real API calls - only fetch when authenticated
   const { data: settingsData, isLoading: settingsLoading, error: settingsError, refetch: refetchSettings } = useSettings({ enabled: isAuthenticated });
   const { data: healthData, isLoading: healthLoading } = useSystemHealth({ enabled: isAuthenticated });
@@ -187,6 +223,13 @@ export default function AdminSettingsPage() {
   const testConnectionById = useTestDatabaseConnectionById();
   const activateConnection = useActivateDatabaseConnection();
 
+  // OCR Configuration hooks
+  const { data: ocrData, isLoading: ocrLoading, refetch: refetchOCR } = useOCRSettings({ enabled: isAuthenticated });
+  const updateOCRSettings = useUpdateOCRSettings();
+  const downloadModels = useDownloadOCRModels();
+  const [downloadingModels, setDownloadingModels] = useState(false);
+  const [downloadResult, setDownloadResult] = useState<{ success: boolean; message: string } | null>(null);
+
   // Initialize local settings when data loads
   useEffect(() => {
     if (settingsData?.settings) {
@@ -194,6 +237,71 @@ export default function AdminSettingsPage() {
       setHasChanges(false);
     }
   }, [settingsData]);
+
+  // Fetch deleted documents
+  const fetchDeletedDocs = async (page: number = 1) => {
+    setDeletedDocsLoading(true);
+    setDeletedDocsError(null);
+    try {
+      const { api } = await import("@/lib/api/client");
+      const result = await api.listDeletedDocuments(page, 10);
+      setDeletedDocs(result.documents.map(doc => ({
+        id: doc.id,
+        name: doc.name,
+        file_type: doc.file_type,
+        file_size: doc.file_size,
+        deleted_at: doc.deleted_at || null,
+        created_at: doc.created_at || null,
+      })));
+      setDeletedDocsTotal(result.total);
+      setDeletedDocsPage(page);
+    } catch (err) {
+      const errorMsg = getErrorMessage(err, "Failed to fetch deleted documents");
+      console.error("Failed to fetch deleted documents:", errorMsg, err);
+      setDeletedDocsError(errorMsg);
+    } finally {
+      setDeletedDocsLoading(false);
+    }
+  };
+
+  // Restore deleted document
+  const handleRestoreDocument = async (documentId: string) => {
+    setRestoringDocId(documentId);
+    try {
+      const { api } = await import("@/lib/api/client");
+      await api.restoreDeletedDocument(documentId);
+      // Refresh the list
+      await fetchDeletedDocs(deletedDocsPage);
+      // Also refresh database info to update counts
+      refetchDbInfo();
+    } catch (err) {
+      console.error("Failed to restore document:", err);
+      alert(`Failed to restore document: ${getErrorMessage(err)}`);
+    } finally {
+      setRestoringDocId(null);
+    }
+  };
+
+  // Permanently delete a soft-deleted document
+  const handleHardDeleteDocument = async (documentId: string, docName: string) => {
+    if (!confirm(`Permanently delete "${docName}"? This cannot be undone.`)) {
+      return;
+    }
+    setHardDeletingDocId(documentId);
+    try {
+      const { api } = await import("@/lib/api/client");
+      await api.deleteDocument(documentId, true); // hard_delete=true
+      // Refresh the list
+      await fetchDeletedDocs(deletedDocsPage);
+      // Also refresh database info to update counts
+      refetchDbInfo();
+    } catch (err) {
+      console.error("Failed to permanently delete document:", err);
+      alert(`Failed to delete: ${getErrorMessage(err)}`);
+    } finally {
+      setHardDeletingDocId(null);
+    }
+  };
 
   const handleSettingChange = (key: string, value: unknown) => {
     setLocalSettings((prev) => ({ ...prev, [key]: value }));
@@ -627,8 +735,47 @@ export default function AdminSettingsPage() {
         </div>
       </div>
 
-      {/* System Status */}
-      <Card>
+      {/* Tabs Navigation */}
+      <Tabs defaultValue="overview" className="space-y-6">
+        <TabsList className="flex flex-wrap h-auto gap-1 p-1">
+          <TabsTrigger value="overview" className="flex items-center gap-2">
+            <Server className="h-4 w-4" />
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="providers" className="flex items-center gap-2">
+            <Bot className="h-4 w-4" />
+            LLM Providers
+          </TabsTrigger>
+          <TabsTrigger value="database" className="flex items-center gap-2">
+            <Database className="h-4 w-4" />
+            Database
+          </TabsTrigger>
+          <TabsTrigger value="rag" className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4" />
+            RAG Features
+          </TabsTrigger>
+          <TabsTrigger value="security" className="flex items-center gap-2">
+            <Shield className="h-4 w-4" />
+            Security
+          </TabsTrigger>
+          <TabsTrigger value="notifications" className="flex items-center gap-2">
+            <Bell className="h-4 w-4" />
+            Notifications
+          </TabsTrigger>
+          <TabsTrigger value="analytics" className="flex items-center gap-2">
+            <BarChart3 className="h-4 w-4" />
+            Analytics
+          </TabsTrigger>
+          <TabsTrigger value="ocr" className="flex items-center gap-2">
+            <Scan className="h-4 w-4" />
+            OCR Configuration
+          </TabsTrigger>
+        </TabsList>
+
+        {/* Overview Tab */}
+        <TabsContent value="overview" className="space-y-6">
+          {/* System Status */}
+          <Card>
         <CardHeader>
           <CardTitle className="text-lg flex items-center gap-2">
             <Server className="h-5 w-5" />
@@ -670,10 +817,13 @@ export default function AdminSettingsPage() {
             <p className="text-muted-foreground">Unable to fetch system status</p>
           )}
         </CardContent>
-      </Card>
+          </Card>
+        </TabsContent>
 
-      {/* LLM Providers Management */}
-      <Card>
+        {/* LLM Providers Tab */}
+        <TabsContent value="providers" className="space-y-6">
+          {/* LLM Providers Management */}
+          <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
@@ -945,14 +1095,17 @@ export default function AdminSettingsPage() {
             </div>
           )}
         </CardContent>
-      </Card>
+          </Card>
+        </TabsContent>
 
-      {/* Database Settings */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Database className="h-5 w-5" />
-            Database Settings
+        {/* Database Tab */}
+        <TabsContent value="database" className="space-y-6">
+          {/* Database Settings */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Database className="h-5 w-5" />
+                Database Settings
           </CardTitle>
           <CardDescription>Vector database configuration</CardDescription>
         </CardHeader>
@@ -1387,14 +1540,149 @@ VECTOR_STORE_BACKEND=auto`}
             </div>
           </div>
         </CardContent>
-      </Card>
+          </Card>
 
-      {/* AI Optimization Settings */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Sparkles className="h-5 w-5" />
-            AI Optimization
+          {/* Deleted Documents */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Trash2 className="h-5 w-5" />
+                Deleted Documents
+              </CardTitle>
+              <CardDescription>
+                View and restore soft-deleted documents
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-muted-foreground">
+                  Soft-deleted documents can be restored here. Hard-deleted documents are permanently removed.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fetchDeletedDocs(1)}
+                  disabled={deletedDocsLoading}
+                >
+                  {deletedDocsLoading ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                  )}
+                  Load Deleted Docs
+                </Button>
+              </div>
+
+              {deletedDocsError && (
+                <div className="flex items-center gap-2 p-3 rounded-lg border border-destructive/50 bg-destructive/10 text-destructive">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                  <span className="text-sm">{deletedDocsError}</span>
+                </div>
+              )}
+
+              {deletedDocsTotal > 0 && (
+                <p className="text-sm font-medium">
+                  {deletedDocsTotal} deleted document{deletedDocsTotal !== 1 ? "s" : ""} found
+                </p>
+              )}
+
+              {deletedDocsLoading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : deletedDocs.length > 0 ? (
+                <div className="space-y-2">
+                  {deletedDocs.map((doc) => (
+                    <div
+                      key={doc.id}
+                      className="flex items-center justify-between p-3 rounded-lg border bg-muted/50"
+                    >
+                      <div className="flex flex-col min-w-0 flex-1">
+                        <span className="font-medium truncate">{doc.name}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {doc.file_type} • {(doc.file_size / 1024).toFixed(1)} KB
+                          {doc.deleted_at && ` • Deleted: ${new Date(doc.deleted_at).toLocaleDateString()}`}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 ml-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleRestoreDocument(doc.id)}
+                          disabled={restoringDocId === doc.id || hardDeletingDocId === doc.id}
+                        >
+                          {restoringDocId === doc.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <>
+                              <RotateCcw className="h-4 w-4 mr-1" />
+                              Restore
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => handleHardDeleteDocument(doc.id, doc.name)}
+                          disabled={restoringDocId === doc.id || hardDeletingDocId === doc.id}
+                        >
+                          {hardDeletingDocId === doc.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <>
+                              <Trash2 className="h-4 w-4 mr-1" />
+                              Delete
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* Pagination */}
+                  {deletedDocsTotal > 10 && (
+                    <div className="flex items-center justify-center gap-2 pt-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => fetchDeletedDocs(deletedDocsPage - 1)}
+                        disabled={deletedDocsPage <= 1 || deletedDocsLoading}
+                      >
+                        Previous
+                      </Button>
+                      <span className="text-sm text-muted-foreground">
+                        Page {deletedDocsPage} of {Math.ceil(deletedDocsTotal / 10)}
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => fetchDeletedDocs(deletedDocsPage + 1)}
+                        disabled={deletedDocsPage >= Math.ceil(deletedDocsTotal / 10) || deletedDocsLoading}
+                      >
+                        Next
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ) : deletedDocsTotal === 0 && !deletedDocsLoading ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Trash2 className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p>No deleted documents found</p>
+                  <p className="text-xs mt-1">Click &quot;Load Deleted Docs&quot; to check for deleted documents</p>
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* RAG Features Tab */}
+        <TabsContent value="rag" className="space-y-6">
+          {/* AI Optimization Settings */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Sparkles className="h-5 w-5" />
+                AI Optimization
           </CardTitle>
           <CardDescription>
             Configure AI features to reduce costs and improve quality
@@ -1737,32 +2025,404 @@ VECTOR_STORE_BACKEND=auto`}
         </CardContent>
       </Card>
 
-      {/* Security Settings */}
+      {/* Advanced RAG Settings */}
       <Card>
         <CardHeader>
           <CardTitle className="text-lg flex items-center gap-2">
-            <Shield className="h-5 w-5" />
-            Security Settings
+            <Sparkles className="h-5 w-5" />
+            Advanced RAG Features
           </CardTitle>
-          <CardDescription>Authentication and access control</CardDescription>
+          <CardDescription>Configure GraphRAG, Agentic RAG, Multimodal, and real-time features</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between p-3 rounded-lg border">
-            <div>
-              <p className="font-medium">Require Email Verification</p>
-              <p className="text-sm text-muted-foreground">
-                New users must verify their email
-              </p>
+        <CardContent className="space-y-6">
+          {/* Retrieval Settings */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Search className="h-4 w-4" />
+              Retrieval Settings
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Configure how documents are retrieved and ranked for chat queries
+            </p>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              {/* Top K Documents */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Documents to Retrieve</label>
+                <Input
+                  type="number"
+                  min="3"
+                  max="25"
+                  value={localSettings["rag.top_k"] as number ?? 10}
+                  onChange={(e) => handleSettingChange("rag.top_k", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  How many documents to search (3-25). Higher = broader but slower.
+                </p>
+              </div>
+
+              {/* Query Expansion Count */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Query Expansions</label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="5"
+                  value={localSettings["rag.query_expansion_count"] as number ?? 3}
+                  onChange={(e) => handleSettingChange("rag.query_expansion_count", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Query variations to try (1-5). More = better recall.
+                </p>
+              </div>
+
+              {/* Similarity Threshold */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Similarity Threshold</label>
+                <Input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  max="0.9"
+                  value={localSettings["rag.similarity_threshold"] as number ?? 0.4}
+                  onChange={(e) => handleSettingChange("rag.similarity_threshold", parseFloat(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Minimum relevance score (0.1-0.9). Lower = more results.
+                </p>
+              </div>
             </div>
-            <input
-              type="checkbox"
-              className="h-4 w-4"
-              checked={localSettings["security.require_email_verification"] as boolean ?? false}
-              onChange={(e) => handleSettingChange("security.require_email_verification", e.target.checked)}
-            />
+
+            {/* Reranking Toggle */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Result Reranking</p>
+                <p className="text-sm text-muted-foreground">
+                  Use cross-encoder AI to reorder results by semantic relevance (recommended)
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.rerank_results"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.rerank_results", e.target.checked)}
+              />
+            </div>
           </div>
-          <div className="flex items-center justify-between p-3 rounded-lg border">
-            <div>
+
+          {/* GraphRAG */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Workflow className="h-4 w-4" />
+              GraphRAG (Knowledge Graph)
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Build knowledge graphs from documents for multi-hop reasoning
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable GraphRAG</p>
+                <p className="text-sm text-muted-foreground">
+                  Extract entities and relationships for graph-based retrieval
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.graphrag_enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.graphrag_enabled", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Max Graph Hops</label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="5"
+                  value={localSettings["rag.graph_max_hops"] as number ?? 2}
+                  onChange={(e) => handleSettingChange("rag.graph_max_hops", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Traversal depth (1-5)</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Graph Weight</label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value={localSettings["rag.graph_weight"] as number ?? 0.3}
+                  onChange={(e) => handleSettingChange("rag.graph_weight", parseFloat(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Hybrid search weight (0-1)</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Entity Extraction on Upload</p>
+                <p className="text-sm text-muted-foreground">
+                  Extract entities when processing documents
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.entity_extraction_enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.entity_extraction_enabled", e.target.checked)}
+              />
+            </div>
+          </div>
+
+          {/* Agentic RAG */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Bot className="h-4 w-4" />
+              Agentic RAG
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Use AI agents for complex multi-step queries (ReAct loop)
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Agentic RAG</p>
+                <p className="text-sm text-muted-foreground">
+                  Decompose complex queries into sub-questions
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.agentic_enabled"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("rag.agentic_enabled", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Max Iterations</label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={localSettings["rag.agentic_max_iterations"] as number ?? 5}
+                  onChange={(e) => handleSettingChange("rag.agentic_max_iterations", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">ReAct loop limit (1-10)</p>
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Auto-detect Complexity</p>
+                  <p className="text-sm text-muted-foreground">
+                    Trigger agentic mode automatically
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={localSettings["rag.auto_detect_complexity"] as boolean ?? true}
+                  onChange={(e) => handleSettingChange("rag.auto_detect_complexity", e.target.checked)}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Multimodal RAG */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <FileText className="h-4 w-4" />
+              Multimodal RAG
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Process images, tables, and charts in documents
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Multimodal Processing</p>
+                <p className="text-sm text-muted-foreground">
+                  Caption images and extract tables during indexing
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.multimodal_enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.multimodal_enabled", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Vision Provider</label>
+                <select
+                  className="w-full h-10 px-3 rounded-md border bg-background"
+                  value={localSettings["rag.vision_provider"] as string || "auto"}
+                  onChange={(e) => handleSettingChange("rag.vision_provider", e.target.value)}
+                >
+                  <option value="auto">Auto (Free first)</option>
+                  <option value="ollama">Ollama (Free - Local)</option>
+                  <option value="openai">OpenAI (Paid)</option>
+                  <option value="anthropic">Anthropic (Paid)</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Ollama Vision Model</label>
+                <select
+                  className="w-full h-10 px-3 rounded-md border bg-background"
+                  value={localSettings["rag.ollama_vision_model"] as string || "llava"}
+                  onChange={(e) => handleSettingChange("rag.ollama_vision_model", e.target.value)}
+                >
+                  <option value="llava">LLaVA (Recommended)</option>
+                  <option value="bakllava">BakLLaVA</option>
+                  <option value="llava:13b">LLaVA 13B</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={localSettings["rag.caption_images"] as boolean ?? true}
+                  onChange={(e) => handleSettingChange("rag.caption_images", e.target.checked)}
+                />
+                <span className="text-sm">Caption Images</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={localSettings["rag.extract_tables"] as boolean ?? true}
+                  onChange={(e) => handleSettingChange("rag.extract_tables", e.target.checked)}
+                />
+                <span className="text-sm">Extract Tables</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Real-Time Updates */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <RefreshCw className="h-4 w-4" />
+              Real-Time Updates
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Incremental indexing and content freshness tracking
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Incremental Indexing</p>
+                <p className="text-sm text-muted-foreground">
+                  Only update changed chunks when reprocessing
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.incremental_indexing"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.incremental_indexing", e.target.checked)}
+              />
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Freshness Tracking</p>
+                <p className="text-sm text-muted-foreground">
+                  Flag stale content based on age
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.freshness_tracking"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.freshness_tracking", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Aging Threshold (days)</label>
+                <Input
+                  type="number"
+                  min="7"
+                  value={localSettings["rag.freshness_threshold_days"] as number ?? 30}
+                  onChange={(e) => handleSettingChange("rag.freshness_threshold_days", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Days until content is aging</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Stale Threshold (days)</label>
+                <Input
+                  type="number"
+                  min="30"
+                  value={localSettings["rag.stale_threshold_days"] as number ?? 90}
+                  onChange={(e) => handleSettingChange("rag.stale_threshold_days", parseInt(e.target.value))}
+                />
+                <p className="text-xs text-muted-foreground">Days until content is stale</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Query Suggestions */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <MessageSquare className="h-4 w-4" />
+              Query Suggestions
+            </h4>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Suggestions</p>
+                <p className="text-sm text-muted-foreground">
+                  Suggest follow-up questions after answers
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.suggested_questions_enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.suggested_questions_enabled", e.target.checked)}
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Suggestions Count</label>
+              <Input
+                type="number"
+                min="1"
+                max="5"
+                value={localSettings["rag.suggestions_count"] as number ?? 3}
+                onChange={(e) => handleSettingChange("rag.suggestions_count", parseInt(e.target.value))}
+              />
+              <p className="text-xs text-muted-foreground">Number of suggestions (1-5)</p>
+            </div>
+          </div>
+        </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Security Tab */}
+        <TabsContent value="security" className="space-y-6">
+          {/* Security Settings */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Shield className="h-5 w-5" />
+                Security Settings
+              </CardTitle>
+              <CardDescription>Authentication and access control</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Require Email Verification</p>
+                  <p className="text-sm text-muted-foreground">
+                    New users must verify their email
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={localSettings["security.require_email_verification"] as boolean ?? false}
+                  onChange={(e) => handleSettingChange("security.require_email_verification", e.target.checked)}
+                />
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
               <p className="font-medium">Enable Two-Factor Authentication</p>
               <p className="text-sm text-muted-foreground">
                 Require 2FA for admin accounts
@@ -1791,40 +2451,43 @@ VECTOR_STORE_BACKEND=auto`}
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">Session Timeout (minutes)</label>
-            <Input
-              type="number"
-              value={localSettings["security.session_timeout_minutes"] as number ?? 60}
-              onChange={(e) => handleSettingChange("security.session_timeout_minutes", parseInt(e.target.value))}
-            />
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Notification Settings */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Bell className="h-5 w-5" />
-            Notifications
-          </CardTitle>
-          <CardDescription>Configure notification preferences</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between p-3 rounded-lg border">
-            <div>
-              <p className="font-medium">Processing Completed</p>
-              <p className="text-sm text-muted-foreground">
-                Notify when document processing finishes
-              </p>
+              <Input
+                type="number"
+                value={localSettings["security.session_timeout_minutes"] as number ?? 60}
+                onChange={(e) => handleSettingChange("security.session_timeout_minutes", parseInt(e.target.value))}
+              />
             </div>
-            <input
-              type="checkbox"
-              className="h-4 w-4"
-              checked={localSettings["notifications.processing_completed"] as boolean ?? true}
-              onChange={(e) => handleSettingChange("notifications.processing_completed", e.target.checked)}
-            />
-          </div>
-          <div className="flex items-center justify-between p-3 rounded-lg border">
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Notifications Tab */}
+        <TabsContent value="notifications" className="space-y-6">
+          {/* Notification Settings */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Bell className="h-5 w-5" />
+                Notifications
+              </CardTitle>
+              <CardDescription>Configure notification preferences</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Processing Completed</p>
+                  <p className="text-sm text-muted-foreground">
+                    Notify when document processing finishes
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={localSettings["notifications.processing_completed"] as boolean ?? true}
+                  onChange={(e) => handleSettingChange("notifications.processing_completed", e.target.checked)}
+                />
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-lg border">
             <div>
               <p className="font-medium">Processing Failed</p>
               <p className="text-sm text-muted-foreground">
@@ -1850,22 +2513,328 @@ VECTOR_STORE_BACKEND=auto`}
               className="h-4 w-4"
               checked={localSettings["notifications.cost_alerts"] as boolean ?? true}
               onChange={(e) => handleSettingChange("notifications.cost_alerts", e.target.checked)}
-            />
-          </div>
-        </CardContent>
-      </Card>
+              />
+            </div>
+            </CardContent>
+          </Card>
 
-      {/* Operation-Level LLM Configuration Card */}
-      <OperationLevelConfigCard providers={providersData?.providers || []} />
+          {/* Operation-Level LLM Configuration Card - Also in Notifications for cost alerts */}
+          <OperationLevelConfigCard providers={providersData?.providers || []} />
+        </TabsContent>
 
-      {/* LLM Usage Analytics Card */}
-      <UsageAnalyticsCard />
+        {/* Analytics Tab */}
+        <TabsContent value="analytics" className="space-y-6">
+          {/* LLM Usage Analytics Card */}
+          <UsageAnalyticsCard />
 
-      {/* Provider Health Card */}
-      <ProviderHealthCard />
+          {/* Provider Health Card */}
+          <ProviderHealthCard />
 
-      {/* Cost Alerts Card */}
-      <CostAlertsCard />
+          {/* Cost Alerts Card */}
+          <CostAlertsCard />
+        </TabsContent>
+
+        {/* OCR Configuration Tab */}
+        <TabsContent value="ocr" className="space-y-6">
+          {ocrLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : (
+            <>
+              {/* OCR Provider Selection */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Scan className="h-5 w-5" />
+                    OCR Provider Configuration
+                  </CardTitle>
+                  <CardDescription>
+                    Configure OCR engine, models, and languages for document processing
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-6">
+                  {/* Provider Selection */}
+                  <div className="space-y-2">
+                    <Label htmlFor="ocr-provider">OCR Provider</Label>
+                    <Select
+                      value={ocrData?.settings?.['ocr.provider'] as string || 'paddleocr'}
+                      onValueChange={(value) => {
+                        updateOCRSettings.mutate({ 'ocr.provider': value });
+                      }}
+                    >
+                      <SelectTrigger id="ocr-provider">
+                        <SelectValue placeholder="Select OCR provider" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="paddleocr">
+                          <div className="flex items-center gap-2">
+                            <Sparkles className="h-4 w-4" />
+                            <div>
+                              <p className="font-medium">PaddleOCR</p>
+                              <p className="text-xs text-muted-foreground">Deep learning-based, high accuracy</p>
+                            </div>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="tesseract">
+                          <div className="flex items-center gap-2">
+                            <FileText className="h-4 w-4" />
+                            <div>
+                              <p className="font-medium">Tesseract</p>
+                              <p className="text-xs text-muted-foreground">Traditional OCR, fast and lightweight</p>
+                            </div>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="auto">
+                          <div className="flex items-center gap-2">
+                            <Zap className="h-4 w-4" />
+                            <div>
+                              <p className="font-medium">Auto (Try Both)</p>
+                              <p className="text-xs text-muted-foreground">PaddleOCR with Tesseract fallback</p>
+                            </div>
+                          </div>
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* PaddleOCR Settings (conditional) */}
+                  {ocrData?.settings?.['ocr.provider'] !== 'tesseract' && (
+                    <>
+                      {/* Model Variant */}
+                      <div className="space-y-2">
+                        <Label htmlFor="ocr-variant">Model Variant</Label>
+                        <Select
+                          value={ocrData?.settings?.['ocr.paddle.variant'] as string || 'server'}
+                          onValueChange={(value) => {
+                            updateOCRSettings.mutate({ 'ocr.paddle.variant': value });
+                          }}
+                        >
+                          <SelectTrigger id="ocr-variant">
+                            <SelectValue placeholder="Select model variant" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="server">
+                              <div>
+                                <p className="font-medium">Server (Accurate)</p>
+                                <p className="text-xs text-muted-foreground">Higher accuracy, slower processing</p>
+                              </div>
+                            </SelectItem>
+                            <SelectItem value="mobile">
+                              <div>
+                                <p className="font-medium">Mobile (Fast)</p>
+                                <p className="text-xs text-muted-foreground">Faster processing, lower accuracy</p>
+                              </div>
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      {/* Languages */}
+                      <div className="space-y-2">
+                        <Label>Languages</Label>
+                        <div className="flex flex-wrap gap-2">
+                          {['en', 'de', 'fr', 'es', 'zh', 'ja', 'ko', 'ar'].map((lang) => {
+                            const labels: Record<string, string> = {
+                              en: 'English',
+                              de: 'German',
+                              fr: 'French',
+                              es: 'Spanish',
+                              zh: 'Chinese',
+                              ja: 'Japanese',
+                              ko: 'Korean',
+                              ar: 'Arabic',
+                            };
+                            const currentLanguages = (ocrData?.settings?.['ocr.paddle.languages'] as string[]) || ['en', 'de'];
+                            const isSelected = currentLanguages.includes(lang);
+
+                            return (
+                              <Button
+                                key={lang}
+                                variant={isSelected ? 'default' : 'outline'}
+                                size="sm"
+                                onClick={() => {
+                                  const newLanguages = isSelected
+                                    ? currentLanguages.filter(l => l !== lang)
+                                    : [...currentLanguages, lang];
+                                  updateOCRSettings.mutate({ 'ocr.paddle.languages': newLanguages });
+                                }}
+                              >
+                                {labels[lang]}
+                              </Button>
+                            );
+                          })}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Selected: {((ocrData?.settings?.['ocr.paddle.languages'] as string[]) || []).join(', ')}
+                        </p>
+                      </div>
+
+                      {/* Auto Download Toggle */}
+                      <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="auto-download">Auto-Download Models</Label>
+                          <p className="text-sm text-muted-foreground">
+                            Automatically download missing models on startup
+                          </p>
+                        </div>
+                        <Switch
+                          id="auto-download"
+                          checked={ocrData?.settings?.['ocr.paddle.auto_download'] as boolean || true}
+                          onCheckedChange={(checked) => {
+                            updateOCRSettings.mutate({ 'ocr.paddle.auto_download': checked });
+                          }}
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {/* Tesseract Fallback */}
+                  {ocrData?.settings?.['ocr.provider'] === 'paddleocr' && (
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label htmlFor="tesseract-fallback">Tesseract Fallback</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Fall back to Tesseract if PaddleOCR fails
+                        </p>
+                      </div>
+                      <Switch
+                        id="tesseract-fallback"
+                        checked={ocrData?.settings?.['ocr.tesseract.fallback_enabled'] as boolean || true}
+                        onCheckedChange={(checked) => {
+                          updateOCRSettings.mutate({ 'ocr.tesseract.fallback_enabled': checked });
+                        }}
+                      />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Model Management */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <HardDrive className="h-5 w-5" />
+                    Downloaded Models
+                  </CardTitle>
+                  <CardDescription>
+                    Manage PaddleOCR model downloads and storage
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {/* Model Status */}
+                  <div className="grid gap-4">
+                    <div className="flex items-center justify-between p-3 rounded-lg border">
+                      <div className="flex items-center gap-3">
+                        <Database className="h-5 w-5 text-muted-foreground" />
+                        <div>
+                          <p className="font-medium">Model Directory</p>
+                          <p className="text-sm text-muted-foreground font-mono">
+                            {ocrData?.models?.model_dir || './data/paddle_models'}
+                          </p>
+                        </div>
+                      </div>
+                      <Badge variant={ocrData?.models?.status === 'installed' ? 'default' : 'secondary'}>
+                        {ocrData?.models?.status || 'unknown'}
+                      </Badge>
+                    </div>
+
+                    <div className="flex items-center justify-between p-3 rounded-lg border">
+                      <div className="flex items-center gap-3">
+                        <HardDrive className="h-5 w-5 text-muted-foreground" />
+                        <div>
+                          <p className="font-medium">Total Size</p>
+                          <p className="text-sm text-muted-foreground">
+                            {ocrData?.models?.total_size || '0 MB'}
+                          </p>
+                        </div>
+                      </div>
+                      <Badge variant="outline">
+                        {ocrData?.models?.downloaded?.length || 0} models
+                      </Badge>
+                    </div>
+                  </div>
+
+                  {/* Downloaded Models List */}
+                  {ocrData?.models?.downloaded && ocrData.models.downloaded.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium">Model Files:</p>
+                      <div className="space-y-1 max-h-60 overflow-y-auto">
+                        {ocrData.models.downloaded.map((model, idx) => (
+                          <div
+                            key={idx}
+                            className="flex items-center justify-between p-2 rounded border text-sm"
+                          >
+                            <div className="flex items-center gap-2">
+                              <CheckCircle className="h-4 w-4 text-green-500" />
+                              <span className="font-mono text-xs">{model.name}</span>
+                            </div>
+                            <span className="text-muted-foreground text-xs">{model.size}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Download Button */}
+                  <div className="pt-4 border-t">
+                    <Button
+                      onClick={async () => {
+                        setDownloadingModels(true);
+                        setDownloadResult(null);
+                        try {
+                          const result = await downloadModels.mutateAsync({
+                            languages: (ocrData?.settings?.['ocr.paddle.languages'] as string[]) || ['en', 'de'],
+                            variant: (ocrData?.settings?.['ocr.paddle.variant'] as string) || 'server',
+                          });
+                          setDownloadResult({
+                            success: result.status === 'success',
+                            message: `Downloaded ${result.downloaded.length} languages successfully`,
+                          });
+                          refetchOCR();
+                        } catch (error) {
+                          setDownloadResult({
+                            success: false,
+                            message: getErrorMessage(error),
+                          });
+                        } finally {
+                          setDownloadingModels(false);
+                        }
+                      }}
+                      disabled={downloadingModels}
+                      className="w-full"
+                    >
+                      {downloadingModels ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Downloading Models...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="h-4 w-4 mr-2" />
+                          Download Selected Models
+                        </>
+                      )}
+                    </Button>
+
+                    {downloadResult && (
+                      <Alert className="mt-3">
+                        {downloadResult.success ? (
+                          <CheckCircle className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <AlertCircle className="h-4 w-4 text-red-500" />
+                        )}
+                        <AlertDescription>{downloadResult.message}</AlertDescription>
+                      </Alert>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          )}
+        </TabsContent>
+
+      </Tabs>
 
       {/* Unsaved Changes Warning */}
       {hasChanges && (

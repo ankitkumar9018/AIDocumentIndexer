@@ -1045,6 +1045,454 @@ async def reset_settings(
 
 
 # =============================================================================
+# OCR Settings Endpoints
+# =============================================================================
+
+class OCRSettingsResponse(BaseModel):
+    """OCR settings and model information."""
+    settings: Dict[str, Any]
+    models: Dict[str, Any]
+
+
+class OCRModelDownloadRequest(BaseModel):
+    """OCR model download request."""
+    languages: List[str] = Field(..., min_items=1, description="List of language codes")
+    variant: str = Field(default="server", pattern="^(server|mobile)$", description="Model variant")
+
+
+@router.get("/ocr/settings", response_model=OCRSettingsResponse)
+async def get_ocr_settings(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get OCR configuration and model information.
+
+    Returns:
+        - OCR settings (provider, languages, variants, etc.)
+        - Downloaded model information
+    """
+    logger.info("Fetching OCR settings", admin_id=admin.user_id)
+
+    settings_service = get_settings_service()
+    ocr_settings = await settings_service.get_settings_by_category(SettingCategory.OCR)
+
+    # Import OCR manager (lazy import to avoid circular dependencies)
+    from backend.services.ocr_manager import OCRManager
+
+    ocr_manager = OCRManager(settings_service)
+    model_info = await ocr_manager.get_model_info()
+
+    return OCRSettingsResponse(
+        settings=ocr_settings,
+        models=model_info,
+    )
+
+
+@router.patch("/ocr/settings")
+async def update_ocr_settings(
+    updates: Dict[str, Any],
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update OCR settings.
+
+    If languages change, triggers model download automatically.
+    """
+    logger.info("Updating OCR settings", admin_id=admin.user_id, updates=updates)
+
+    settings_service = get_settings_service()
+
+    # Update each setting
+    for key, value in updates.items():
+        if not key.startswith("ocr."):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid OCR setting key: {key}. Must start with 'ocr.'"
+            )
+        await settings_service.update_setting(key, value)
+
+    # If languages changed, trigger model download
+    if "ocr.paddle.languages" in updates or "ocr.paddle.variant" in updates:
+        from backend.services.ocr_manager import OCRManager
+
+        ocr_manager = OCRManager(settings_service)
+        download_result = await ocr_manager.download_models()
+
+        logger.info("Model download triggered", result=download_result)
+
+    # Log the update
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="ocr_settings",
+        changes=updates,
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    # Return updated settings
+    ocr_settings = await settings_service.get_settings_by_category(SettingCategory.OCR)
+
+    return {"status": "updated", "settings": ocr_settings}
+
+
+@router.post("/ocr/models/download")
+async def download_ocr_models(
+    download_request: OCRModelDownloadRequest,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Manually trigger OCR model download for specified languages.
+
+    This endpoint allows downloading models without changing settings.
+    """
+    logger.info(
+        "Downloading OCR models",
+        admin_id=admin.user_id,
+        languages=download_request.languages,
+        variant=download_request.variant,
+    )
+
+    from backend.services.ocr_manager import OCRManager
+
+    settings_service = get_settings_service()
+    ocr_manager = OCRManager(settings_service)
+
+    result = await ocr_manager.download_models(
+        languages=download_request.languages,
+        variant=download_request.variant,
+    )
+
+    # Log the download
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="ocr_models",
+        changes={
+            "action": "download",
+            "languages": download_request.languages,
+            "variant": download_request.variant,
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return result
+
+
+@router.get("/ocr/models/info")
+async def get_ocr_model_info(
+    admin: AdminUser,
+):
+    """
+    Get information about available and downloaded OCR models.
+
+    Returns model sizes, download status, and supported languages.
+    """
+    logger.info("Fetching OCR model info", admin_id=admin.user_id)
+
+    from backend.services.ocr_manager import OCRManager
+
+    settings_service = get_settings_service()
+    ocr_manager = OCRManager(settings_service)
+
+    model_info = await ocr_manager.get_model_info()
+
+    return model_info
+
+
+class OCRBatchDownloadRequest(BaseModel):
+    """OCR batch model download request."""
+    language_batches: List[List[str]] = Field(
+        ...,
+        min_items=1,
+        description="List of language code batches (e.g., [['en', 'de'], ['fr', 'es']])"
+    )
+    variant: str = Field(default="server", pattern="^(server|mobile)$", description="Model variant")
+
+
+@router.post("/ocr/models/download-batch")
+async def download_ocr_models_batch(
+    download_request: OCRBatchDownloadRequest,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Download OCR models in batches with progress tracking.
+
+    This endpoint allows downloading many languages without blocking for too long.
+    Useful for initial setup or bulk language additions.
+    """
+    logger.info(
+        "Downloading OCR models in batches",
+        admin_id=admin.user_id,
+        batches=download_request.language_batches,
+        variant=download_request.variant,
+    )
+
+    from backend.services.ocr_manager import OCRManager
+
+    settings_service = get_settings_service()
+    ocr_manager = OCRManager(settings_service)
+
+    result = await ocr_manager.download_models_batch(
+        language_batches=download_request.language_batches,
+        variant=download_request.variant,
+    )
+
+    # Log the batch download
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="ocr_models",
+        changes={
+            "action": "batch_download",
+            "batches": download_request.language_batches,
+            "variant": download_request.variant,
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return result
+
+
+@router.get("/ocr/models/check-updates")
+async def check_ocr_model_updates(
+    admin: AdminUser,
+):
+    """
+    Check if newer PaddleOCR models are available.
+
+    Returns:
+        - Current installed version
+        - Latest available version
+        - Update availability status
+        - Release information
+    """
+    logger.info("Checking for OCR model updates", admin_id=admin.user_id)
+
+    from backend.services.ocr_manager import OCRManager
+
+    settings_service = get_settings_service()
+    ocr_manager = OCRManager(settings_service)
+
+    update_info = await ocr_manager.check_model_updates()
+
+    return update_info
+
+
+@router.get("/ocr/models/installed")
+async def get_installed_ocr_models(
+    admin: AdminUser,
+):
+    """
+    Get detailed information about installed OCR models.
+
+    Returns comprehensive metadata including:
+        - Model names and paths
+        - File sizes
+        - Last modification dates
+        - Model versions (where available)
+    """
+    logger.info("Fetching installed OCR models info", admin_id=admin.user_id)
+
+    from backend.services.ocr_manager import OCRManager
+
+    settings_service = get_settings_service()
+    ocr_manager = OCRManager(settings_service)
+
+    installed_info = await ocr_manager.get_installed_models_info()
+
+    return installed_info
+
+
+# =============================================================================
+# OCR Metrics Endpoints
+# =============================================================================
+
+@router.get("/ocr/metrics/summary")
+async def get_ocr_metrics_summary(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    days: int = Query(7, ge=1, le=90, description="Number of days to analyze"),
+    provider: Optional[str] = Query(None, description="Filter by provider"),
+):
+    """
+    Get aggregated OCR performance metrics.
+
+    Returns summary statistics including:
+    - Total operations
+    - Success rate
+    - Average processing time
+    - Total characters processed
+    - Cost metrics
+    - Fallback usage
+    """
+    logger.info("Fetching OCR metrics summary", admin_id=admin.user_id, days=days, provider=provider)
+
+    from datetime import timedelta
+    from backend.services.ocr_metrics import OCRMetricsService
+
+    metrics_service = OCRMetricsService(db)
+
+    start_date = datetime.utcnow() - timedelta(days=days)
+    summary = await metrics_service.get_metrics_summary(
+        start_date=start_date,
+        provider=provider,
+    )
+
+    return summary
+
+
+@router.get("/ocr/metrics/by-provider")
+async def get_ocr_metrics_by_provider(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    days: int = Query(7, ge=1, le=90, description="Number of days to analyze"),
+):
+    """
+    Get OCR metrics grouped by provider.
+
+    Returns performance statistics for each OCR provider:
+    - PaddleOCR
+    - Tesseract
+    - Auto (fallback mode)
+    """
+    logger.info("Fetching OCR metrics by provider", admin_id=admin.user_id, days=days)
+
+    from datetime import timedelta
+    from backend.services.ocr_metrics import OCRMetricsService
+
+    metrics_service = OCRMetricsService(db)
+
+    start_date = datetime.utcnow() - timedelta(days=days)
+    metrics = await metrics_service.get_metrics_by_provider(
+        start_date=start_date,
+    )
+
+    return {"providers": metrics}
+
+
+@router.get("/ocr/metrics/by-language")
+async def get_ocr_metrics_by_language(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    days: int = Query(7, ge=1, le=90, description="Number of days to analyze"),
+):
+    """
+    Get OCR metrics grouped by language.
+
+    Returns usage statistics for each language:
+    - Total operations
+    - Average processing time
+    """
+    logger.info("Fetching OCR metrics by language", admin_id=admin.user_id, days=days)
+
+    from datetime import timedelta
+    from backend.services.ocr_metrics import OCRMetricsService
+
+    metrics_service = OCRMetricsService(db)
+
+    start_date = datetime.utcnow() - timedelta(days=days)
+    metrics = await metrics_service.get_metrics_by_language(
+        start_date=start_date,
+    )
+
+    return {"languages": metrics}
+
+
+@router.get("/ocr/metrics/trend")
+async def get_ocr_metrics_trend(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    days: int = Query(7, ge=1, le=30, description="Number of days to analyze"),
+    provider: Optional[str] = Query(None, description="Filter by provider"),
+):
+    """
+    Get OCR performance trend over time.
+
+    Returns daily performance metrics:
+    - Total operations per day
+    - Success rate per day
+    - Average processing time per day
+    """
+    logger.info("Fetching OCR metrics trend", admin_id=admin.user_id, days=days, provider=provider)
+
+    from backend.services.ocr_metrics import OCRMetricsService
+
+    metrics_service = OCRMetricsService(db)
+
+    trend = await metrics_service.get_performance_trend(
+        days=days,
+        provider=provider,
+    )
+
+    return {"trend": trend}
+
+
+@router.get("/ocr/metrics/recent")
+async def get_recent_ocr_operations(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    limit: int = Query(100, ge=1, le=1000, description="Number of records to retrieve"),
+    provider: Optional[str] = Query(None, description="Filter by provider"),
+):
+    """
+    Get recent OCR operations.
+
+    Returns list of recent OCR operations with full details:
+    - Provider and variant used
+    - Processing time
+    - Success status
+    - Error messages (if any)
+    - Document context
+    """
+    logger.info("Fetching recent OCR operations", admin_id=admin.user_id, limit=limit, provider=provider)
+
+    from backend.services.ocr_metrics import OCRMetricsService
+
+    metrics_service = OCRMetricsService(db)
+
+    operations = await metrics_service.get_recent_metrics(
+        limit=limit,
+        provider=provider,
+    )
+
+    # Convert to dict for JSON serialization
+    operations_data = []
+    for op in operations:
+        operations_data.append({
+            "id": str(op.id),
+            "provider": op.provider,
+            "variant": op.variant,
+            "language": op.language,
+            "processing_time_ms": op.processing_time_ms,
+            "page_count": op.page_count,
+            "character_count": op.character_count,
+            "confidence_score": op.confidence_score,
+            "success": op.success,
+            "error_message": op.error_message,
+            "fallback_used": op.fallback_used,
+            "cost_usd": op.cost_usd,
+            "created_at": op.created_at.isoformat() if op.created_at else None,
+            "document_id": str(op.document_id) if op.document_id else None,
+            "user_id": str(op.user_id) if op.user_id else None,
+        })
+
+    return {"operations": operations_data}
+
+
+# =============================================================================
 # System Health Endpoint
 # =============================================================================
 

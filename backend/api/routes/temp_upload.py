@@ -129,9 +129,9 @@ async def get_session_info(
 @router.post("/sessions/{session_id}/upload", response_model=UploadResponse)
 async def upload_temp_document(
     session_id: str,
+    user: AuthenticatedUser,
     file: UploadFile = File(...),
     create_embeddings: bool = Form(default=False),
-    user: AuthenticatedUser = Depends(),
     service: TempDocumentService = Depends(get_temp_document_service),
 ):
     """
@@ -277,9 +277,9 @@ async def delete_session(
 @router.get("/sessions/{session_id}/context")
 async def get_session_context(
     session_id: str,
+    user: AuthenticatedUser,
     query: Optional[str] = Query(None, description="Query for semantic search in large documents"),
     max_tokens: int = Query(50000, ge=1000, le=100000),
-    user: AuthenticatedUser = Depends(),
     service: TempDocumentService = Depends(get_temp_document_service),
 ):
     """

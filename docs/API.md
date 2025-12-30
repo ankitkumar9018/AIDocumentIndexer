@@ -139,10 +139,22 @@ Update document metadata.
 
 ### DELETE /documents/{document_id}
 
-Delete a document.
+Delete a document (soft delete by default).
 
 **Query Parameters:**
-- `hard_delete` (bool): Permanently delete (admin only)
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `hard_delete` | bool | false | Permanently delete document and all chunks (admin only) |
+
+**Soft Delete (default):**
+- Marks document as deleted but preserves data
+- Can be restored from Admin Settings > Database > Deleted Documents
+- Chunks remain in vector store
+
+**Hard Delete (admin only):**
+- Permanently removes document from database
+- Removes all chunks from vector store
+- Cannot be undone
 
 ### GET /documents/{document_id}/chunks
 
@@ -171,6 +183,33 @@ Search documents using semantic and keyword search.
 ### POST /documents/{document_id}/reprocess
 
 Reprocess a document.
+
+### POST /documents/{document_id}/auto-tag
+
+Automatically generate tags/collection for a document using AI analysis.
+
+**Request:**
+```json
+{
+  "max_tags": 3
+}
+```
+
+**Request Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `max_tags` | int | 3 | Maximum number of tags to generate (1-10) |
+
+**Response:**
+```json
+{
+  "document_id": "uuid",
+  "tags": ["German", "Language Learning", "Vocabulary"],
+  "collection": "German"
+}
+```
+
+The first tag is automatically set as the document's collection. Tags are merged with any existing user-defined tags.
 
 ### GET /documents/collections/list
 
@@ -216,12 +255,14 @@ Send a chat message and get a response. Supports three modes:
   "message": "What is the main topic of the Q4 report?",
   "session_id": "optional-session-id",
   "document_ids": ["doc-1", "doc-2"],
-  "collection": "optional-collection",
+  "collection_filter": "optional-collection",
+  "collection_filters": ["collection1", "collection2"],
   "search_type": "hybrid",
-  "top_k": 5,
+  "top_k": 10,
   "stream": false,
   "mode": "chat",
-  "include_collection_context": true
+  "include_collection_context": true,
+  "temp_session_id": "optional-temp-session-id"
 }
 ```
 
@@ -234,10 +275,26 @@ Send a chat message and get a response. Supports three modes:
 | `mode` | string | "chat" | Execution mode: `chat`, `general`, or `agent` |
 | `stream` | boolean | false | Enable Server-Sent Events streaming |
 | `document_ids` | array | null | Limit search to specific documents |
-| `collection` | string | null | Limit search to a collection |
+| `collection_filter` | string | null | Limit search to a single collection (backward compatible) |
+| `collection_filters` | array | null | Limit search to multiple collections |
 | `include_collection_context` | boolean | true | Include collection tags in LLM context |
 | `search_type` | string | "hybrid" | Search type: `vector`, `keyword`, `hybrid` |
-| `top_k` | int | 5 | Number of chunks to retrieve |
+| `top_k` | int | null | Number of documents to retrieve (3-25). Uses admin setting if not specified. |
+| `temp_session_id` | string | null | Temporary document session ID for quick chat |
+| `use_graph` | boolean | true | Enable GraphRAG for knowledge graph retrieval |
+| `use_agentic` | boolean | false | Enable Agentic RAG for complex multi-step queries |
+
+**Per-Query Retrieval Override:**
+
+The `top_k` parameter allows you to adjust how many documents are searched on a per-query basis:
+- If not specified (`null`), uses the admin-configured default (typically 10)
+- Range: 3-25 documents
+- Higher values = broader search, finds more potentially relevant documents
+- Lower values = faster, more focused results
+
+This is useful when:
+- Searching across many collections without filters (use higher top_k: 15-20)
+- Looking for specific information with filters applied (use lower top_k: 5-10)
 
 **General Chat Mode Example:**
 ```json
@@ -267,13 +324,21 @@ Send a chat message and get a response. Supports three modes:
       "filename": "document.pdf",
       "page_number": 5,
       "snippet": "Relevant text excerpt...",
+      "full_content": "Complete chunk content for detailed viewing...",
       "similarity": 0.92,
-      "collection": "my-collection"
+      "relevance_score": 0.88,
+      "collection": "my-collection",
+      "chunk_index": 3
     }
   ],
   "is_general_response": false,
   "confidence_score": 0.85,
   "confidence_level": "high",
+  "suggested_questions": [
+    "What other cities are important in France?",
+    "What is the population of Paris?",
+    "What landmarks are in Paris?"
+  ],
   "created_at": "2025-01-01T00:00:00Z"
 }
 ```
@@ -299,6 +364,7 @@ Stream a chat response using Server-Sent Events (SSE).
 | `content` | `{ "data": "text chunk" }` | Streaming response text |
 | `sources` | `{ "data": [{ "document_id": "...", ... }] }` | Document sources with metadata |
 | `confidence` | `{ "score": 0.85, "level": "high" }` | Confidence score for the response |
+| `suggested_questions` | `{ "questions": ["...", "..."] }` | Follow-up query suggestions |
 | `agent_step` | `{ "step": "Research", "status": "completed" }` | Agent mode step progress |
 | `done` | `{ "message_id": "uuid", "content": "full text" }` | Final message with complete content |
 | `error` | `{ "message": "error description" }` | Error during processing |
@@ -704,6 +770,101 @@ Update user role/tier (admin only).
 - `role` (string): New role
 - `access_tier` (int): New access tier
 - `is_active` (bool): Active status
+
+### GET /admin/ocr/settings
+
+Get OCR configuration and model information (admin only).
+
+**Response:**
+```json
+{
+  "settings": {
+    "ocr.provider": "paddleocr",
+    "ocr.paddle.variant": "server",
+    "ocr.paddle.languages": ["en", "de"],
+    "ocr.paddle.model_dir": "./data/paddle_models",
+    "ocr.paddle.auto_download": true,
+    "ocr.tesseract.fallback_enabled": true
+  },
+  "models": {
+    "downloaded": [
+      {
+        "name": "inference",
+        "type": ".pdiparams",
+        "size": "83.9 MB",
+        "path": "official_models/PP-OCRv5_server_det/inference.pdiparams"
+      }
+    ],
+    "total_size": "118.4 MB",
+    "model_dir": "data/paddle_models",
+    "status": "installed"
+  }
+}
+```
+
+### PATCH /admin/ocr/settings
+
+Update OCR configuration (admin only).
+
+**Request Body:**
+```json
+{
+  "ocr.provider": "paddleocr",
+  "ocr.paddle.variant": "mobile",
+  "ocr.paddle.languages": ["en", "de", "fr"]
+}
+```
+
+**Response:**
+```json
+{
+  "status": "updated",
+  "settings": { ... },
+  "download_triggered": true
+}
+```
+
+### POST /admin/ocr/models/download
+
+Download PaddleOCR models for specified languages (admin only).
+
+**Request Body:**
+```json
+{
+  "languages": ["en", "de"],
+  "variant": "server"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "downloaded": ["en", "de"],
+  "failed": [],
+  "model_info": {
+    "downloaded": [...],
+    "total_size": "118.4 MB",
+    "status": "installed"
+  }
+}
+```
+
+### GET /admin/ocr/models/info
+
+Get information about downloaded PaddleOCR models (admin only).
+
+**Response:**
+```json
+{
+  "downloaded": [...],
+  "total_size": "118.4 MB",
+  "model_dir": "data/paddle_models",
+  "status": "installed"
+}
+```
+
+**Note:** For complete OCR configuration details, see [OCR_CONFIGURATION.md](./OCR_CONFIGURATION.md).
 
 ---
 

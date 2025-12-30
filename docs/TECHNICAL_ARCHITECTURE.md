@@ -722,6 +722,181 @@ The AIDocumentIndexer API provides 197 endpoints across 11 categories. All endpo
 |---------|------|----------------|
 | **RAG Verifier** | `services/rag_verifier.py` | Self-RAG verification and confidence scoring |
 | **Query Expander** | `services/query_expander.py` | Multi-query expansion for improved recall |
+| **Knowledge Graph** | `services/knowledge_graph.py` | Entity extraction and graph-based retrieval |
+| **Agentic RAG** | `services/agentic_rag.py` | Query decomposition and ReAct loop |
+| **Multimodal RAG** | `services/multimodal_rag.py` | Image captioning and table extraction |
+| **Real-Time Indexer** | `services/realtime_indexer.py` | Incremental indexing and freshness tracking |
+
+#### GraphRAG Architecture
+
+GraphRAG enhances retrieval by building a knowledge graph from document content.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         GraphRAG Pipeline                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Document Upload                                                        │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    │
+│  │ Entity          │───▶│ Relationship    │───▶│ Graph           │    │
+│  │ Extraction      │    │ Detection       │    │ Storage         │    │
+│  │ (LLM-based)     │    │                 │    │ (PostgreSQL)    │    │
+│  └─────────────────┘    └─────────────────┘    └─────────────────┘    │
+│                                                                         │
+│  Query Time                                                             │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    │
+│  │ Entity          │───▶│ Graph           │───▶│ Hybrid          │    │
+│  │ Recognition     │    │ Traversal       │    │ Ranking         │    │
+│  │ in Query        │    │ (Multi-hop)     │    │ (Vector+Graph)  │    │
+│  └─────────────────┘    └─────────────────┘    └─────────────────┘    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Entity Types:**
+- PERSON, ORGANIZATION, LOCATION, CONCEPT, EVENT, PRODUCT, TECHNOLOGY
+
+**Relationship Types:**
+- WORKS_FOR, LOCATED_IN, PART_OF, RELATED_TO, CREATED_BY, OWNS, etc.
+
+**Database Tables:**
+- `entities` - Knowledge graph nodes with embeddings
+- `entity_mentions` - Where entities appear in chunks
+- `entity_relations` - Relationships between entities
+
+#### Agentic RAG Architecture
+
+Agentic RAG handles complex queries through iterative reasoning.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Agentic RAG Flow                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  User Query                                                             │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌─────────────────┐                                                    │
+│  │ Complexity      │──── Simple ────▶ Standard RAG                     │
+│  │ Detection       │                                                    │
+│  └────────┬────────┘                                                    │
+│           │ Complex                                                     │
+│           ▼                                                             │
+│  ┌─────────────────┐                                                    │
+│  │ Query           │     "What products does Company X sell            │
+│  │ Decomposition   │      in European markets?"                        │
+│  └────────┬────────┘                                                    │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────────────────────────┐               │
+│  │ Sub-queries:                                         │               │
+│  │  1. What products does Company X make?              │               │
+│  │  2. Which markets does Company X operate in?        │               │
+│  │  3. What is Company X's European presence?          │               │
+│  └─────────────────────────────────────────────────────┘               │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────────────────────────┐               │
+│  │            ReAct Loop (max iterations)              │               │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐            │               │
+│  │  │ Reason  │─▶│   Act   │─▶│ Observe │──┐         │               │
+│  │  └─────────┘  └─────────┘  └─────────┘  │         │               │
+│  │       ▲                                  │         │               │
+│  │       └──────────────────────────────────┘         │               │
+│  └─────────────────────────────────────────────────────┘               │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────┐                                                    │
+│  │ Synthesize      │                                                    │
+│  │ Final Answer    │                                                    │
+│  └─────────────────┘                                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Multimodal RAG Architecture
+
+Processes images and tables within documents.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       Multimodal Processing                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Document with Images/Tables                                            │
+│       │                                                                 │
+│       ├────────────────────────────────────────┐                       │
+│       │                                        │                       │
+│       ▼                                        ▼                       │
+│  ┌─────────────────┐                    ┌─────────────────┐            │
+│  │ Image           │                    │ Table           │            │
+│  │ Detection       │                    │ Detection       │            │
+│  └────────┬────────┘                    └────────┬────────┘            │
+│           │                                      │                      │
+│           ▼                                      ▼                      │
+│  ┌─────────────────┐                    ┌─────────────────┐            │
+│  │ Vision Model    │                    │ Table           │            │
+│  │ (LLaVA/GPT-4V)  │                    │ Extraction      │            │
+│  │ Captioning      │                    │ & Structuring   │            │
+│  └────────┬────────┘                    └────────┬────────┘            │
+│           │                                      │                      │
+│           ▼                                      ▼                      │
+│  ┌─────────────────────────────────────────────────────┐               │
+│  │              Text Content + Captions + Tables        │               │
+│  │                      (Unified Index)                 │               │
+│  └─────────────────────────────────────────────────────┘               │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Vision Model Priority:**
+1. Ollama (LLaVA) - Free, local
+2. OpenAI (GPT-4V) - Paid, high quality
+3. Anthropic (Claude Vision) - Paid, high quality
+
+#### Real-Time Indexer Architecture
+
+Enables incremental updates without full re-indexing.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Incremental Indexing                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Document Update                                                        │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌─────────────────┐                                                    │
+│  │ Content Hash    │──── No Change ────▶ Skip (Already Indexed)        │
+│  │ Comparison      │                                                    │
+│  └────────┬────────┘                                                    │
+│           │ Changed                                                     │
+│           ▼                                                             │
+│  ┌─────────────────┐                                                    │
+│  │ Chunk-Level     │                                                    │
+│  │ Diff Detection  │                                                    │
+│  └────────┬────────┘                                                    │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────────────────────────┐               │
+│  │  Only Update Changed Chunks:                        │               │
+│  │  - Delete removed chunks                            │               │
+│  │  - Update modified chunks                           │               │
+│  │  - Add new chunks                                   │               │
+│  │  - Preserve unchanged chunks                        │               │
+│  └─────────────────────────────────────────────────────┘               │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Freshness Tracking:**
+- `freshness_threshold_days` (30): Content aging warning
+- `stale_threshold_days` (90): Content marked as stale
+- Freshness indicators shown in UI
 
 #### RAG Verification Levels
 

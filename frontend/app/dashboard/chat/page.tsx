@@ -111,6 +111,7 @@ interface Message {
   isGeneralResponse?: boolean;
   confidenceScore?: number;  // 0-1 confidence score
   confidenceLevel?: "high" | "medium" | "low";  // Confidence level
+  suggestedQuestions?: string[];  // Follow-up question suggestions
   // Agent mode specific fields
   isAgentResponse?: boolean;  // Whether this is from agent mode
   planningDetails?: string;  // Planning phase summary
@@ -189,6 +190,8 @@ export default function ChatPage() {
   const [tempDocuments, setTempDocuments] = useState<TempDocument[]>([]);
   const [tempTotalTokens, setTempTotalTokens] = useState(0);
   const [isTempUploading, setIsTempUploading] = useState(false);
+  // Documents to search (per-query override, null = use admin setting)
+  const [topK, setTopK] = useState<number | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -524,6 +527,7 @@ export default function ChatPage() {
           agent_options: agentOptions,
           include_collection_context: includeCollectionContext,
           collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
+          top_k: topK || undefined,
         })) {
           switch (chunk.type) {
             case "session":
@@ -642,13 +646,16 @@ export default function ChatPage() {
               if (chunk.data && Array.isArray(chunk.data)) {
                 const newSources: Source[] = chunk.data.map((s: Record<string, unknown>) => {
                   const docId = (s.document_id as string) || (s.source as string) || "unknown";
+                  // Use similarity_score (original vector similarity 0-1) for display,
+                  // fallback to relevance_score (RRF score ~0.01-0.03) if not available
+                  const similarityValue = (s.similarity_score as number) || (s.score as number) || (s.relevance_score as number) || 0;
                   return {
                     documentId: docId,
                     filename: (s.document_name as string) || (s.source as string) || `Document ${docId.slice(0, 8)}`,
                     pageNumber: s.page_number as number | undefined,
                     snippet: ((s.snippet as string) || (s.content as string) || "").substring(0, 200),
                     fullContent: (s.full_content as string) || (s.content as string) || "",
-                    similarity: (s.score as number) || (s.relevance_score as number) || 0,
+                    similarity: similarityValue,
                     collection: (s.collection as string) || undefined,
                   };
                 });
@@ -666,6 +673,19 @@ export default function ChatPage() {
                 if (newSources.length > 0) {
                   setSelectedMessageId(assistantId);
                 }
+              }
+              break;
+
+            case "suggestions":
+              // Handle suggested follow-up questions
+              if (chunk.data && Array.isArray(chunk.data)) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? { ...m, suggestedQuestions: chunk.data as string[] }
+                      : m
+                  )
+                );
               }
               break;
 
@@ -694,11 +714,19 @@ export default function ChatPage() {
 
             case "done":
               setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? { ...m, isStreaming: false }
-                    : m
-                )
+                prev.map((m) => {
+                  if (m.id !== assistantId) return m;
+                  // Clean up SUGGESTED_QUESTIONS line from content if present
+                  let cleanedContent = m.content;
+                  if (cleanedContent.includes("SUGGESTED_QUESTIONS:")) {
+                    cleanedContent = cleanedContent
+                      .split("\n")
+                      .filter(line => !line.trim().startsWith("SUGGESTED_QUESTIONS:"))
+                      .join("\n")
+                      .trim();
+                  }
+                  return { ...m, content: cleanedContent, isStreaming: false };
+                })
               );
               break;
 
@@ -750,6 +778,7 @@ export default function ChatPage() {
           include_collection_context: includeCollectionContext,
           collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
           temp_session_id: tempSessionId || undefined,
+          top_k: topK || undefined,
         });
 
         // Update session ID if new
@@ -765,7 +794,9 @@ export default function ChatPage() {
             pageNumber: s.page_number,
             snippet: s.snippet,
             fullContent: s.full_content,
-            similarity: s.relevance_score,
+            // Use similarity_score (original vector similarity 0-1) for display,
+            // fallback to relevance_score (RRF score ~0.01-0.03) if not available
+            similarity: s.similarity_score ?? s.relevance_score,
             collection: s.collection,
           })) || [];
 
@@ -924,9 +955,9 @@ export default function ChatPage() {
   ];
 
   return (
-    <div className="flex h-[calc(100vh-8rem)] gap-4">
+    <div className="flex h-[calc(100vh-8rem)] gap-2 sm:gap-4 overflow-hidden">
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
           <div className="shrink-0">
@@ -935,7 +966,7 @@ export default function ChatPage() {
               Ask questions and get answers from your knowledge base
             </p>
           </div>
-          <div className="flex items-center gap-2 flex-wrap justify-end">
+          <div className="flex items-center gap-2 flex-wrap justify-end overflow-x-auto max-w-full pb-1">
             {/* Temperature Settings */}
             <Popover>
               <PopoverTrigger asChild>
@@ -975,6 +1006,62 @@ export default function ChatPage() {
                       <span className="text-muted-foreground">Current value:</span>
                       <span className="font-medium">{temperature.toFixed(2)}</span>
                     </div>
+                  </div>
+                </div>
+              </PopoverContent>
+            </Popover>
+
+            {/* Documents to Search */}
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant={topK ? "default" : "outline"}
+                  size="sm"
+                  className="gap-2"
+                  title="Documents to search per query"
+                >
+                  <FileSearch className="h-4 w-4" />
+                  <span className="text-xs sm:text-sm">{topK ? `${topK}` : ""}</span>
+                  <span className="hidden sm:inline">{topK ? "docs" : "Auto"}</span>
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-72" align="end">
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm font-medium">Documents to Search</Label>
+                      <span className="text-sm text-muted-foreground">
+                        {topK ? `${topK} documents` : "Default"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-muted-foreground w-6">3</span>
+                      <Slider
+                        value={[topK || 10]}
+                        onValueChange={(value) => setTopK(value[0])}
+                        min={3}
+                        max={25}
+                        step={1}
+                        className="flex-1"
+                      />
+                      <span className="text-xs text-muted-foreground w-6">25</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      How many documents to search for each query. Higher = broader search but slower.
+                    </p>
+                  </div>
+                  <div className="pt-2 border-t flex justify-between items-center">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setTopK(null)}
+                      className="text-xs"
+                    >
+                      Reset to Default
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      {topK ? `${topK} docs` : "Using admin setting"}
+                    </span>
                   </div>
                 </div>
               </PopoverContent>
@@ -1306,7 +1393,7 @@ export default function ChatPage() {
 
         {/* History Dropdown */}
         {showHistory && sessions && sessions.sessions?.length > 0 && (
-          <Card className="absolute z-10 top-32 right-6 w-80 p-2 shadow-lg">
+          <Card className="absolute z-10 top-24 sm:top-32 right-2 sm:right-6 w-[min(calc(100vw-1rem),20rem)] p-2 shadow-lg max-h-[60vh] overflow-hidden flex flex-col">
             <div className="flex items-center justify-between px-2 py-1 mb-2">
               <span className="text-sm font-medium text-muted-foreground">
                 Recent Conversations
@@ -1578,6 +1665,31 @@ export default function ChatPage() {
                         })()}
                       </div>
                     )}
+
+                    {/* Suggested Follow-up Questions */}
+                    {message.role === "assistant" && !message.isStreaming && message.suggestedQuestions && message.suggestedQuestions.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-muted">
+                        <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                          <Sparkles className="h-3 w-3" />
+                          Related questions
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {message.suggestedQuestions.map((question, qIndex) => (
+                            <Button
+                              key={qIndex}
+                              variant="outline"
+                              size="sm"
+                              className="h-auto py-1.5 px-3 text-xs text-left whitespace-normal"
+                              onClick={() => {
+                                setInput(question);
+                              }}
+                            >
+                              {question}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1684,7 +1796,7 @@ export default function ChatPage() {
 
             {/* Document Filter Panel */}
             {showFilters && (chatMode === "chat" || chatMode === "agent") && (
-              <div className="max-w-3xl mx-auto mb-3">
+              <div className="max-w-3xl mx-auto mb-3 max-h-48 sm:max-h-none overflow-y-auto">
                 <DocumentFilterPanel
                   collections={collectionsData?.collections || []}
                   selectedCollections={selectedCollections}
@@ -1857,21 +1969,28 @@ export default function ChatPage() {
                           </Button>
                         </div>
 
-                        <div className="flex items-center gap-2 mt-2 ml-8">
+                        <div className="flex items-center gap-2 mt-2 ml-8 flex-wrap">
                           <Badge variant="secondary" className="text-xs">
                             {group.sources.length} {group.sources.length === 1 ? 'chunk' : 'chunks'}
                           </Badge>
-                          <div className="flex items-center gap-1 flex-1">
-                            <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden max-w-20">
-                              <div
-                                className="h-full bg-primary rounded-full"
-                                style={{ width: `${group.avgSimilarity * 100}%` }}
-                              />
-                            </div>
-                            <span className="text-xs text-muted-foreground">
-                              {Math.round(group.avgSimilarity * 100)}% avg
-                            </span>
-                          </div>
+                          {group.sources[0]?.collection && (
+                            <Badge variant="outline" className="text-xs">
+                              {group.sources[0].collection}
+                            </Badge>
+                          )}
+                          <Badge
+                            variant="secondary"
+                            className={cn(
+                              "text-xs",
+                              group.avgSimilarity >= 0.8
+                                ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300"
+                                : group.avgSimilarity >= 0.5
+                                ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300"
+                                : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300"
+                            )}
+                          >
+                            {Math.round(group.avgSimilarity * 100)}% match
+                          </Badge>
                         </div>
                       </div>
 
@@ -1902,15 +2021,19 @@ export default function ChatPage() {
                                   {source.snippet}
                                 </p>
                                 <div className="flex items-center gap-2 mt-2">
-                                  <div className="flex-1 h-1 bg-muted rounded-full overflow-hidden">
-                                    <div
-                                      className="h-full bg-primary/70 rounded-full"
-                                      style={{ width: `${source.similarity * 100}%` }}
-                                    />
-                                  </div>
-                                  <span className="text-xs text-muted-foreground">
-                                    {Math.round(source.similarity * 100)}%
-                                  </span>
+                                  <Badge
+                                    variant="secondary"
+                                    className={cn(
+                                      "text-xs",
+                                      source.similarity >= 0.8
+                                        ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300"
+                                        : source.similarity >= 0.5
+                                        ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300"
+                                        : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300"
+                                    )}
+                                  >
+                                    {Math.round(source.similarity * 100)}% match
+                                  </Badge>
                                 </div>
                               </div>
                             );

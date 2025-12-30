@@ -139,6 +139,7 @@ class UniversalProcessor:
 
         # Lazy-load heavy dependencies
         self._ocr_engine = None
+        self._easyocr_engine = None
         self._pdf_processor = None
 
     def process(
@@ -507,32 +508,141 @@ class UniversalProcessor:
         if not self.enable_ocr:
             return ""
 
+        import os
+        import time
+        provider = "paddleocr"
+        fallback_used = False
+        start_time = time.time()
+        success = True
+        error_message = None
+        text = ""
+
         try:
             from paddleocr import PaddleOCR
 
             if self._ocr_engine is None:
+                # Set model cache directory from environment or use project directory default
+                default_paddle_home = os.path.join(os.getcwd(), "data", "paddle_models")
+                paddle_home = os.getenv("PADDLEX_HOME", default_paddle_home)
+                paddle_hub = os.getenv("PADDLE_HUB_HOME", os.path.join(paddle_home, "official_models"))
+
+                # Ensure directories exist
+                os.makedirs(paddle_home, exist_ok=True)
+                os.makedirs(paddle_hub, exist_ok=True)
+
+                # Set environment variables before PaddleOCR initialization
+                os.environ.setdefault("PADDLEX_HOME", paddle_home)
+                os.environ.setdefault("PADDLE_HUB_HOME", paddle_hub)
+
+                # Use HuggingFace mirror if specified
+                if os.getenv("PADDLE_PDX_MODEL_SOURCE"):
+                    os.environ["PADDLE_PDX_MODEL_SOURCE"] = os.getenv("PADDLE_PDX_MODEL_SOURCE")
+
                 # Convert Tesseract language code to PaddleOCR format
                 paddle_lang = self._convert_ocr_language(self.ocr_language)
+
+                # Initialize PaddleOCR
+                # Note: use_textline_orientation replaces deprecated use_angle_cls
+                # Disable doc preprocessing to avoid UVDoc model issues
                 self._ocr_engine = PaddleOCR(
-                    use_angle_cls=True,
+                    use_textline_orientation=True,
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
                     lang=paddle_lang,
-                    show_log=False,
+                )
+
+                logger.info(
+                    "PaddleOCR initialized",
+                    language=paddle_lang,
+                    cache_dir=paddle_home,
                 )
 
             result = self._ocr_engine.ocr(image_path, cls=True)
 
             if result and result[0]:
                 text_lines = [line[1][0] for line in result[0]]
-                return "\n".join(text_lines)
-
-            return ""
+                text = "\n".join(text_lines)
+            else:
+                text = ""
 
         except ImportError:
             logger.warning("PaddleOCR not installed, trying Tesseract")
-            return self._ocr_tesseract(image_path)
+            provider = "tesseract"
+            fallback_used = True
+            text = self._ocr_tesseract(image_path)
         except Exception as e:
-            logger.error("OCR failed", error=str(e))
-            return ""
+            logger.warning("PaddleOCR failed, falling back to Tesseract", error=str(e))
+            provider = "tesseract"
+            fallback_used = True
+            error_message = str(e)
+            try:
+                text = self._ocr_tesseract(image_path)
+            except Exception as fallback_error:
+                success = False
+                error_message = f"PaddleOCR: {str(e)}, Tesseract: {str(fallback_error)}"
+        finally:
+            # Record metrics (async operation, fire-and-forget)
+            processing_time_ms = int((time.time() - start_time) * 1000)
+            self._record_ocr_metrics(
+                provider=provider,
+                processing_time_ms=processing_time_ms,
+                success=success,
+                character_count=len(text) if text else 0,
+                error_message=error_message,
+                fallback_used=fallback_used,
+            )
+
+        return text
+
+    def _record_ocr_metrics(
+        self,
+        provider: str,
+        processing_time_ms: int,
+        success: bool,
+        character_count: int = 0,
+        error_message: str = None,
+        fallback_used: bool = False,
+    ):
+        """
+        Record OCR metrics for analytics.
+
+        This is a fire-and-forget async operation that doesn't block OCR processing.
+        """
+        try:
+            import asyncio
+            from backend.db.database import get_async_session_context
+            from backend.services.ocr_metrics import OCRMetricsService
+
+            # Convert language code to standard format
+            paddle_lang = self._convert_ocr_language(self.ocr_language)
+
+            async def record_metrics():
+                try:
+                    async with get_async_session_context() as session:
+                        metrics_service = OCRMetricsService(session)
+                        await metrics_service.record_ocr_operation(
+                            provider=provider,
+                            language=paddle_lang,
+                            processing_time_ms=processing_time_ms,
+                            success=success,
+                            character_count=character_count,
+                            error_message=error_message,
+                            fallback_used=fallback_used,
+                        )
+                except Exception as e:
+                    logger.debug("Failed to record OCR metrics", error=str(e))
+
+            # Run in background without blocking
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(record_metrics())
+            except RuntimeError:
+                # No event loop running, skip metrics
+                logger.debug("No event loop running, skipping OCR metrics")
+
+        except Exception as e:
+            # Metrics recording should never break OCR processing
+            logger.debug("Failed to record OCR metrics", error=str(e))
 
     def _ocr_tesseract(self, image_path: str) -> str:
         """Fallback OCR using Tesseract."""
@@ -555,6 +665,52 @@ class UniversalProcessor:
             return ""
         except Exception as e:
             logger.error("Tesseract OCR failed", error=str(e), language=self.ocr_language)
+            return ""
+
+    def _ocr_easyocr(self, image_path: str) -> str:
+        """OCR using EasyOCR."""
+        try:
+            import easyocr
+
+            if self._easyocr_engine is None:
+                # Map common language codes to EasyOCR format
+                lang_map = {
+                    "en": "en",
+                    "de": "de",
+                    "fr": "fr",
+                    "es": "es",
+                    "zh": "ch_sim",
+                    "ja": "ja",
+                    "ko": "ko",
+                    "ar": "ar",
+                }
+
+                # Convert Tesseract language code to EasyOCR format
+                easyocr_lang = lang_map.get(self.ocr_language, "en")
+
+                # Initialize EasyOCR Reader
+                # Use GPU if available (will fall back to CPU automatically)
+                self._easyocr_engine = easyocr.Reader([easyocr_lang], gpu=True)
+
+                logger.info("EasyOCR initialized", language=easyocr_lang)
+
+            # Perform OCR
+            result = self._easyocr_engine.readtext(image_path)
+
+            # Extract text from results
+            if result:
+                text_lines = [detection[1] for detection in result]
+                text = "\n".join(text_lines)
+            else:
+                text = ""
+
+            return text
+
+        except ImportError:
+            logger.warning("EasyOCR not installed")
+            return ""
+        except Exception as e:
+            logger.error("EasyOCR failed", error=str(e), language=self.ocr_language)
             return ""
 
     def _optimize_image_for_ocr(self, img_data: bytes) -> bytes:

@@ -16,16 +16,13 @@ from alembic import context
 
 # Import our models and database configuration
 from backend.db.models import Base
-from backend.db.database import get_database_url
+from backend.db.database import db_config
 
 # this is the Alembic Config object
 config = context.config
 
 # Set the database URL from environment
-database_url = get_database_url()
-# Convert async URL to sync for Alembic if needed
-if database_url.startswith("postgresql+asyncpg"):
-    database_url = database_url.replace("postgresql+asyncpg", "postgresql")
+database_url = db_config.sync_url
 config.set_main_option("sqlalchemy.url", database_url)
 
 # Interpret the config file for Python logging.

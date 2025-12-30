@@ -151,6 +151,7 @@ services:
     volumes:
       - ../backend:/app/backend
       - storage_data:/app/storage
+      - paddle_models:/app/data/paddle_models
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:
@@ -214,3 +215,5 @@ volumes:
     name: aidoc-ollama-data
   storage_data:
     name: aidoc-storage-data
+  paddle_models:
+    name: aidoc-paddle-models

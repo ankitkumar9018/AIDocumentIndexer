@@ -183,18 +183,29 @@ export function DocumentFilterPanel({
       {/* Active Filters Summary */}
       {hasActiveFilters && (
         <div className="p-3 border-t bg-muted/30">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs text-muted-foreground">
+              Searching {filteredDocuments} document{filteredDocuments !== 1 ? 's' : ''} from {selectedCollections.length} collection{selectedCollections.length !== 1 ? 's' : ''}
+            </span>
+          </div>
           <div className="flex flex-wrap gap-1">
-            {selectedCollections.map((collection) => (
-              <Badge
-                key={collection}
-                variant="secondary"
-                className="text-xs cursor-pointer hover:bg-destructive hover:text-destructive-foreground transition-colors"
-                onClick={() => handleCollectionToggle(collection)}
-              >
-                {collection}
-                <X className="h-3 w-3 ml-1" />
-              </Badge>
-            ))}
+            {selectedCollections.map((collection) => {
+              const collectionData = collections.find(c => c.name === collection);
+              return (
+                <Badge
+                  key={collection}
+                  variant="secondary"
+                  className="text-xs cursor-pointer hover:bg-destructive hover:text-destructive-foreground transition-colors"
+                  onClick={() => handleCollectionToggle(collection)}
+                >
+                  {collection}
+                  {collectionData && (
+                    <span className="ml-1 opacity-60">({collectionData.document_count})</span>
+                  )}
+                  <X className="h-3 w-3 ml-1" />
+                </Badge>
+              );
+            })}
           </div>
         </div>
       )}

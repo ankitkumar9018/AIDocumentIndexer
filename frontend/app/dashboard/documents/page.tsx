@@ -169,6 +169,11 @@ export default function DocumentsPage() {
   const [recentlyViewed, setRecentlyViewed] = useState<string[]>([]);
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
 
+  // Delete confirmation dialog
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [documentToDelete, setDocumentToDelete] = useState<{ id: string; name: string } | null>(null);
+  const [hardDeleteEnabled, setHardDeleteEnabled] = useState(false);
+
   // Load favorites and recently viewed from localStorage
   useEffect(() => {
     try {
@@ -310,6 +315,8 @@ export default function DocumentsPage() {
 
   // Queries - only fetch when authenticated
   const { data: documentsData, isLoading, refetch } = useDocuments({
+    page: currentPage,
+    page_size: pageSize,
     collection: selectedCollection || undefined,
     sort_by: sortBy,
     sort_order: sortOrder,
@@ -444,7 +451,7 @@ export default function DocumentsPage() {
 
   const handleDeleteSelected = async () => {
     for (const id of selectedDocuments) {
-      await deleteDocument.mutateAsync(id);
+      await deleteDocument.mutateAsync({ id, hardDelete: false });
     }
     setSelectedDocuments(new Set());
     refetch();
@@ -462,11 +469,26 @@ export default function DocumentsPage() {
   // Use real collections from API (no mock fallback)
   const collectionsList = collections?.collections?.map((c: { name: string }) => c.name) ?? [];
 
-  const handleDeleteDocument = async (docId: string, docName: string) => {
+  // Open delete confirmation dialog
+  const handleDeleteDocument = (docId: string, docName: string) => {
+    setDocumentToDelete({ id: docId, name: docName });
+    setHardDeleteEnabled(false); // Reset hard delete option
+    setDeleteDialogOpen(true);
+  };
+
+  // Confirm and execute delete
+  const confirmDeleteDocument = async () => {
+    if (!documentToDelete) return;
+
     try {
-      await deleteDocument.mutateAsync(docId);
-      toast.success("Document deleted", {
-        description: `"${docName}" has been deleted.`,
+      await deleteDocument.mutateAsync({
+        id: documentToDelete.id,
+        hardDelete: hardDeleteEnabled,
+      });
+      toast.success(hardDeleteEnabled ? "Document permanently deleted" : "Document deleted", {
+        description: hardDeleteEnabled
+          ? `"${documentToDelete.name}" has been permanently removed.`
+          : `"${documentToDelete.name}" has been deleted (can be recovered by admin).`,
       });
       refetch();
     } catch (error) {
@@ -474,6 +496,10 @@ export default function DocumentsPage() {
       toast.error("Failed to delete document", {
         description: getErrorMessage(error, "An error occurred"),
       });
+    } finally {
+      setDeleteDialogOpen(false);
+      setDocumentToDelete(null);
+      setHardDeleteEnabled(false);
     }
   };
 
@@ -1479,7 +1505,7 @@ export default function DocumentsPage() {
       <div className="grid gap-4 sm:grid-cols-3">
         <Card>
           <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{documents.length}</div>
+            <div className="text-2xl font-bold">{documentsData?.total ?? documents.length}</div>
             <p className="text-sm text-muted-foreground">Total Documents</p>
           </CardContent>
         </Card>
@@ -1575,6 +1601,72 @@ export default function DocumentsPage() {
             </Button>
             <Button onClick={handleSaveTags} disabled={isSavingTags}>
               {isSavingTags ? "Saving..." : "Save Tags"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Document</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete &quot;{documentToDelete?.name}&quot;?
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="py-4 space-y-4">
+            <div className="p-3 bg-muted rounded-lg text-sm">
+              <p className="font-medium mb-2">Delete Options:</p>
+              <ul className="list-disc list-inside space-y-1 text-muted-foreground">
+                <li><strong>Soft delete (default):</strong> Document is hidden but can be recovered by an admin</li>
+                <li><strong>Hard delete:</strong> Document is permanently removed and cannot be recovered</li>
+              </ul>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="hard-delete"
+                checked={hardDeleteEnabled}
+                onCheckedChange={(checked) => setHardDeleteEnabled(checked === true)}
+              />
+              <Label
+                htmlFor="hard-delete"
+                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+              >
+                Permanently delete (cannot be undone)
+              </Label>
+            </div>
+
+            {hardDeleteEnabled && (
+              <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg text-sm text-destructive">
+                <strong>Warning:</strong> This will permanently delete the document, its chunks, and all associated data. This action cannot be undone.
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDeleteDialogOpen(false);
+                setDocumentToDelete(null);
+                setHardDeleteEnabled(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant={hardDeleteEnabled ? "destructive" : "default"}
+              onClick={confirmDeleteDocument}
+              disabled={deleteDocument.isPending}
+            >
+              {deleteDocument.isPending
+                ? "Deleting..."
+                : hardDeleteEnabled
+                ? "Permanently Delete"
+                : "Delete"}
             </Button>
           </DialogFooter>
         </DialogContent>

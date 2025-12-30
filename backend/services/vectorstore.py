@@ -17,7 +17,7 @@ from sqlalchemy import select, text, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import async_session_context, get_async_session_factory
-from backend.db.models import Chunk, Document, AccessTier, HAS_PGVECTOR
+from backend.db.models import Chunk, Document, AccessTier, HAS_PGVECTOR, ProcessingStatus
 
 logger = structlog.get_logger(__name__)
 
@@ -47,7 +47,8 @@ class SearchResult:
     chunk_id: str
     document_id: str
     content: str
-    score: float
+    score: float  # RRF score for ranking in hybrid search
+    similarity_score: float = 0.0  # Original vector similarity (0-1) for display/confidence
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     # Document info
@@ -302,6 +303,13 @@ class VectorStore:
                 .join(AccessTier, Chunk.access_tier_id == AccessTier.id)
                 .where(AccessTier.level <= access_tier_level)
                 .where(Chunk.embedding.isnot(None))
+                # Exclude soft-deleted documents (status=FAILED with error="Deleted by user")
+                .where(
+                    ~(
+                        (Document.processing_status == ProcessingStatus.FAILED)
+                        & (Document.processing_error == "Deleted by user")
+                    )
+                )
             )
 
             # Filter by document IDs if provided
@@ -322,11 +330,13 @@ class VectorStore:
 
             results = []
             for chunk, doc, similarity in rows:
+                sim_float = float(similarity)
                 results.append(SearchResult(
                     chunk_id=str(chunk.id),
                     document_id=str(chunk.document_id),
                     content=chunk.content,
-                    score=float(similarity),
+                    score=sim_float,
+                    similarity_score=sim_float,  # Store original similarity
                     metadata={
                         "chunk_index": chunk.chunk_index,
                         "token_count": chunk.token_count,
@@ -389,6 +399,13 @@ class VectorStore:
                 .where(
                     func.to_tsvector('english', Chunk.content).op('@@')(ts_query)
                 )
+                # Exclude soft-deleted documents (status=FAILED with error="Deleted by user")
+                .where(
+                    ~(
+                        (Document.processing_status == ProcessingStatus.FAILED)
+                        & (Document.processing_error == "Deleted by user")
+                    )
+                )
             )
 
             # Filter by document IDs if provided
@@ -408,11 +425,15 @@ class VectorStore:
 
             results = []
             for chunk, doc, rank in rows:
+                # Normalize rank to 0-1 range for display (keyword ranks are typically 1-N)
+                # Use a reasonable default similarity for keyword matches
+                normalized_score = min(1.0, 1.0 / (float(rank) + 1)) if rank > 0 else 0.5
                 results.append(SearchResult(
                     chunk_id=str(chunk.id),
                     document_id=str(chunk.document_id),
                     content=chunk.content,
                     score=float(rank),
+                    similarity_score=normalized_score,  # Keyword match score for display
                     metadata={
                         "chunk_index": chunk.chunk_index,
                         "search_type": "keyword",
@@ -459,10 +480,11 @@ class VectorStore:
 
         async def _search(db: AsyncSession) -> List[SearchResult]:
             # Get documents with enhanced metadata
+            # Only include completed documents (excludes soft-deleted which are FAILED)
             base_query = (
                 select(Document)
                 .where(Document.enhanced_metadata.isnot(None))
-                .where(Document.processing_status == "completed")
+                .where(Document.processing_status == ProcessingStatus.COMPLETED)
             )
 
             # Filter by document IDs if provided
@@ -546,6 +568,7 @@ class VectorStore:
                     document_id=str(doc.id),
                     content=content,
                     score=score,
+                    similarity_score=min(score, 1.0),  # Metadata match score for display
                     metadata={
                         "search_type": "enhanced",
                         "topics": metadata.get("topics", []),
@@ -639,26 +662,27 @@ class VectorStore:
         k = 60
         scores: Dict[str, Tuple[float, SearchResult]] = {}
 
-        # Process vector results
+        # Process vector results - preserve original similarity scores
         for rank, result in enumerate(vector_results):
             rrf_score = vec_weight * (1.0 / (k + rank + 1))
+            original_similarity = result.similarity_score  # Preserve before RRF overwrites
             if result.chunk_id in scores:
-                scores[result.chunk_id] = (
-                    scores[result.chunk_id][0] + rrf_score,
-                    result,
-                )
+                existing_rrf, existing_result = scores[result.chunk_id]
+                # Keep max similarity from vector search
+                existing_result.similarity_score = max(existing_result.similarity_score, original_similarity)
+                scores[result.chunk_id] = (existing_rrf + rrf_score, existing_result)
             else:
+                # Ensure similarity_score is preserved (already set from similarity_search)
                 scores[result.chunk_id] = (rrf_score, result)
 
         # Process keyword results
         for rank, result in enumerate(keyword_results):
             rrf_score = kw_weight * (1.0 / (k + rank + 1))
             if result.chunk_id in scores:
-                scores[result.chunk_id] = (
-                    scores[result.chunk_id][0] + rrf_score,
-                    result,
-                )
+                existing_rrf, existing_result = scores[result.chunk_id]
+                scores[result.chunk_id] = (existing_rrf + rrf_score, existing_result)
             else:
+                # Keyword results don't have similarity score - leave as 0
                 scores[result.chunk_id] = (rrf_score, result)
 
         # Process enhanced metadata results
@@ -899,6 +923,7 @@ class VectorStore:
                     document_id=str(chunk.document_id),
                     content=chunk.content,
                     score=1.0,
+                    similarity_score=1.0,  # Direct document access = 100% match
                     metadata={"chunk_index": chunk.chunk_index},
                     document_title=doc.title or doc.filename,
                     document_filename=doc.filename,

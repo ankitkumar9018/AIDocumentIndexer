@@ -480,6 +480,30 @@ class DocumentPipeline:
                 num_chunks=len(chunks),
             )
 
+            # Validate: Fail if no extractable content (prevents zombie documents)
+            if result.chunk_count == 0 and result.word_count == 0:
+                logger.warning(
+                    "Document has no extractable content - marking as failed",
+                    document_id=document_id,
+                    page_count=result.page_count,
+                    file_path=file_path,
+                )
+                result.status = ProcessingStatus.FAILED
+                result.error_message = "No extractable text content found. The document may be image-based and require OCR, or it may be empty/corrupted."
+                self._update_status(document_id, ProcessingStatus.FAILED)
+
+                # Still create document record but with FAILED status so user can see it
+                await self._create_document_record(
+                    document_id=document_id,
+                    file_path=file_path,
+                    file_hash=result.file_hash,
+                    metadata=metadata or {},
+                    access_tier=access_tier,
+                    collection=collection,
+                    processing_result=result,
+                )
+                return result
+
             # Step 4: Generate embeddings
             self._update_status(document_id, ProcessingStatus.EMBEDDING)
             self._update_progress(document_id, 3, 5)
@@ -523,6 +547,12 @@ class DocumentPipeline:
             elif self.vector_store and chunks:
                 await self._index_document(document_id, chunks, result.embeddings)
 
+            # Mark as completed BEFORE creating/updating db record
+            # This ensures the document is saved with COMPLETED status
+            result.status = ProcessingStatus.COMPLETED
+            self._update_status(document_id, ProcessingStatus.COMPLETED)
+            self._update_progress(document_id, 5, 5)
+
             # Step 6: Create Document record in database (CRITICAL FIX)
             # This was the missing step - documents were processed but never recorded
             await self._create_document_record(
@@ -534,11 +564,6 @@ class DocumentPipeline:
                 collection=collection,
                 processing_result=result,
             )
-
-            # Mark as completed
-            self._update_status(document_id, ProcessingStatus.COMPLETED)
-            self._update_progress(document_id, 5, 5)
-            result.status = ProcessingStatus.COMPLETED
 
             # Track hash for deduplication
             self._processed_hashes[result.file_hash] = document_id
@@ -569,6 +594,9 @@ class DocumentPipeline:
         """
         Check if a document with the given file_hash already exists.
 
+        Excludes soft-deleted documents (those marked as FAILED with "Deleted by user" error)
+        so they don't get reactivated when a new file with the same hash is uploaded.
+
         Args:
             file_hash: SHA-256 hash of the file
 
@@ -577,7 +605,17 @@ class DocumentPipeline:
         """
         try:
             async with async_session_context() as db:
-                query = select(DocumentModel).where(DocumentModel.file_hash == file_hash)
+                # Exclude soft-deleted documents from hash lookup
+                query = (
+                    select(DocumentModel)
+                    .where(DocumentModel.file_hash == file_hash)
+                    .where(
+                        ~(
+                            (DocumentModel.processing_status == DBProcessingStatus.FAILED)
+                            & (DocumentModel.processing_error == "Deleted by user")
+                        )
+                    )
+                )
                 result = await db.execute(query)
                 existing_doc = result.scalar_one_or_none()
                 if existing_doc:
@@ -775,15 +813,16 @@ class DocumentPipeline:
                 if existing_doc:
                     # Update existing document (reactivate if soft-deleted)
                     existing_doc.filename = path.name
-                    # Preserve original_filename if it's already set and not "unknown"
+                    # Always update original_filename to the new uploaded filename
+                    # This ensures re-uploads with different names show the correct name
                     new_original_filename = metadata.get("original_filename", path.name)
-                    if not existing_doc.original_filename or existing_doc.original_filename == "unknown":
-                        existing_doc.original_filename = new_original_filename
+                    existing_doc.original_filename = new_original_filename
                     existing_doc.file_path = str(file_path)
                     existing_doc.file_size = path.stat().st_size if path.exists() else processing_result.file_size
-                    existing_doc.processing_status = DBProcessingStatus.COMPLETED
+                    # Use the actual processing status (could be FAILED if no content extracted)
+                    existing_doc.processing_status = DBProcessingStatus(processing_result.status.value)
                     existing_doc.processing_mode = self.config.processing_mode
-                    existing_doc.processing_error = None  # Clear any previous error
+                    existing_doc.processing_error = processing_result.error_message  # Preserve error message if failed
                     existing_doc.page_count = processing_result.page_count
                     existing_doc.word_count = processing_result.word_count
                     # Merge collection tag with existing tags instead of replacing
@@ -813,8 +852,10 @@ class DocumentPipeline:
                         file_path=str(file_path),
                         file_type=path.suffix.lower().lstrip("."),
                         file_size=path.stat().st_size if path.exists() else processing_result.file_size,
-                        processing_status=DBProcessingStatus.COMPLETED,
+                        # Use the actual processing status (could be FAILED if no content extracted)
+                        processing_status=DBProcessingStatus(processing_result.status.value),
                         processing_mode=self.config.processing_mode,
+                        processing_error=processing_result.error_message,  # Preserve error message if failed
                         storage_mode=StorageMode.RAG,
                         page_count=processing_result.page_count,
                         word_count=processing_result.word_count,

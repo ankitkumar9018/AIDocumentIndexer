@@ -82,12 +82,15 @@ export default function DocumentDetailPage() {
   const handleDelete = async () => {
     if (!document) return;
 
-    if (!confirm(`Are you sure you want to delete "${document.name}"?`)) {
+    const hardDelete = confirm(
+      `Are you sure you want to delete "${document.name}"?\n\nClick OK for soft delete (recoverable) or use the Documents page for permanent deletion.`
+    );
+    if (!hardDelete && !confirm(`Proceed with soft delete of "${document.name}"?`)) {
       return;
     }
 
     try {
-      await deleteDocument.mutateAsync(documentId);
+      await deleteDocument.mutateAsync({ id: documentId, hardDelete: false });
       toast.success("Document deleted");
       router.push("/dashboard/documents");
     } catch (error) {
