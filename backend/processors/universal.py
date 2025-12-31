@@ -118,6 +118,8 @@ class UniversalProcessor:
         ocr_language: str = None,  # Will use OCR_LANGUAGE env var or default
         smart_image_handling: bool = True,
         optimization_config: Optional[ImageOptimizationConfig] = None,
+        parallel_ocr: bool = True,  # Enable parallel OCR for multi-page PDFs
+        max_ocr_workers: int = 4,  # Max parallel OCR workers
     ):
         """
         Initialize the universal processor.
@@ -128,6 +130,8 @@ class UniversalProcessor:
             ocr_language: Language for OCR (uses OCR_LANGUAGE env var or defaults to 'eng')
             smart_image_handling: Optimize image quality based on content
             optimization_config: Image optimization configuration
+            parallel_ocr: Enable parallel OCR for multi-page documents
+            max_ocr_workers: Maximum number of parallel OCR workers
         """
         import os
         self.enable_ocr = enable_ocr
@@ -136,6 +140,8 @@ class UniversalProcessor:
         self.ocr_language = ocr_language or os.getenv("OCR_LANGUAGE", "eng")
         self.smart_image_handling = smart_image_handling
         self.optimization_config = optimization_config or ImageOptimizationConfig()
+        self.parallel_ocr = parallel_ocr
+        self.max_ocr_workers = max_ocr_workers
 
         # Lazy-load heavy dependencies
         self._ocr_engine = None
@@ -193,7 +199,7 @@ class UniversalProcessor:
     # =========================================================================
 
     def _process_pdf(self, file_path: str, mode: str) -> ExtractedContent:
-        """Process PDF document using PyMuPDF."""
+        """Process PDF document using PyMuPDF with optional parallel OCR."""
         try:
             import fitz  # PyMuPDF
         except ImportError:
@@ -208,17 +214,14 @@ class UniversalProcessor:
         all_text = []
         images = []
 
+        # Identify pages that need OCR
+        pages_needing_ocr = []
         for page_num, page in enumerate(doc, start=1):
-            # Extract text
             text = page.get_text()
             all_text.append(text)
 
-            # Check if page needs OCR (mostly images, little text)
             if self.enable_ocr and len(text.strip()) < 50:
-                ocr_text = self._ocr_page(page, file_size_mb)
-                if ocr_text:
-                    all_text[-1] = ocr_text
-                    text = ocr_text
+                pages_needing_ocr.append((page_num - 1, page))  # 0-indexed
 
             pages.append({
                 "page_number": page_num,
@@ -235,6 +238,27 @@ class UniversalProcessor:
                         "xref": img[0],
                     })
 
+        # Process OCR pages in parallel if there are multiple pages needing OCR
+        if pages_needing_ocr:
+            if len(pages_needing_ocr) > 1 and hasattr(self, 'parallel_ocr') and self.parallel_ocr:
+                # Use parallel OCR for multiple pages
+                ocr_results = self._ocr_pages_parallel(
+                    file_path,
+                    [idx for idx, _ in pages_needing_ocr],
+                    file_size_mb
+                )
+                for idx, ocr_text in ocr_results.items():
+                    if ocr_text:
+                        all_text[idx] = ocr_text
+                        pages[idx]["text"] = ocr_text
+            else:
+                # Sequential OCR (original behavior)
+                for idx, page in pages_needing_ocr:
+                    ocr_text = self._ocr_page(page, file_size_mb)
+                    if ocr_text:
+                        all_text[idx] = ocr_text
+                        pages[idx]["text"] = ocr_text
+
         doc.close()
 
         return ExtractedContent(
@@ -243,6 +267,7 @@ class UniversalProcessor:
                 "file_type": "pdf",
                 "file_path": file_path,
                 "file_size_mb": file_size_mb,
+                "parallel_ocr": getattr(self, 'parallel_ocr', False),
             },
             pages=pages,
             images=images,
@@ -799,6 +824,114 @@ class UniversalProcessor:
         except Exception as e:
             logger.error("Page OCR failed", error=str(e))
             return ""
+
+    def _ocr_pages_parallel(
+        self,
+        file_path: str,
+        page_indices: List[int],
+        file_size_mb: float = 0,
+    ) -> Dict[int, str]:
+        """
+        OCR multiple PDF pages in parallel using ThreadPoolExecutor.
+
+        Args:
+            file_path: Path to the PDF file
+            page_indices: List of page indices (0-based) to OCR
+            file_size_mb: File size for optimization decisions
+
+        Returns:
+            Dict mapping page index to OCR text
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import tempfile
+
+        logger.info(
+            "Starting parallel OCR",
+            file_path=file_path,
+            pages=len(page_indices),
+            max_workers=self.max_ocr_workers,
+        )
+
+        results: Dict[int, str] = {}
+
+        def ocr_single_page(page_idx: int) -> tuple:
+            """OCR a single page (runs in thread pool)."""
+            try:
+                import fitz
+
+                # Calculate zoom
+                if self.smart_image_handling:
+                    if file_size_mb > self.optimization_config.large_file_threshold_mb:
+                        zoom = self.optimization_config.large_pdf_zoom
+                    else:
+                        zoom = self.optimization_config.default_zoom
+                else:
+                    zoom = 2.0
+
+                # Open document in this thread
+                doc = fitz.open(file_path)
+                page = doc[page_idx]
+
+                # Render page to image
+                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                img_data = pix.tobytes("png")
+
+                # Apply image optimization
+                if self.smart_image_handling and self.optimization_config.compress_before_ocr:
+                    img_data = self._optimize_image_for_ocr(img_data)
+
+                # Save temp file for OCR
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                    f.write(img_data)
+                    temp_path = f.name
+
+                doc.close()
+
+                # Run OCR
+                text = self._ocr_image(temp_path)
+
+                # Clean up temp file
+                os.unlink(temp_path)
+
+                return (page_idx, text)
+
+            except Exception as e:
+                logger.error(
+                    "Parallel OCR failed for page",
+                    page_idx=page_idx,
+                    error=str(e),
+                )
+                return (page_idx, "")
+
+        # Use ThreadPoolExecutor for parallel processing
+        with ThreadPoolExecutor(max_workers=self.max_ocr_workers) as executor:
+            # Submit all OCR tasks
+            future_to_page = {
+                executor.submit(ocr_single_page, idx): idx
+                for idx in page_indices
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_page):
+                page_idx = future_to_page[future]
+                try:
+                    idx, text = future.result()
+                    results[idx] = text
+                except Exception as e:
+                    logger.error(
+                        "Parallel OCR task failed",
+                        page_idx=page_idx,
+                        error=str(e),
+                    )
+                    results[page_idx] = ""
+
+        logger.info(
+            "Parallel OCR complete",
+            pages_processed=len(results),
+            successful=sum(1 for v in results.values() if v),
+        )
+
+        return results
 
     # =========================================================================
     # Email

@@ -34,6 +34,7 @@ interface PlanStep {
   estimated_cost_usd?: number | null;
   actual_cost_usd?: number | null;
   dependencies?: string[];
+  output?: string;  // Output preview from completed step
 }
 
 interface AgentResponseSectionsProps {
@@ -106,6 +107,20 @@ export function AgentResponseSections({
   const [isThinkingOpen, setIsThinkingOpen] = useState(false);  // Collapsed by default per user preference
   const [isExecutionOpen, setIsExecutionOpen] = useState(false);
   const [isFinalOpen, setIsFinalOpen] = useState(true);
+  // Track which step outputs are expanded (all collapsed by default)
+  const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
+
+  const toggleStepOutput = (stepId: string) => {
+    setExpandedSteps((prev) => {
+      const next = new Set(prev);
+      if (next.has(stepId)) {
+        next.delete(stepId);
+      } else {
+        next.add(stepId);
+      }
+      return next;
+    });
+  };
 
   const completedSteps = executionSteps.filter(
     (s) => s.status === "completed"
@@ -244,41 +259,71 @@ export function AgentResponseSections({
                 const AgentIcon = getAgentIcon(step.agent);
                 const isCurrentStepActive =
                   currentStep !== undefined && index + 1 === currentStep;
+                const isStepExpanded = expandedSteps.has(step.step_id);
+                const hasOutput = step.output && step.output.trim().length > 0;
 
                 return (
                   <div
                     key={step.step_id}
                     className={cn(
-                      "flex items-start gap-3 p-2 rounded-md transition-colors",
+                      "rounded-md transition-colors",
                       isCurrentStepActive && "bg-primary/5 border border-primary/20",
-                      step.status === "completed" && "opacity-80"
+                      step.status === "completed" && !isStepExpanded && "opacity-80"
                     )}
                   >
-                    <div className="flex-shrink-0 mt-0.5">
-                      {getStatusIcon(step.status, isCurrentStepActive)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-xs font-medium text-muted-foreground">
-                          Step {step.step_number}
-                        </span>
-                        <Badge
-                          variant="secondary"
-                          className={cn("text-xs px-1.5 py-0", getAgentColor(step.agent))}
-                        >
-                          <AgentIcon className="h-3 w-3 mr-1" />
-                          {step.agent}
-                        </Badge>
-                      </div>
-                      <p className="text-sm text-foreground mt-0.5 line-clamp-2">
-                        {step.name || step.task}
-                      </p>
-                      {step.actual_cost_usd != null && (
-                        <span className="text-xs text-muted-foreground">
-                          Cost: ${step.actual_cost_usd.toFixed(4)}
-                        </span>
+                    <div
+                      className={cn(
+                        "flex items-start gap-3 p-2 cursor-pointer hover:bg-muted/50 rounded-md",
+                        hasOutput && "cursor-pointer"
                       )}
+                      onClick={() => hasOutput && toggleStepOutput(step.step_id)}
+                    >
+                      <div className="flex-shrink-0 mt-0.5">
+                        {getStatusIcon(step.status, isCurrentStepActive)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-medium text-muted-foreground">
+                            Step {step.step_number}
+                          </span>
+                          <Badge
+                            variant="secondary"
+                            className={cn("text-xs px-1.5 py-0", getAgentColor(step.agent))}
+                          >
+                            <AgentIcon className="h-3 w-3 mr-1" />
+                            {step.agent}
+                          </Badge>
+                          {hasOutput && (
+                            <span className="text-xs text-muted-foreground flex items-center gap-1">
+                              {isStepExpanded ? (
+                                <ChevronDown className="h-3 w-3" />
+                              ) : (
+                                <ChevronRight className="h-3 w-3" />
+                              )}
+                              Output
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-sm text-foreground mt-0.5 line-clamp-2">
+                          {step.name || step.task}
+                        </p>
+                        {step.actual_cost_usd != null && (
+                          <span className="text-xs text-muted-foreground">
+                            Cost: ${step.actual_cost_usd.toFixed(4)}
+                          </span>
+                        )}
+                      </div>
                     </div>
+                    {/* Collapsible output section with markdown rendering */}
+                    {hasOutput && isStepExpanded && (
+                      <div className="mx-2 mb-2 p-3 bg-muted/30 rounded border border-border/50 max-h-[400px] overflow-y-auto">
+                        <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {step.output}
+                          </ReactMarkdown>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}

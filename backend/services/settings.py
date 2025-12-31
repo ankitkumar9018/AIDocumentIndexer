@@ -404,6 +404,49 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         value_type=ValueType.BOOLEAN,
         description="Use GPU acceleration for EasyOCR (if available)"
     ),
+
+    # ==========================================================================
+    # Job Queue & Caching Configuration
+    # ==========================================================================
+
+    # Celery/Redis Settings
+    SettingDefinition(
+        key="queue.celery_enabled",
+        category=SettingCategory.GENERAL,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable Celery for async document processing (requires Redis)"
+    ),
+    SettingDefinition(
+        key="queue.redis_url",
+        category=SettingCategory.GENERAL,
+        default_value="redis://localhost:6379/0",
+        value_type=ValueType.STRING,
+        description="Redis connection URL for job queue and caching"
+    ),
+    SettingDefinition(
+        key="queue.max_workers",
+        category=SettingCategory.GENERAL,
+        default_value=4,
+        value_type=ValueType.NUMBER,
+        description="Maximum concurrent Celery workers"
+    ),
+
+    # Embedding Cache Settings
+    SettingDefinition(
+        key="cache.embedding_cache_enabled",
+        category=SettingCategory.GENERAL,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable embedding deduplication cache (uses Redis if available, falls back to memory)"
+    ),
+    SettingDefinition(
+        key="cache.embedding_cache_ttl_days",
+        category=SettingCategory.GENERAL,
+        default_value=7,
+        value_type=ValueType.NUMBER,
+        description="Embedding cache TTL in days"
+    ),
 ]
 
 # Build lookup dictionary

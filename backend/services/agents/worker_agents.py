@@ -68,6 +68,9 @@ class GeneratorAgent(BaseAgent):
 
     Creates documents, summaries, outlines, and other written content.
     Reuses patterns from CollaborationService generator role.
+
+    Optionally accepts RAGService for direct document context retrieval
+    when include_document_context is True in context.
     """
 
     def __init__(
@@ -76,6 +79,7 @@ class GeneratorAgent(BaseAgent):
         llm=None,
         prompt_template: Optional[PromptTemplate] = None,
         trajectory_collector=None,
+        rag_service=None,
     ):
         if prompt_template is None:
             prompt_template = PromptTemplate(
@@ -92,6 +96,13 @@ class GeneratorAgent(BaseAgent):
             trajectory_collector=trajectory_collector,
         )
 
+        self.rag_service = rag_service
+
+    def set_services(self, rag_service=None) -> None:
+        """Set service instances."""
+        if rag_service:
+            self.rag_service = rag_service
+
     async def execute(
         self,
         task: AgentTask,
@@ -102,7 +113,9 @@ class GeneratorAgent(BaseAgent):
 
         Args:
             task: Generation task
-            context: Context including prior step results, format spec
+            context: Context including prior step results, format spec.
+                     If include_document_context is True and rag_service is available,
+                     will fetch relevant documents using context_query or task description.
 
         Returns:
             AgentResult with generated content
@@ -123,6 +136,26 @@ class GeneratorAgent(BaseAgent):
 
         # Build context string from dependencies
         context_parts = []
+
+        # Optionally fetch document context directly
+        if context.get("include_document_context") and self.rag_service:
+            try:
+                query = context.get("context_query", task.description)
+                doc_results = await self._fetch_document_context(query, limit=5)
+                if doc_results:
+                    context_parts.append("Relevant Document Context:\n")
+                    for doc in doc_results:
+                        doc_name = doc.get("document_name", "Unknown")
+                        content = doc.get("content", "")[:500]
+                        context_parts.append(f"[{doc_name}]: {content}\n")
+
+                    self.record_step(
+                        action_type="document_fetch",
+                        input_data={"query": query[:100]},
+                        output_data={"result_count": len(doc_results)},
+                    )
+            except Exception as e:
+                logger.warning(f"Document context fetch failed: {e}")
 
         # Add dependency results - especially research findings
         if context.get("dependency_results"):
@@ -201,6 +234,50 @@ class GeneratorAgent(BaseAgent):
                 confidence_score=0.0,  # Failed tasks should have 0 confidence
                 trajectory_steps=self._current_trajectory,
             )
+
+    async def _fetch_document_context(
+        self,
+        query: str,
+        limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch relevant documents from RAG service.
+
+        Args:
+            query: Search query for document retrieval
+            limit: Maximum number of documents to return
+
+        Returns:
+            List of document results with content and metadata
+        """
+        if not self.rag_service:
+            return []
+
+        try:
+            results = await self.rag_service.search(
+                query=query,
+                limit=limit,
+            )
+
+            logger.info(
+                "Generator fetched document context",
+                query=query[:50],
+                result_count=len(results),
+            )
+
+            return [
+                {
+                    "document_name": r.get("document_name", "Document"),
+                    "content": r.get("content", ""),
+                    "score": r.get("score", 0),
+                    "collection": r.get("metadata", {}).get("collection") if r.get("metadata") else None,
+                }
+                for r in results
+            ]
+
+        except Exception as e:
+            logger.warning(f"Document context fetch failed: {e}")
+            return []
 
 
 # =============================================================================
@@ -992,10 +1069,14 @@ def create_worker_agents(
         name="Generator Agent",
         description="Content generation and drafting",
     )
-    workers["generator"] = GeneratorAgent(
+    generator_agent = GeneratorAgent(
         config=generator_config,
         trajectory_collector=trajectory_collector,
     )
+    # Allow Generator to access documents for context when needed
+    if rag_service:
+        generator_agent.set_services(rag_service=rag_service)
+    workers["generator"] = generator_agent
 
     # Critic Agent
     critic_config = AgentConfig(

@@ -576,22 +576,39 @@ async def _test_custom(api_key: Optional[str], base_url: str) -> Dict[str, Any]:
             return {"success": False, "error": f"Could not connect to {base_url}"}
 
 
+# Known Ollama vision model patterns for detection
+OLLAMA_VISION_MODEL_PATTERNS = [
+    "llava", "qwen2-vl", "qwen2.5-vl", "llama3.2-vision", "llama-3.2-vision",
+    "moondream", "bakllava", "minicpm-v", "cogvlm", "yi-vl", "internlm-xcomposer",
+    "phi-3-vision", "llava-llama3", "llava-phi3", "nanollava", "llava-1.6",
+]
+
+
+def _is_vision_model(model_name: str) -> bool:
+    """Check if a model is a vision/multimodal model."""
+    model_lower = model_name.lower()
+    return any(pattern in model_lower for pattern in OLLAMA_VISION_MODEL_PATTERNS)
+
+
 async def _list_ollama_models(base_url: str) -> Dict[str, Any]:
-    """List models available in Ollama."""
+    """List models available in Ollama, including vision model detection."""
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{base_url}/api/tags", timeout=10.0)
             if response.status_code == 200:
                 data = response.json()
                 models = [m["name"] for m in data.get("models", [])]
-                # Categorize models (simple heuristic)
+
+                # Categorize models
                 chat_models = [m for m in models if not m.endswith("-embed") and "embed" not in m.lower()]
                 embedding_models = [m for m in models if "embed" in m.lower()]
+                vision_models = [m for m in chat_models if _is_vision_model(m)]
 
                 return {
                     "success": True,
                     "chat_models": chat_models,
                     "embedding_models": embedding_models,
+                    "vision_models": vision_models,
                 }
             else:
                 return {"success": False, "error": f"Ollama error: {response.status_code}"}

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { getErrorMessage } from "@/lib/errors";
@@ -18,6 +19,10 @@ import {
   CheckCircle,
   XCircle,
   AlertCircle,
+  Shield,
+  Edit2,
+  Check,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,8 +34,10 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
-import { useDocument, useDeleteDocument, useReprocessDocument, api } from "@/lib/api";
+import { useDocument, useDeleteDocument, useReprocessDocument, useUpdateDocument, useAccessTiers, useDocumentChunks, api } from "@/lib/api";
+import { useUser } from "@/lib/auth";
 
 const formatFileSize = (bytes: number) => {
   if (!bytes || bytes === 0) return "0 B";
@@ -71,13 +78,31 @@ export default function DocumentDetailPage() {
   const router = useRouter();
   const { status } = useSession();
   const isAuthenticated = status === "authenticated";
+  const { user } = useUser();
 
   const documentId = params.id as string;
 
+  // State for tier editing
+  const [isEditingTier, setIsEditingTier] = useState(false);
+  const [selectedTier, setSelectedTier] = useState<number | undefined>(undefined);
+
   const { data: document, isLoading, error, refetch } = useDocument(documentId);
+  const { data: tiersData } = useAccessTiers({ enabled: isAuthenticated });
+  const { data: chunks, isLoading: chunksLoading } = useDocumentChunks(documentId, isAuthenticated && !!documentId);
+  const tiers = tiersData?.tiers ?? [];
 
   const deleteDocument = useDeleteDocument();
   const reprocessDocument = useReprocessDocument();
+  const updateDocument = useUpdateDocument();
+
+  // Get document's current tier level
+  const documentTierLevel = document?.access_tier ?? 1;
+  // Get user's tier level
+  const userTierLevel = user?.accessTier ?? 1;
+  // Can edit tier if user's tier >= document's tier
+  const canEditTier = userTierLevel >= documentTierLevel;
+  // Filter tiers to only show tiers at or below user's level
+  const availableTiers = tiers.filter((t: { id: string; name: string; level: number }) => t.level <= userTierLevel);
 
   const handleDelete = async () => {
     if (!document) return;
@@ -107,6 +132,38 @@ export default function DocumentDetailPage() {
       refetch();
     } catch (error) {
       toast.error("Failed to reprocess document", {
+        description: getErrorMessage(error, "An error occurred"),
+      });
+    }
+  };
+
+  const handleStartEditTier = () => {
+    setSelectedTier(documentTierLevel);
+    setIsEditingTier(true);
+  };
+
+  const handleCancelEditTier = () => {
+    setIsEditingTier(false);
+    setSelectedTier(undefined);
+  };
+
+  const handleSaveTier = async () => {
+    if (selectedTier === undefined || selectedTier === documentTierLevel) {
+      handleCancelEditTier();
+      return;
+    }
+
+    try {
+      await updateDocument.mutateAsync({
+        id: documentId,
+        data: { access_tier: selectedTier },
+      });
+      toast.success("Access tier updated");
+      setIsEditingTier(false);
+      setSelectedTier(undefined);
+      refetch();
+    } catch (error) {
+      toast.error("Failed to update access tier", {
         description: getErrorMessage(error, "An error occurred"),
       });
     }
@@ -327,15 +384,65 @@ export default function DocumentDetailPage() {
               </div>
             )}
 
-            {document.access_tier_name && (
-              <div className="flex items-center justify-between py-2 border-b">
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <Layers className="h-4 w-4" />
-                  <span>Access Tier</span>
-                </div>
-                <Badge variant="outline">{document.access_tier_name}</Badge>
+            {/* Access Tier - Editable */}
+            <div className="flex items-center justify-between py-2 border-b">
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Shield className="h-4 w-4" />
+                <span>Access Tier</span>
               </div>
-            )}
+              {isEditingTier ? (
+                <div className="flex items-center gap-2">
+                  <select
+                    className="h-8 px-2 rounded-md border bg-background text-sm"
+                    value={selectedTier ?? documentTierLevel}
+                    onChange={(e) => setSelectedTier(parseInt(e.target.value))}
+                  >
+                    {availableTiers
+                      .sort((a: { level: number }, b: { level: number }) => a.level - b.level)
+                      .map((tier: { id: string; name: string; level: number }) => (
+                        <option key={tier.id} value={tier.level}>
+                          {tier.name} (Level {tier.level})
+                        </option>
+                      ))}
+                  </select>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7"
+                    onClick={handleSaveTier}
+                    disabled={updateDocument.isPending}
+                  >
+                    <Check className="h-4 w-4 text-green-500" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7"
+                    onClick={handleCancelEditTier}
+                    disabled={updateDocument.isPending}
+                  >
+                    <X className="h-4 w-4 text-red-500" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline">
+                    {document?.access_tier_name || "Unknown"}
+                  </Badge>
+                  {canEditTier && (
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-7 w-7"
+                      onClick={handleStartEditTier}
+                      title="Edit access tier"
+                    >
+                      <Edit2 className="h-3 w-3 text-muted-foreground" />
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
 
             {document.tags && document.tags.length > 0 && (
               <div className="py-2">
@@ -370,6 +477,63 @@ export default function DocumentDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Document Content */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Document Content</CardTitle>
+          <CardDescription>
+            Extracted text content ({chunks?.length || 0} chunks)
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {chunksLoading ? (
+            <div className="space-y-3">
+              <Skeleton className="h-20 w-full" />
+              <Skeleton className="h-20 w-full" />
+              <Skeleton className="h-20 w-full" />
+            </div>
+          ) : chunks && chunks.length > 0 ? (
+            <ScrollArea className="h-[500px] pr-4">
+              <div className="space-y-4">
+                {chunks.map((chunk) => (
+                  <div
+                    key={chunk.id}
+                    className="p-4 bg-muted/30 rounded-lg border border-border/50"
+                  >
+                    <div className="flex items-center gap-2 mb-2">
+                      <Badge variant="secondary" className="text-xs">
+                        Chunk {chunk.chunk_index + 1}
+                      </Badge>
+                      {chunk.page_number && (
+                        <Badge variant="outline" className="text-xs">
+                          Page {chunk.page_number}
+                        </Badge>
+                      )}
+                      {chunk.token_count && (
+                        <span className="text-xs text-muted-foreground">
+                          {chunk.token_count} tokens
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                      {chunk.content}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          ) : (
+            <div className="text-center py-8 text-muted-foreground">
+              <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />
+              <p>No content chunks available</p>
+              <p className="text-xs mt-1">
+                The document may still be processing or has no extractable text.
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

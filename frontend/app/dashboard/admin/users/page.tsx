@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { getErrorMessage } from "@/lib/errors";
+import { toast } from "sonner";
 import {
   Users,
   Search,
@@ -15,6 +16,8 @@ import {
   RefreshCw,
   Loader2,
   AlertCircle,
+  Plus,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,7 +41,27 @@ import {
   useAccessTiers,
   useUpdateAdminUser,
   useAdminStats,
+  useCreateUser,
+  useUpdateAccessTier,
+  useCreateAccessTier,
+  useDeleteAccessTier,
 } from "@/lib/api/hooks";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useUser } from "@/lib/auth";
 
 const getTierIcon = (level: number) => {
@@ -52,6 +75,33 @@ export default function AdminUsersPage() {
   const [page, setPage] = useState(1);
   const { isAuthenticated, isLoading: authLoading } = useUser();
 
+  // Add User dialog state
+  const [showAddUserDialog, setShowAddUserDialog] = useState(false);
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserTierId, setNewUserTierId] = useState("");
+
+  // Configure Tier dialog state
+  const [showConfigureTierDialog, setShowConfigureTierDialog] = useState(false);
+  const [editingTier, setEditingTier] = useState<{ id: string; name: string; level: number; description: string; color: string } | null>(null);
+  const [tierName, setTierName] = useState("");
+  const [tierLevel, setTierLevel] = useState(0);
+  const [tierDescription, setTierDescription] = useState("");
+  const [tierColor, setTierColor] = useState("#6B7280");
+
+  // Change User Tier state
+  const [showChangeTierDialog, setShowChangeTierDialog] = useState(false);
+  const [changingUser, setChangingUser] = useState<{ id: string; name: string; currentTierId: string } | null>(null);
+  const [selectedNewTierId, setSelectedNewTierId] = useState("");
+
+  // Add Tier dialog state
+  const [showAddTierDialog, setShowAddTierDialog] = useState(false);
+  const [newTierName, setNewTierName] = useState("");
+  const [newTierLevel, setNewTierLevel] = useState(50);
+  const [newTierDescription, setNewTierDescription] = useState("");
+  const [newTierColor, setNewTierColor] = useState("#6B7280");
+
   // Real API calls - only fetch when authenticated
   const { data: usersData, isLoading: usersLoading, error: usersError, refetch: refetchUsers } = useAdminUsers({
     page,
@@ -62,6 +112,10 @@ export default function AdminUsersPage() {
   const { data: tiersData, isLoading: tiersLoading } = useAccessTiers({ enabled: isAuthenticated });
   const { data: statsData, isLoading: statsLoading } = useAdminStats({ enabled: isAuthenticated });
   const updateUser = useUpdateAdminUser();
+  const createUser = useCreateUser();
+  const updateTier = useUpdateAccessTier();
+  const createTier = useCreateAccessTier();
+  const deleteTier = useDeleteAccessTier();
 
   const users = usersData?.users ?? [];
   const tiers = tiersData?.tiers ?? [];
@@ -85,6 +139,153 @@ export default function AdminUsersPage() {
     }
   };
 
+  // Add User handlers
+  const handleOpenAddUser = () => {
+    setNewUserEmail("");
+    setNewUserPassword("");
+    setNewUserName("");
+    setNewUserTierId(tiers[0]?.id || "");
+    setShowAddUserDialog(true);
+  };
+
+  const handleCreateUser = async () => {
+    if (!newUserEmail || !newUserPassword || !newUserTierId) return;
+    try {
+      await createUser.mutateAsync({
+        email: newUserEmail,
+        password: newUserPassword,
+        name: newUserName || undefined,
+        access_tier_id: newUserTierId,
+      });
+      setShowAddUserDialog(false);
+      toast.success("User created successfully");
+      refetchUsers();
+    } catch (err: unknown) {
+      console.error("Failed to create user:", err);
+      toast.error("Failed to create user", {
+        description: getErrorMessage(err),
+      });
+    }
+  };
+
+  // Configure Tier handlers
+  const handleOpenConfigureTier = (tier: typeof tiers[0]) => {
+    setEditingTier({
+      id: tier.id,
+      name: tier.name,
+      level: tier.level,
+      description: tier.description || "",
+      color: tier.color || "#6B7280",
+    });
+    setTierName(tier.name);
+    setTierLevel(tier.level);
+    setTierDescription(tier.description || "");
+    setTierColor(tier.color || "#6B7280");
+    setShowConfigureTierDialog(true);
+  };
+
+  const handleUpdateTier = async () => {
+    if (!editingTier) return;
+    try {
+      await updateTier.mutateAsync({
+        tierId: editingTier.id,
+        data: {
+          name: tierName,
+          level: tierLevel,
+          description: tierDescription || undefined,
+          color: tierColor,
+        },
+      });
+      setShowConfigureTierDialog(false);
+      toast.success("Access tier updated successfully");
+    } catch (err: unknown) {
+      console.error("Failed to update tier:", err);
+      toast.error("Failed to update tier", {
+        description: getErrorMessage(err),
+      });
+    }
+  };
+
+  // Change User Tier handlers
+  const handleOpenChangeTier = (user: typeof users[0]) => {
+    setChangingUser({
+      id: user.id,
+      name: user.name || user.email,
+      currentTierId: user.access_tier_id,
+    });
+    setSelectedNewTierId(user.access_tier_id);
+    setShowChangeTierDialog(true);
+  };
+
+  const handleChangeUserTier = async () => {
+    if (!changingUser || !selectedNewTierId) return;
+    try {
+      await updateUser.mutateAsync({
+        userId: changingUser.id,
+        data: { access_tier_id: selectedNewTierId },
+      });
+      setShowChangeTierDialog(false);
+      toast.success("User tier updated successfully");
+      refetchUsers();
+    } catch (err: unknown) {
+      console.error("Failed to change user tier:", err);
+      toast.error("Failed to change user tier", {
+        description: getErrorMessage(err),
+      });
+    }
+  };
+
+  // Add Tier handlers
+  const handleOpenAddTier = () => {
+    setNewTierName("");
+    setNewTierLevel(50);
+    setNewTierDescription("");
+    setNewTierColor("#6B7280");
+    setShowAddTierDialog(true);
+  };
+
+  const handleCreateTier = async () => {
+    if (!newTierName) return;
+    try {
+      await createTier.mutateAsync({
+        name: newTierName,
+        level: newTierLevel,
+        description: newTierDescription || undefined,
+        color: newTierColor,
+      });
+      setShowAddTierDialog(false);
+      toast.success("Access tier created successfully");
+    } catch (err: unknown) {
+      console.error("Failed to create tier:", err);
+      toast.error("Failed to create tier", {
+        description: getErrorMessage(err),
+      });
+    }
+  };
+
+  const handleDeleteTier = async (tierId: string, tierName: string, userCount: number) => {
+    if (userCount > 0) {
+      toast.error("Cannot delete tier", {
+        description: `${tierName} has ${userCount} users. Reassign users first.`,
+      });
+      return;
+    }
+
+    if (!confirm(`Are you sure you want to delete the "${tierName}" tier? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      await deleteTier.mutateAsync(tierId);
+      toast.success("Access tier deleted successfully");
+    } catch (err: unknown) {
+      console.error("Failed to delete tier:", err);
+      toast.error("Failed to delete tier", {
+        description: getErrorMessage(err),
+      });
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -99,7 +300,7 @@ export default function AdminUsersPage() {
           <Button variant="outline" size="icon" onClick={() => refetchUsers()}>
             <RefreshCw className={`h-4 w-4 ${usersLoading ? "animate-spin" : ""}`} />
           </Button>
-          <Button disabled>
+          <Button onClick={handleOpenAddUser}>
             <UserPlus className="h-4 w-4 mr-2" />
             Add User
           </Button>
@@ -304,7 +505,7 @@ export default function AdminUsersPage() {
                               {user.is_active ? "Deactivate User" : "Activate User"}
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
-                            <DropdownMenuItem disabled className="text-muted-foreground">
+                            <DropdownMenuItem onClick={() => handleOpenChangeTier(user)}>
                               Change Access Tier
                             </DropdownMenuItem>
                           </DropdownMenuContent>
@@ -348,9 +549,15 @@ export default function AdminUsersPage() {
 
       {/* Access Tiers */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Access Tiers</CardTitle>
-          <CardDescription>Document access permissions by tier</CardDescription>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div>
+            <CardTitle className="text-lg">Access Tiers</CardTitle>
+            <CardDescription>Document access permissions by tier</CardDescription>
+          </div>
+          <Button size="sm" onClick={handleOpenAddTier}>
+            <Plus className="h-4 w-4 mr-2" />
+            Add Tier
+          </Button>
         </CardHeader>
         <CardContent>
           {tiersLoading ? (
@@ -384,13 +591,22 @@ export default function AdminUsersPage() {
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-4">
-                      <div className="text-right text-sm">
+                    <div className="flex items-center gap-2">
+                      <div className="text-right text-sm mr-2">
                         <p className="font-medium">{tier.user_count} users</p>
                         <p className="text-muted-foreground">{tier.document_count} docs</p>
                       </div>
-                      <Button variant="outline" size="sm" disabled>
+                      <Button variant="outline" size="sm" onClick={() => handleOpenConfigureTier(tier)}>
                         Configure
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8 text-red-500 hover:text-red-600 hover:bg-red-50"
+                        onClick={() => handleDeleteTier(tier.id, tier.name, tier.user_count)}
+                        disabled={deleteTier.isPending}
+                      >
+                        <Trash2 className="h-4 w-4" />
                       </Button>
                     </div>
                   </div>
@@ -399,6 +615,257 @@ export default function AdminUsersPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Add User Dialog */}
+      <Dialog open={showAddUserDialog} onOpenChange={setShowAddUserDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add New User</DialogTitle>
+            <DialogDescription>
+              Create a new user account with specified access tier.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="email">Email *</Label>
+              <Input
+                id="email"
+                type="email"
+                placeholder="user@example.com"
+                value={newUserEmail}
+                onChange={(e) => setNewUserEmail(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="password">Password *</Label>
+              <Input
+                id="password"
+                type="password"
+                placeholder="Enter password"
+                value={newUserPassword}
+                onChange={(e) => setNewUserPassword(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="name">Name</Label>
+              <Input
+                id="name"
+                placeholder="John Doe"
+                value={newUserName}
+                onChange={(e) => setNewUserName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="tier">Access Tier *</Label>
+              <Select value={newUserTierId} onValueChange={setNewUserTierId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select tier" />
+                </SelectTrigger>
+                <SelectContent>
+                  {tiers.map((tier) => (
+                    <SelectItem key={tier.id} value={tier.id}>
+                      {tier.name} (Level {tier.level})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowAddUserDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreateUser}
+              disabled={!newUserEmail || !newUserPassword || !newUserTierId || createUser.isPending}
+            >
+              {createUser.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Create User
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Configure Tier Dialog */}
+      <Dialog open={showConfigureTierDialog} onOpenChange={setShowConfigureTierDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Configure Access Tier</DialogTitle>
+            <DialogDescription>
+              Update the tier settings. Changes affect all users with this tier.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="tierName">Name</Label>
+              <Input
+                id="tierName"
+                value={tierName}
+                onChange={(e) => setTierName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="tierLevel">Level (0-100)</Label>
+              <Input
+                id="tierLevel"
+                type="number"
+                min={0}
+                max={100}
+                value={tierLevel}
+                onChange={(e) => setTierLevel(parseInt(e.target.value) || 0)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="tierDescription">Description</Label>
+              <Input
+                id="tierDescription"
+                placeholder="Tier description..."
+                value={tierDescription}
+                onChange={(e) => setTierDescription(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="tierColor">Color</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="tierColor"
+                  type="color"
+                  className="w-12 h-10 p-1"
+                  value={tierColor}
+                  onChange={(e) => setTierColor(e.target.value)}
+                />
+                <Input
+                  value={tierColor}
+                  onChange={(e) => setTierColor(e.target.value)}
+                  placeholder="#6B7280"
+                />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowConfigureTierDialog(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleUpdateTier} disabled={!tierName || updateTier.isPending}>
+              {updateTier.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Change User Tier Dialog */}
+      <Dialog open={showChangeTierDialog} onOpenChange={setShowChangeTierDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Change Access Tier</DialogTitle>
+            <DialogDescription>
+              Change access tier for {changingUser?.name}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>New Access Tier</Label>
+              <Select value={selectedNewTierId} onValueChange={setSelectedNewTierId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select tier" />
+                </SelectTrigger>
+                <SelectContent>
+                  {tiers.map((tier) => (
+                    <SelectItem key={tier.id} value={tier.id}>
+                      {tier.name} (Level {tier.level})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowChangeTierDialog(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleChangeUserTier} disabled={!selectedNewTierId || updateUser.isPending}>
+              {updateUser.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Update Tier
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Tier Dialog */}
+      <Dialog open={showAddTierDialog} onOpenChange={setShowAddTierDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add New Access Tier</DialogTitle>
+            <DialogDescription>
+              Create a new access tier for controlling document permissions.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="newTierName">Name *</Label>
+              <Input
+                id="newTierName"
+                placeholder="e.g., Manager, Viewer, Premium"
+                value={newTierName}
+                onChange={(e) => setNewTierName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="newTierLevel">Level (0-100) *</Label>
+              <Input
+                id="newTierLevel"
+                type="number"
+                min={0}
+                max={100}
+                value={newTierLevel}
+                onChange={(e) => setNewTierLevel(parseInt(e.target.value) || 0)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Higher levels can access documents from lower levels
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="newTierDescription">Description</Label>
+              <Input
+                id="newTierDescription"
+                placeholder="Tier description..."
+                value={newTierDescription}
+                onChange={(e) => setNewTierDescription(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="newTierColor">Color</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="newTierColor"
+                  type="color"
+                  className="w-12 h-10 p-1"
+                  value={newTierColor}
+                  onChange={(e) => setNewTierColor(e.target.value)}
+                />
+                <Input
+                  value={newTierColor}
+                  onChange={(e) => setNewTierColor(e.target.value)}
+                  placeholder="#6B7280"
+                />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowAddTierDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreateTier}
+              disabled={!newTierName || createTier.isPending}
+            >
+              {createTier.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Create Tier
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

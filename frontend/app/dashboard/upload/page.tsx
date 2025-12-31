@@ -33,6 +33,7 @@ import {
   Wifi,
   WifiOff,
   Sparkles,
+  Shield,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -59,6 +60,7 @@ import {
   useCancelProcessing,
   useRetryProcessing,
   useSupportedFileTypes,
+  useAccessTiers,
   ProcessingStatus,
 } from "@/lib/api";
 
@@ -128,11 +130,14 @@ export default function UploadPage() {
     detect_duplicates: true,
     auto_generate_tags: false,
     processing_mode: "smart" as "full" | "smart" | "text_only",
+    access_tier: undefined as number | undefined,
   });
 
   // Queries - only fetch when authenticated
   const { data: queue, isLoading: queueLoading, refetch: refetchQueue } = useProcessingQueue({ enabled: isAuthenticated });
   const { data: supportedTypes } = useSupportedFileTypes();
+  const { data: tiersData } = useAccessTiers({ enabled: isAuthenticated });
+  const tiers = tiersData?.tiers ?? [];
 
   // Mutations
   const uploadFile = useUploadFile();
@@ -464,6 +469,36 @@ export default function UploadPage() {
                 value={collection}
                 onChange={(e) => setCollection(e.target.value)}
               />
+            </div>
+
+            {/* Access Tier Selection */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium flex items-center gap-2">
+                <Shield className="h-4 w-4 text-muted-foreground" />
+                Access Tier
+              </label>
+              <select
+                className="w-full h-10 px-3 rounded-md border bg-background text-sm"
+                value={processingOptions.access_tier ?? ""}
+                onChange={(e) =>
+                  setProcessingOptions((prev) => ({
+                    ...prev,
+                    access_tier: e.target.value ? parseInt(e.target.value) : undefined,
+                  }))
+                }
+              >
+                <option value="">Default (lowest tier)</option>
+                {tiers
+                  .sort((a: { level: number }, b: { level: number }) => a.level - b.level)
+                  .map((tier: { id: string; name: string; level: number }) => (
+                    <option key={tier.id} value={tier.level}>
+                      {tier.name} (Level {tier.level})
+                    </option>
+                  ))}
+              </select>
+              <p className="text-xs text-muted-foreground">
+                Set the minimum access level required to view this document
+              </p>
             </div>
 
             {/* Processing Options */}

@@ -594,6 +594,59 @@ class ChatMessage(Base, UUIDMixin):
         return f"<ChatMessage(role='{self.role}', content='{self.content[:50]}...')>"
 
 
+class ChatFeedback(Base, UUIDMixin, TimestampMixin):
+    """
+    Store user feedback on chat responses for quality improvement.
+
+    Links to agent trajectories when feedback is for agent-mode responses,
+    enabling the prompt optimization system to learn from user preferences.
+    """
+    __tablename__ = "chat_feedback"
+
+    # Message identification
+    message_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("chat_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Feedback data
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-5 scale
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Context
+    mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # chat, general, agent
+
+    # Link to agent trajectory (for agent mode responses)
+    trajectory_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("agent_trajectories.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User")
+    session: Mapped[Optional["ChatSession"]] = relationship("ChatSession")
+    trajectory: Mapped[Optional["AgentTrajectory"]] = relationship("AgentTrajectory")
+
+    __table_args__ = (
+        Index("idx_chat_feedback_message", "message_id"),
+        Index("idx_chat_feedback_user", "user_id"),
+        Index("idx_chat_feedback_rating", "rating"),
+        Index("idx_chat_feedback_created", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ChatFeedback(message_id='{self.message_id}', rating={self.rating})>"
+
+
 class AuditLog(Base, UUIDMixin):
     """
     Audit log for tracking user actions.

@@ -78,7 +78,6 @@ import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { AgentModeToggle } from "@/components/agent-mode-toggle";
 import { CostApprovalDialog } from "@/components/cost-approval-dialog";
 import { AgentExecutionProgress } from "@/components/agent-execution-progress";
 import { AgentResponseSections } from "@/components/agent-response-sections";
@@ -88,7 +87,80 @@ import { VoiceInput } from "@/components/chat/voice-input";
 import { TextToSpeech } from "@/components/chat/text-to-speech";
 import { VoiceConversationIndicator, type VoiceState } from "@/components/chat/voice-conversation-indicator";
 import { TempDocumentPanel } from "@/components/chat/temp-document-panel";
+import { ImageUploadCompact, ImagePreviewBar } from "@/components/chat/image-upload";
 import { api, type PlanStep, type ExecutionMode } from "@/lib/api/client";
+
+/**
+ * Highlights matching query terms in text for source snippets.
+ * Returns React nodes with highlighted terms wrapped in <mark> tags.
+ */
+function highlightQueryTerms(text: string, query?: string): React.ReactNode {
+  if (!query || !text) {
+    return text;
+  }
+
+  // English stop words to ignore - keep domain-specific terms
+  const stopWords = new Set([
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "must", "shall", "can", "need",
+    "to", "of", "in", "for", "on", "with", "at", "by",
+    "from", "as", "into", "through", "during", "before", "after",
+    "then", "once", "here", "there", "when", "where", "why", "how",
+    "all", "each", "few", "more", "most", "other", "some", "such",
+    "no", "nor", "not", "only", "own", "same", "so", "than", "too",
+    "very", "just", "and", "but", "if", "or", "because", "until", "while",
+    "about", "what", "which", "who", "this", "that", "these", "those",
+  ]);
+
+  // Extract words from query - keep words 2+ chars that aren't stopwords
+  // Also preserve punctuation-attached words like "German?" -> "german"
+  const queryWords = query
+    .toLowerCase()
+    .replace(/[?!.,;:'"]/g, "") // Remove punctuation
+    .split(/\s+/)
+    .filter(word => word.length >= 2 && !stopWords.has(word))
+    .map(word => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")); // Escape regex special chars
+
+  if (queryWords.length === 0) {
+    return text;
+  }
+
+  // Check if query contains non-ASCII characters (German ä, ö, ü, etc.)
+  // \b word boundary doesn't work with Unicode - use simple matching instead
+  const hasNonAscii = queryWords.some(w => /[^\x00-\x7F]/.test(w));
+
+  try {
+    // Create pattern - for non-ASCII languages, match anywhere
+    // For ASCII, use word boundaries for precise matching
+    const pattern = hasNonAscii
+      ? new RegExp(`(${queryWords.join("|")})`, "gi")
+      : new RegExp(`\\b(${queryWords.join("|")})\\b`, "gi");
+
+    const parts = text.split(pattern);
+
+    return parts.map((part, index) => {
+      // Check if this part matches any query word (case-insensitive)
+      const isMatch = queryWords.some(word =>
+        part.toLowerCase() === word.toLowerCase()
+      );
+      if (isMatch) {
+        return (
+          <mark
+            key={index}
+            className="bg-yellow-300 dark:bg-yellow-600 text-black dark:text-yellow-100 px-0.5 rounded font-medium"
+          >
+            {part}
+          </mark>
+        );
+      }
+      return part;
+    });
+  } catch {
+    // If regex fails, return plain text
+    return text;
+  }
+}
 
 // Temp document interface matching backend response
 interface TempDocument {
@@ -99,6 +171,15 @@ interface TempDocument {
   file_type: string;
   has_chunks: boolean;
   has_embeddings: boolean;
+}
+
+// Image attachment for vision chat
+interface ImageAttachment {
+  id: string;
+  data: string;
+  mimeType: string;
+  name: string;
+  preview: string;
 }
 
 interface Message {
@@ -153,7 +234,10 @@ export default function ChatPage() {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [temperature, setTemperature] = useState<number>(0.7);
   const [agentExecutionMode, setAgentExecutionMode] = useState<ExecutionMode>("agent");
-  const [chatMode, setChatMode] = useState<"chat" | "general" | "agent">("chat");
+  // Source mode: documents (RAG search) vs general (no document search)
+  const [sourceMode, setSourceMode] = useState<"documents" | "general">("documents");
+  // Agent mode: enable multi-agent orchestration (can be combined with either source mode)
+  const [agentEnabled, setAgentEnabled] = useState(false);
   // Agent mode options - user-configurable settings for agent execution
   const [agentOptions, setAgentOptions] = useState({
     search_documents: true,      // Force search uploaded documents first
@@ -192,6 +276,8 @@ export default function ChatPage() {
   const [isTempUploading, setIsTempUploading] = useState(false);
   // Documents to search (per-query override, null = use admin setting)
   const [topK, setTopK] = useState<number | null>(null);
+  // Image attachments for vision mode
+  const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -475,10 +561,14 @@ export default function ChatPage() {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
 
+    // Capture current images before clearing
+    const imagesToSend = [...attachedImages];
+    const hasImages = imagesToSend.length > 0;
+
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
-      content: input.trim(),
+      content: hasImages ? `[Image${imagesToSend.length > 1 ? 's' : ''} attached] ${input.trim()}` : input.trim(),
       timestamp: new Date(),
     };
 
@@ -486,6 +576,7 @@ export default function ChatPage() {
     const messageText = input.trim();
     setLastUserQuery(messageText); // Track the last user query for source highlighting
     setInput("");
+    setAttachedImages([]); // Clear attached images after sending
     setIsLoading(true);
 
     // Update voice state when submitting in voice mode
@@ -494,11 +585,18 @@ export default function ChatPage() {
     }
 
     // Reset agent state when starting new request
-    if (chatMode === "agent") {
+    if (agentEnabled) {
       setAgentSteps([]);
       setCurrentAgentStep(0);
       setIsAgentExecuting(false);
     }
+
+    // Compute API mode from combined state
+    const apiMode = agentEnabled
+      ? "agent"
+      : sourceMode === "documents"
+        ? "chat"
+        : "general";
 
     // Add streaming assistant message
     const assistantId = (Date.now() + 1).toString();
@@ -516,7 +614,7 @@ export default function ChatPage() {
 
     try {
       // Use streaming for agent mode to receive real-time updates
-      if (chatMode === "agent") {
+      if (agentEnabled) {
         const { api } = await import("@/lib/api/client");
         let streamContent = "";
 
@@ -524,7 +622,10 @@ export default function ChatPage() {
           message: messageText,
           session_id: currentSessionId || undefined,
           mode: "agent",
-          agent_options: agentOptions,
+          agent_options: {
+            ...agentOptions,
+            search_documents: sourceMode === "documents", // Sync with source mode
+          },
           include_collection_context: includeCollectionContext,
           collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
           top_k: topK || undefined,
@@ -606,21 +707,27 @@ export default function ChatPage() {
 
             case "step_completed":
               if (chunk.step_index !== undefined) {
+                // Use full_output if available, fallback to output_preview
+                const stepOutput = chunk.full_output || chunk.output_preview;
                 setAgentSteps((prev) => {
                   const updated = [...prev];
                   if (updated[chunk.step_index!]) {
-                    updated[chunk.step_index!] = { ...updated[chunk.step_index!], status: "completed" };
+                    updated[chunk.step_index!] = {
+                      ...updated[chunk.step_index!],
+                      status: "completed",
+                      output: stepOutput,
+                    };
                   }
                   return updated;
                 });
-                // Update message with completed steps
+                // Update message with completed steps and output
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === assistantId
                       ? {
                           ...m,
                           executionSteps: prev.find(msg => msg.id === assistantId)?.executionSteps?.map((step, idx) =>
-                            idx === chunk.step_index ? { ...step, status: "completed" as const } : step
+                            idx === chunk.step_index ? { ...step, status: "completed" as const, output: stepOutput } : step
                           )
                         }
                       : m
@@ -653,7 +760,7 @@ export default function ChatPage() {
                     documentId: docId,
                     filename: (s.document_name as string) || (s.source as string) || `Document ${docId.slice(0, 8)}`,
                     pageNumber: s.page_number as number | undefined,
-                    snippet: ((s.snippet as string) || (s.content as string) || "").substring(0, 200),
+                    snippet: ((s.snippet as string) || (s.content as string) || "").substring(0, 500),
                     fullContent: (s.full_content as string) || (s.content as string) || "",
                     similarity: similarityValue,
                     collection: (s.collection as string) || undefined,
@@ -771,15 +878,26 @@ export default function ChatPage() {
         }
       } else {
         // Use non-streaming for documents/general mode
-        const response = await sendMessage.mutateAsync({
+        // Prepare request with optional image attachments
+        const requestPayload: Parameters<typeof sendMessage.mutateAsync>[0] = {
           message: messageText,
           session_id: currentSessionId || undefined,
-          mode: chatMode,
+          mode: hasImages ? "vision" : apiMode, // Use vision mode if images attached, otherwise computed mode
           include_collection_context: includeCollectionContext,
           collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
           temp_session_id: tempSessionId || undefined,
           top_k: topK || undefined,
-        });
+        };
+
+        // Add images if present
+        if (hasImages) {
+          (requestPayload as unknown as Record<string, unknown>).images = imagesToSend.map((img) => ({
+            data: img.data,
+            mime_type: img.mimeType,
+          }));
+        }
+
+        const response = await sendMessage.mutateAsync(requestPayload);
 
         // Update session ID if new
         if (response.session_id && !currentSessionId) {
@@ -943,10 +1061,6 @@ export default function ChatPage() {
     }
   };
 
-  const handleModeChange = (mode: ExecutionMode) => {
-    setAgentExecutionMode(mode);
-  };
-
   const suggestedQuestions = [
     "What were our main achievements last quarter?",
     "Show me past stadium activation ideas",
@@ -1067,13 +1181,6 @@ export default function ChatPage() {
               </PopoverContent>
             </Popover>
 
-            {/* Agent Mode Toggle */}
-            <AgentModeToggle
-              sessionId={currentSessionId || undefined}
-              showLabel={false}
-              onModeChange={handleModeChange}
-            />
-
             {/* Voice Mode Toggle */}
             <Button
               variant={voiceModeEnabled ? "default" : "outline"}
@@ -1100,8 +1207,8 @@ export default function ChatPage() {
               <VoiceConversationIndicator state={voiceState} />
             )}
 
-            {/* Agent Options Popover - Only show when in agent mode */}
-            {chatMode === "agent" && (
+            {/* Agent Options Popover - Only show when agent mode is enabled */}
+            {agentEnabled && (
               <Popover>
                 <PopoverTrigger asChild>
                   <Button variant="outline" size="sm" className="gap-2">
@@ -1704,17 +1811,17 @@ export default function ChatPage() {
                   </Avatar>
                   <div className="bg-muted rounded-lg px-4 py-3">
                     <div className="flex items-center gap-2">
-                      {chatMode === "agent" ? (
+                      {agentEnabled ? (
                         <Bot className="h-4 w-4 animate-pulse" />
                       ) : (
                         <Search className="h-4 w-4 animate-pulse" />
                       )}
                       <span className="text-sm text-muted-foreground">
-                        {chatMode === "agent"
+                        {agentEnabled
                           ? isAgentExecuting && agentSteps.length > 0
                             ? `Executing step ${(currentAgentStep ?? 0) + 1}/${agentSteps.length}: ${agentSteps[currentAgentStep ?? 0]?.name || "Processing..."}`
                             : "Agents planning task..."
-                          : chatMode === "general"
+                          : sourceMode === "general"
                           ? "Thinking..."
                           : "Searching documents..."}
                       </span>
@@ -1747,15 +1854,56 @@ export default function ChatPage() {
 
           {/* Input Area */}
           <div className="p-4 border-t">
-            {/* Input Controls - Filters and Quick Upload */}
-            <div className="flex items-center justify-center gap-2 mb-3">
-              {/* Filter Toggle Button - Only visible for document-aware modes */}
-              {(chatMode === "chat" || chatMode === "agent") && (
+            {/* Mode Selection Controls */}
+            <div className="flex items-center justify-center gap-3 mb-3 flex-wrap">
+              {/* Source Mode Toggle: Documents vs General */}
+              <div className="flex items-center gap-1 p-1 bg-muted rounded-lg">
+                <Button
+                  variant={sourceMode === "documents" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setSourceMode("documents")}
+                  className="gap-1.5 h-8"
+                >
+                  <FileSearch className="h-4 w-4" />
+                  <span className="hidden sm:inline">Documents</span>
+                </Button>
+                <Button
+                  variant={sourceMode === "general" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setSourceMode("general")}
+                  className="gap-1.5 h-8"
+                >
+                  <Brain className="h-4 w-4" />
+                  <span className="hidden sm:inline">General</span>
+                </Button>
+              </div>
+
+              {/* Agent Mode Toggle */}
+              <Button
+                variant={agentEnabled ? "default" : "outline"}
+                size="sm"
+                onClick={() => setAgentEnabled(!agentEnabled)}
+                className={cn(
+                  "gap-1.5 h-8",
+                  agentEnabled && "bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600"
+                )}
+              >
+                <Bot className="h-4 w-4" />
+                <span className="hidden sm:inline">Agent</span>
+                {agentEnabled && (
+                  <Badge variant="secondary" className="text-[10px] px-1 py-0 bg-white/20 ml-1">
+                    ON
+                  </Badge>
+                )}
+              </Button>
+
+              {/* Filter Toggle Button - Only visible for document mode */}
+              {sourceMode === "documents" && (
                 <Button
                   variant={showFilters ? "default" : "outline"}
                   size="sm"
                   onClick={() => setShowFilters(!showFilters)}
-                  className="gap-1.5"
+                  className="gap-1.5 h-8"
                   aria-label="Toggle document filters"
                   aria-expanded={showFilters}
                 >
@@ -1773,7 +1921,7 @@ export default function ChatPage() {
                 variant={showTempPanel ? "default" : "outline"}
                 size="sm"
                 onClick={() => setShowTempPanel(!showTempPanel)}
-                className="gap-1.5"
+                className="gap-1.5 h-8"
                 aria-label="Toggle quick document upload"
                 aria-expanded={showTempPanel}
               >
@@ -1795,7 +1943,7 @@ export default function ChatPage() {
             )}
 
             {/* Document Filter Panel */}
-            {showFilters && (chatMode === "chat" || chatMode === "agent") && (
+            {showFilters && sourceMode === "documents" && (
               <div className="max-w-3xl mx-auto mb-3 max-h-48 sm:max-h-none overflow-y-auto">
                 <DocumentFilterPanel
                   collections={collectionsData?.collections || []}
@@ -1824,27 +1972,48 @@ export default function ChatPage() {
               </div>
             )}
 
+            {/* Image Preview Bar */}
+            {attachedImages.length > 0 && (
+              <div className="max-w-3xl mx-auto mb-2">
+                <ImagePreviewBar
+                  images={attachedImages}
+                  onRemove={(id) => setAttachedImages((prev) => prev.filter((img) => img.id !== id))}
+                  disabled={isLoading}
+                />
+              </div>
+            )}
+
             <form onSubmit={handleSubmit} className="flex gap-2 max-w-3xl mx-auto" role="search">
               <Input
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder={
-                  chatMode === "agent"
+                  attachedImages.length > 0
+                    ? "Describe what you want to know about the image..."
+                    : agentEnabled
                     ? "Describe a task for the agents to complete..."
-                    : chatMode === "general"
+                    : sourceMode === "general"
                     ? "Ask anything..."
                     : "Ask anything about your documents..."
                 }
                 disabled={isLoading || isAgentExecuting}
                 className="flex-1"
                 aria-label={
-                  chatMode === "agent"
+                  attachedImages.length > 0
+                    ? "Ask about the attached image"
+                    : agentEnabled
                     ? "Describe a task for AI agents"
-                    : chatMode === "general"
+                    : sourceMode === "general"
                     ? "Ask a general question"
                     : "Ask about your documents"
                 }
+              />
+              <ImageUploadCompact
+                images={attachedImages}
+                onImagesChange={setAttachedImages}
+                disabled={isLoading || isAgentExecuting}
+                maxImages={4}
               />
               <VoiceInput
                 onTranscript={(transcript) => {
@@ -1891,11 +2060,13 @@ export default function ChatPage() {
               </Button>
             </form>
             <p className="text-xs text-muted-foreground text-center mt-2">
-              {chatMode === "agent"
-                ? "Multi-agent system will plan and execute complex tasks step by step."
-                : chatMode === "general"
-                ? "Responses use general AI knowledge without document search."
-                : "Responses are generated from your document archive. Always verify important information."}
+              {agentEnabled
+                ? sourceMode === "documents"
+                  ? "Multi-agent system will search your documents and complete complex tasks."
+                  : "Multi-agent system will use general knowledge to complete complex tasks."
+                : sourceMode === "documents"
+                ? "Responses are generated from your document archive."
+                : "Responses use general AI knowledge without document search."}
               <span className="hidden sm:inline ml-2 opacity-70">
                 Press ⌘Enter to send • ⌘K to focus
               </span>
@@ -2012,15 +2183,12 @@ export default function ChatPage() {
                                 }}
                                 title="Click to view full content"
                               >
-                                {source.pageNumber && (
-                                  <p className="text-xs text-muted-foreground mb-1">
-                                    Page {source.pageNumber}
-                                  </p>
-                                )}
-                                <p className="text-sm text-muted-foreground line-clamp-3">
-                                  {source.snippet}
-                                </p>
-                                <div className="flex items-center gap-2 mt-2">
+                                <div className="flex items-center gap-2 mb-2">
+                                  {source.pageNumber && (
+                                    <Badge variant="outline" className="text-xs">
+                                      Page {source.pageNumber}
+                                    </Badge>
+                                  )}
                                   <Badge
                                     variant="secondary"
                                     className={cn(
@@ -2035,6 +2203,18 @@ export default function ChatPage() {
                                     {Math.round(source.similarity * 100)}% match
                                   </Badge>
                                 </div>
+                                {/* Snippet with query term highlighting - show more lines */}
+                                <p className="text-sm text-foreground/80 leading-relaxed">
+                                  {highlightQueryTerms(
+                                    source.snippet.length > 400
+                                      ? source.snippet.substring(0, 400) + "..."
+                                      : source.snippet,
+                                    selectedMessage?.query || lastUserQuery
+                                  )}
+                                </p>
+                                <p className="text-xs text-muted-foreground mt-2 italic">
+                                  Click to view full content
+                                </p>
                               </div>
                             );
                           })}

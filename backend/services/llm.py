@@ -1341,3 +1341,170 @@ async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
             "chat_models": [],
             "embedding_models": [],
         }
+
+
+# =============================================================================
+# Vision Model Support
+# =============================================================================
+
+# Known vision model patterns
+VISION_MODEL_PATTERNS = [
+    # Ollama models
+    "llava", "qwen2-vl", "qwen2.5-vl", "llama3.2-vision", "llama-3.2-vision",
+    "moondream", "bakllava", "minicpm-v", "cogvlm", "yi-vl", "internlm-xcomposer",
+    "phi-3-vision", "llava-llama3", "llava-phi3", "nanollava",
+    # OpenAI models
+    "gpt-4-vision", "gpt-4o", "gpt-4-turbo",
+    # Anthropic models
+    "claude-3", "claude-3.5",
+    # Google models
+    "gemini-1.5", "gemini-pro-vision",
+]
+
+
+def is_vision_model(model_name: str) -> bool:
+    """Check if a model supports vision/image input."""
+    if not model_name:
+        return False
+    model_lower = model_name.lower()
+    return any(pattern in model_lower for pattern in VISION_MODEL_PATTERNS)
+
+
+def create_vision_message(
+    text: str,
+    image_data: bytes,
+    image_type: str = "image/jpeg",
+) -> HumanMessage:
+    """
+    Create a HumanMessage with image content for vision models.
+
+    Args:
+        text: Text prompt/question about the image
+        image_data: Raw image bytes
+        image_type: MIME type of the image (default: image/jpeg)
+
+    Returns:
+        HumanMessage with multimodal content
+    """
+    import base64
+
+    image_b64 = base64.b64encode(image_data).decode("utf-8")
+
+    # LangChain multimodal message format
+    return HumanMessage(
+        content=[
+            {"type": "text", "text": text},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{image_type};base64,{image_b64}",
+                },
+            },
+        ]
+    )
+
+
+def create_vision_messages_from_urls(
+    text: str,
+    image_urls: List[str],
+) -> HumanMessage:
+    """
+    Create a HumanMessage with multiple images from URLs.
+
+    Args:
+        text: Text prompt/question about the images
+        image_urls: List of image URLs
+
+    Returns:
+        HumanMessage with multimodal content
+    """
+    content = [{"type": "text", "text": text}]
+
+    for url in image_urls:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": url},
+        })
+
+    return HumanMessage(content=content)
+
+
+async def chat_with_vision(
+    model: BaseChatModel,
+    text: str,
+    image_data: Optional[bytes] = None,
+    image_url: Optional[str] = None,
+    image_type: str = "image/jpeg",
+    system_prompt: Optional[str] = None,
+) -> str:
+    """
+    Send a vision request to a multimodal LLM.
+
+    Args:
+        model: LangChain chat model (must support vision)
+        text: Text prompt/question
+        image_data: Raw image bytes (mutually exclusive with image_url)
+        image_url: URL to an image (mutually exclusive with image_data)
+        image_type: MIME type of the image
+        system_prompt: Optional system prompt
+
+    Returns:
+        Model's response as string
+    """
+    messages: List[BaseMessage] = []
+
+    if system_prompt:
+        messages.append(SystemMessage(content=system_prompt))
+
+    if image_data:
+        messages.append(create_vision_message(text, image_data, image_type))
+    elif image_url:
+        messages.append(create_vision_messages_from_urls(text, [image_url]))
+    else:
+        messages.append(HumanMessage(content=text))
+
+    response = await model.ainvoke(messages)
+    return response.content
+
+
+async def analyze_image(
+    image_data: bytes,
+    prompt: str = "Describe this image in detail.",
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> str:
+    """
+    Analyze an image using a vision model.
+
+    Args:
+        image_data: Raw image bytes
+        prompt: Question or prompt about the image
+        provider: LLM provider (defaults to config)
+        model: Model name (defaults to provider's default vision model)
+
+    Returns:
+        Model's analysis as string
+    """
+    # Get appropriate vision model
+    provider = provider or llm_config.default_provider
+    if model is None:
+        if provider == "ollama":
+            model = "llava"  # Default vision model for Ollama
+        elif provider == "openai":
+            model = "gpt-4o"
+        elif provider == "anthropic":
+            model = "claude-3-5-sonnet-20241022"
+        else:
+            model = "gpt-4o"  # Fallback
+
+    llm = LLMFactory.get_chat_model(
+        provider=provider,
+        model=model,
+        temperature=0.3,  # Lower temperature for analysis
+    )
+
+    return await chat_with_vision(
+        model=llm,
+        text=prompt,
+        image_data=image_data,
+    )

@@ -15,7 +15,7 @@ import aiohttp
 import asyncio
 import tempfile
 import hashlib
-from typing import Optional, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
@@ -27,6 +27,8 @@ logger = structlog.get_logger(__name__)
 class ImageBackend(str, Enum):
     """Available image generation backends."""
     AUTOMATIC1111 = "automatic1111"  # Local Stable Diffusion WebUI
+    OPENAI = "openai"  # OpenAI DALL-E
+    STABILITY = "stability"  # Stability AI
     UNSPLASH = "unsplash"  # Free placeholder images
     DISABLED = "disabled"
 
@@ -44,6 +46,16 @@ class ImageGeneratorConfig:
     sd_model: str = ""  # Use default model
     sd_sampler: str = "DPM++ 2M Karras"
     sd_steps: int = 20
+
+    # OpenAI DALL-E settings
+    openai_api_key: str = ""  # Set via env OPENAI_API_KEY
+    openai_model: str = "dall-e-3"  # dall-e-3 or dall-e-2
+    openai_quality: str = "standard"  # standard or hd
+    openai_style: str = "vivid"  # vivid or natural
+
+    # Stability AI settings
+    stability_api_key: str = ""  # Set via env STABILITY_API_KEY
+    stability_engine: str = "stable-diffusion-xl-1024-v1-0"
 
     # Unsplash settings (fallback - always works, no setup needed)
     unsplash_base_url: str = "https://source.unsplash.com"
@@ -225,6 +237,10 @@ class ImageGeneratorService:
             return None
         elif backend == ImageBackend.AUTOMATIC1111:
             return await self._generate_automatic1111(prompt, width, height)
+        elif backend == ImageBackend.OPENAI:
+            return await self._generate_openai(prompt, width, height)
+        elif backend == ImageBackend.STABILITY:
+            return await self._generate_stability(prompt, width, height)
         elif backend == ImageBackend.UNSPLASH:
             return await self._generate_unsplash(prompt, width, height)
         else:
@@ -438,6 +454,253 @@ class ImageGeneratorService:
                 error=str(e),
             )
 
+    async def _generate_openai(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+    ) -> Optional[GeneratedImage]:
+        """Generate image using OpenAI DALL-E.
+
+        Requires OPENAI_API_KEY environment variable or config setting.
+        """
+        import base64
+
+        api_key = self.config.openai_api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            logger.warning("OpenAI API key not configured")
+            return GeneratedImage(
+                path="",
+                width=width,
+                height=height,
+                prompt=prompt,
+                backend=ImageBackend.OPENAI,
+                success=False,
+                error="OpenAI API key not configured. Set OPENAI_API_KEY environment variable.",
+            )
+
+        # DALL-E 3 only supports specific sizes
+        if self.config.openai_model == "dall-e-3":
+            if width > 1024 and height <= 1024:
+                size = "1792x1024"
+            elif height > 1024 and width <= 1024:
+                size = "1024x1792"
+            else:
+                size = "1024x1024"
+        else:
+            # DALL-E 2 sizes
+            if width <= 256 and height <= 256:
+                size = "256x256"
+            elif width <= 512 and height <= 512:
+                size = "512x512"
+            else:
+                size = "1024x1024"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "model": self.config.openai_model,
+                    "prompt": prompt,
+                    "n": 1,
+                    "size": size,
+                    "response_format": "b64_json",
+                }
+
+                # DALL-E 3 specific options
+                if self.config.openai_model == "dall-e-3":
+                    payload["quality"] = self.config.openai_quality
+                    payload["style"] = self.config.openai_style
+
+                async with session.post(
+                    "https://api.openai.com/v1/images/generations",
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.config.timeout_seconds),
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error("OpenAI DALL-E API error", error=error_text)
+                        return GeneratedImage(
+                            path="",
+                            width=width,
+                            height=height,
+                            prompt=prompt,
+                            backend=ImageBackend.OPENAI,
+                            success=False,
+                            error=f"OpenAI API error: {error_text}",
+                        )
+
+                    result = await response.json()
+                    data = result.get("data", [])
+
+                    if not data:
+                        return GeneratedImage(
+                            path="",
+                            width=width,
+                            height=height,
+                            prompt=prompt,
+                            backend=ImageBackend.OPENAI,
+                            success=False,
+                            error="No image returned from OpenAI",
+                        )
+
+                    # Save image
+                    image_data = base64.b64decode(data[0].get("b64_json", ""))
+                    prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]
+                    filename = f"dalle_{prompt_hash}.png"
+                    filepath = os.path.join(self.config.output_dir, filename)
+
+                    with open(filepath, "wb") as f:
+                        f.write(image_data)
+
+                    logger.info("Image generated with OpenAI DALL-E", path=filepath)
+
+                    return GeneratedImage(
+                        path=filepath,
+                        width=int(size.split("x")[0]),
+                        height=int(size.split("x")[1]),
+                        prompt=prompt,
+                        backend=ImageBackend.OPENAI,
+                        success=True,
+                        metadata={
+                            "model": self.config.openai_model,
+                            "revised_prompt": data[0].get("revised_prompt"),
+                        },
+                    )
+
+        except Exception as e:
+            logger.error(f"OpenAI DALL-E generation error: {e}")
+            return GeneratedImage(
+                path="",
+                width=width,
+                height=height,
+                prompt=prompt,
+                backend=ImageBackend.OPENAI,
+                success=False,
+                error=str(e),
+            )
+
+    async def _generate_stability(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+    ) -> Optional[GeneratedImage]:
+        """Generate image using Stability AI.
+
+        Requires STABILITY_API_KEY environment variable or config setting.
+        """
+        import base64
+
+        api_key = self.config.stability_api_key or os.getenv("STABILITY_API_KEY")
+        if not api_key:
+            logger.warning("Stability AI API key not configured")
+            return GeneratedImage(
+                path="",
+                width=width,
+                height=height,
+                prompt=prompt,
+                backend=ImageBackend.STABILITY,
+                success=False,
+                error="Stability AI API key not configured. Set STABILITY_API_KEY environment variable.",
+            )
+
+        # Stability requires specific dimensions
+        # Round to nearest 64
+        width = (width // 64) * 64
+        height = (height // 64) * 64
+        width = max(512, min(width, 2048))
+        height = max(512, min(height, 2048))
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "text_prompts": [{"text": prompt, "weight": 1.0}],
+                    "cfg_scale": 7,
+                    "height": height,
+                    "width": width,
+                    "samples": 1,
+                    "steps": 30,
+                }
+
+                url = f"https://api.stability.ai/v1/generation/{self.config.stability_engine}/text-to-image"
+
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.config.timeout_seconds),
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error("Stability AI API error", error=error_text)
+                        return GeneratedImage(
+                            path="",
+                            width=width,
+                            height=height,
+                            prompt=prompt,
+                            backend=ImageBackend.STABILITY,
+                            success=False,
+                            error=f"Stability AI API error: {error_text}",
+                        )
+
+                    result = await response.json()
+                    artifacts = result.get("artifacts", [])
+
+                    if not artifacts:
+                        return GeneratedImage(
+                            path="",
+                            width=width,
+                            height=height,
+                            prompt=prompt,
+                            backend=ImageBackend.STABILITY,
+                            success=False,
+                            error="No image returned from Stability AI",
+                        )
+
+                    # Save image
+                    image_data = base64.b64decode(artifacts[0].get("base64", ""))
+                    prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]
+                    filename = f"stability_{prompt_hash}.png"
+                    filepath = os.path.join(self.config.output_dir, filename)
+
+                    with open(filepath, "wb") as f:
+                        f.write(image_data)
+
+                    logger.info("Image generated with Stability AI", path=filepath)
+
+                    return GeneratedImage(
+                        path=filepath,
+                        width=width,
+                        height=height,
+                        prompt=prompt,
+                        backend=ImageBackend.STABILITY,
+                        success=True,
+                        metadata={
+                            "engine": self.config.stability_engine,
+                            "seed": artifacts[0].get("seed"),
+                        },
+                    )
+
+        except Exception as e:
+            logger.error(f"Stability AI generation error: {e}")
+            return GeneratedImage(
+                path="",
+                width=width,
+                height=height,
+                prompt=prompt,
+                backend=ImageBackend.STABILITY,
+                success=False,
+                error=str(e),
+            )
+
     async def check_sd_webui_available(self) -> bool:
         """Check if Stable Diffusion WebUI server is available."""
         try:
@@ -449,6 +712,48 @@ class ImageGeneratorService:
                     return response.status == 200
         except:
             return False
+
+    def get_available_backends(self) -> List[dict]:
+        """Get list of available (configured) backends."""
+        backends = []
+
+        # Check OpenAI
+        if self.config.openai_api_key or os.getenv("OPENAI_API_KEY"):
+            backends.append({
+                "id": ImageBackend.OPENAI.value,
+                "name": "OpenAI DALL-E",
+                "models": ["dall-e-3", "dall-e-2"],
+                "configured": True,
+            })
+
+        # Check Stability AI
+        if self.config.stability_api_key or os.getenv("STABILITY_API_KEY"):
+            backends.append({
+                "id": ImageBackend.STABILITY.value,
+                "name": "Stability AI",
+                "models": ["stable-diffusion-xl-1024-v1-0", "stable-diffusion-v1-6"],
+                "configured": True,
+            })
+
+        # Automatic1111 is always available if configured
+        backends.append({
+            "id": ImageBackend.AUTOMATIC1111.value,
+            "name": "Stable Diffusion WebUI (Local)",
+            "models": ["varies"],
+            "configured": True,
+            "requires_local_server": True,
+        })
+
+        # Unsplash is always available
+        backends.append({
+            "id": ImageBackend.UNSPLASH.value,
+            "name": "Unsplash (Placeholder Images)",
+            "models": [],
+            "configured": True,
+            "free": True,
+        })
+
+        return backends
 
 
 # Singleton instance

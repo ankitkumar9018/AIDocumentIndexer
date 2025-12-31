@@ -632,16 +632,23 @@ class ImageGenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=5, max_length=1000)
     width: int = Field(default=800, ge=256, le=2048)
     height: int = Field(default=600, ge=256, le=2048)
+    backend: Optional[str] = Field(None, description="Image generation backend: openai, stability, automatic1111, unsplash")
+    model: Optional[str] = Field(None, description="Model to use (backend-specific, e.g., dall-e-3)")
+    quality: Optional[str] = Field(None, description="Quality for DALL-E 3: standard or hd")
+    style: Optional[str] = Field(None, description="Style for DALL-E 3: vivid or natural")
 
 
 class ImageGenerateResponse(BaseModel):
     """Response from image generation."""
     success: bool
     path: Optional[str] = None
+    image_base64: Optional[str] = None  # Base64-encoded image data
     width: int
     height: int
     prompt: str
+    revised_prompt: Optional[str] = None  # DALL-E 3 may revise the prompt
     backend: str
+    model: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -665,19 +672,25 @@ async def generate_image(
     """
     Generate an image using AI.
 
-    Uses Stable Diffusion WebUI (Automatic1111) if available,
-    falls back to Unsplash placeholder images.
+    Supports multiple backends:
+    - openai: OpenAI DALL-E 3/2 (requires OPENAI_API_KEY)
+    - stability: Stability AI (requires STABILITY_API_KEY)
+    - automatic1111: Local Stable Diffusion WebUI
+    - unsplash: Placeholder images (free, always works)
+
+    If no backend is specified, uses the configured default.
     """
     logger.info(
         "Generating image",
         user_id=user.user_id,
         prompt_preview=request.prompt[:50],
+        backend=request.backend,
     )
 
     service = get_image_generator()
 
-    # Check if image generation is enabled
-    if not service.config.enabled:
+    # Check if image generation is enabled (unless explicitly requesting a backend)
+    if not service.config.enabled and not request.backend:
         return ImageGenerateResponse(
             success=False,
             path=None,
@@ -685,25 +698,73 @@ async def generate_image(
             height=request.height,
             prompt=request.prompt,
             backend="disabled",
-            error="Image generation is disabled. Enable with include_images=true in generation config.",
+            error="Image generation is disabled. Enable with include_images=true in generation config, or specify a backend explicitly.",
         )
 
     try:
-        result = await service.generate_for_section(
-            section_title="Custom Generation",
-            section_content=request.prompt,
+        import base64
+
+        # Temporarily update config if backend/model specified
+        original_backend = service.config.backend
+        original_model = service.config.openai_model
+        original_quality = service.config.openai_quality
+        original_style = service.config.openai_style
+
+        if request.backend:
+            try:
+                service.config.backend = ImageBackend(request.backend)
+            except ValueError:
+                return ImageGenerateResponse(
+                    success=False,
+                    path=None,
+                    width=request.width,
+                    height=request.height,
+                    prompt=request.prompt,
+                    backend=request.backend,
+                    error=f"Invalid backend: {request.backend}. Valid options: openai, stability, automatic1111, unsplash",
+                )
+
+        if request.model:
+            service.config.openai_model = request.model
+        if request.quality:
+            service.config.openai_quality = request.quality
+        if request.style:
+            service.config.openai_style = request.style
+
+        # Generate image directly with the backend
+        result = await service._generate_with_backend(
+            prompt=request.prompt,
             width=request.width,
             height=request.height,
+            backend=service.config.backend,
         )
 
+        # Restore original config
+        service.config.backend = original_backend
+        service.config.openai_model = original_model
+        service.config.openai_quality = original_quality
+        service.config.openai_style = original_style
+
         if result and result.success:
+            # Read image file and convert to base64
+            image_base64 = None
+            if result.path:
+                try:
+                    with open(result.path, "rb") as f:
+                        image_base64 = base64.b64encode(f.read()).decode("utf-8")
+                except Exception as e:
+                    logger.warning(f"Could not read generated image file: {e}")
+
             return ImageGenerateResponse(
                 success=True,
                 path=result.path,
+                image_base64=image_base64,
                 width=result.width,
                 height=result.height,
                 prompt=result.prompt,
+                revised_prompt=result.metadata.get("revised_prompt") if result.metadata else None,
                 backend=result.backend.value,
+                model=result.metadata.get("model") if result.metadata else None,
             )
         else:
             return ImageGenerateResponse(
@@ -745,3 +806,20 @@ async def get_image_config(user: AuthenticatedUser):
         available_backends=[b.value for b in ImageBackend],
         sd_webui_available=sd_available,
     )
+
+
+@router.get("/image/backends")
+async def get_image_backends(user: AuthenticatedUser):
+    """
+    Get list of available image generation backends with their configuration status.
+
+    Returns which backends are configured and ready to use (have API keys, etc.)
+    """
+    service = get_image_generator()
+    backends = service.get_available_backends()
+
+    return {
+        "backends": backends,
+        "current_backend": service.config.backend.value,
+        "enabled": service.config.enabled,
+    }

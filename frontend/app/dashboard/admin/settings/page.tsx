@@ -101,6 +101,9 @@ import {
   useUpdateOCRSettings,
   useDownloadOCRModels,
   useOCRModelInfo,
+  useRedisStatus,
+  useCeleryStatus,
+  useInvalidateRedisCache,
 } from "@/lib/api/hooks";
 import type { LLMProvider, LLMProviderType, DatabaseConnectionType } from "@/lib/api/client";
 import { useUser } from "@/lib/auth";
@@ -770,6 +773,10 @@ export default function AdminSettingsPage() {
             <Scan className="h-4 w-4" />
             OCR Configuration
           </TabsTrigger>
+          <TabsTrigger value="jobqueue" className="flex items-center gap-2">
+            <Workflow className="h-4 w-4" />
+            Job Queue
+          </TabsTrigger>
         </TabsList>
 
         {/* Overview Tab */}
@@ -1116,7 +1123,7 @@ export default function AdminSettingsPage() {
               <Input
                 type="number"
                 value={localSettings["database.vector_dimensions"] as number ?? 1536}
-                onChange={(e) => handleSettingChange("database.vector_dimensions", parseInt(e.target.value))}
+                onChange={(e) => handleSettingChange("database.vector_dimensions", parseInt(e.target.value) || 1536)}
               />
             </div>
             <div className="space-y-2">
@@ -1136,7 +1143,7 @@ export default function AdminSettingsPage() {
             <Input
               type="number"
               value={localSettings["database.max_results_per_query"] as number ?? 10}
-              onChange={(e) => handleSettingChange("database.max_results_per_query", parseInt(e.target.value))}
+              onChange={(e) => handleSettingChange("database.max_results_per_query", parseInt(e.target.value) || 10)}
             />
           </div>
         </CardContent>
@@ -1788,7 +1795,7 @@ VECTOR_STORE_BACKEND=auto`}
                   type="number"
                   placeholder="50"
                   value={localSettings["ai.summarization_threshold_pages"] as number ?? 50}
-                  onChange={(e) => handleSettingChange("ai.summarization_threshold_pages", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("ai.summarization_threshold_pages", parseInt(e.target.value) || 10)}
                 />
                 <p className="text-xs text-muted-foreground">Summarize docs with more pages</p>
               </div>
@@ -1798,7 +1805,7 @@ VECTOR_STORE_BACKEND=auto`}
                   type="number"
                   placeholder="100"
                   value={localSettings["ai.summarization_threshold_kb"] as number ?? 100}
-                  onChange={(e) => handleSettingChange("ai.summarization_threshold_kb", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("ai.summarization_threshold_kb", parseInt(e.target.value) || 500)}
                 />
                 <p className="text-xs text-muted-foreground">Summarize docs larger than this</p>
               </div>
@@ -1860,7 +1867,7 @@ VECTOR_STORE_BACKEND=auto`}
                   type="number"
                   placeholder="10000"
                   value={localSettings["ai.max_semantic_cache_entries"] as number ?? 10000}
-                  onChange={(e) => handleSettingChange("ai.max_semantic_cache_entries", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("ai.max_semantic_cache_entries", parseInt(e.target.value) || 1000)}
                 />
                 <p className="text-xs text-muted-foreground">Limit semantic cache size</p>
               </div>
@@ -1899,7 +1906,7 @@ VECTOR_STORE_BACKEND=auto`}
                   max="5"
                   placeholder="2"
                   value={localSettings["ai.query_expansion_count"] as number ?? 2}
-                  onChange={(e) => handleSettingChange("ai.query_expansion_count", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("ai.query_expansion_count", parseInt(e.target.value) || 2)}
                 />
                 <p className="text-xs text-muted-foreground">Number of variations to generate (1-5)</p>
               </div>
@@ -1996,7 +2003,7 @@ VECTOR_STORE_BACKEND=auto`}
                   max="20"
                   placeholder="10"
                   value={localSettings["ai.sections_per_document"] as number ?? 10}
-                  onChange={(e) => handleSettingChange("ai.sections_per_document", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("ai.sections_per_document", parseInt(e.target.value) || 5)}
                 />
                 <p className="text-xs text-muted-foreground">Number of section summaries</p>
               </div>
@@ -2054,7 +2061,7 @@ VECTOR_STORE_BACKEND=auto`}
                   min="3"
                   max="25"
                   value={localSettings["rag.top_k"] as number ?? 10}
-                  onChange={(e) => handleSettingChange("rag.top_k", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("rag.top_k", parseInt(e.target.value) || 5)}
                 />
                 <p className="text-xs text-muted-foreground">
                   How many documents to search (3-25). Higher = broader but slower.
@@ -2069,7 +2076,7 @@ VECTOR_STORE_BACKEND=auto`}
                   min="1"
                   max="5"
                   value={localSettings["rag.query_expansion_count"] as number ?? 3}
-                  onChange={(e) => handleSettingChange("rag.query_expansion_count", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("rag.query_expansion_count", parseInt(e.target.value) || 3)}
                 />
                 <p className="text-xs text-muted-foreground">
                   Query variations to try (1-5). More = better recall.
@@ -2141,7 +2148,7 @@ VECTOR_STORE_BACKEND=auto`}
                   min="1"
                   max="5"
                   value={localSettings["rag.graph_max_hops"] as number ?? 2}
-                  onChange={(e) => handleSettingChange("rag.graph_max_hops", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("rag.graph_max_hops", parseInt(e.target.value) || 2)}
                 />
                 <p className="text-xs text-muted-foreground">Traversal depth (1-5)</p>
               </div>
@@ -2205,7 +2212,7 @@ VECTOR_STORE_BACKEND=auto`}
                   min="1"
                   max="10"
                   value={localSettings["rag.agentic_max_iterations"] as number ?? 5}
-                  onChange={(e) => handleSettingChange("rag.agentic_max_iterations", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("rag.agentic_max_iterations", parseInt(e.target.value) || 5)}
                 />
                 <p className="text-xs text-muted-foreground">ReAct loop limit (1-10)</p>
               </div>
@@ -2342,7 +2349,7 @@ VECTOR_STORE_BACKEND=auto`}
                   type="number"
                   min="7"
                   value={localSettings["rag.freshness_threshold_days"] as number ?? 30}
-                  onChange={(e) => handleSettingChange("rag.freshness_threshold_days", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("rag.freshness_threshold_days", parseInt(e.target.value) || 7)}
                 />
                 <p className="text-xs text-muted-foreground">Days until content is aging</p>
               </div>
@@ -2352,7 +2359,7 @@ VECTOR_STORE_BACKEND=auto`}
                   type="number"
                   min="30"
                   value={localSettings["rag.stale_threshold_days"] as number ?? 90}
-                  onChange={(e) => handleSettingChange("rag.stale_threshold_days", parseInt(e.target.value))}
+                  onChange={(e) => handleSettingChange("rag.stale_threshold_days", parseInt(e.target.value) || 90)}
                 />
                 <p className="text-xs text-muted-foreground">Days until content is stale</p>
               </div>
@@ -2386,7 +2393,7 @@ VECTOR_STORE_BACKEND=auto`}
                 min="1"
                 max="5"
                 value={localSettings["rag.suggestions_count"] as number ?? 3}
-                onChange={(e) => handleSettingChange("rag.suggestions_count", parseInt(e.target.value))}
+                onChange={(e) => handleSettingChange("rag.suggestions_count", parseInt(e.target.value) || 3)}
               />
               <p className="text-xs text-muted-foreground">Number of suggestions (1-5)</p>
             </div>
@@ -2454,7 +2461,7 @@ VECTOR_STORE_BACKEND=auto`}
               <Input
                 type="number"
                 value={localSettings["security.session_timeout_minutes"] as number ?? 60}
-                onChange={(e) => handleSettingChange("security.session_timeout_minutes", parseInt(e.target.value))}
+                onChange={(e) => handleSettingChange("security.session_timeout_minutes", parseInt(e.target.value) || 60)}
               />
             </div>
             </CardContent>
@@ -2832,6 +2839,14 @@ VECTOR_STORE_BACKEND=auto`}
               </Card>
             </>
           )}
+        </TabsContent>
+
+        {/* Job Queue Tab */}
+        <TabsContent value="jobqueue" className="space-y-6">
+          <JobQueueSettings
+            localSettings={localSettings}
+            handleSettingChange={handleSettingChange}
+          />
         </TabsContent>
 
       </Tabs>
@@ -3542,5 +3557,253 @@ function CostAlertsCard() {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// Job Queue Settings Component
+function JobQueueSettings({
+  localSettings,
+  handleSettingChange,
+}: {
+  localSettings: Record<string, unknown>;
+  handleSettingChange: (key: string, value: unknown) => void;
+}) {
+  const { data: redisStatus, isLoading: redisLoading } = useRedisStatus();
+  const { data: celeryStatus, isLoading: celeryLoading } = useCeleryStatus();
+  const invalidateCache = useInvalidateRedisCache();
+
+  return (
+    <>
+      {/* Connection Status */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Activity className="h-5 w-5" />
+            Connection Status
+          </CardTitle>
+          <CardDescription>
+            Real-time status of Redis and Celery connections
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 md:grid-cols-2">
+            {/* Redis Status */}
+            <div className="p-4 rounded-lg border">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-medium">Redis</span>
+                {redisLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`h-2 w-2 rounded-full ${
+                        redisStatus?.connected
+                          ? "bg-green-500"
+                          : redisStatus?.enabled
+                          ? "bg-yellow-500"
+                          : "bg-gray-400"
+                      }`}
+                    />
+                    <span className="text-sm">
+                      {redisStatus?.connected
+                        ? "Connected"
+                        : redisStatus?.enabled
+                        ? "Disconnected"
+                        : "Disabled"}
+                    </span>
+                  </div>
+                )}
+              </div>
+              {redisStatus?.url && (
+                <p className="text-xs text-muted-foreground">{redisStatus.url}</p>
+              )}
+              {redisStatus?.reason && !redisStatus?.connected && (
+                <p className="text-xs text-yellow-600 mt-1">{redisStatus.reason}</p>
+              )}
+            </div>
+
+            {/* Celery Status */}
+            <div className="p-4 rounded-lg border">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-medium">Celery Workers</span>
+                {celeryLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`h-2 w-2 rounded-full ${
+                        celeryStatus?.available
+                          ? "bg-green-500"
+                          : celeryStatus?.enabled
+                          ? "bg-yellow-500"
+                          : "bg-gray-400"
+                      }`}
+                    />
+                    <span className="text-sm">
+                      {celeryStatus?.available
+                        ? `${celeryStatus.worker_count} workers`
+                        : celeryStatus?.enabled
+                        ? "No workers"
+                        : "Disabled"}
+                    </span>
+                  </div>
+                )}
+              </div>
+              {celeryStatus?.active_tasks !== undefined && celeryStatus.active_tasks > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {celeryStatus.active_tasks} active task(s)
+                </p>
+              )}
+              {celeryStatus?.message && (
+                <p className="text-xs text-yellow-600 mt-1">{celeryStatus.message}</p>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => invalidateCache.mutate()}
+              disabled={invalidateCache.isPending}
+            >
+              {invalidateCache.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+              ) : (
+                <RefreshCw className="h-4 w-4 mr-2" />
+              )}
+              Apply Settings Changes
+            </Button>
+            <p className="text-xs text-muted-foreground mt-1">
+              Click after saving settings to apply Redis/Celery configuration changes
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Celery Configuration */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Workflow className="h-5 w-5" />
+            Job Queue Configuration
+          </CardTitle>
+          <CardDescription>
+            Configure Celery for async document processing (requires Redis)
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Enable Celery Toggle */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Enable Celery Job Queue</p>
+              <p className="text-sm text-muted-foreground">
+                Process documents asynchronously with Celery workers
+              </p>
+            </div>
+            <Switch
+              checked={(localSettings["queue.celery_enabled"] as boolean) ?? false}
+              onCheckedChange={(checked) =>
+                handleSettingChange("queue.celery_enabled", checked)
+              }
+            />
+          </div>
+
+          {/* Redis URL (shown when Celery enabled) */}
+          {Boolean(localSettings["queue.celery_enabled"]) && (
+            <div className="space-y-2">
+              <Label htmlFor="redis-url">Redis URL</Label>
+              <Input
+                id="redis-url"
+                value={
+                  (localSettings["queue.redis_url"] as string) ??
+                  "redis://localhost:6379/0"
+                }
+                onChange={(e) =>
+                  handleSettingChange("queue.redis_url", e.target.value)
+                }
+                placeholder="redis://localhost:6379/0"
+              />
+              <p className="text-xs text-muted-foreground">
+                Redis connection URL for job queue and caching
+              </p>
+            </div>
+          )}
+
+          {/* Max Workers */}
+          {Boolean(localSettings["queue.celery_enabled"]) && (
+            <div className="space-y-2">
+              <Label htmlFor="max-workers">Max Celery Workers</Label>
+              <Input
+                id="max-workers"
+                type="number"
+                min={1}
+                max={16}
+                value={(localSettings["queue.max_workers"] as number) ?? 4}
+                onChange={(e) =>
+                  handleSettingChange("queue.max_workers", parseInt(e.target.value) || 4)
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Maximum concurrent workers for document processing
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Embedding Cache Configuration */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <HardDrive className="h-5 w-5" />
+            Embedding Cache
+          </CardTitle>
+          <CardDescription>
+            Cache embeddings to reduce API calls and speed up processing
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Enable Cache Toggle */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Enable Embedding Cache</p>
+              <p className="text-sm text-muted-foreground">
+                Cache embeddings to reduce API calls (uses Redis if available, falls back to memory)
+              </p>
+            </div>
+            <Switch
+              checked={(localSettings["cache.embedding_cache_enabled"] as boolean) ?? true}
+              onCheckedChange={(checked) =>
+                handleSettingChange("cache.embedding_cache_enabled", checked)
+              }
+            />
+          </div>
+
+          {/* Cache TTL */}
+          {(localSettings["cache.embedding_cache_enabled"] as boolean) !== false && (
+            <div className="space-y-2">
+              <Label htmlFor="cache-ttl">Cache TTL (days)</Label>
+              <Input
+                id="cache-ttl"
+                type="number"
+                min={1}
+                max={30}
+                value={(localSettings["cache.embedding_cache_ttl_days"] as number) ?? 7}
+                onChange={(e) =>
+                  handleSettingChange(
+                    "cache.embedding_cache_ttl_days",
+                    parseInt(e.target.value) || 7
+                  )
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                How long to cache embeddings before they expire
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </>
   );
 }

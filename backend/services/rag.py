@@ -683,13 +683,24 @@ class RAGService:
         # Format results for agent consumption
         results = []
         for doc, score in retrieved_docs:
+            # Get document name with proper fallback chain
+            # Custom vectorstore sets "document_name", others may use "document_filename" or "source"
+            doc_name = (
+                doc.metadata.get("document_name") or
+                doc.metadata.get("document_filename") or
+                doc.metadata.get("source") or
+                "Unknown Document"
+            )
+            # Use similarity_score (0-1) for display, fallback to RRF score if not available
+            # RRF scores are typically 0.01-0.02, so we need to use the original similarity
+            display_score = doc.metadata.get("similarity_score", score)
+
             results.append({
                 "content": doc.page_content,
-                "document_name": doc.metadata.get("document_filename",
-                                doc.metadata.get("source", "Unknown")),
-                "source": doc.metadata.get("source", "Unknown"),
+                "document_name": doc_name,
+                "source": doc.metadata.get("source") or doc_name,
                 "chunk_id": doc.metadata.get("chunk_id"),
-                "score": score,
+                "score": display_score,
                 "metadata": doc.metadata,
             })
 
@@ -1373,8 +1384,8 @@ class RAGService:
         for i, (doc, score) in enumerate(retrieved_docs, 1):
             metadata = doc.metadata or {}
 
-            # Build context entry
-            doc_name = metadata.get("document_filename") or metadata.get("document_name") or f"Document {metadata.get('document_id', 'unknown')[:8]}"
+            # Build context entry - check document_name first (set by custom vectorstore)
+            doc_name = metadata.get("document_name") or metadata.get("document_filename") or f"Document {metadata.get('document_id', 'unknown')[:8]}"
             collection = metadata.get("collection")
 
             # Include collection info if enabled and available
@@ -1404,7 +1415,7 @@ class RAGService:
                 slide_number=metadata.get("slide_number"),
                 relevance_score=score,  # RRF score for ranking
                 similarity_score=similarity,  # Original vector similarity (0-1) for display
-                snippet=doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+                snippet=doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content,
                 full_content=doc.page_content,  # Full content for source viewer modal
                 metadata=metadata,
             )

@@ -61,7 +61,7 @@ router = APIRouter()
 class AccessTierBase(BaseModel):
     """Base access tier model."""
     name: str = Field(..., min_length=1, max_length=100)
-    level: int = Field(..., ge=1, le=100)
+    level: int = Field(..., ge=0, le=100)  # 0 = Public/Everyone
     description: Optional[str] = None
     color: str = Field(default="#6B7280", pattern="^#[0-9A-Fa-f]{6}$")
 
@@ -74,7 +74,7 @@ class AccessTierCreate(AccessTierBase):
 class AccessTierUpdate(BaseModel):
     """Access tier update request."""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
-    level: Optional[int] = Field(None, ge=1, le=100)
+    level: Optional[int] = Field(None, ge=0, le=100)  # 0 = Public/Everyone
     description: Optional[str] = None
     color: Optional[str] = Field(None, pattern="^#[0-9A-Fa-f]{6}$")
 
@@ -541,6 +541,99 @@ async def list_users(
         page=page,
         page_size=page_size,
         has_more=(offset + len(users)) < total,
+    )
+
+
+@router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    user_data: UserCreate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a new user.
+
+    Admin only endpoint.
+    Admins can only create users with tiers at or below their own level.
+    """
+    logger.info("Creating user", admin_id=admin.user_id, email=user_data.email)
+
+    # Check if email already exists
+    existing_query = select(User).where(User.email == user_data.email)
+    existing_result = await db.execute(existing_query)
+    if existing_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"User with email '{user_data.email}' already exists",
+        )
+
+    # Verify access tier exists and admin can assign it
+    tier_query = select(AccessTier).where(AccessTier.id == user_data.access_tier_id)
+    tier_result = await db.execute(tier_query)
+    tier = tier_result.scalar_one_or_none()
+
+    if not tier:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Access tier not found",
+        )
+
+    # Admin can only assign tiers at or below their own level
+    if tier.level > admin.access_tier_level:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Cannot assign tier {tier.level} (your tier: {admin.access_tier_level})",
+        )
+
+    # Hash password
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    hashed_password = pwd_context.hash(user_data.password)
+
+    # Create user
+    new_user = User(
+        email=user_data.email,
+        name=user_data.name,
+        password_hash=hashed_password,
+        access_tier_id=user_data.access_tier_id,
+        is_active=True,
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+
+    # Reload with access tier
+    user_query = select(User).options(selectinload(User.access_tier)).where(User.id == new_user.id)
+    user_result = await db.execute(user_query)
+    new_user = user_result.scalar_one()
+
+    # Log action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.USER_CREATE,
+        admin_user_id=admin.user_id,
+        target_user_id=str(new_user.id),
+        target_resource_type="user",
+        changes={
+            "email": new_user.email,
+            "name": new_user.name,
+            "access_tier": tier.name,
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return UserResponse(
+        id=new_user.id,
+        email=new_user.email,
+        name=new_user.name,
+        is_active=new_user.is_active,
+        access_tier_id=new_user.access_tier_id,
+        access_tier_name=new_user.access_tier.name if new_user.access_tier else "Unknown",
+        access_tier_level=new_user.access_tier.level if new_user.access_tier else 0,
+        created_at=new_user.created_at,
+        last_login_at=new_user.last_login_at,
     )
 
 
@@ -4348,7 +4441,7 @@ async def enhance_single_document(
 # Provider Health Check Endpoints
 # =============================================================================
 
-class ProviderHealthResponse(BaseModel):
+class ProviderHealthCheckResponse(BaseModel):
     """Response for provider health check."""
     provider_id: str
     provider_type: str
@@ -4362,7 +4455,7 @@ class ProviderHealthResponse(BaseModel):
 
 class AllProvidersHealthResponse(BaseModel):
     """Response for all providers health check."""
-    providers: List[ProviderHealthResponse]
+    providers: List[ProviderHealthCheckResponse]
     healthy_count: int
     unhealthy_count: int
     degraded_count: int
@@ -4398,7 +4491,7 @@ async def check_all_providers_health(
                 provider_id=str(provider.id),
                 check_type="ping",
             )
-            health_results.append(ProviderHealthResponse(
+            health_results.append(ProviderHealthCheckResponse(
                 provider_id=str(provider.id),
                 provider_type=provider.provider_type,
                 provider_name=provider.name,
@@ -4410,7 +4503,7 @@ async def check_all_providers_health(
             ))
         except Exception as e:
             logger.error("Health check failed", provider_id=str(provider.id), error=str(e))
-            health_results.append(ProviderHealthResponse(
+            health_results.append(ProviderHealthCheckResponse(
                 provider_id=str(provider.id),
                 provider_type=provider.provider_type,
                 provider_name=provider.name,
@@ -4434,7 +4527,7 @@ async def check_all_providers_health(
     )
 
 
-@router.get("/health/providers/{provider_id}", response_model=ProviderHealthResponse)
+@router.get("/health/providers/{provider_id}", response_model=ProviderHealthCheckResponse)
 async def check_provider_health(
     provider_id: UUID,
     admin: AdminUser,
@@ -4463,7 +4556,7 @@ async def check_provider_health(
         check_type=check_type,
     )
 
-    return ProviderHealthResponse(
+    return ProviderHealthCheckResponse(
         provider_id=check_result.provider_id,
         provider_type=check_result.provider_type,
         provider_name=check_result.provider_name,
@@ -4473,3 +4566,125 @@ async def check_provider_health(
         error_message=check_result.error_message,
         checked_at=check_result.checked_at,
     )
+
+
+# =============================================================================
+# Redis/Celery Status
+# =============================================================================
+
+
+class RedisStatusResponse(BaseModel):
+    """Response model for Redis connection status."""
+    connected: bool
+    enabled: bool
+    url: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class CeleryStatusResponse(BaseModel):
+    """Response model for Celery status."""
+    enabled: bool
+    available: bool
+    workers: List[str] = []
+    worker_count: int = 0
+    active_tasks: int = 0
+    message: Optional[str] = None
+
+
+@router.get("/redis/status", response_model=RedisStatusResponse)
+async def get_redis_status(
+    admin: AdminUser,
+):
+    """
+    Check Redis connection status.
+
+    Admin only endpoint.
+    """
+    from backend.services.redis_client import check_redis_connection
+
+    status = await check_redis_connection()
+    return RedisStatusResponse(**status)
+
+
+@router.get("/celery/status", response_model=CeleryStatusResponse)
+async def get_celery_status(
+    admin: AdminUser,
+):
+    """
+    Check Celery worker status.
+
+    Admin only endpoint.
+    """
+    try:
+        from backend.services.task_queue import (
+            is_celery_available,
+            get_worker_stats,
+            get_active_tasks,
+        )
+
+        # Get worker info
+        worker_stats = get_worker_stats()
+        is_available = is_celery_available()
+
+        # Count active tasks
+        active_count = 0
+        if worker_stats.get("enabled", False):
+            try:
+                active_tasks = get_active_tasks()
+                for worker_tasks in active_tasks.get("active", {}).values():
+                    active_count += len(worker_tasks)
+            except Exception:
+                pass
+
+        return CeleryStatusResponse(
+            enabled=worker_stats.get("enabled", False),
+            available=is_available,
+            workers=worker_stats.get("workers", []),
+            worker_count=worker_stats.get("count", 0),
+            active_tasks=active_count,
+            message=worker_stats.get("message"),
+        )
+    except ImportError:
+        # Celery is not installed
+        return CeleryStatusResponse(
+            enabled=False,
+            available=False,
+            workers=[],
+            worker_count=0,
+            active_tasks=0,
+            message="Celery is not installed. Install with: pip install celery[redis]",
+        )
+
+
+@router.post("/redis/invalidate-cache")
+async def invalidate_redis_settings_cache(
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Invalidate Redis/Celery settings cache.
+
+    Call this after changing queue.* or cache.* settings to apply changes.
+    Admin only endpoint.
+    """
+    from backend.services.redis_client import invalidate_redis_cache
+    from backend.services.embedding_cache import invalidate_cache_settings
+
+    invalidate_redis_cache()
+    invalidate_cache_settings()
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="redis_settings",
+        changes={"action": "invalidate_cache"},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    logger.info("Redis settings cache invalidated", admin_id=admin.user_id)
+
+    return {"message": "Redis settings cache invalidated. Changes will take effect on next request."}

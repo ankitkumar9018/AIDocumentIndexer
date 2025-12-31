@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useSession } from "next-auth/react";
 import {
   Bot,
@@ -24,6 +24,10 @@ import {
   Play,
   Pause,
   RotateCcw,
+  Loader2,
+  Plus,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -56,6 +60,18 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
   useAgentStatus,
@@ -65,6 +81,11 @@ import {
   useTriggerPromptOptimization,
   useAgentTrajectories,
   useUpdateAgentConfig,
+  useLLMProviders,
+  useLLMProviderModels,
+  useCreateAgent,
+  useUpdateAgent,
+  useDeleteAgent,
 } from "@/lib/api/hooks";
 import type { AgentDefinition, PromptOptimizationJob, AgentTrajectory } from "@/lib/api/client";
 
@@ -106,16 +127,51 @@ export default function AgentsAdminPage() {
   const [showOptimizationDialog, setShowOptimizationDialog] = useState(false);
   const [selectedJob, setSelectedJob] = useState<PromptOptimizationJob | null>(null);
 
+  // Configure dialog state
+  const [showConfigureDialog, setShowConfigureDialog] = useState(false);
+  const [configuringAgent, setConfiguringAgent] = useState<AgentDefinition | null>(null);
+  const [configTemperature, setConfigTemperature] = useState(0.7);
+  const [configMaxTokens, setConfigMaxTokens] = useState(2048);
+  const [configProviderId, setConfigProviderId] = useState<string>("");
+  const [configModel, setConfigModel] = useState<string>("");
+
+  // Create Agent dialog state
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentType, setNewAgentType] = useState("");
+  const [newAgentDescription, setNewAgentDescription] = useState("");
+  const [newAgentTemperature, setNewAgentTemperature] = useState(0.7);
+  const [newAgentMaxTokens, setNewAgentMaxTokens] = useState(2048);
+
+  // Edit Agent dialog state
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [editingAgent, setEditingAgent] = useState<AgentDefinition | null>(null);
+  const [editAgentName, setEditAgentName] = useState("");
+  const [editAgentDescription, setEditAgentDescription] = useState("");
+  const [editAgentTemperature, setEditAgentTemperature] = useState(0.7);
+  const [editAgentMaxTokens, setEditAgentMaxTokens] = useState(2048);
+
+  // Delete Agent dialog state
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deletingAgent, setDeletingAgent] = useState<AgentDefinition | null>(null);
+
   // Queries - only fetch when authenticated
   const { data: statusData, isLoading: statusLoading, refetch: refetchStatus } = useAgentStatus({ enabled: isAuthenticated });
   const { data: jobsData, isLoading: jobsLoading } = useOptimizationJobs(undefined, { enabled: isAuthenticated });
   const { data: trajectoriesData } = useAgentTrajectories({ limit: 50 }, { enabled: isAuthenticated });
+  const { data: providersData } = useLLMProviders({ enabled: isAuthenticated });
+  const { data: providerModelsData } = useLLMProviderModels(configProviderId, {
+    enabled: isAuthenticated && !!configProviderId,
+  });
 
   // Mutations
   const approveOptimization = useApproveOptimization();
   const rejectOptimization = useRejectOptimization();
   const triggerOptimization = useTriggerPromptOptimization();
   const updateAgentConfig = useUpdateAgentConfig();
+  const createAgentMutation = useCreateAgent();
+  const updateAgentMutation = useUpdateAgent();
+  const deleteAgentMutation = useDeleteAgent();
 
   const agents = statusData?.agents || [];
   const jobs = jobsData?.jobs || [];
@@ -130,16 +186,24 @@ export default function AgentsAdminPage() {
         agentId: agent.id,
         data: { is_active: !agent.is_active },
       });
+      toast.success(
+        agent.is_active ? "Agent Disabled" : "Agent Enabled",
+        { description: `${agent.name} has been ${agent.is_active ? "disabled" : "enabled"}.` }
+      );
+      refetchStatus();
     } catch (error) {
       console.error("Failed to toggle agent:", error);
+      toast.error("Error", { description: "Failed to update agent status. Please try again." });
     }
   };
 
   const handleTriggerOptimization = async (agentId: string) => {
     try {
       await triggerOptimization.mutateAsync(agentId);
+      toast.success("Optimization Started", { description: "Prompt optimization has been triggered." });
     } catch (error) {
       console.error("Failed to trigger optimization:", error);
+      toast.error("Error", { description: "Failed to trigger optimization. Please try again." });
     }
   };
 
@@ -148,8 +212,10 @@ export default function AgentsAdminPage() {
       await approveOptimization.mutateAsync(jobId);
       setShowOptimizationDialog(false);
       setSelectedJob(null);
+      toast.success("Optimization Approved", { description: "The new prompt version has been activated." });
     } catch (error) {
       console.error("Failed to approve optimization:", error);
+      toast.error("Error", { description: "Failed to approve optimization. Please try again." });
     }
   };
 
@@ -158,10 +224,140 @@ export default function AgentsAdminPage() {
       await rejectOptimization.mutateAsync({ jobId, reason: "Manual rejection" });
       setShowOptimizationDialog(false);
       setSelectedJob(null);
+      toast.success("Optimization Rejected", { description: "The prompt optimization has been rejected." });
     } catch (error) {
       console.error("Failed to reject optimization:", error);
+      toast.error("Error", { description: "Failed to reject optimization. Please try again." });
     }
   };
+
+  // Configure dialog handlers
+  const handleOpenConfigure = (agent: AgentDefinition) => {
+    setConfiguringAgent(agent);
+    setConfigTemperature(agent.default_temperature ?? 0.7);
+    setConfigMaxTokens(agent.max_tokens ?? 2048);
+    setConfigProviderId(agent.default_provider_id ?? "");
+    setConfigModel(agent.default_model ?? "");
+    setShowConfigureDialog(true);
+  };
+
+  const handleSaveConfig = async () => {
+    if (!configuringAgent) return;
+    try {
+      await updateAgentConfig.mutateAsync({
+        agentId: configuringAgent.id,
+        data: {
+          temperature: configTemperature,
+          max_tokens: configMaxTokens,
+          provider_id: configProviderId || undefined,
+          model: configModel || undefined,
+        },
+      });
+      toast.success("Configuration Saved", {
+        description: `${configuringAgent.name} settings have been updated.`,
+      });
+      setShowConfigureDialog(false);
+      setConfiguringAgent(null);
+      refetchStatus();
+    } catch (error) {
+      console.error("Failed to save configuration:", error);
+      toast.error("Error", { description: "Failed to save configuration. Please try again." });
+    }
+  };
+
+  // Create Agent handlers
+  const handleOpenCreate = () => {
+    setNewAgentName("");
+    setNewAgentType("");
+    setNewAgentDescription("");
+    setNewAgentTemperature(0.7);
+    setNewAgentMaxTokens(2048);
+    setShowCreateDialog(true);
+  };
+
+  const handleCreateAgent = async () => {
+    if (!newAgentName.trim() || !newAgentType.trim()) {
+      toast.error("Error", { description: "Name and type are required." });
+      return;
+    }
+    try {
+      await createAgentMutation.mutateAsync({
+        name: newAgentName.trim(),
+        agent_type: newAgentType.trim().toLowerCase().replace(/\s+/g, "_"),
+        description: newAgentDescription.trim() || undefined,
+        default_temperature: newAgentTemperature,
+        max_tokens: newAgentMaxTokens,
+      });
+      toast.success("Agent Created", { description: `${newAgentName} has been created.` });
+      setShowCreateDialog(false);
+      refetchStatus();
+    } catch (error: unknown) {
+      console.error("Failed to create agent:", error);
+      const message = error instanceof Error ? error.message : "Failed to create agent.";
+      toast.error("Error", { description: message });
+    }
+  };
+
+  // Edit Agent handlers
+  const handleOpenEdit = (agent: AgentDefinition) => {
+    setEditingAgent(agent);
+    setEditAgentName(agent.name);
+    setEditAgentDescription(agent.description || "");
+    setEditAgentTemperature(agent.default_temperature ?? 0.7);
+    setEditAgentMaxTokens(agent.max_tokens ?? 2048);
+    setShowEditDialog(true);
+  };
+
+  const handleUpdateAgent = async () => {
+    if (!editingAgent || !editAgentName.trim()) {
+      toast.error("Error", { description: "Name is required." });
+      return;
+    }
+    try {
+      await updateAgentMutation.mutateAsync({
+        agentId: editingAgent.id,
+        data: {
+          name: editAgentName.trim(),
+          description: editAgentDescription.trim() || undefined,
+          default_temperature: editAgentTemperature,
+          max_tokens: editAgentMaxTokens,
+        },
+      });
+      toast.success("Agent Updated", { description: `${editAgentName} has been updated.` });
+      setShowEditDialog(false);
+      setEditingAgent(null);
+      refetchStatus();
+    } catch (error: unknown) {
+      console.error("Failed to update agent:", error);
+      const message = error instanceof Error ? error.message : "Failed to update agent.";
+      toast.error("Error", { description: message });
+    }
+  };
+
+  // Delete Agent handlers
+  const handleOpenDelete = (agent: AgentDefinition) => {
+    setDeletingAgent(agent);
+    setShowDeleteDialog(true);
+  };
+
+  const handleDeleteAgent = async (hardDelete: boolean = false) => {
+    if (!deletingAgent) return;
+    try {
+      await deleteAgentMutation.mutateAsync({ agentId: deletingAgent.id, hardDelete });
+      const action = hardDelete ? "permanently deleted" : "deactivated";
+      toast.success("Agent Deleted", { description: `${deletingAgent.name} has been ${action}.` });
+      setShowDeleteDialog(false);
+      setDeletingAgent(null);
+      refetchStatus();
+    } catch (error: unknown) {
+      console.error("Failed to delete agent:", error);
+      const message = error instanceof Error ? error.message : "Failed to delete agent.";
+      toast.error("Error", { description: message });
+    }
+  };
+
+  // Get the selected provider's models from the models endpoint
+  const availableModels = providerModelsData?.chat_models || [];
 
   return (
     <div className="space-y-6">
@@ -173,10 +369,16 @@ export default function AgentsAdminPage() {
             Monitor and configure multi-agent system performance
           </p>
         </div>
-        <Button onClick={() => refetchStatus()} variant="outline" size="sm">
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleOpenCreate} size="sm">
+            <Plus className="h-4 w-4 mr-2" />
+            Add Agent
+          </Button>
+          <Button onClick={() => refetchStatus()} variant="outline" size="sm">
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Overview Cards */}
@@ -392,9 +594,21 @@ export default function AgentsAdminPage() {
                               <History className="h-4 w-4 mr-2" />
                               View Prompt History
                             </DropdownMenuItem>
-                            <DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleOpenConfigure(agent)}>
                               <Settings2 className="h-4 w-4 mr-2" />
-                              Configure
+                              Configure LLM
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onClick={() => handleOpenEdit(agent)}>
+                              <Pencil className="h-4 w-4 mr-2" />
+                              Edit Agent
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => handleOpenDelete(agent)}
+                              className="text-destructive focus:text-destructive"
+                            >
+                              <Trash2 className="h-4 w-4 mr-2" />
+                              Delete Agent
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -714,6 +928,335 @@ export default function AgentsAdminPage() {
                   Approve
                 </Button>
               </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Configure Agent Dialog */}
+      <Dialog open={showConfigureDialog} onOpenChange={setShowConfigureDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Configure {configuringAgent?.name}</DialogTitle>
+            <DialogDescription>
+              Adjust the LLM settings for this agent. Changes apply to all future executions.
+            </DialogDescription>
+          </DialogHeader>
+          {configuringAgent && (
+            <div className="space-y-6 py-4">
+              {/* Provider Selection */}
+              <div className="space-y-2">
+                <Label htmlFor="provider">LLM Provider</Label>
+                <Select
+                  value={configProviderId || "__default__"}
+                  onValueChange={(value) => {
+                    setConfigProviderId(value === "__default__" ? "" : value);
+                    setConfigModel(""); // Reset model when provider changes
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Use default provider" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default__">Use Default</SelectItem>
+                    {providersData?.providers?.map((provider) => (
+                      <SelectItem key={provider.id} value={provider.id}>
+                        {provider.name} ({provider.provider_type})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Select a specific provider or use the system default.
+                </p>
+              </div>
+
+              {/* Model Selection */}
+              {configProviderId && availableModels.length > 0 && (
+                <div className="space-y-2">
+                  <Label htmlFor="model">Model</Label>
+                  <Select
+                    value={configModel || "__default__"}
+                    onValueChange={(value) => setConfigModel(value === "__default__" ? "" : value)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Use provider default" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">Use Provider Default</SelectItem>
+                      {availableModels.map((model: string) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              {/* Temperature Slider */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label>Temperature</Label>
+                  <span className="text-sm text-muted-foreground">{configTemperature.toFixed(2)}</span>
+                </div>
+                <Slider
+                  value={[configTemperature]}
+                  onValueChange={([value]) => setConfigTemperature(value)}
+                  min={0}
+                  max={2}
+                  step={0.05}
+                  className="w-full"
+                />
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>Precise (0)</span>
+                  <span>Balanced (0.7)</span>
+                  <span>Creative (2)</span>
+                </div>
+              </div>
+
+              {/* Max Tokens */}
+              <div className="space-y-2">
+                <Label htmlFor="maxTokens">Max Tokens</Label>
+                <Input
+                  id="maxTokens"
+                  type="number"
+                  min={256}
+                  max={128000}
+                  step={256}
+                  value={configMaxTokens}
+                  onChange={(e) => setConfigMaxTokens(parseInt(e.target.value) || 2048)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Maximum tokens in the response. Higher values allow longer outputs.
+                </p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowConfigureDialog(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSaveConfig} disabled={updateAgentConfig.isPending}>
+              {updateAgentConfig.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Create Agent Dialog */}
+      <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create New Agent</DialogTitle>
+            <DialogDescription>
+              Create a custom agent with specific capabilities and settings.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="newAgentName">Agent Name *</Label>
+              <Input
+                id="newAgentName"
+                placeholder="e.g., Summarizer Agent"
+                value={newAgentName}
+                onChange={(e) => setNewAgentName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="newAgentType">Agent Type *</Label>
+              <Input
+                id="newAgentType"
+                placeholder="e.g., summarizer (lowercase, no spaces)"
+                value={newAgentType}
+                onChange={(e) => setNewAgentType(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Unique identifier for this agent type. Use lowercase with underscores.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="newAgentDescription">Description</Label>
+              <Textarea
+                id="newAgentDescription"
+                placeholder="Describe what this agent does..."
+                value={newAgentDescription}
+                onChange={(e) => setNewAgentDescription(e.target.value)}
+                rows={3}
+              />
+            </div>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Label>Temperature</Label>
+                <span className="text-sm text-muted-foreground">{newAgentTemperature.toFixed(2)}</span>
+              </div>
+              <Slider
+                value={[newAgentTemperature]}
+                onValueChange={([value]) => setNewAgentTemperature(value)}
+                min={0}
+                max={2}
+                step={0.05}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="newAgentMaxTokens">Max Tokens</Label>
+              <Input
+                id="newAgentMaxTokens"
+                type="number"
+                min={256}
+                max={128000}
+                value={newAgentMaxTokens}
+                onChange={(e) => setNewAgentMaxTokens(parseInt(e.target.value) || 2048)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowCreateDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreateAgent}
+              disabled={createAgentMutation.isPending || !newAgentName.trim() || !newAgentType.trim()}
+            >
+              {createAgentMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Create Agent
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Agent Dialog */}
+      <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Edit Agent</DialogTitle>
+            <DialogDescription>
+              Update {editingAgent?.name} settings. Type cannot be changed after creation.
+            </DialogDescription>
+          </DialogHeader>
+          {editingAgent && (
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="editAgentName">Agent Name *</Label>
+                <Input
+                  id="editAgentName"
+                  value={editAgentName}
+                  onChange={(e) => setEditAgentName(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Agent Type</Label>
+                <Input value={editingAgent.agent_type} disabled className="bg-muted" />
+                <p className="text-xs text-muted-foreground">
+                  Agent type cannot be changed after creation.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="editAgentDescription">Description</Label>
+                <Textarea
+                  id="editAgentDescription"
+                  value={editAgentDescription}
+                  onChange={(e) => setEditAgentDescription(e.target.value)}
+                  rows={3}
+                />
+              </div>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label>Temperature</Label>
+                  <span className="text-sm text-muted-foreground">{editAgentTemperature.toFixed(2)}</span>
+                </div>
+                <Slider
+                  value={[editAgentTemperature]}
+                  onValueChange={([value]) => setEditAgentTemperature(value)}
+                  min={0}
+                  max={2}
+                  step={0.05}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="editAgentMaxTokens">Max Tokens</Label>
+                <Input
+                  id="editAgentMaxTokens"
+                  type="number"
+                  min={256}
+                  max={128000}
+                  value={editAgentMaxTokens}
+                  onChange={(e) => setEditAgentMaxTokens(parseInt(e.target.value) || 2048)}
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowEditDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleUpdateAgent}
+              disabled={updateAgentMutation.isPending || !editAgentName.trim()}
+            >
+              {updateAgentMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Agent Dialog */}
+      <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Agent</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete {deletingAgent?.name}?
+            </DialogDescription>
+          </DialogHeader>
+          {deletingAgent && (
+            <div className="py-4">
+              <div className="rounded-lg border p-4 bg-muted/50">
+                <div className="flex items-center gap-3">
+                  <div className={cn("p-2 rounded-lg", agentColors[deletingAgent.agent_type] || "bg-gray-500")}>
+                    {agentIcons[deletingAgent.agent_type] || <Bot className="h-5 w-5 text-white" />}
+                  </div>
+                  <div>
+                    <p className="font-medium">{deletingAgent.name}</p>
+                    <p className="text-sm text-muted-foreground">{deletingAgent.agent_type}</p>
+                  </div>
+                </div>
+              </div>
+              <p className="mt-4 text-sm text-muted-foreground">
+                <strong>Deactivate</strong> will disable the agent but keep its data.
+                <br />
+                <strong>Delete Permanently</strong> will remove the agent and all associated data.
+              </p>
+              {["manager", "generator", "critic", "research", "tool_executor"].includes(deletingAgent.agent_type) && (
+                <p className="mt-2 text-sm text-amber-600 dark:text-amber-400">
+                  Note: Core agents cannot be permanently deleted.
+                </p>
+              )}
+            </div>
+          )}
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setShowDeleteDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => handleDeleteAgent(false)}
+              disabled={deleteAgentMutation.isPending}
+            >
+              {deleteAgentMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Deactivate
+            </Button>
+            {deletingAgent && !["manager", "generator", "critic", "research", "tool_executor"].includes(deletingAgent.agent_type) && (
+              <Button
+                variant="destructive"
+                onClick={() => handleDeleteAgent(true)}
+                disabled={deleteAgentMutation.isPending}
+              >
+                {deleteAgentMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Delete Permanently
+              </Button>
             )}
           </DialogFooter>
         </DialogContent>

@@ -68,6 +68,8 @@ dependencies = [
     # Caching & Sessions
     "redis>=5.0.0",
     "hiredis>=2.3.0",
+    # Task Queue
+    "celery[redis]>=5.3.6",
     # File Watching
     "watchdog>=3.0.0",
     # Document Generation

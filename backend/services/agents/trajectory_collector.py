@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import structlog
-from sqlalchemy import select, func, and_, desc
+from sqlalchemy import select, func, and_, desc, Integer, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import AgentTrajectory, AgentDefinition, AgentPromptVersion
@@ -50,6 +50,158 @@ class TrajectoryCollector:
     def set_db(self, db: AsyncSession) -> None:
         """Set database session."""
         self.db = db
+
+    async def record_trajectory_by_type(
+        self,
+        session_id: str,
+        agent_type: str,
+        task_type: str,
+        input_summary: str,
+        steps: List[TrajectoryStep],
+        success: bool,
+        quality_score: Optional[float] = None,
+        error_message: Optional[str] = None,
+        total_tokens: int = 0,
+        total_duration_ms: int = 0,
+        total_cost_usd: float = 0.0,
+    ) -> Optional[AgentTrajectory]:
+        """
+        Record trajectory by looking up AgentDefinition by agent_type.
+
+        This is the preferred method for recording trajectories as it handles
+        the mapping from agent_type string to AgentDefinition UUID.
+
+        Args:
+            session_id: Execution session ID
+            agent_type: Agent type string (e.g., "research", "generator", "manager")
+            task_type: Type of task executed
+            input_summary: Summary of task inputs
+            steps: List of execution steps
+            success: Whether execution succeeded
+            quality_score: Quality score (0-5)
+            error_message: Error message if failed
+            total_tokens: Total tokens used
+            total_duration_ms: Total duration in milliseconds
+            total_cost_usd: Total cost in USD
+
+        Returns:
+            Created AgentTrajectory record or None
+        """
+        if not self.db:
+            logger.warning("No database session, trajectory not persisted")
+            return None
+
+        # Look up AgentDefinition by agent_type
+        result = await self.db.execute(
+            select(AgentDefinition).where(AgentDefinition.agent_type == agent_type)
+        )
+        agent_def = result.scalar_one_or_none()
+
+        if not agent_def:
+            logger.warning(f"No AgentDefinition found for type: {agent_type}")
+
+        # Convert steps to JSON-serializable format
+        trajectory_steps = []
+        calc_tokens = 0
+        calc_duration = 0
+
+        for step in steps:
+            step_dict = {
+                "step_id": step.step_id,
+                "timestamp": step.timestamp.isoformat(),
+                "agent_id": step.agent_id,
+                "action_type": step.action_type,
+                "input_data": step.input_data,
+                "output_data": step.output_data,
+                "tokens_used": step.tokens_used,
+                "duration_ms": step.duration_ms,
+                "success": step.success,
+                "error_message": step.error_message,
+            }
+            trajectory_steps.append(step_dict)
+            calc_tokens += step.tokens_used
+            calc_duration += step.duration_ms
+
+        # Use provided totals or calculate from steps
+        final_tokens = total_tokens if total_tokens > 0 else calc_tokens
+        final_duration = total_duration_ms if total_duration_ms > 0 else calc_duration
+
+        # Create trajectory record
+        trajectory = AgentTrajectory(
+            session_id=uuid.UUID(session_id) if isinstance(session_id, str) else session_id,
+            agent_id=agent_def.id if agent_def else None,
+            task_type=task_type,
+            input_summary=input_summary[:1000] if input_summary else None,
+            trajectory_steps=trajectory_steps,
+            success=success,
+            quality_score=quality_score,
+            error_message=error_message,
+            total_tokens=final_tokens,
+            total_duration_ms=final_duration,
+            total_cost_usd=total_cost_usd,
+        )
+
+        self.db.add(trajectory)
+
+        # Update agent metrics after recording
+        if agent_def:
+            await self._update_agent_metrics(agent_def)
+
+        await self.db.commit()
+        await self.db.refresh(trajectory)
+
+        logger.info(
+            "Recorded trajectory by type",
+            trajectory_id=str(trajectory.id),
+            agent_type=agent_type,
+            agent_id=str(agent_def.id) if agent_def else None,
+            success=success,
+            total_tokens=final_tokens,
+        )
+
+        return trajectory
+
+    async def _update_agent_metrics(self, agent_def: AgentDefinition) -> None:
+        """
+        Update AgentDefinition metrics after recording trajectory.
+
+        This keeps the success_rate, total_executions, avg_latency_ms, and
+        avg_tokens_per_execution fields up to date.
+        """
+        if not self.db or not agent_def:
+            return
+
+        # Get stats for this agent from recent trajectories (last 7 days)
+        cutoff = datetime.utcnow() - timedelta(days=7)
+
+        # Count total executions and successes
+        stats = await self.db.execute(
+            select(
+                func.count(AgentTrajectory.id).label("total"),
+                func.sum(case((AgentTrajectory.success == True, 1), else_=0)).label("successes"),
+                func.avg(AgentTrajectory.total_duration_ms).label("avg_latency"),
+                func.avg(AgentTrajectory.total_tokens).label("avg_tokens"),
+            )
+            .where(and_(
+                AgentTrajectory.agent_id == agent_def.id,
+                AgentTrajectory.created_at >= cutoff,
+            ))
+        )
+        row = stats.one()
+
+        # Update agent definition metrics
+        agent_def.total_executions = row.total or 0
+        agent_def.success_rate = (row.successes / row.total) if row.total and row.total > 0 else 0.0
+        agent_def.avg_latency_ms = int(row.avg_latency) if row.avg_latency else None
+        agent_def.avg_tokens_per_execution = int(row.avg_tokens) if row.avg_tokens else None
+
+        logger.debug(
+            "Updated agent metrics",
+            agent_id=str(agent_def.id),
+            agent_type=agent_def.agent_type,
+            total_executions=agent_def.total_executions,
+            success_rate=agent_def.success_rate,
+        )
 
     async def record_trajectory(
         self,
@@ -351,11 +503,12 @@ class TrajectoryCollector:
         agent_uuid = uuid.UUID(agent_id)
 
         # Get aggregate stats
+        # Use case() for boolean to int conversion - works across SQLite and PostgreSQL
         stats_result = await self.db.execute(
             select(
                 func.count(AgentTrajectory.id).label("total"),
                 func.sum(
-                    func.cast(AgentTrajectory.success, type_=func.INTEGER)
+                    case((AgentTrajectory.success == True, 1), else_=0)
                 ).label("successes"),
                 func.avg(AgentTrajectory.quality_score).label("avg_quality"),
                 func.avg(AgentTrajectory.total_tokens).label("avg_tokens"),
@@ -412,7 +565,7 @@ class TrajectoryCollector:
             select(
                 func.count(AgentTrajectory.id).label("total"),
                 func.sum(
-                    func.cast(AgentTrajectory.success, type_=func.INTEGER)
+                    case((AgentTrajectory.success == True, 1), else_=0)
                 ).label("successes"),
                 func.avg(AgentTrajectory.quality_score).label("avg_quality"),
             )

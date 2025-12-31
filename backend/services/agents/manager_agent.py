@@ -606,6 +606,7 @@ class ManagerAgent(BaseAgent):
         context = context or {}
         plan.status = PlanStatus.EXECUTING
         plan.started_at = datetime.utcnow()
+        plan_start_time = time.time()  # Track for trajectory recording
 
         yield {
             "type": "plan_started",
@@ -655,21 +656,54 @@ class ManagerAgent(BaseAgent):
                     }
 
                     # Execute step
+                    step_start_time = time.time()
                     result = await self._execute_step(step, step_context)
                     step.result = result
                     step_results[step.id] = result
+
+                    # Record trajectory for this step
+                    step_trajectory = getattr(result, 'trajectory_steps', None) or []
+                    if step_trajectory and self.trajectory_collector:
+                        try:
+                            await self.trajectory_collector.record_trajectory_by_type(
+                                session_id=context.get("session_id", plan.session_id),
+                                agent_type=step.agent_type,
+                                task_type=step.task.type.value,
+                                input_summary=step.task.description[:500] if step.task.description else step.task.name,
+                                steps=step_trajectory,
+                                success=result.status == TaskStatus.COMPLETED,
+                                quality_score=result.confidence_score,
+                                error_message=result.error_message,
+                                total_tokens=result.tokens_used or 0,
+                                total_duration_ms=int((time.time() - step_start_time) * 1000),
+                                total_cost_usd=getattr(result, 'cost_usd', 0.0) or 0.0,
+                            )
+                        except Exception as traj_err:
+                            logger.warning(f"Failed to record step trajectory: {traj_err}")
 
                     if result.is_success:
                         step.status = TaskStatus.COMPLETED
                         step.actual_cost_usd = self._estimate_step_cost(result)
                         plan.total_actual_cost_usd += step.actual_cost_usd
 
+                        # Prepare full output for step display
+                        full_output = None
+                        if result.output:
+                            if isinstance(result.output, dict):
+                                # Research agent returns {"findings": ..., "sources": ...}
+                                full_output = result.output.get("findings", str(result.output))
+                            else:
+                                full_output = str(result.output)
+
                         yield {
                             "type": "step_completed",
                             "step_id": step.id,
+                            "step_index": plan.current_step_index,
                             "step_name": step.task.name,
+                            "agent_type": step.agent_type,
                             "status": "success",
-                            "output_preview": str(result.output)[:200] if result.output else None,
+                            "output_preview": full_output[:200] if full_output else None,
+                            "full_output": full_output,  # Full output for detailed view
                             "progress": plan.progress_percentage,
                         }
 
@@ -748,6 +782,25 @@ class ManagerAgent(BaseAgent):
                 "completed_steps": plan.completed_steps,
                 "failed_steps": plan.failed_steps,
             }
+
+        # Record manager agent's overall trajectory
+        if self._current_trajectory and self.trajectory_collector:
+            try:
+                await self.trajectory_collector.record_trajectory_by_type(
+                    session_id=plan.session_id,
+                    agent_type="manager",
+                    task_type="orchestration",
+                    input_summary=plan.user_request[:500] if plan.user_request else "Agent execution",
+                    steps=self._current_trajectory,
+                    success=plan.status == PlanStatus.COMPLETED,
+                    quality_score=None,
+                    error_message=plan.error_message,
+                    total_tokens=sum((r.tokens_used or 0) for r in step_results.values()),
+                    total_duration_ms=int((time.time() - plan_start_time) * 1000),
+                    total_cost_usd=plan.total_actual_cost_usd or 0.0,
+                )
+            except Exception as traj_err:
+                logger.warning(f"Failed to record manager trajectory: {traj_err}")
 
     async def _execute_step(
         self,

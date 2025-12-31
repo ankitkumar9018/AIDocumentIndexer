@@ -88,6 +88,30 @@ class UpdateAgentConfigRequest(BaseModel):
     is_active: Optional[bool] = None
 
 
+class CreateAgentRequest(BaseModel):
+    """Request to create a new agent."""
+    name: str = Field(..., min_length=1, max_length=100)
+    agent_type: str = Field(..., min_length=1, max_length=50)
+    description: Optional[str] = Field(None, max_length=500)
+    default_temperature: float = Field(0.7, ge=0, le=2)
+    max_tokens: int = Field(2048, ge=256, le=128000)
+    settings: Optional[Dict[str, Any]] = None
+    default_provider_id: Optional[str] = None
+    default_model: Optional[str] = None
+
+
+class UpdateAgentRequest(BaseModel):
+    """Request to fully update an agent."""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+    default_temperature: Optional[float] = Field(None, ge=0, le=2)
+    max_tokens: Optional[int] = Field(None, ge=256, le=128000)
+    settings: Optional[Dict[str, Any]] = None
+    default_provider_id: Optional[str] = None
+    default_model: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 class CreatePromptVersionRequest(BaseModel):
     """Request to create a prompt version."""
     system_prompt: str
@@ -541,6 +565,161 @@ async def update_agent_config(
 
 
 # =============================================================================
+# Agent CRUD Endpoints
+# =============================================================================
+
+@router.post("/agents")
+async def create_agent(
+    request: CreateAgentRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a new agent definition.
+
+    Creates a custom agent with specified configuration. The agent_type must be unique.
+    """
+    from sqlalchemy import select
+
+    # Check if agent_type already exists
+    existing = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.agent_type == request.agent_type)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Agent type '{request.agent_type}' already exists"
+        )
+
+    agent = AgentDefinition(
+        name=request.name,
+        agent_type=request.agent_type,
+        description=request.description,
+        default_temperature=request.default_temperature,
+        max_tokens=request.max_tokens,
+        settings=request.settings or {},
+        default_provider_id=uuid.UUID(request.default_provider_id) if request.default_provider_id else None,
+        default_model=request.default_model,
+        is_active=True,
+    )
+
+    db.add(agent)
+    await db.commit()
+    await db.refresh(agent)
+
+    logger.info("Created new agent", agent_id=str(agent.id), agent_type=request.agent_type)
+
+    return {
+        "id": str(agent.id),
+        "name": agent.name,
+        "agent_type": agent.agent_type,
+        "message": f"Agent '{agent.name}' created successfully",
+    }
+
+
+@router.put("/agents/{agent_id}")
+async def update_agent(
+    agent_id: str,
+    request: UpdateAgentRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update an agent definition (full update).
+
+    Updates agent name, description, settings, and LLM configuration.
+    """
+    from sqlalchemy import select
+
+    result = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.id == uuid.UUID(agent_id))
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Update fields if provided
+    if request.name is not None:
+        agent.name = request.name
+    if request.description is not None:
+        agent.description = request.description
+    if request.default_temperature is not None:
+        agent.default_temperature = request.default_temperature
+    if request.max_tokens is not None:
+        agent.max_tokens = request.max_tokens
+    if request.settings is not None:
+        agent.settings = request.settings
+    if request.default_provider_id is not None:
+        agent.default_provider_id = uuid.UUID(request.default_provider_id) if request.default_provider_id else None
+    if request.default_model is not None:
+        agent.default_model = request.default_model
+    if request.is_active is not None:
+        agent.is_active = request.is_active
+
+    await db.commit()
+
+    logger.info("Updated agent", agent_id=agent_id)
+
+    return {
+        "success": True,
+        "id": str(agent.id),
+        "name": agent.name,
+        "message": f"Agent '{agent.name}' updated successfully",
+    }
+
+
+@router.delete("/agents/{agent_id}")
+async def delete_agent(
+    agent_id: str,
+    hard_delete: bool = Query(False, description="Permanently delete instead of deactivate"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Delete an agent definition.
+
+    By default, performs a soft delete (deactivates the agent).
+    Use hard_delete=true to permanently remove the agent.
+    """
+    from sqlalchemy import select
+
+    result = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.id == uuid.UUID(agent_id))
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    agent_name = agent.name
+    agent_type = agent.agent_type
+
+    # Prevent deletion of core agents
+    core_agents = {"manager", "generator", "critic", "research", "tool_executor"}
+    if agent_type in core_agents and hard_delete:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot permanently delete core agent type '{agent_type}'. Use soft delete instead."
+        )
+
+    if hard_delete:
+        await db.delete(agent)
+        logger.info("Hard deleted agent", agent_id=agent_id, agent_type=agent_type)
+        message = f"Agent '{agent_name}' permanently deleted"
+    else:
+        agent.is_active = False
+        logger.info("Soft deleted agent", agent_id=agent_id, agent_type=agent_type)
+        message = f"Agent '{agent_name}' deactivated"
+
+    await db.commit()
+
+    return {
+        "success": True,
+        "id": agent_id,
+        "deleted": hard_delete,
+        "message": message,
+    }
+
+
+# =============================================================================
 # Prompt Optimization Endpoints (Admin)
 # =============================================================================
 
@@ -829,30 +1008,52 @@ async def list_trajectories(
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    """List agent execution trajectories."""
-    collector = TrajectoryCollector(db)
-    trajectories = await collector.get_recent_trajectories(
-        agent_id=agent_id,
-        success_filter=success,
-        limit=limit,
+    """List agent execution trajectories with agent names."""
+    from sqlalchemy import select, desc
+    from datetime import datetime, timedelta
+
+    # Build query with join to get agent name
+    cutoff = datetime.utcnow() - timedelta(hours=24 * 7)  # Last 7 days
+
+    query = (
+        select(AgentTrajectory, AgentDefinition.name.label("agent_name"), AgentDefinition.agent_type)
+        .outerjoin(AgentDefinition, AgentTrajectory.agent_id == AgentDefinition.id)
+        .where(AgentTrajectory.created_at >= cutoff)
+        .order_by(desc(AgentTrajectory.created_at))
+        .limit(limit)
     )
+
+    if agent_id:
+        query = query.where(AgentTrajectory.agent_id == uuid.UUID(agent_id))
+
+    if success is not None:
+        query = query.where(AgentTrajectory.success == success)
+
+    result = await db.execute(query)
+    rows = result.all()
 
     return {
         "trajectories": [
             {
-                "id": str(t.id),
-                "session_id": str(t.session_id),
-                "agent_id": str(t.agent_id) if t.agent_id else None,
-                "task_type": t.task_type,
-                "success": t.success,
-                "quality_score": t.quality_score,
-                "total_tokens": t.total_tokens,
-                "total_duration_ms": t.total_duration_ms,
-                "created_at": t.created_at.isoformat() if t.created_at else None,
+                "id": str(traj.id),
+                "session_id": str(traj.session_id),
+                "agent_id": str(traj.agent_id) if traj.agent_id else None,
+                "agent_name": agent_name or "Unknown",
+                "agent_type": agent_type or "unknown",
+                "task_type": traj.task_type,
+                "input_summary": traj.input_summary,
+                "success": traj.success,
+                "quality_score": traj.quality_score,
+                "error_message": traj.error_message,
+                "total_tokens": traj.total_tokens,
+                "total_duration_ms": traj.total_duration_ms,
+                "total_cost_usd": traj.total_cost_usd,
+                "user_rating": traj.user_rating,
+                "created_at": traj.created_at.isoformat() if traj.created_at else None,
             }
-            for t in trajectories
+            for traj, agent_name, agent_type in rows
         ],
-        "count": len(trajectories),
+        "count": len(rows),
     }
 
 

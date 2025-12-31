@@ -20,7 +20,14 @@ import json
 from backend.services.rag import RAGService, RAGConfig, get_rag_service
 from backend.services.response_cache import get_response_cache_service, ResponseCacheService
 from backend.db.database import async_session_context, get_async_session
-from backend.db.models import ChatSession as ChatSessionModel, ChatMessage as ChatMessageModel, MessageRole, User
+from backend.db.models import (
+    ChatSession as ChatSessionModel,
+    ChatMessage as ChatMessageModel,
+    ChatFeedback,
+    MessageRole,
+    User,
+    AgentTrajectory,
+)
 from backend.services.agent_orchestrator import AgentOrchestrator, create_orchestrator
 from backend.api.middleware.auth import AuthenticatedUser
 
@@ -201,6 +208,13 @@ class AgentOptions(BaseModel):
     collection: Optional[str] = Field(default=None, description="Target specific collection (None = all)")
 
 
+class ImageAttachment(BaseModel):
+    """Image attachment for vision-enabled chat."""
+    data: Optional[str] = Field(None, description="Base64-encoded image data")
+    url: Optional[str] = Field(None, description="URL to image (alternative to data)")
+    mime_type: str = Field(default="image/jpeg", description="MIME type of the image")
+
+
 class ChatRequest(BaseModel):
     """Chat completion request."""
     message: str
@@ -210,11 +224,12 @@ class ChatRequest(BaseModel):
     collection_filter: Optional[str] = None  # Single collection filter (backward compatible)
     collection_filters: Optional[List[str]] = None  # Multiple collection filters
     query_only: bool = False  # If True, don't store in RAG
-    mode: Optional[str] = Field(None, pattern="^(agent|chat|general)$")  # Execution mode: agent, chat (RAG), or general (LLM)
+    mode: Optional[str] = Field(None, pattern="^(agent|chat|general|vision)$")  # Execution mode: agent, chat (RAG), general (LLM), or vision (multimodal)
     agent_options: Optional[AgentOptions] = Field(default=None, description="Options for agent mode execution")
     include_collection_context: bool = Field(default=True, description="Include collection tags in LLM context")
     temp_session_id: Optional[str] = Field(default=None, description="Temporary document session ID for quick chat")
     top_k: Optional[int] = Field(default=None, ge=3, le=25, description="Number of documents to search (3-25). Uses admin setting if not specified.")
+    images: Optional[List[ImageAttachment]] = Field(default=None, description="Image attachments for vision mode")
 
     @property
     def effective_collection_filters(self) -> Optional[List[str]]:
@@ -411,6 +426,70 @@ async def create_chat_completion(
                 message_id=message_id,
                 content=response.content,
                 sources=[],  # No sources for general chat
+                created_at=datetime.now(),
+            )
+
+        elif request.mode == "vision":
+            # Vision mode: Use multimodal LLM for image analysis
+            if not request.images:
+                raise HTTPException(status_code=400, detail="Vision mode requires at least one image attachment")
+
+            from backend.services.llm import chat_with_vision
+            import base64
+
+            # Process images
+            image_data_list = []
+            image_urls = []
+
+            for img in request.images:
+                if img.data:
+                    # Decode base64 image data
+                    try:
+                        decoded = base64.b64decode(img.data)
+                        image_data_list.append((decoded, img.mime_type))
+                    except Exception as e:
+                        logger.warning("Failed to decode image data", error=str(e))
+                elif img.url:
+                    image_urls.append(img.url)
+
+            # Use the first image (extend to multi-image later if needed)
+            response_content = ""
+            if image_data_list:
+                image_bytes, mime_type = image_data_list[0]
+                response_content = await chat_with_vision(
+                    model=None,  # Use default vision model
+                    text=request.message,
+                    image_data=image_bytes,
+                    image_type=mime_type,
+                )
+            elif image_urls:
+                from backend.services.llm import create_vision_messages_from_urls, get_chat_llm
+                llm = await get_chat_llm()
+                # For URL-based images, use a different approach
+                response_content = await chat_with_vision(
+                    model=None,
+                    text=request.message,
+                    image_url=image_urls[0],
+                )
+            else:
+                raise HTTPException(status_code=400, detail="No valid image data or URL provided")
+
+            # Save messages to database
+            if not request.query_only:
+                await save_chat_messages(
+                    session_id=session_id,
+                    user_message=f"[Image Analysis] {request.message}",
+                    assistant_response=response_content,
+                    user_id=user.user_id,
+                    user_email=user.email,
+                    model_used="vision",
+                )
+
+            return ChatResponse(
+                session_id=session_id,
+                message_id=message_id,
+                content=response_content,
+                sources=[],  # No sources for vision chat
                 created_at=datetime.now(),
             )
 
@@ -648,9 +727,18 @@ async def create_streaming_completion(
                         yield f"data: {json.dumps({'type': 'agent_step', 'step_index': step_index, 'step': {'name': update.get('step_name', 'Processing'), 'agent': update.get('agent_type', 'research'), 'status': 'in_progress'}})}\n\n"
 
                     elif update_type == "step_completed":
-                        # Send step_completed event
+                        # Send step_completed event with full output for detailed view
                         step_index = update.get("step_index", 0)
-                        yield f"data: {json.dumps({'type': 'step_completed', 'step_index': step_index, 'status': 'completed'})}\n\n"
+                        step_data = {
+                            'type': 'step_completed',
+                            'step_index': step_index,
+                            'status': 'completed',
+                            'step_name': update.get('step_name'),
+                            'agent_type': update.get('agent_type'),
+                            'output_preview': update.get('output_preview'),
+                            'full_output': update.get('full_output'),  # Full output for expansion
+                        }
+                        yield f"data: {json.dumps(step_data)}\n\n"
 
                     elif update_type == "thinking":
                         # Forward thinking/reasoning content
@@ -1107,27 +1195,86 @@ async def submit_feedback(
     message_id: UUID,
     rating: int = Query(..., ge=1, le=5),
     comment: Optional[str] = None,
+    session_id: Optional[UUID] = None,
+    mode: Optional[str] = None,
 ):
     """
     Submit feedback for a chat response.
 
-    Used to improve RAG quality over time.
+    Stores feedback in database and updates agent trajectories for agent mode responses.
+    Used to improve RAG quality and agent prompts over time.
     """
     logger.info(
         "Submitting chat feedback",
         message_id=str(message_id),
         rating=rating,
         comment=comment,
+        mode=mode,
     )
 
-    # Log feedback for analysis; implement database storage for production use
-    logger.info(
-        "Chat feedback received",
-        message_id=str(message_id),
-        rating=rating,
-        has_comment=comment is not None,
-    )
-    return {"message": "Feedback submitted", "message_id": str(message_id)}
+    try:
+        async with async_session_context() as db:
+            # Get valid user UUID from the database
+            db_user_id = await get_db_user_id(db, user.user_id, user.email)
+            if not db_user_id:
+                raise HTTPException(status_code=400, detail="Could not find user in database")
+
+            # Check if there's an agent trajectory for this message (for agent mode)
+            trajectory_id = None
+            if mode == "agent":
+                # Look for trajectory with this message_id in metadata
+                # Agent trajectories store message_id in their metadata
+                trajectory_query = select(AgentTrajectory).where(
+                    AgentTrajectory.trajectory_steps.contains({"message_id": str(message_id)})
+                )
+                result = await db.execute(trajectory_query)
+                trajectory = result.scalar_one_or_none()
+
+                if trajectory:
+                    trajectory_id = trajectory.id
+                    # Update the trajectory with user feedback
+                    trajectory.user_rating = rating
+                    trajectory.user_feedback = comment
+                    logger.info(
+                        "Updated agent trajectory with user feedback",
+                        trajectory_id=str(trajectory_id),
+                        rating=rating,
+                    )
+
+            # Create feedback record
+            feedback = ChatFeedback(
+                message_id=str(message_id),
+                session_id=session_id,
+                user_id=db_user_id,
+                rating=rating,
+                comment=comment,
+                mode=mode,
+                trajectory_id=trajectory_id,
+            )
+            db.add(feedback)
+            await db.commit()
+
+            logger.info(
+                "Chat feedback stored",
+                feedback_id=str(feedback.id),
+                message_id=str(message_id),
+                rating=rating,
+                has_trajectory=trajectory_id is not None,
+            )
+
+            return {
+                "message": "Feedback submitted",
+                "message_id": str(message_id),
+                "feedback_id": str(feedback.id),
+                "trajectory_updated": trajectory_id is not None,
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to store feedback", error=str(e), message_id=str(message_id))
+        # Still return success to not block the user experience
+        return {"message": "Feedback submitted", "message_id": str(message_id)}
 
 
 # =============================================================================

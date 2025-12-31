@@ -52,8 +52,7 @@ function highlightText(text: string, query?: string): React.ReactNode[] {
     return [text];
   }
 
-  // Split query into words, filter out very common stop words only
-  // Keep domain-specific terms that might be relevant
+  // English stop words to ignore - keep domain-specific terms
   const stopWords = new Set([
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had", "do", "does", "did", "will", "would", "could",
@@ -67,10 +66,11 @@ function highlightText(text: string, query?: string): React.ReactNode[] {
     "about", "what", "which", "who", "this", "that", "these", "those",
   ]);
 
+  // Extract words from query - remove punctuation, keep 2+ char words
   const queryWords = query
     .toLowerCase()
+    .replace(/[?!.,;:'"]/g, "") // Remove punctuation
     .split(/\s+/)
-    // Allow words with 2+ characters (was > 2, now >= 2)
     .filter(word => word.length >= 2 && !stopWords.has(word))
     .map(word => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")); // Escape regex special chars
 
@@ -78,34 +78,45 @@ function highlightText(text: string, query?: string): React.ReactNode[] {
     return [text];
   }
 
-  // Create regex pattern with word boundaries for better matching
-  // Use \b for word boundary to avoid partial matches within words
-  const pattern = new RegExp(`\\b(${queryWords.join("|")})\\b`, "gi");
+  // Check if query contains non-ASCII characters (German ä, ö, ü, etc.)
+  // \b word boundary doesn't work with Unicode - use simple matching instead
+  const hasNonAscii = queryWords.some(w => /[^\x00-\x7F]/.test(w));
 
-  const parts = text.split(pattern);
-  const result: React.ReactNode[] = [];
+  try {
+    // Create pattern - for non-ASCII languages, match anywhere
+    // For ASCII, use word boundaries for precise matching
+    const pattern = hasNonAscii
+      ? new RegExp(`(${queryWords.join("|")})`, "gi")
+      : new RegExp(`\\b(${queryWords.join("|")})\\b`, "gi");
 
-  parts.forEach((part, index) => {
-    // Check if this part matches any query word (case-insensitive)
-    const isMatch = queryWords.some(word =>
-      part.toLowerCase() === word.toLowerCase()
-    );
+    const parts = text.split(pattern);
+    const result: React.ReactNode[] = [];
 
-    if (isMatch) {
-      result.push(
-        <mark
-          key={index}
-          className="bg-yellow-200 dark:bg-yellow-800/60 text-inherit px-0.5 rounded font-medium"
-        >
-          {part}
-        </mark>
+    parts.forEach((part, index) => {
+      // Check if this part matches any query word (case-insensitive)
+      const isMatch = queryWords.some(word =>
+        part.toLowerCase() === word.toLowerCase()
       );
-    } else {
-      result.push(part);
-    }
-  });
 
-  return result;
+      if (isMatch) {
+        result.push(
+          <mark
+            key={index}
+            className="bg-yellow-300 dark:bg-yellow-600 text-black dark:text-yellow-100 px-0.5 rounded font-medium"
+          >
+            {part}
+          </mark>
+        );
+      } else {
+        result.push(part);
+      }
+    });
+
+    return result;
+  } catch {
+    // If regex fails, return plain text
+    return [text];
+  }
 }
 
 export function SourceDocumentViewer({
