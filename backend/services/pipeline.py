@@ -26,8 +26,9 @@ import structlog
 import ray
 from sqlalchemy import select
 
-from backend.processors.universal import UniversalProcessor, ExtractedContent
+from backend.processors.universal import UniversalProcessor, ExtractedContent, ExtractedImage
 from backend.db.models import ProcessingMode, Document as DocumentModel, AccessTier, ProcessingStatus as DBProcessingStatus, StorageMode
+from backend.services.multimodal_rag import MultimodalRAGService, get_multimodal_rag_service
 from backend.db.database import async_session_context
 from backend.processors.chunker import DocumentChunker, ChunkingConfig, ChunkingStrategy, Chunk
 from backend.services.embeddings import EmbeddingService, RayEmbeddingService, EmbeddingResult
@@ -119,6 +120,10 @@ class PipelineConfig:
         enable_summarization: bool = None,  # Read from ENABLE_SUMMARIZATION env var
         summarization_config: Optional[SummarizationConfig] = None,
 
+        # Multimodal processing (image understanding)
+        enable_multimodal: bool = None,  # Read from settings if not set
+        caption_images: bool = True,  # Generate captions for extracted images
+
         # Progress callbacks
         on_status_change: Optional[Callable[[str, ProcessingStatus], None]] = None,
         on_progress: Optional[Callable[[str, int, int], None]] = None,
@@ -147,6 +152,12 @@ class PipelineConfig:
         else:
             self.enable_summarization = enable_summarization
         self.summarization_config = summarization_config
+        # Multimodal is disabled by default (requires vision model)
+        if enable_multimodal is None:
+            self.enable_multimodal = os.getenv("ENABLE_MULTIMODAL", "false").lower() == "true"
+        else:
+            self.enable_multimodal = enable_multimodal
+        self.caption_images = caption_images
         self.on_status_change = on_status_change
         self.on_progress = on_progress
 
@@ -218,6 +229,12 @@ class DocumentPipeline:
             summ_config = self.config.summarization_config or SummarizationConfig(enabled=True)
             self._summarizer = DocumentSummarizer(summ_config)
 
+        # Multimodal service (optional, for image understanding)
+        self._multimodal: Optional[MultimodalRAGService] = None
+        if self.config.enable_multimodal:
+            self._multimodal = get_multimodal_rag_service()
+            logger.info("Multimodal processing enabled for image understanding")
+
         # Track processed file hashes for deduplication
         self._processed_hashes: Dict[str, str] = {}
 
@@ -229,6 +246,7 @@ class DocumentPipeline:
             use_custom_vectorstore=use_custom_vectorstore,
             preprocessing_enabled=self.config.enable_preprocessing,
             summarization_enabled=self.config.enable_summarization,
+            multimodal_enabled=self.config.enable_multimodal,
         )
 
     def _update_status(self, doc_id: str, status: ProcessingStatus):
@@ -442,6 +460,53 @@ class DocumentPipeline:
                             reduction_percent=round(summary_result.reduction_percent, 2),
                         )
 
+            # Step 2.8: Process images for multimodal understanding
+            image_chunks = []
+            if self._multimodal and extracted.extracted_images:
+                logger.info(
+                    "Processing images for multimodal understanding",
+                    document_id=document_id,
+                    image_count=len(extracted.extracted_images),
+                )
+
+                image_captions = await self._process_document_images(
+                    document_id=document_id,
+                    images=extracted.extracted_images,
+                )
+
+                if image_captions:
+                    # Create chunks for image descriptions
+                    for i, (img, caption) in enumerate(zip(extracted.extracted_images, image_captions)):
+                        if caption and caption.strip():
+                            page_info = f" on page {img.page_number}" if img.page_number else ""
+                            image_content = f"[IMAGE{page_info}]: {caption}"
+
+                            image_chunk = Chunk(
+                                content=image_content,
+                                chunk_index=-100 - i,  # Negative index for special chunks
+                                chunk_hash=hashlib.md5(image_content.encode()).hexdigest()[:16],
+                                document_id=document_id,
+                                page_number=img.page_number,
+                                metadata={
+                                    **result.metadata,
+                                    "chunk_type": "image_description",
+                                    "image_index": img.image_index,
+                                    "image_extension": img.extension,
+                                },
+                            )
+                            image_chunks.append(image_chunk)
+
+                    result.metadata["multimodal"] = {
+                        "images_processed": len(extracted.extracted_images),
+                        "captions_generated": len(image_captions),
+                    }
+
+                    logger.info(
+                        "Image processing complete",
+                        document_id=document_id,
+                        captions_generated=len(image_captions),
+                    )
+
             # Step 3: Chunk content
             self._update_status(document_id, ProcessingStatus.CHUNKING)
             self._update_progress(document_id, 2, 5)
@@ -469,6 +534,15 @@ class DocumentPipeline:
                     "Added summary chunks",
                     document_id=document_id,
                     summary_count=len(summary_chunks),
+                )
+
+            # Add image description chunks (for multimodal retrieval)
+            if image_chunks:
+                chunks = image_chunks + chunks
+                logger.debug(
+                    "Added image description chunks",
+                    document_id=document_id,
+                    image_chunk_count=len(image_chunks),
                 )
 
             result.chunks = chunks
@@ -589,6 +663,46 @@ class DocumentPipeline:
             self._update_status(document_id, ProcessingStatus.FAILED)
 
         return result
+
+    async def _process_document_images(
+        self,
+        document_id: str,
+        images: List[ExtractedImage],
+    ) -> List[str]:
+        """
+        Process extracted images to generate captions/descriptions.
+
+        Args:
+            document_id: Document ID for logging
+            images: List of extracted images
+
+        Returns:
+            List of caption strings (same order as input images)
+        """
+        if not self._multimodal or not images:
+            return []
+
+        captions = []
+
+        for img in images:
+            try:
+                # Use the multimodal service to caption the image
+                caption = await self._multimodal.caption_image(
+                    image_data=img.image_bytes,
+                    image_format=img.extension,
+                )
+                captions.append(caption)
+
+            except Exception as e:
+                logger.warning(
+                    "Failed to caption image",
+                    document_id=document_id,
+                    image_index=img.image_index,
+                    error=str(e),
+                )
+                captions.append("")  # Empty caption for failed images
+
+        return captions
 
     async def _get_existing_document_id(self, file_hash: str) -> Optional[str]:
         """

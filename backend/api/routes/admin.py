@@ -1975,6 +1975,60 @@ async def list_ollama_models(
     return result
 
 
+class OllamaModelRequest(BaseModel):
+    """Request body for Ollama model operations."""
+    model_name: str = Field(..., description="Model name to pull (e.g., 'qwen2.5vl', 'llava:7b')")
+    base_url: str = Field(default="http://localhost:11434", description="Ollama API base URL")
+
+
+@router.post("/llm/ollama-models/pull")
+async def pull_ollama_model(
+    request: OllamaModelRequest,
+    admin: AdminUser,
+):
+    """
+    Pull (download) an Ollama model.
+
+    This starts the model download. For large models, this may take several minutes.
+    Admin only endpoint.
+    """
+    from backend.services.llm import pull_ollama_model as do_pull
+
+    logger.info(
+        "Admin pulling Ollama model",
+        admin_id=admin.user_id,
+        model_name=request.model_name,
+        base_url=request.base_url,
+    )
+
+    result = await do_pull(request.model_name, request.base_url)
+    return result
+
+
+@router.delete("/llm/ollama-models/{model_name}")
+async def delete_ollama_model(
+    model_name: str,
+    admin: AdminUser,
+    base_url: str = Query("http://localhost:11434", description="Ollama API base URL"),
+):
+    """
+    Delete a local Ollama model.
+
+    Admin only endpoint.
+    """
+    from backend.services.llm import delete_ollama_model as do_delete
+
+    logger.info(
+        "Admin deleting Ollama model",
+        admin_id=admin.user_id,
+        model_name=model_name,
+        base_url=base_url,
+    )
+
+    result = await do_delete(model_name, base_url)
+    return result
+
+
 @router.get("/llm/providers/{provider_id}")
 async def get_llm_provider(
     provider_id: str,

@@ -1343,6 +1343,115 @@ async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
         }
 
 
+async def pull_ollama_model(model_name: str, base_url: str = None) -> Dict[str, Any]:
+    """
+    Pull (download) an Ollama model.
+
+    Note: This can be a long-running operation for large models.
+    With stream=False, Ollama waits for the download to complete.
+
+    Args:
+        model_name: Model name to pull (e.g., 'qwen2.5vl', 'llava:7b')
+        base_url: Optional Ollama API base URL. Defaults to config value.
+
+    Returns:
+        dict: Contains 'success', 'message', and optionally 'model' or 'error'
+    """
+    import httpx
+
+    ollama_url = base_url or llm_config.ollama_host
+
+    logger.info("Pulling Ollama model", model_name=model_name, ollama_url=ollama_url)
+
+    try:
+        # Use a longer timeout for large model downloads (up to 30 minutes)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=30.0)) as client:
+            response = await client.post(
+                f"{ollama_url}/api/pull",
+                json={"name": model_name, "stream": False},
+            )
+
+            if response.status_code == 200:
+                logger.info("Successfully pulled Ollama model", model_name=model_name)
+                return {
+                    "success": True,
+                    "message": f"Model '{model_name}' pulled successfully",
+                    "model": model_name,
+                }
+            else:
+                error_text = response.text
+                logger.error("Failed to pull Ollama model", model_name=model_name, error=error_text)
+                return {
+                    "success": False,
+                    "error": f"Pull failed: {error_text}",
+                }
+    except httpx.ConnectError:
+        logger.error("Cannot connect to Ollama", ollama_url=ollama_url)
+        return {"success": False, "error": "Cannot connect to Ollama. Is it running?"}
+    except httpx.TimeoutException:
+        logger.warning("Ollama pull timed out", model_name=model_name)
+        return {
+            "success": False,
+            "error": "Pull timed out - model may still be downloading. Check Ollama logs.",
+        }
+    except Exception as e:
+        logger.error("Error pulling Ollama model", model_name=model_name, error=str(e))
+        return {"success": False, "error": str(e)}
+
+
+async def delete_ollama_model(model_name: str, base_url: str = None) -> Dict[str, Any]:
+    """
+    Delete a local Ollama model.
+
+    Args:
+        model_name: Model name to delete (e.g., 'llama3.2:latest')
+        base_url: Optional Ollama API base URL. Defaults to config value.
+
+    Returns:
+        dict: Contains 'success' and 'message' or 'error'
+    """
+    import httpx
+
+    ollama_url = base_url or llm_config.ollama_host
+
+    logger.info("Deleting Ollama model", model_name=model_name, ollama_url=ollama_url)
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Ollama uses DELETE with JSON body for model deletion
+            response = await client.request(
+                "DELETE",
+                f"{ollama_url}/api/delete",
+                json={"name": model_name},
+            )
+
+            if response.status_code == 200:
+                logger.info("Successfully deleted Ollama model", model_name=model_name)
+                return {
+                    "success": True,
+                    "message": f"Model '{model_name}' deleted successfully",
+                }
+            elif response.status_code == 404:
+                logger.warning("Ollama model not found", model_name=model_name)
+                return {
+                    "success": False,
+                    "error": f"Model '{model_name}' not found",
+                }
+            else:
+                error_text = response.text
+                logger.error("Failed to delete Ollama model", model_name=model_name, error=error_text)
+                return {
+                    "success": False,
+                    "error": f"Delete failed: {error_text}",
+                }
+    except httpx.ConnectError:
+        logger.error("Cannot connect to Ollama", ollama_url=ollama_url)
+        return {"success": False, "error": "Cannot connect to Ollama. Is it running?"}
+    except Exception as e:
+        logger.error("Error deleting Ollama model", model_name=model_name, error=str(e))
+        return {"success": False, "error": str(e)}
+
+
 # =============================================================================
 # Vision Model Support
 # =============================================================================

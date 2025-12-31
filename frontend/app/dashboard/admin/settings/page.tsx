@@ -97,6 +97,8 @@ import {
   useCostAlertsAdmin,
   useAcknowledgeCostAlert,
   useOllamaModels,
+  usePullOllamaModel,
+  useDeleteOllamaModel,
   useOCRSettings,
   useUpdateOCRSettings,
   useDownloadOCRModels,
@@ -232,6 +234,21 @@ export default function AdminSettingsPage() {
   const downloadModels = useDownloadOCRModels();
   const [downloadingModels, setDownloadingModels] = useState(false);
   const [downloadResult, setDownloadResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  // Ollama Model Management state
+  const [ollamaBaseUrl, setOllamaBaseUrl] = useState("http://localhost:11434");
+  const [newModelName, setNewModelName] = useState("");
+  const [pullingModel, setPullingModel] = useState(false);
+  const [pullResult, setPullResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [deletingModel, setDeletingModel] = useState<string | null>(null);
+
+  // Ollama Model Management hooks
+  const { data: ollamaLocalModels, isLoading: ollamaLocalModelsLoading, refetch: refetchOllamaModels } = useOllamaModels(
+    ollamaBaseUrl,
+    { enabled: isAuthenticated }
+  );
+  const pullOllamaModel = usePullOllamaModel();
+  const deleteOllamaModel = useDeleteOllamaModel();
 
   // Initialize local settings when data loads
   useEffect(() => {
@@ -1102,6 +1119,275 @@ export default function AdminSettingsPage() {
             </div>
           )}
         </CardContent>
+          </Card>
+
+          {/* Ollama Local Models Management */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <HardDrive className="h-5 w-5" />
+                    Ollama Local Models
+                  </CardTitle>
+                  <CardDescription>Manage locally installed Ollama models</CardDescription>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => refetchOllamaModels()}
+                  disabled={ollamaLocalModelsLoading}
+                >
+                  {ollamaLocalModelsLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Ollama Base URL */}
+              <div className="space-y-2">
+                <Label>Ollama Base URL</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    placeholder="http://localhost:11434"
+                    value={ollamaBaseUrl}
+                    onChange={(e) => setOllamaBaseUrl(e.target.value)}
+                    className="flex-1"
+                  />
+                </div>
+              </div>
+
+              {/* Pull New Model */}
+              <div className="p-4 rounded-lg border bg-muted/30 space-y-3">
+                <Label>Pull New Model</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    placeholder="Model name (e.g., qwen2.5vl, llava:7b, nomic-embed-text)"
+                    value={newModelName}
+                    onChange={(e) => setNewModelName(e.target.value)}
+                    className="flex-1"
+                  />
+                  <Button
+                    onClick={async () => {
+                      if (!newModelName.trim()) return;
+                      setPullingModel(true);
+                      setPullResult(null);
+                      try {
+                        const result = await pullOllamaModel.mutateAsync({
+                          modelName: newModelName.trim(),
+                          baseUrl: ollamaBaseUrl,
+                        });
+                        if (result.success) {
+                          setPullResult({ success: true, message: result.message || "Model pulled successfully" });
+                          setNewModelName("");
+                          refetchOllamaModels();
+                        } else {
+                          setPullResult({ success: false, message: result.error || "Pull failed" });
+                        }
+                      } catch (err) {
+                        setPullResult({ success: false, message: getErrorMessage(err, "Pull failed") });
+                      } finally {
+                        setPullingModel(false);
+                      }
+                    }}
+                    disabled={!newModelName.trim() || pullingModel}
+                  >
+                    {pullingModel ? (
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                    ) : (
+                      <Download className="h-4 w-4 mr-2" />
+                    )}
+                    Pull Model
+                  </Button>
+                </div>
+                {pullResult && (
+                  <p className={`text-sm ${pullResult.success ? "text-green-600" : "text-red-600"}`}>
+                    {pullResult.message}
+                  </p>
+                )}
+                {/* Recommended Models */}
+                <div className="pt-2">
+                  <p className="text-xs text-muted-foreground mb-2">Quick select recommended models:</p>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { name: "qwen2.5vl", desc: "Vision (Best DocVQA)" },
+                      { name: "llava", desc: "Vision (General)" },
+                      { name: "llama3.2", desc: "Fast Chat" },
+                      { name: "nomic-embed-text", desc: "Embeddings" },
+                    ].map((rec) => (
+                      <Button
+                        key={rec.name}
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setNewModelName(rec.name)}
+                        className="text-xs h-7"
+                      >
+                        {rec.name}
+                        <span className="text-muted-foreground ml-1">({rec.desc})</span>
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Model List */}
+              {ollamaLocalModelsLoading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : ollamaLocalModels?.success ? (
+                <div className="space-y-4">
+                  {/* Chat Models */}
+                  {ollamaLocalModels.chat_models && ollamaLocalModels.chat_models.length > 0 && (
+                    <div>
+                      <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
+                        <MessageSquare className="h-4 w-4" />
+                        Chat Models ({ollamaLocalModels.chat_models.length})
+                      </h4>
+                      <div className="space-y-2">
+                        {ollamaLocalModels.chat_models.map((model: { name: string; parameter_size?: string; family?: string; size?: number }) => (
+                          <div
+                            key={model.name}
+                            className="flex items-center justify-between p-3 rounded-lg border"
+                          >
+                            <div className="flex items-center gap-3">
+                              <Bot className="h-4 w-4 text-primary" />
+                              <div>
+                                <p className="font-medium">{model.name}</p>
+                                <p className="text-xs text-muted-foreground">
+                                  {model.parameter_size && `${model.parameter_size} · `}
+                                  {model.family && `${model.family} · `}
+                                  {model.size && `${(model.size / 1024 / 1024 / 1024).toFixed(1)} GB`}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {(model.name.includes("llava") || model.name.includes("vision") ||
+                                model.name.includes("qwen") && model.name.includes("vl") || model.name.includes("moondream")) && (
+                                <Badge variant="secondary" className="text-xs">
+                                  <Eye className="h-3 w-3 mr-1" />
+                                  Vision
+                                </Badge>
+                              )}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={async () => {
+                                  if (!confirm(`Delete model "${model.name}"? This will free up disk space.`)) return;
+                                  setDeletingModel(model.name);
+                                  try {
+                                    const result = await deleteOllamaModel.mutateAsync({
+                                      modelName: model.name,
+                                      baseUrl: ollamaBaseUrl,
+                                    });
+                                    if (result.success) {
+                                      refetchOllamaModels();
+                                    } else {
+                                      alert(result.error || "Delete failed");
+                                    }
+                                  } catch (err) {
+                                    alert(getErrorMessage(err, "Delete failed"));
+                                  } finally {
+                                    setDeletingModel(null);
+                                  }
+                                }}
+                                disabled={deletingModel === model.name}
+                                className="text-red-500 hover:text-red-600"
+                              >
+                                {deletingModel === model.name ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Trash2 className="h-4 w-4" />
+                                )}
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Embedding Models */}
+                  {ollamaLocalModels.embedding_models && ollamaLocalModels.embedding_models.length > 0 && (
+                    <div>
+                      <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
+                        <Database className="h-4 w-4" />
+                        Embedding Models ({ollamaLocalModels.embedding_models.length})
+                      </h4>
+                      <div className="space-y-2">
+                        {ollamaLocalModels.embedding_models.map((model: { name: string; parameter_size?: string; size?: number }) => (
+                          <div
+                            key={model.name}
+                            className="flex items-center justify-between p-3 rounded-lg border"
+                          >
+                            <div className="flex items-center gap-3">
+                              <Database className="h-4 w-4 text-blue-500" />
+                              <div>
+                                <p className="font-medium">{model.name}</p>
+                                <p className="text-xs text-muted-foreground">
+                                  {model.parameter_size && `${model.parameter_size} · `}
+                                  {model.size && `${(model.size / 1024 / 1024 / 1024).toFixed(1)} GB`}
+                                </p>
+                              </div>
+                            </div>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={async () => {
+                                if (!confirm(`Delete model "${model.name}"? This will free up disk space.`)) return;
+                                setDeletingModel(model.name);
+                                try {
+                                  const result = await deleteOllamaModel.mutateAsync({
+                                    modelName: model.name,
+                                    baseUrl: ollamaBaseUrl,
+                                  });
+                                  if (result.success) {
+                                    refetchOllamaModels();
+                                  } else {
+                                    alert(result.error || "Delete failed");
+                                  }
+                                } catch (err) {
+                                  alert(getErrorMessage(err, "Delete failed"));
+                                } finally {
+                                  setDeletingModel(null);
+                                }
+                              }}
+                              disabled={deletingModel === model.name}
+                              className="text-red-500 hover:text-red-600"
+                            >
+                              {deletingModel === model.name ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Empty state */}
+                  {(!ollamaLocalModels.chat_models?.length && !ollamaLocalModels.embedding_models?.length) && (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Bot className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p>No models installed</p>
+                      <p className="text-xs mt-1">Pull a model using the form above</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    {ollamaLocalModels?.error || "Cannot connect to Ollama. Is it running?"}
+                  </AlertDescription>
+                </Alert>
+              )}
+            </CardContent>
           </Card>
         </TabsContent>
 

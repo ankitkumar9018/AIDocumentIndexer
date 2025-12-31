@@ -18,12 +18,26 @@ logger = structlog.get_logger(__name__)
 
 
 @dataclass
+class ExtractedImage:
+    """Represents an extracted image from a document."""
+    page_number: Optional[int] = None
+    image_index: int = 0
+    image_bytes: bytes = field(default_factory=bytes)
+    extension: str = "png"  # png, jpg, etc.
+    width: Optional[int] = None
+    height: Optional[int] = None
+    alt_text: Optional[str] = None  # If available from source
+    source_type: str = "embedded"  # embedded, inline, background
+
+
+@dataclass
 class ExtractedContent:
     """Extracted content from a document."""
     text: str
     metadata: Dict[str, Any] = field(default_factory=dict)
     pages: List[Dict[str, Any]] = field(default_factory=list)
     images: List[Dict[str, Any]] = field(default_factory=list)
+    extracted_images: List[ExtractedImage] = field(default_factory=list)  # New: actual image data
     tables: List[Dict[str, Any]] = field(default_factory=list)
     word_count: int = 0
     page_count: int = 0
@@ -213,6 +227,7 @@ class UniversalProcessor:
         pages = []
         all_text = []
         images = []
+        extracted_images: List[ExtractedImage] = []
 
         # Identify pages that need OCR
         pages_needing_ocr = []
@@ -237,6 +252,15 @@ class UniversalProcessor:
                         "index": img_index,
                         "xref": img[0],
                     })
+
+                    # Extract actual image bytes for multimodal processing
+                    if self.enable_image_analysis:
+                        try:
+                            extracted_img = self._extract_pdf_image(doc, img[0], page_num, img_index)
+                            if extracted_img:
+                                extracted_images.append(extracted_img)
+                        except Exception as e:
+                            logger.debug(f"Failed to extract image xref={img[0]}: {e}")
 
         # Process OCR pages in parallel if there are multiple pages needing OCR
         if pages_needing_ocr:
@@ -268,11 +292,63 @@ class UniversalProcessor:
                 "file_path": file_path,
                 "file_size_mb": file_size_mb,
                 "parallel_ocr": getattr(self, 'parallel_ocr', False),
+                "images_extracted": len(extracted_images),
             },
             pages=pages,
             images=images,
+            extracted_images=extracted_images,
             page_count=len(pages),
         )
+
+    def _extract_pdf_image(
+        self,
+        doc,
+        xref: int,
+        page_number: int,
+        image_index: int,
+    ) -> Optional[ExtractedImage]:
+        """
+        Extract a single image from a PDF by xref.
+
+        Args:
+            doc: PyMuPDF document object
+            xref: Image cross-reference number
+            page_number: Page number where image is located
+            image_index: Index of image on the page
+
+        Returns:
+            ExtractedImage or None if extraction fails
+        """
+        try:
+            base_image = doc.extract_image(xref)
+            if not base_image:
+                return None
+
+            image_bytes = base_image.get("image")
+            if not image_bytes or len(image_bytes) < 100:  # Skip tiny images (likely artifacts)
+                return None
+
+            extension = base_image.get("ext", "png")
+            width = base_image.get("width")
+            height = base_image.get("height")
+
+            # Skip very small images (likely icons/bullets)
+            if width and height and (width < 50 or height < 50):
+                return None
+
+            return ExtractedImage(
+                page_number=page_number,
+                image_index=image_index,
+                image_bytes=image_bytes,
+                extension=extension,
+                width=width,
+                height=height,
+                source_type="embedded",
+            )
+
+        except Exception as e:
+            logger.debug(f"Failed to extract PDF image: {e}")
+            return None
 
     def _process_pdf_fallback(self, file_path: str, mode: str) -> ExtractedContent:
         """Fallback PDF processing without PyMuPDF."""
@@ -312,12 +388,73 @@ class UniversalProcessor:
                 table_data.append(row_data)
             tables.append({"data": table_data})
 
+        # Extract images if not text_only mode
+        extracted_images: List[ExtractedImage] = []
+        if mode != "text_only" and self.enable_image_analysis:
+            extracted_images = self._extract_docx_images(doc)
+
         return ExtractedContent(
             text="\n\n".join(paragraphs),
-            metadata={"file_type": "docx", "file_path": file_path},
+            metadata={
+                "file_type": "docx",
+                "file_path": file_path,
+                "images_extracted": len(extracted_images),
+            },
             tables=tables,
+            extracted_images=extracted_images,
             page_count=1,  # DOCX doesn't have page concept in API
         )
+
+    def _extract_docx_images(self, doc) -> List[ExtractedImage]:
+        """
+        Extract images from a DOCX document.
+
+        Args:
+            doc: python-docx Document object
+
+        Returns:
+            List of ExtractedImage objects
+        """
+        extracted_images = []
+        image_index = 0
+
+        try:
+            # Access the document's relationships to find embedded images
+            for rel in doc.part.rels.values():
+                if "image" in rel.reltype:
+                    try:
+                        image_part = rel.target_part
+                        image_bytes = image_part.blob
+
+                        # Skip tiny images
+                        if len(image_bytes) < 100:
+                            continue
+
+                        # Determine extension from content type
+                        content_type = image_part.content_type
+                        extension = content_type.split("/")[-1] if "/" in content_type else "png"
+                        # Normalize extension
+                        if extension == "jpeg":
+                            extension = "jpg"
+
+                        extracted_images.append(ExtractedImage(
+                            page_number=None,  # DOCX doesn't have page concept
+                            image_index=image_index,
+                            image_bytes=image_bytes,
+                            extension=extension,
+                            source_type="embedded",
+                        ))
+                        image_index += 1
+
+                    except Exception as e:
+                        logger.debug(f"Failed to extract DOCX image: {e}")
+                        continue
+
+        except Exception as e:
+            logger.warning(f"Error extracting DOCX images: {e}")
+
+        logger.debug(f"Extracted {len(extracted_images)} images from DOCX")
+        return extracted_images
 
     def _process_doc(self, file_path: str, mode: str) -> ExtractedContent:
         """Process legacy DOC files."""
@@ -333,6 +470,8 @@ class UniversalProcessor:
         prs = Presentation(file_path)
         slides = []
         all_text = []
+        extracted_images: List[ExtractedImage] = []
+        image_index = 0
 
         for slide_num, slide in enumerate(prs.slides, start=1):
             slide_text = []
@@ -347,17 +486,44 @@ class UniversalProcessor:
                         row_text = [cell.text for cell in row.cells]
                         slide_text.append(" | ".join(row_text))
 
+                # Extract images if not text_only mode
+                if mode != "text_only" and self.enable_image_analysis:
+                    if hasattr(shape, "image"):
+                        try:
+                            img_blob = shape.image.blob
+                            if img_blob and len(img_blob) > 100:  # Skip tiny images
+                                extension = shape.image.ext or "png"
+                                if extension == "jpeg":
+                                    extension = "jpg"
+
+                                extracted_images.append(ExtractedImage(
+                                    page_number=slide_num,
+                                    image_index=image_index,
+                                    image_bytes=img_blob,
+                                    extension=extension,
+                                    source_type="embedded",
+                                ))
+                                image_index += 1
+                        except Exception as e:
+                            logger.debug(f"Failed to extract PPTX image: {e}")
+
             text = "\n".join(slide_text)
             slides.append({
                 "page_number": slide_num,
                 "text": text,
+                "has_images": any(hasattr(s, "image") for s in slide.shapes),
             })
             all_text.append(f"[Slide {slide_num}]\n{text}")
 
         return ExtractedContent(
             text="\n\n".join(all_text),
-            metadata={"file_type": "pptx", "file_path": file_path},
+            metadata={
+                "file_type": "pptx",
+                "file_path": file_path,
+                "images_extracted": len(extracted_images),
+            },
             pages=slides,
+            extracted_images=extracted_images,
             page_count=len(slides),
         )
 
@@ -458,8 +624,43 @@ class UniversalProcessor:
         """Process HTML files."""
         try:
             from bs4 import BeautifulSoup
+            import base64
+            import re
+
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 soup = BeautifulSoup(f.read(), "html.parser")
+
+            # Extract images if not text_only mode
+            extracted_images: List[ExtractedImage] = []
+            if mode != "text_only" and self.enable_image_analysis:
+                image_index = 0
+                for img in soup.find_all("img"):
+                    src = img.get("src", "")
+                    alt = img.get("alt", "")
+
+                    # Handle base64-encoded inline images
+                    if src.startswith("data:image/"):
+                        try:
+                            # Parse data:image/png;base64,... format
+                            match = re.match(r"data:image/(\w+);base64,(.+)", src)
+                            if match:
+                                extension = match.group(1)
+                                if extension == "jpeg":
+                                    extension = "jpg"
+                                image_data = base64.b64decode(match.group(2))
+
+                                if len(image_data) > 100:  # Skip tiny images
+                                    extracted_images.append(ExtractedImage(
+                                        page_number=None,
+                                        image_index=image_index,
+                                        image_bytes=image_data,
+                                        extension=extension,
+                                        alt_text=alt if alt else None,
+                                        source_type="inline",
+                                    ))
+                                    image_index += 1
+                        except Exception as e:
+                            logger.debug(f"Failed to extract HTML inline image: {e}")
 
             # Remove script and style elements
             for element in soup(["script", "style", "nav", "footer"]):
@@ -468,7 +669,12 @@ class UniversalProcessor:
             text = soup.get_text(separator="\n", strip=True)
             return ExtractedContent(
                 text=text,
-                metadata={"file_type": "html", "file_path": file_path},
+                metadata={
+                    "file_type": "html",
+                    "file_path": file_path,
+                    "images_extracted": len(extracted_images),
+                },
+                extracted_images=extracted_images,
                 page_count=1,
             )
         except ImportError:
