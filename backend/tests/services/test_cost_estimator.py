@@ -18,11 +18,13 @@ from backend.services.agents.cost_estimator import (
     MODEL_PRICING,
 )
 from backend.services.agents.agent_base import (
-    ExecutionPlan,
-    ExecutionStep,
     AgentTask,
     TaskType,
     FallbackStrategy,
+)
+from backend.services.agents.manager_agent import (
+    ExecutionPlan,
+    PlanStep,
 )
 
 
@@ -102,7 +104,7 @@ class TestAgentCostEstimator:
         """Test estimating cost for an execution plan."""
         # Create a simple plan
         steps = [
-            ExecutionStep(
+            PlanStep(
                 step_id="step-1",
                 step_number=1,
                 agent_id="research-agent",

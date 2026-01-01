@@ -94,6 +94,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DocumentListSkeleton,
+  DocumentGridSkeleton,
+  DocumentStatsSkeleton,
+} from "@/components/skeletons";
 
 type ViewMode = "grid" | "list";
 
@@ -1072,9 +1077,11 @@ export default function DocumentsPage() {
 
       {/* Documents */}
       {isLoading ? (
-        <div className="flex items-center justify-center py-12">
-          <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
+        viewMode === "list" ? (
+          <DocumentListSkeleton count={pageSize > 10 ? 10 : pageSize} />
+        ) : (
+          <DocumentGridSkeleton count={8} />
+        )
       ) : viewMode === "list" ? (
         <Card>
           <CardContent className="p-0">

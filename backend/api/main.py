@@ -29,6 +29,9 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from backend.api.middleware.request_id import RequestIDMiddleware
+from backend.api.errors import register_exception_handlers as register_app_exception_handlers
+
 # Configure structured logging
 structlog.configure(
     processors=[
@@ -184,6 +187,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Add Request ID middleware (must be first to ensure all requests get an ID)
+    app.add_middleware(RequestIDMiddleware)
+
     # Configure CORS
     cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
     app.add_middleware(
@@ -192,13 +198,14 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Request-ID"],  # Allow clients to read request ID
     )
 
     # Register routes
     register_routes(app)
 
-    # Register exception handlers
-    register_exception_handlers(app)
+    # Register exception handlers (standardized error responses)
+    register_app_exception_handlers(app)
 
     return app
 
@@ -247,11 +254,13 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.templates import router as templates_router
     from backend.api.routes.agent import router as agent_router
     from backend.api.routes.temp_upload import router as temp_upload_router
+    from backend.api.routes.metrics import router as metrics_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
     app.include_router(agent_router, prefix="/api/v1/agent", tags=["Agent Orchestration"])
     app.include_router(temp_upload_router, prefix="/api/v1/temp", tags=["Temporary Uploads"])
+    app.include_router(metrics_router, prefix="/api/v1/metrics", tags=["Metrics & Monitoring"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)
@@ -331,36 +340,6 @@ def register_websocket_routes(app: FastAPI) -> None:
         return manager.get_stats()
 
     logger.info("WebSocket routes registered")
-
-
-def register_exception_handlers(app: FastAPI) -> None:
-    """Register custom exception handlers."""
-
-    @app.exception_handler(Exception)
-    async def global_exception_handler(request: Request, exc: Exception):
-        """Handle all unhandled exceptions."""
-        logger.error(
-            "Unhandled exception",
-            path=request.url.path,
-            method=request.method,
-            error=str(exc),
-            exc_info=True,
-        )
-
-        # In production, don't expose internal errors
-        if os.getenv("APP_ENV") == "production":
-            return JSONResponse(
-                status_code=500,
-                content={"detail": "Internal server error"},
-            )
-
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": str(exc),
-                "type": type(exc).__name__,
-            },
-        )
 
 
 # =============================================================================

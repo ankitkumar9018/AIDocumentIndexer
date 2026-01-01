@@ -66,6 +66,12 @@ from backend.services.rag_verifier import (
     VerificationLevel,
     VerificationResult,
 )
+from backend.services.query_classifier import (
+    QueryClassifier,
+    QueryClassification,
+    QueryIntent,
+    get_query_classifier,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -84,6 +90,10 @@ class Source:
     snippet: str = ""
     full_content: str = ""  # Full chunk content for source viewer
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Context expansion (surrounding chunks for navigation)
+    prev_chunk_snippet: Optional[str] = None
+    next_chunk_snippet: Optional[str] = None
+    chunk_index: Optional[int] = None
 
 
 @dataclass
@@ -144,6 +154,9 @@ class RAGConfig:
         # Verification settings (Self-RAG)
         enable_verification: bool = None,  # Read from env if not set
         verification_level: str = None,  # "none", "quick", "standard", "thorough"
+
+        # Dynamic search weighting (query intent classification)
+        enable_dynamic_weighting: bool = None,  # Read from env if not set
     ):
         import os
         from backend.services.settings import get_settings_service
@@ -175,6 +188,8 @@ class RAGConfig:
             enable_verification = os.getenv("ENABLE_VERIFICATION", "true").lower() == "true"
         if verification_level is None:
             verification_level = os.getenv("VERIFICATION_LEVEL", "quick")
+        if enable_dynamic_weighting is None:
+            enable_dynamic_weighting = os.getenv("ENABLE_DYNAMIC_WEIGHTING", "true").lower() == "true"
 
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
@@ -195,6 +210,8 @@ class RAGConfig:
         # Verification
         self.enable_verification = enable_verification
         self.verification_level = verification_level
+        # Dynamic weighting
+        self.enable_dynamic_weighting = enable_dynamic_weighting
 
 
 # =============================================================================
@@ -461,6 +478,11 @@ class RAGService:
                 level=level_map.get(self.config.verification_level, VerificationLevel.QUICK),
             )
 
+        # Initialize query classifier for dynamic hybrid search weighting
+        self._query_classifier: Optional[QueryClassifier] = None
+        if self.config.enable_dynamic_weighting:
+            self._query_classifier = get_query_classifier()
+
         logger.info(
             "Initialized RAG service",
             chat_provider=self.config.chat_provider,
@@ -472,6 +494,7 @@ class RAGService:
             query_expansion=self.config.enable_query_expansion,
             verification=self.config.enable_verification,
             verification_level=self.config.verification_level,
+            dynamic_weighting=self.config.enable_dynamic_weighting,
         )
 
     async def get_runtime_settings(self) -> Dict[str, Any]:
@@ -1174,6 +1197,23 @@ class RAGService:
             # Determine search type
             search_type = SearchType.HYBRID if self.config.use_hybrid_search else SearchType.VECTOR
 
+            # Classify query intent for dynamic weighting (if enabled)
+            vector_weight = None
+            keyword_weight = None
+            query_classification = None
+            if self._query_classifier is not None and search_type == SearchType.HYBRID:
+                query_classification = self._query_classifier.classify(query)
+                vector_weight = query_classification.vector_weight
+                keyword_weight = query_classification.keyword_weight
+                logger.debug(
+                    "Query classified for dynamic weighting",
+                    query=query[:50],
+                    intent=query_classification.intent.value,
+                    vector_weight=vector_weight,
+                    keyword_weight=keyword_weight,
+                    confidence=query_classification.confidence,
+                )
+
             # Get document IDs matching the collection filter
             document_ids = None
             if collection_filter:
@@ -1228,6 +1268,8 @@ class RAGService:
                 top_k=top_k,
                 access_tier_level=access_tier,
                 document_ids=document_ids,
+                vector_weight=vector_weight,
+                keyword_weight=keyword_weight,
             )
 
             # Convert SearchResult to LangChain Document format
@@ -1252,6 +1294,10 @@ class RAGService:
                         "page_number": result.page_number,
                         "section_title": result.section_title,
                         "similarity_score": result.similarity_score,  # Original vector similarity (0-1)
+                        # Context expansion
+                        "prev_chunk_snippet": result.prev_chunk_snippet,
+                        "next_chunk_snippet": result.next_chunk_snippet,
+                        "chunk_index": result.chunk_index,
                         **result.metadata,
                     },
                 )
@@ -1261,6 +1307,9 @@ class RAGService:
                 "Retrieved documents with custom store",
                 num_results=len(langchain_results),
                 search_type=search_type.value,
+                query_intent=query_classification.intent.value if query_classification else None,
+                vector_weight=vector_weight,
+                keyword_weight=keyword_weight,
             )
 
             return langchain_results
@@ -1418,6 +1467,10 @@ class RAGService:
                 snippet=doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content,
                 full_content=doc.page_content,  # Full content for source viewer modal
                 metadata=metadata,
+                # Context expansion (surrounding chunks)
+                prev_chunk_snippet=metadata.get("prev_chunk_snippet"),
+                next_chunk_snippet=metadata.get("next_chunk_snippet"),
+                chunk_index=metadata.get("chunk_index"),
             )
             sources.append(source)
 

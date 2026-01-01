@@ -866,6 +866,106 @@ Get information about downloaded PaddleOCR models (admin only).
 
 **Note:** For complete OCR configuration details, see [OCR_CONFIGURATION.md](./OCR_CONFIGURATION.md).
 
+### GET /admin/llm/ollama-models
+
+List all locally installed Ollama models, categorized by type (admin only).
+
+**Query Parameters:**
+- `base_url` (string): Ollama server URL (default: `http://localhost:11434`)
+
+**Response:**
+```json
+{
+  "success": true,
+  "chat_models": [
+    {
+      "name": "llama3.2:latest",
+      "parameter_size": "3B",
+      "family": "llama",
+      "size": 2147483648
+    },
+    {
+      "name": "qwen2.5vl:7b",
+      "parameter_size": "7B",
+      "family": "qwen2",
+      "size": 4831838208
+    }
+  ],
+  "embedding_models": [
+    {
+      "name": "nomic-embed-text:latest",
+      "parameter_size": "274M",
+      "size": 137000000
+    }
+  ],
+  "vision_models": [
+    {
+      "name": "qwen2.5vl:7b",
+      "parameter_size": "7B",
+      "family": "qwen2",
+      "size": 4831838208
+    }
+  ]
+}
+```
+
+### POST /admin/llm/ollama-models/pull
+
+Download (pull) an Ollama model from the library (admin only).
+
+**Request Body:**
+```json
+{
+  "model_name": "qwen2.5vl",
+  "base_url": "http://localhost:11434"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Model 'qwen2.5vl' pulled successfully",
+  "model": "qwen2.5vl"
+}
+```
+
+**Error Response:**
+```json
+{
+  "success": false,
+  "error": "Cannot connect to Ollama. Is it running?"
+}
+```
+
+**Note:** Model downloads can take several minutes for large models (7B+). The endpoint has a 30-minute timeout.
+
+### DELETE /admin/llm/ollama-models/{model_name}
+
+Delete a locally installed Ollama model (admin only).
+
+**Path Parameters:**
+- `model_name` (string): Name of the model to delete (e.g., `llama3.2:latest`)
+
+**Query Parameters:**
+- `base_url` (string): Ollama server URL (default: `http://localhost:11434`)
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Model 'llama3.2:latest' deleted successfully"
+}
+```
+
+**Error Response:**
+```json
+{
+  "success": false,
+  "error": "Model 'unknown-model' not found"
+}
+```
+
 ---
 
 ## Health Check

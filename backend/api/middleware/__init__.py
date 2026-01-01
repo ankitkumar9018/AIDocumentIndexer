@@ -38,6 +38,12 @@ from backend.api.middleware.cost_limit import (
     estimate_cost,
     reset_user_cost_tracking,
 )
+from backend.api.middleware.request_id import (
+    RequestIDMiddleware,
+    get_request_id,
+    REQUEST_ID_HEADER,
+    CORRELATION_ID_HEADER,
+)
 
 __all__ = [
     # Auth
@@ -69,4 +75,9 @@ __all__ = [
     "record_actual_cost",
     "estimate_cost",
     "reset_user_cost_tracking",
+    # Request ID / Correlation
+    "RequestIDMiddleware",
+    "get_request_id",
+    "REQUEST_ID_HEADER",
+    "CORRELATION_ID_HEADER",
 ]

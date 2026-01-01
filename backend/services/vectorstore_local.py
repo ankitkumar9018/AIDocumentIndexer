@@ -773,6 +773,8 @@ class ChromaVectorStore:
         access_tier_level: int = 100,
         document_ids: Optional[List[str]] = None,
         session: Optional[Any] = None,
+        vector_weight: Optional[float] = None,
+        keyword_weight: Optional[float] = None,
     ) -> List[SearchResult]:
         """
         Unified search interface.
@@ -785,6 +787,8 @@ class ChromaVectorStore:
             access_tier_level: Maximum access tier level
             document_ids: Optional document filter
             session: Ignored (kept for interface compatibility)
+            vector_weight: Dynamic weight for vector results (0-1), overrides config
+            keyword_weight: Dynamic weight for keyword results (0-1), overrides config
 
         Returns:
             List of SearchResult objects
@@ -825,6 +829,8 @@ class ChromaVectorStore:
                 top_k=top_k,
                 access_tier_level=access_tier_level,
                 document_ids=document_ids,
+                vector_weight=vector_weight,
+                keyword_weight=keyword_weight,
             )
 
     # =========================================================================

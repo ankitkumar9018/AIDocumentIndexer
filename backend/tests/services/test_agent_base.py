@@ -15,12 +15,15 @@ from backend.services.agents.agent_base import (
     AgentTask,
     AgentResult,
     ValidationResult,
-    ExecutionPlan,
-    ExecutionStep,
+    TrajectoryStep,
     BaseAgent,
     TaskType,
     TaskStatus,
     FallbackStrategy,
+)
+from backend.services.agents.manager_agent import (
+    ExecutionPlan,
+    PlanStep,
 )
 
 
@@ -152,7 +155,7 @@ class TestExecutionPlan:
     def test_create_execution_plan(self):
         """Test creating an ExecutionPlan."""
         steps = [
-            ExecutionStep(
+            PlanStep(
                 step_id="step-1",
                 step_number=1,
                 agent_id="research-agent",
@@ -169,7 +172,7 @@ class TestExecutionPlan:
                 dependencies=[],
                 estimated_cost_usd=0.01,
             ),
-            ExecutionStep(
+            PlanStep(
                 step_id="step-2",
                 step_number=2,
                 agent_id="generator-agent",

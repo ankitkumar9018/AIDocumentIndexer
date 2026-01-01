@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/card";
 import { useDocuments, useProcessingQueue, useCostDashboard, useChatSessions, useHealthCheck } from "@/lib/api";
 import { useUser } from "@/lib/auth";
+import { StatsCardSkeleton, ListCardSkeleton, QueueCardSkeleton } from "@/components/skeletons";
 
 // Helper to display values with null/undefined handling
 const formatNumber = (value: number | null | undefined): string => {
@@ -126,90 +127,98 @@ export default function DashboardPage() {
 
       {/* Stats Grid */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Documents</CardTitle>
-            <FileText className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {docsLoading ? <Loader2 className="h-6 w-6 animate-spin" /> : formatNumber(totalDocuments)}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {totalChunks != null ? `${formatNumber(totalChunks)} chunks indexed` : "No chunks indexed yet"}
-            </p>
-          </CardContent>
-        </Card>
+        {docsLoading ? (
+          <StatsCardSkeleton />
+        ) : (
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Total Documents</CardTitle>
+              <FileText className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{formatNumber(totalDocuments)}</div>
+              <p className="text-xs text-muted-foreground">
+                {totalChunks != null ? `${formatNumber(totalChunks)} chunks indexed` : "No chunks indexed yet"}
+              </p>
+            </CardContent>
+          </Card>
+        )}
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Processing</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {queueLoading ? <Loader2 className="h-6 w-6 animate-spin" /> : formatNumber(processingJobs)}
-            </div>
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-green-600 flex items-center">
-                <CheckCircle className="h-3 w-3 mr-1" />
-                {completedItems.length} completed
-              </span>
-              {failedItems.length > 0 && (
-                <span className="text-red-600 flex items-center">
-                  <AlertCircle className="h-3 w-3 mr-1" />
-                  {failedItems.length} failed
+        {queueLoading ? (
+          <StatsCardSkeleton />
+        ) : (
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Processing</CardTitle>
+              <Activity className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{formatNumber(processingJobs)}</div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-green-600 flex items-center">
+                  <CheckCircle className="h-3 w-3 mr-1" />
+                  {completedItems.length} completed
                 </span>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+                {failedItems.length > 0 && (
+                  <span className="text-red-600 flex items-center">
+                    <AlertCircle className="h-3 w-3 mr-1" />
+                    {failedItems.length} failed
+                  </span>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Chat Sessions</CardTitle>
-            <MessageSquare className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {chatsLoading ? <Loader2 className="h-6 w-6 animate-spin" /> : formatNumber(activeChats)}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Total sessions
-            </p>
-          </CardContent>
-        </Card>
+        {chatsLoading ? (
+          <StatsCardSkeleton />
+        ) : (
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Chat Sessions</CardTitle>
+              <MessageSquare className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{formatNumber(activeChats)}</div>
+              <p className="text-xs text-muted-foreground">
+                Total sessions
+              </p>
+            </CardContent>
+          </Card>
+        )}
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">API Costs</CardTitle>
-            <Zap className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {costsLoading ? <Loader2 className="h-6 w-6 animate-spin" /> : formatCurrency(costThisMonth)}
-            </div>
-            <p className="text-xs text-muted-foreground flex items-center">
-              {costChange != null ? (
-                costChange > 0 ? (
-                  <>
-                    <ArrowUpRight className="h-3 w-3 text-red-500 mr-1" />
-                    <span className="text-red-500">+{costChange.toFixed(1)}%</span>
-                    <span className="ml-1">from last week</span>
-                  </>
+        {costsLoading ? (
+          <StatsCardSkeleton />
+        ) : (
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">API Costs</CardTitle>
+              <Zap className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{formatCurrency(costThisMonth)}</div>
+              <p className="text-xs text-muted-foreground flex items-center">
+                {costChange != null ? (
+                  costChange > 0 ? (
+                    <>
+                      <ArrowUpRight className="h-3 w-3 text-red-500 mr-1" />
+                      <span className="text-red-500">+{costChange.toFixed(1)}%</span>
+                      <span className="ml-1">from last week</span>
+                    </>
+                  ) : (
+                    <>
+                      <ArrowDownRight className="h-3 w-3 text-green-500 mr-1" />
+                      <span className="text-green-500">{costChange.toFixed(1)}%</span>
+                      <span className="ml-1">from last week</span>
+                    </>
+                  )
                 ) : (
-                  <>
-                    <ArrowDownRight className="h-3 w-3 text-green-500 mr-1" />
-                    <span className="text-green-500">{costChange.toFixed(1)}%</span>
-                    <span className="ml-1">from last week</span>
-                  </>
-                )
-              ) : (
-                <span>This month</span>
-              )}
-            </p>
-          </CardContent>
-        </Card>
+                  <span>This month</span>
+                )}
+              </p>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       {/* Quick Actions */}
@@ -362,17 +371,16 @@ export default function DashboardPage() {
       {/* Recent Documents & Activity */}
       <div className="grid gap-6 md:grid-cols-2">
         {/* Recent Documents */}
+        {docsLoading ? (
+          <ListCardSkeleton count={5} />
+        ) : (
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">Recent Documents</CardTitle>
             <CardDescription>Latest files added to your archive</CardDescription>
           </CardHeader>
           <CardContent>
-            {docsLoading ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : recentDocuments.length === 0 ? (
+            {recentDocuments.length === 0 ? (
               <div className="text-center py-6 text-muted-foreground">
                 <div className="p-4 rounded-full bg-muted/50 w-fit mx-auto mb-3">
                   <FileText className="h-8 w-8 opacity-50" />
@@ -418,19 +426,19 @@ export default function DashboardPage() {
             </Link>
           </CardContent>
         </Card>
+        )}
 
         {/* Processing Queue Status */}
+        {queueLoading ? (
+          <QueueCardSkeleton count={5} />
+        ) : (
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">Processing Queue</CardTitle>
             <CardDescription>Current document processing status</CardDescription>
           </CardHeader>
           <CardContent>
-            {queueLoading ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : !queue?.items || queue.items.length === 0 ? (
+            {!queue?.items || queue.items.length === 0 ? (
               <div className="text-center py-6 text-muted-foreground">
                 <div className="p-4 rounded-full bg-muted/50 w-fit mx-auto mb-3">
                   <Activity className="h-8 w-8 opacity-50" />
@@ -496,6 +504,7 @@ export default function DashboardPage() {
             )}
           </CardContent>
         </Card>
+        )}
       </div>
 
       {/* How It Works - Show only for empty workspaces */}

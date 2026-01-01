@@ -28,8 +28,8 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Input } from "@/components/ui/input";
 import { KeyboardShortcutsDialog } from "@/components/keyboard-shortcuts-dialog";
+import { CommandPalette } from "@/components/command-palette";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -250,16 +250,9 @@ export default function DashboardLayout({
               {pageTitles[pathname] || "Dashboard"}
             </h1>
 
-            {/* Search Bar */}
+            {/* Command Palette / Search */}
             <div className="flex-1 max-w-md">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  type="search"
-                  placeholder="Search documents..."
-                  className="pl-9 h-9"
-                />
-              </div>
+              <CommandPalette />
             </div>
           </div>
 

@@ -62,6 +62,11 @@ class SearchResult:
     enhanced_summary: Optional[str] = None
     enhanced_keywords: Optional[List[str]] = None
 
+    # Context expansion (surrounding chunks for better context)
+    prev_chunk_snippet: Optional[str] = None  # Preview of previous chunk
+    next_chunk_snippet: Optional[str] = None  # Preview of next chunk
+    chunk_index: Optional[int] = None  # Position in document for navigation
+
 
 @dataclass
 class VectorStoreConfig:
@@ -70,6 +75,10 @@ class VectorStoreConfig:
     default_top_k: int = 10
     similarity_threshold: float = 0.4  # Lower threshold for OCR'd documents
     search_type: SearchType = SearchType.HYBRID
+
+    # Context expansion (surrounding chunks)
+    enable_context_expansion: bool = True  # Include prev/next chunk snippets
+    context_snippet_length: int = 200  # Max characters for context snippets
 
     # Hybrid search weights
     vector_weight: float = 0.7
@@ -736,6 +745,10 @@ class VectorStore:
         if self.config.enable_reranking and self._reranker is not None and query:
             final_results = self._rerank_results(query, final_results, top_k)
 
+        # Expand context with surrounding chunks
+        if self.config.enable_context_expansion:
+            final_results = await self.expand_context(final_results, session=session)
+
         return final_results
 
     def _rerank_results(
@@ -803,6 +816,8 @@ class VectorStore:
         access_tier_level: int = 100,
         document_ids: Optional[List[str]] = None,
         session: Optional[AsyncSession] = None,
+        vector_weight: Optional[float] = None,
+        keyword_weight: Optional[float] = None,
     ) -> List[SearchResult]:
         """
         Unified search interface.
@@ -815,6 +830,8 @@ class VectorStore:
             access_tier_level: Maximum access tier level
             document_ids: Optional document filter
             session: Optional database session
+            vector_weight: Dynamic weight for vector results (0-1), overrides config
+            keyword_weight: Dynamic weight for keyword results (0-1), overrides config
 
         Returns:
             List of SearchResult objects
@@ -860,7 +877,103 @@ class VectorStore:
                 access_tier_level=access_tier_level,
                 document_ids=document_ids,
                 session=session,
+                vector_weight=vector_weight,
+                keyword_weight=keyword_weight,
             )
+
+    # =========================================================================
+    # Context Expansion
+    # =========================================================================
+
+    async def expand_context(
+        self,
+        results: List[SearchResult],
+        session: Optional[AsyncSession] = None,
+    ) -> List[SearchResult]:
+        """
+        Expand search results with surrounding chunk context.
+
+        For each result, fetches snippets from the previous and next chunks
+        in the same document to provide better context for the LLM.
+
+        Args:
+            results: List of search results to expand
+            session: Optional existing database session
+
+        Returns:
+            The same results with prev_chunk_snippet and next_chunk_snippet populated
+        """
+        if not self.config.enable_context_expansion or not results:
+            return results
+
+        async def _expand(db: AsyncSession) -> List[SearchResult]:
+            # Group results by document for efficient querying
+            doc_chunks: Dict[str, List[Tuple[int, SearchResult]]] = {}
+            for result in results:
+                chunk_index = result.metadata.get("chunk_index")
+                if chunk_index is not None:
+                    if result.document_id not in doc_chunks:
+                        doc_chunks[result.document_id] = []
+                    doc_chunks[result.document_id].append((chunk_index, result))
+                    result.chunk_index = chunk_index
+
+            # For each document, fetch surrounding chunks
+            snippet_length = self.config.context_snippet_length
+
+            for doc_id, chunks in doc_chunks.items():
+                # Get all relevant chunk indices
+                indices = set()
+                for chunk_index, _ in chunks:
+                    if chunk_index > 0:
+                        indices.add(chunk_index - 1)  # Previous
+                    indices.add(chunk_index + 1)  # Next
+
+                if not indices:
+                    continue
+
+                # Fetch surrounding chunks in one query
+                try:
+                    surrounding = await db.execute(
+                        select(Chunk.chunk_index, Chunk.content)
+                        .where(Chunk.document_id == uuid.UUID(doc_id))
+                        .where(Chunk.chunk_index.in_(list(indices)))
+                    )
+                    surrounding_map = {row[0]: row[1] for row in surrounding.fetchall()}
+
+                    # Populate prev/next snippets
+                    for chunk_index, result in chunks:
+                        # Previous chunk snippet
+                        if chunk_index > 0 and (chunk_index - 1) in surrounding_map:
+                            prev_content = surrounding_map[chunk_index - 1]
+                            # Take last snippet_length characters
+                            if len(prev_content) > snippet_length:
+                                result.prev_chunk_snippet = "..." + prev_content[-snippet_length:]
+                            else:
+                                result.prev_chunk_snippet = prev_content
+
+                        # Next chunk snippet
+                        if (chunk_index + 1) in surrounding_map:
+                            next_content = surrounding_map[chunk_index + 1]
+                            # Take first snippet_length characters
+                            if len(next_content) > snippet_length:
+                                result.next_chunk_snippet = next_content[:snippet_length] + "..."
+                            else:
+                                result.next_chunk_snippet = next_content
+
+                except Exception as e:
+                    logger.warning(
+                        "Failed to fetch surrounding chunks",
+                        document_id=doc_id,
+                        error=str(e),
+                    )
+
+            return results
+
+        if session:
+            return await _expand(session)
+        else:
+            async with async_session_context() as db:
+                return await _expand(db)
 
     # =========================================================================
     # Utility Operations

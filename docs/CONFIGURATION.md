@@ -90,6 +90,26 @@ postgresql://username:password@host:port/database?sslmode=require
 | `OLLAMA_CHAT_MODEL` | Chat model | `llama3.2` |
 | `OLLAMA_EMBEDDING_MODEL` | Embedding model | `nomic-embed-text` |
 
+**Admin UI Model Management:**
+
+You can manage Ollama models directly from the Admin Settings page:
+
+1. Go to **Admin → Settings → LLM Providers** tab
+2. Scroll to the **Ollama Local Models** section
+3. Features available:
+   - **View installed models** - See all chat, embedding, and vision models with size info
+   - **Pull new models** - Download models from Ollama library (e.g., `qwen2.5vl`, `llava`, `nomic-embed-text`)
+   - **Delete models** - Remove unused models to free disk space
+   - **Quick select** - One-click buttons for recommended models
+
+**Recommended Models:**
+| Model | Type | Best For |
+|-------|------|----------|
+| `qwen2.5vl` | Vision | Document OCR, tables (95.7% DocVQA) |
+| `llava` | Vision | General image understanding |
+| `llama3.2` | Chat | Fast responses, general chat |
+| `nomic-embed-text` | Embedding | Document embeddings (768 dims) |
+
 ### Default LLM Settings
 
 | Variable | Description | Default |

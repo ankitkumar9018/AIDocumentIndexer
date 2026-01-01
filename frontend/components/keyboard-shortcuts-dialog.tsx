@@ -121,9 +121,9 @@ export function KeyboardShortcutsDialog() {
         </div>
 
         <div className="mt-4 pt-4 border-t text-center">
-          <p className="text-xs text-muted-foreground">
+          <span className="text-xs text-muted-foreground">
             Press <Badge variant="outline" className="h-5 px-1.5 font-mono text-xs mx-1">Esc</Badge> to close
-          </p>
+          </span>
         </div>
       </DialogContent>
     </Dialog>

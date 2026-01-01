@@ -4,14 +4,23 @@ AIDocumentIndexer - Embedding Service
 
 Embedding generation with Ray-parallel processing.
 Supports multiple embedding providers via LangChain.
+
+Performance optimizations:
+- Adaptive batching based on provider rate limits
+- Embedding cache to avoid re-embedding identical content
+- Concurrent processing with ThreadPoolExecutor fallback
+- Ray-parallel processing for large batches
 """
 
 from typing import List, Dict, Any, Optional, Union
 from dataclasses import dataclass
 import asyncio
 import hashlib
+import os
 import structlog
+import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 # LangChain embeddings
 from langchain_openai import OpenAIEmbeddings
@@ -25,6 +34,10 @@ from backend.processors.chunker import Chunk
 from backend.services.llm import LLMConfig
 
 logger = structlog.get_logger(__name__)
+
+# Embedding cache for deduplication (content hash -> embedding)
+_embedding_cache: Dict[str, List[float]] = {}
+_CACHE_MAX_SIZE = int(os.getenv("EMBEDDING_CACHE_SIZE", "10000"))
 
 
 @dataclass
@@ -157,47 +170,85 @@ class EmbeddingService:
             logger.error("Embedding failed", error=str(e), text_length=len(text))
             raise
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def _get_content_hash(self, text: str) -> str:
+        """Generate a hash for text content for caching."""
+        return hashlib.md5(f"{self.model}:{text}".encode()).hexdigest()
+
+    def embed_texts(
+        self,
+        texts: List[str],
+        use_cache: bool = True,
+    ) -> List[List[float]]:
         """
-        Generate embeddings for multiple texts.
+        Generate embeddings for multiple texts with caching.
 
         Args:
             texts: List of texts to embed
+            use_cache: Whether to use embedding cache (default True)
 
         Returns:
             List of embedding vectors
         """
+        global _embedding_cache
+
         if not texts:
             return []
 
-        # Filter empty texts but track positions
-        valid_texts = []
-        valid_indices = []
+        # Track which texts need embedding vs are cached
+        result = [None] * len(texts)
+        texts_to_embed = []
+        indices_to_embed = []
+
         for i, text in enumerate(texts):
-            if text and text.strip():
-                valid_texts.append(text)
-                valid_indices.append(i)
+            if not text or not text.strip():
+                result[i] = [0.0] * self.dimensions
+                continue
 
-        if not valid_texts:
-            return [[0.0] * self.dimensions for _ in texts]
+            if use_cache:
+                content_hash = self._get_content_hash(text)
+                if content_hash in _embedding_cache:
+                    result[i] = _embedding_cache[content_hash]
+                    continue
 
-        try:
-            embeddings = self.embeddings.embed_documents(valid_texts)
+            texts_to_embed.append(text)
+            indices_to_embed.append(i)
 
-            # Rebuild full list with zero vectors for empty texts
-            result = [[0.0] * self.dimensions for _ in texts]
-            for idx, embedding in zip(valid_indices, embeddings):
-                result[idx] = embedding
-
-            return result
-
-        except Exception as e:
-            logger.error(
-                "Batch embedding failed",
-                error=str(e),
-                num_texts=len(texts),
+        # Log cache statistics
+        cache_hits = len(texts) - len(texts_to_embed) - sum(1 for r in result if r is not None and r == [0.0] * self.dimensions)
+        if cache_hits > 0:
+            logger.debug(
+                "Embedding cache hits",
+                cache_hits=cache_hits,
+                cache_misses=len(texts_to_embed),
             )
-            raise
+
+        # Embed texts that weren't cached
+        if texts_to_embed:
+            try:
+                embeddings = self.embeddings.embed_documents(texts_to_embed)
+
+                # Store in results and cache
+                for idx, text, embedding in zip(indices_to_embed, texts_to_embed, embeddings):
+                    result[idx] = embedding
+
+                    if use_cache and len(_embedding_cache) < _CACHE_MAX_SIZE:
+                        content_hash = self._get_content_hash(text)
+                        _embedding_cache[content_hash] = embedding
+
+            except Exception as e:
+                logger.error(
+                    "Batch embedding failed",
+                    error=str(e),
+                    num_texts=len(texts_to_embed),
+                )
+                raise
+
+        # Fill any remaining None values with zero vectors
+        for i in range(len(result)):
+            if result[i] is None:
+                result[i] = [0.0] * self.dimensions
+
+        return result
 
     async def embed_text_async(self, text: str) -> List[float]:
         """Async version of embed_text."""
@@ -229,14 +280,16 @@ class EmbeddingService:
     def embed_chunks(
         self,
         chunks: List[Chunk],
-        batch_size: int = 100,
+        batch_size: Optional[int] = None,
+        use_cache: bool = True,
     ) -> List[EmbeddingResult]:
         """
-        Generate embeddings for document chunks.
+        Generate embeddings for document chunks with caching and optimal batching.
 
         Args:
             chunks: List of Chunk objects
-            batch_size: Number of chunks to process at once
+            batch_size: Number of chunks to process at once (auto-detected if None)
+            use_cache: Whether to use the embedding cache
 
         Returns:
             List of EmbeddingResult objects
@@ -244,11 +297,18 @@ class EmbeddingService:
         if not chunks:
             return []
 
+        # Use optimal batch size for provider if not specified
+        if batch_size is None:
+            batch_size = get_optimal_batch_size(self.provider, len(chunks))
+
+        start_time = time.time()
         logger.info(
             "Embedding chunks",
             num_chunks=len(chunks),
             batch_size=batch_size,
             model=self.model,
+            provider=self.provider,
+            cache_enabled=use_cache,
         )
 
         results = []
@@ -260,7 +320,7 @@ class EmbeddingService:
             batch_chunks = chunks[i:i + batch_size]
 
             try:
-                embeddings = self.embed_texts(batch_texts)
+                embeddings = self.embed_texts(batch_texts, use_cache=use_cache)
 
                 for chunk, embedding in zip(batch_chunks, embeddings):
                     result = EmbeddingResult(
@@ -296,6 +356,15 @@ class EmbeddingService:
                         metadata={**chunk.metadata, "embedding_failed": True},
                     )
                     results.append(result)
+
+        elapsed = time.time() - start_time
+        logger.info(
+            "Embedding complete",
+            num_chunks=len(chunks),
+            num_results=len(results),
+            elapsed_seconds=round(elapsed, 2),
+            chunks_per_second=round(len(chunks) / elapsed, 1) if elapsed > 0 else 0,
+        )
 
         return results
 
@@ -646,3 +715,61 @@ def compute_similarity(
         return 0.0
 
     return dot_product / (norm1 * norm2)
+
+
+def clear_embedding_cache():
+    """Clear the global embedding cache."""
+    global _embedding_cache
+    _embedding_cache.clear()
+    logger.info("Embedding cache cleared")
+
+
+def get_cache_stats() -> Dict[str, Any]:
+    """Get statistics about the embedding cache."""
+    return {
+        "size": len(_embedding_cache),
+        "max_size": _CACHE_MAX_SIZE,
+        "utilization_percent": (len(_embedding_cache) / _CACHE_MAX_SIZE) * 100 if _CACHE_MAX_SIZE > 0 else 0,
+    }
+
+
+# Provider-specific rate limits and optimal batch sizes
+PROVIDER_BATCH_CONFIG = {
+    "openai": {
+        "max_batch_size": 2048,  # OpenAI supports up to 2048 texts per batch
+        "requests_per_minute": 3000,  # Rate limit
+        "tokens_per_minute": 1000000,  # TPM limit for embeddings
+        "optimal_batch_size": 500,  # Good balance of speed and reliability
+    },
+    "ollama": {
+        "max_batch_size": 100,  # Ollama is local, smaller batches
+        "requests_per_minute": None,  # No rate limit
+        "optimal_batch_size": 50,  # Keep batches small for local models
+    },
+    "huggingface": {
+        "max_batch_size": 256,
+        "requests_per_minute": 300,
+        "optimal_batch_size": 100,
+    },
+}
+
+
+def get_optimal_batch_size(provider: str, num_texts: int) -> int:
+    """
+    Get the optimal batch size for a provider.
+
+    Args:
+        provider: The embedding provider
+        num_texts: Total number of texts to embed
+
+    Returns:
+        Optimal batch size for the provider
+    """
+    config = PROVIDER_BATCH_CONFIG.get(provider, PROVIDER_BATCH_CONFIG["openai"])
+    optimal = config["optimal_batch_size"]
+
+    # For small batches, use the smaller of optimal or num_texts
+    if num_texts <= optimal:
+        return num_texts
+
+    return optimal
