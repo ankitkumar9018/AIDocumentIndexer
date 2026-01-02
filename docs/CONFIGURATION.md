@@ -370,6 +370,77 @@ Users can click the "Documents to Search" button in the chat header to:
 | `rag.suggested_questions_enabled` | Show follow-up suggestions | `true` |
 | `rag.suggestions_count` | Number of suggestions to show (1-5) | `3` |
 
+#### HyDE (Hypothetical Document Embeddings)
+
+HyDE improves retrieval for short, abstract queries by generating a hypothetical document that might contain the answer, then using that document's embedding for search.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.hyde_enabled` | Enable HyDE for short/abstract queries | `true` |
+| `rag.hyde_min_query_words` | Use HyDE only for queries shorter than this | `5` |
+
+**How HyDE Works:**
+1. Short queries like "marketing strategy" often don't match document vocabulary well
+2. HyDE generates a hypothetical answer document: "A marketing strategy involves..."
+3. The hypothetical doc is embedded and searched alongside the original query
+4. Results are merged and deduplicated for better recall
+
+**When HyDE Helps:**
+- Short, conceptual queries (2-4 words)
+- Abstract questions that don't use specific document terminology
+- Queries where you're exploring a topic rather than finding a specific fact
+
+#### CRAG (Corrective RAG)
+
+CRAG automatically evaluates and corrects low-confidence search results, improving answer quality when initial retrieval is uncertain.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.crag_enabled` | Enable automatic result correction | `true` |
+| `rag.crag_confidence_threshold` | Trigger CRAG below this confidence (0-1) | `0.5` |
+
+**How CRAG Works:**
+1. After retrieval, documents are evaluated for relevance to the query
+2. Documents are classified as: Correct, Ambiguous, or Incorrect
+3. Based on classification, CRAG takes action:
+   - **Mostly correct**: Use results as-is
+   - **Mixed**: Filter to keep only correct + some ambiguous
+   - **Mostly incorrect**: Show confidence warning to user
+
+**Confidence Warnings:**
+When CRAG detects low-confidence results, users see warnings:
+- `< 0.5`: "Moderate confidence - results may be incomplete"
+- `< 0.4`: "Low confidence - documents may not fully address your question"
+- `< 0.2`: "Very low confidence - consider rephrasing your question"
+
+#### Query Expansion & Parallel Search
+
+Query expansion generates paraphrased versions of your query to improve recall.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.query_expansion_enabled` | Enable query paraphrasing | `true` |
+| `rag.query_expansion_count` | Number of query variations | `3` |
+| `rag.parallel_query_search` | Search all variations in parallel | `true` |
+
+**Performance Note:** Parallel search uses `asyncio.gather()` to search all expanded queries simultaneously, typically reducing total search time by 40-60% compared to sequential search.
+
+#### Verification (Self-RAG)
+
+Self-verification filters irrelevant documents before generating responses.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.verification_enabled` | Enable document verification | `true` |
+| `rag.verification_level` | Verification thoroughness | `quick` |
+| `rag.dynamic_weighting_enabled` | Adjust vector/keyword weights by query type | `true` |
+
+**Verification Levels:**
+- `none`: Skip verification (fastest)
+- `quick`: Fast heuristic-based filtering (default)
+- `standard`: LLM-assisted relevance scoring
+- `thorough`: Detailed LLM evaluation per document (slowest)
+
 ---
 
 ## Distributed Processing

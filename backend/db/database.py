@@ -48,8 +48,12 @@ class DatabaseConfig:
     def __init__(self):
         self.database_type = os.getenv("DATABASE_TYPE", "postgresql")
         self.database_url = os.getenv("DATABASE_URL", "")
-        self.pool_size = int(os.getenv("DB_POOL_SIZE", "5"))
-        self.max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+        # Increased default pool size from 5 to 30 for better concurrency
+        # Scale: 5 connections supports ~15 concurrent users
+        #        30 connections supports ~100 concurrent users
+        #        50+ connections for high-traffic production deployments
+        self.pool_size = int(os.getenv("DB_POOL_SIZE", "30"))
+        self.max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "20"))
         self.echo = os.getenv("APP_ENV") == "development"
 
     @property

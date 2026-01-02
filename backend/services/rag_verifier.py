@@ -120,6 +120,22 @@ Rate the relevance on a scale of 0-10:
 Respond with ONLY a JSON object:
 {{"score": <0-10>, "reasoning": "<brief explanation>"}}"""
 
+    BATCH_RELEVANCE_PROMPT = """Assess the relevance of each text passage to the given query.
+
+Query: {query}
+
+{passages}
+
+For EACH passage, rate the relevance on a scale of 0-10:
+- 0-2: Not relevant at all
+- 3-4: Slightly related but doesn't answer the query
+- 5-6: Partially relevant, some useful information
+- 7-8: Relevant, contains answer to query
+- 9-10: Highly relevant, directly answers the query
+
+Respond with ONLY a JSON object with scores for each passage number:
+{{"1": {{"score": <0-10>, "reasoning": "<brief>"}}, "2": {{"score": <0-10>, "reasoning": "<brief>"}}, ...}}"""
+
     GROUNDING_PROMPT = """Analyze if this answer is grounded in the provided sources.
 
 Question: {question}
@@ -265,32 +281,40 @@ Respond with ONLY a JSON object:
         """Assess relevance of each document to the query."""
         relevances = []
 
-        # Get query embedding for similarity comparison
-        query_embedding = await self.embedding_service.embed_query(query)
-
-        for doc, retrieval_score in docs:
-            chunk_id = doc.metadata.get("chunk_id", "unknown")
-            content = doc.page_content[:500]  # Snippet for display
-            # Get original vector similarity from metadata (0-1 range)
-            # Falls back to retrieval_score if not available
-            similarity = doc.metadata.get("similarity_score", retrieval_score)
-
-            # Quick mode: embedding similarity only
-            if self.config.level == VerificationLevel.QUICK:
-                # Use retrieval score as relevance
+        # Quick mode: embedding similarity only (no LLM calls)
+        if self.config.level == VerificationLevel.QUICK:
+            for doc, retrieval_score in docs:
+                chunk_id = doc.metadata.get("chunk_id", "unknown")
+                content = doc.page_content[:500]
+                similarity = doc.metadata.get("similarity_score", retrieval_score)
                 is_relevant = retrieval_score >= self.config.embedding_relevance_threshold
+
                 relevances.append(ChunkRelevance(
                     chunk_id=chunk_id,
                     content_snippet=content[:200],
                     relevance_score=min(retrieval_score, 1.0),
-                    similarity_score=similarity,  # Original vector similarity for display
+                    similarity_score=similarity,
                     is_relevant=is_relevant,
                 ))
-                continue
+            return relevances
 
-            # Standard/Thorough: LLM assessment
-            try:
-                llm_score, reasoning = await self._llm_relevance_check(query, doc.page_content)
+        # Standard/Thorough: Use BATCH LLM assessment (single LLM call for all chunks)
+        # This is 5-10x more efficient than individual calls
+        passages = [doc.page_content for doc, _ in docs]
+
+        try:
+            batch_scores = await self._batch_llm_relevance_check(query, passages)
+
+            for i, (doc, retrieval_score) in enumerate(docs):
+                chunk_id = doc.metadata.get("chunk_id", "unknown")
+                content = doc.page_content[:500]
+                similarity = doc.metadata.get("similarity_score", retrieval_score)
+
+                if i < len(batch_scores):
+                    llm_score, reasoning = batch_scores[i]
+                else:
+                    llm_score, reasoning = 0.5, "No score returned"
+
                 combined_score = (retrieval_score + llm_score) / 2
                 is_relevant = combined_score >= self.config.llm_relevance_threshold
 
@@ -298,18 +322,24 @@ Respond with ONLY a JSON object:
                     chunk_id=chunk_id,
                     content_snippet=content[:200],
                     relevance_score=combined_score,
-                    similarity_score=similarity,  # Original vector similarity for display
+                    similarity_score=similarity,
                     is_relevant=is_relevant,
                     reasoning=reasoning,
                 ))
-            except Exception as e:
-                logger.warning("LLM relevance check failed", error=str(e))
-                # Fall back to retrieval score
+
+        except Exception as e:
+            logger.warning("Batch LLM relevance check failed, falling back to retrieval scores", error=str(e))
+            # Fall back to retrieval scores only
+            for doc, retrieval_score in docs:
+                chunk_id = doc.metadata.get("chunk_id", "unknown")
+                content = doc.page_content[:500]
+                similarity = doc.metadata.get("similarity_score", retrieval_score)
+
                 relevances.append(ChunkRelevance(
                     chunk_id=chunk_id,
                     content_snippet=content[:200],
                     relevance_score=min(retrieval_score, 1.0),
-                    similarity_score=similarity,  # Original vector similarity for display
+                    similarity_score=similarity,
                     is_relevant=retrieval_score >= self.config.embedding_relevance_threshold,
                 ))
 
@@ -345,6 +375,76 @@ Respond with ONLY a JSON object:
         except Exception as e:
             logger.error("LLM relevance check error", error=str(e))
             raise
+
+    async def _batch_llm_relevance_check(
+        self,
+        query: str,
+        passages: List[str],
+    ) -> List[Tuple[float, str]]:
+        """
+        Use LLM to assess relevance of multiple passages in a single call.
+
+        This is 5-10x more efficient than individual calls for multiple passages.
+
+        Args:
+            query: The user's query
+            passages: List of passage texts to assess
+
+        Returns:
+            List of (score, reasoning) tuples, one per passage
+        """
+        import json
+
+        if not passages:
+            return []
+
+        # Format passages for the prompt
+        passages_text = "\n\n".join([
+            f"[Passage {i+1}]:\n{passage[:800]}"  # Limit each passage
+            for i, passage in enumerate(passages)
+        ])
+
+        prompt = self.BATCH_RELEVANCE_PROMPT.format(
+            query=query,
+            passages=passages_text,
+        )
+
+        try:
+            response = await self.llm.ainvoke(prompt)
+            content = response.content if hasattr(response, 'content') else str(response)
+
+            # Parse JSON response
+            result = json.loads(content)
+
+            # Extract scores in order
+            scores = []
+            for i in range(len(passages)):
+                key = str(i + 1)
+                if key in result:
+                    item = result[key]
+                    score = item.get("score", 5) / 10.0  # Normalize to 0-1
+                    reasoning = item.get("reasoning", "")
+                    scores.append((score, reasoning))
+                else:
+                    # Missing entry, use default
+                    scores.append((0.5, "No assessment provided"))
+
+            logger.debug(
+                "Batch relevance check complete",
+                num_passages=len(passages),
+                num_scores=len(scores),
+            )
+
+            return scores
+
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse batch LLM relevance response", error=str(e))
+            # Return default scores for all
+            return [(0.5, "Failed to parse response")] * len(passages)
+        except Exception as e:
+            logger.error("Batch LLM relevance check error", error=str(e))
+            # Return default scores
+            return [(0.5, f"Error: {str(e)}")] * len(passages)
 
     async def _verify_grounding(
         self,

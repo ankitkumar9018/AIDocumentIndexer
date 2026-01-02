@@ -72,6 +72,15 @@ from backend.services.query_classifier import (
     QueryIntent,
     get_query_classifier,
 )
+from backend.services.hyde import HyDEExpander, get_hyde_expander
+from backend.services.corrective_rag import CorrectiveRAG, get_corrective_rag, CRAGResult
+from backend.services.retrieval_strategies import (
+    HierarchicalRetriever,
+    HierarchicalConfig,
+    get_hierarchical_retriever,
+)
+# Note: KnowledgeGraphService is imported lazily inside _enhance_with_knowledge_graph
+# to avoid circular imports (knowledge_graph -> llm -> services.__init__ -> rag)
 
 logger = structlog.get_logger(__name__)
 
@@ -112,6 +121,10 @@ class RAGResponse:
     verification_result: Optional[VerificationResult] = None
     # Suggested follow-up questions
     suggested_questions: List[str] = field(default_factory=list)
+    # Confidence warning for UI display (empty string = no warning)
+    confidence_warning: str = ""
+    # CRAG result if query was refined
+    crag_result: Optional[CRAGResult] = None
 
 
 @dataclass
@@ -157,6 +170,27 @@ class RAGConfig:
 
         # Dynamic search weighting (query intent classification)
         enable_dynamic_weighting: bool = None,  # Read from env if not set
+
+        # HyDE (Hypothetical Document Embeddings) - improves recall for short/abstract queries
+        enable_hyde: bool = None,  # Read from env if not set
+        hyde_min_query_words: int = 5,  # Only use HyDE for queries shorter than this
+
+        # CRAG (Corrective RAG) - auto-refines queries on low confidence
+        enable_crag: bool = None,  # Read from env if not set
+        crag_confidence_threshold: float = 0.5,  # Trigger CRAG below this confidence
+
+        # Hierarchical retrieval - document-first strategy for better diversity
+        enable_hierarchical_retrieval: bool = None,  # Read from settings if not set
+        hierarchical_doc_limit: int = 10,  # Max documents in stage 1
+        hierarchical_chunks_per_doc: int = 3,  # Chunks per document in stage 2
+
+        # Semantic deduplication - remove near-duplicate chunks from expanded queries
+        enable_semantic_dedup: bool = None,  # Read from settings if not set
+        semantic_dedup_threshold: float = 0.95,  # Similarity threshold for dedup
+
+        # Knowledge graph integration - entity-aware retrieval
+        enable_knowledge_graph: bool = None,  # Read from settings if not set
+        knowledge_graph_max_hops: int = 2,  # Graph traversal depth
     ):
         import os
         from backend.services.settings import get_settings_service
@@ -190,6 +224,59 @@ class RAGConfig:
             verification_level = os.getenv("VERIFICATION_LEVEL", "quick")
         if enable_dynamic_weighting is None:
             enable_dynamic_weighting = os.getenv("ENABLE_DYNAMIC_WEIGHTING", "true").lower() == "true"
+        if enable_hyde is None:
+            # Try settings service first, fall back to env
+            enable_hyde = settings.get_default_value("rag.hyde_enabled")
+            if enable_hyde is None:
+                enable_hyde = os.getenv("ENABLE_HYDE", "true").lower() == "true"
+        if enable_crag is None:
+            # Try settings service first, fall back to env
+            enable_crag = settings.get_default_value("rag.crag_enabled")
+            if enable_crag is None:
+                enable_crag = os.getenv("ENABLE_CRAG", "true").lower() == "true"
+        # Read other HyDE/CRAG settings from settings service
+        if hyde_min_query_words == 5:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.hyde_min_query_words")
+            if stored_value is not None:
+                hyde_min_query_words = stored_value
+        if crag_confidence_threshold == 0.5:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.crag_confidence_threshold")
+            if stored_value is not None:
+                crag_confidence_threshold = stored_value
+
+        # Read hierarchical retrieval settings
+        if enable_hierarchical_retrieval is None:
+            enable_hierarchical_retrieval = settings.get_default_value("rag.hierarchical_enabled")
+            if enable_hierarchical_retrieval is None:
+                enable_hierarchical_retrieval = os.getenv("ENABLE_HIERARCHICAL_RETRIEVAL", "false").lower() == "true"
+        if hierarchical_doc_limit == 10:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.hierarchical_doc_limit")
+            if stored_value is not None:
+                hierarchical_doc_limit = stored_value
+        if hierarchical_chunks_per_doc == 3:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.hierarchical_chunks_per_doc")
+            if stored_value is not None:
+                hierarchical_chunks_per_doc = stored_value
+
+        # Read semantic deduplication settings
+        if enable_semantic_dedup is None:
+            enable_semantic_dedup = settings.get_default_value("rag.semantic_dedup_enabled")
+            if enable_semantic_dedup is None:
+                enable_semantic_dedup = os.getenv("ENABLE_SEMANTIC_DEDUP", "true").lower() == "true"
+        if semantic_dedup_threshold == 0.95:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.semantic_dedup_threshold")
+            if stored_value is not None:
+                semantic_dedup_threshold = stored_value
+
+        # Read knowledge graph settings
+        if enable_knowledge_graph is None:
+            enable_knowledge_graph = settings.get_default_value("rag.knowledge_graph_enabled")
+            if enable_knowledge_graph is None:
+                enable_knowledge_graph = os.getenv("ENABLE_KNOWLEDGE_GRAPH", "false").lower() == "true"
+        if knowledge_graph_max_hops == 2:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.knowledge_graph_max_hops")
+            if stored_value is not None:
+                knowledge_graph_max_hops = stored_value
 
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
@@ -212,6 +299,22 @@ class RAGConfig:
         self.verification_level = verification_level
         # Dynamic weighting
         self.enable_dynamic_weighting = enable_dynamic_weighting
+        # HyDE
+        self.enable_hyde = enable_hyde
+        self.hyde_min_query_words = hyde_min_query_words
+        # CRAG
+        self.enable_crag = enable_crag
+        self.crag_confidence_threshold = crag_confidence_threshold
+        # Hierarchical retrieval
+        self.enable_hierarchical_retrieval = enable_hierarchical_retrieval
+        self.hierarchical_doc_limit = hierarchical_doc_limit
+        self.hierarchical_chunks_per_doc = hierarchical_chunks_per_doc
+        # Semantic deduplication
+        self.enable_semantic_dedup = enable_semantic_dedup
+        self.semantic_dedup_threshold = semantic_dedup_threshold
+        # Knowledge graph
+        self.enable_knowledge_graph = enable_knowledge_graph
+        self.knowledge_graph_max_hops = knowledge_graph_max_hops
 
 
 # =============================================================================
@@ -483,6 +586,29 @@ class RAGService:
         if self.config.enable_dynamic_weighting:
             self._query_classifier = get_query_classifier()
 
+        # Initialize HyDE expander for short/abstract queries
+        self._hyde_expander: Optional[HyDEExpander] = None
+        if self.config.enable_hyde:
+            self._hyde_expander = get_hyde_expander()
+
+        # Initialize CRAG for low-confidence result correction
+        self._crag: Optional[CorrectiveRAG] = None
+        if self.config.enable_crag:
+            self._crag = get_corrective_rag()
+
+        # Initialize hierarchical retriever for document-diverse retrieval
+        self._hierarchical_retriever: Optional[HierarchicalRetriever] = None
+        if self.config.enable_hierarchical_retrieval and self._custom_vectorstore:
+            self._hierarchical_retriever = get_hierarchical_retriever(
+                vectorstore=self._custom_vectorstore,
+                doc_limit=self.config.hierarchical_doc_limit,
+                chunks_per_doc=self.config.hierarchical_chunks_per_doc,
+            )
+
+        # Knowledge graph is initialized lazily per-request (requires db session)
+        self._enable_knowledge_graph = self.config.enable_knowledge_graph
+        self._knowledge_graph_max_hops = self.config.knowledge_graph_max_hops
+
         logger.info(
             "Initialized RAG service",
             chat_provider=self.config.chat_provider,
@@ -495,6 +621,11 @@ class RAGService:
             verification=self.config.enable_verification,
             verification_level=self.config.verification_level,
             dynamic_weighting=self.config.enable_dynamic_weighting,
+            hyde=self.config.enable_hyde,
+            crag=self.config.enable_crag,
+            hierarchical_retrieval=self.config.enable_hierarchical_retrieval,
+            semantic_dedup=self.config.enable_semantic_dedup,
+            knowledge_graph=self.config.enable_knowledge_graph,
         )
 
     async def get_runtime_settings(self) -> Dict[str, Any]:
@@ -887,6 +1018,70 @@ class RAGService:
         confidence_score = verification_result.confidence_score if verification_result else None
         confidence_level = verification_result.confidence_level if verification_result else None
 
+        # Generate confidence warning for UI display
+        confidence_warning = ""
+        crag_result = None
+        if confidence_score is not None:
+            if confidence_score < 0.2:
+                confidence_warning = "Very low confidence - the retrieved documents may not be relevant. Consider rephrasing your question."
+            elif confidence_score < 0.4:
+                confidence_warning = "Low confidence - some retrieved documents may not fully address your question."
+            elif confidence_score < self.config.crag_confidence_threshold:
+                confidence_warning = "Moderate confidence - results may be incomplete. Try adding more specific terms."
+
+        # Apply CRAG for low-confidence results (auto-refine query)
+        if (
+            self._crag is not None
+            and confidence_score is not None
+            and confidence_score < self.config.crag_confidence_threshold
+            and len(sources) > 0
+        ):
+            try:
+                # Convert sources to SearchResult format for CRAG
+                from backend.services.vectorstore import SearchResult as VSSearchResult
+                search_results = [
+                    VSSearchResult(
+                        chunk_id=s.chunk_id,
+                        document_id=s.document_id,
+                        content=s.full_content,
+                        score=s.relevance_score,
+                        similarity_score=s.similarity_score,
+                        document_title=s.document_name,
+                        document_filename=s.document_name,
+                        collection=s.collection,
+                        page_number=s.page_number,
+                        metadata=s.metadata,
+                    )
+                    for s in sources
+                ]
+
+                crag_result = await self._crag.process(
+                    query=question,
+                    search_results=search_results,
+                    llm=llm,
+                )
+
+                if crag_result.action_taken in ["filtered", "refined_query"]:
+                    logger.info(
+                        "CRAG applied to low-confidence results",
+                        action=crag_result.action_taken,
+                        original_count=len(sources),
+                        filtered_count=len(crag_result.filtered_results),
+                        new_confidence=crag_result.confidence,
+                    )
+                    # Update confidence based on CRAG evaluation
+                    if crag_result.confidence > confidence_score:
+                        confidence_score = crag_result.confidence
+                        if confidence_score >= 0.7:
+                            confidence_level = "high"
+                            confidence_warning = ""
+                        elif confidence_score >= 0.5:
+                            confidence_level = "medium"
+                            confidence_warning = ""
+
+            except Exception as e:
+                logger.warning("CRAG processing failed", error=str(e))
+
         return RAGResponse(
             content=content,
             sources=sources if self.config.include_sources else [],
@@ -903,6 +1098,8 @@ class RAGService:
             confidence_level=confidence_level,
             verification_result=verification_result,
             suggested_questions=suggested_questions,
+            confidence_warning=confidence_warning,
+            crag_result=crag_result,
         )
 
     async def query_stream(
@@ -1099,13 +1296,38 @@ class RAGService:
             has_custom_vectorstore=self._custom_vectorstore is not None,
         )
 
-        # Expand query if enabled (generates paraphrased versions for better recall)
+        # Build list of queries to search
         queries_to_search = [query]
+        query_word_count = len(query.split())
+
+        # Use HyDE for short/abstract queries (< 5 words by default)
+        # HyDE generates a hypothetical document that might contain the answer
+        hyde_query = None
+        if (
+            self._hyde_expander is not None
+            and query_word_count < self.config.hyde_min_query_words
+            and query_word_count >= 2  # Skip very short queries
+        ):
+            try:
+                llm, _ = await self.get_llm_for_session()
+                hyde_result = await self._hyde_expander.expand(query, llm)
+                if hyde_result.hypothetical_document and hyde_result.hypothetical_document != query:
+                    hyde_query = hyde_result.hypothetical_document
+                    queries_to_search.append(hyde_query)
+                    logger.info(
+                        "HyDE expansion applied",
+                        original_query=query,
+                        hypothetical_preview=hyde_query[:100],
+                    )
+            except Exception as e:
+                logger.warning("HyDE expansion failed, using original query", error=str(e))
+
+        # Expand query if enabled (generates paraphrased versions for better recall)
         if self._query_expander is not None and self._query_expander.should_expand(query):
             try:
                 expansion_result = await self._query_expander.expand_query(query)
                 if expansion_result.expanded_queries:
-                    queries_to_search = self._query_expander.get_all_queries(expansion_result)
+                    queries_to_search.extend(expansion_result.expanded_queries)
                     logger.debug(
                         "Query expanded",
                         original=query,
@@ -1114,12 +1336,61 @@ class RAGService:
             except Exception as e:
                 logger.warning("Query expansion failed, using original query", error=str(e))
 
-        # Collect results from all queries
+        # Collect results from all queries in PARALLEL for better performance
         all_results: List[Tuple[Document, float]] = []
         seen_chunk_ids: set = set()
 
-        for search_query in queries_to_search:
-            # Use custom vector store if available
+        # Create search coroutines for parallel execution
+        async def search_single_query(search_query: str) -> List[Tuple[Document, float]]:
+            """Execute search for a single query."""
+            if self._custom_vectorstore is not None:
+                return await self._retrieve_with_custom_store(
+                    query=search_query,
+                    collection_filter=collection_filter,
+                    access_tier=access_tier,
+                    top_k=top_k,
+                )
+            elif self._vector_store is not None:
+                return await self._retrieve_with_langchain_store(
+                    query=search_query,
+                    collection_filter=collection_filter,
+                    access_tier=access_tier,
+                    top_k=top_k,
+                )
+            else:
+                return []
+
+        # Execute all searches in parallel
+        if len(queries_to_search) > 1:
+            logger.info(
+                "Parallel retrieval starting",
+                num_queries=len(queries_to_search),
+                has_hyde=hyde_query is not None,
+                has_expansion=len(queries_to_search) > (2 if hyde_query else 1),
+            )
+            search_results = await asyncio.gather(
+                *[search_single_query(q) for q in queries_to_search],
+                return_exceptions=True,
+            )
+
+            # Process results from all queries
+            for i, results in enumerate(search_results):
+                if isinstance(results, Exception):
+                    logger.warning(
+                        "Query search failed",
+                        query_index=i,
+                        error=str(results),
+                    )
+                    continue
+
+                # Deduplicate results by chunk_id
+                for doc, score in results:
+                    chunk_id = doc.metadata.get("chunk_id", id(doc))
+                    if chunk_id not in seen_chunk_ids:
+                        seen_chunk_ids.add(chunk_id)
+                        all_results.append((doc, score))
+        else:
+            # Single query - no parallel execution needed
             logger.info(
                 "RAG retrieval starting",
                 has_custom_vectorstore=self._custom_vectorstore is not None,
@@ -1128,21 +1399,19 @@ class RAGService:
             )
             if self._custom_vectorstore is not None:
                 results = await self._retrieve_with_custom_store(
-                    query=search_query,
+                    query=query,
                     collection_filter=collection_filter,
                     access_tier=access_tier,
                     top_k=top_k,
                 )
-            # Use LangChain vector store if configured
             elif self._vector_store is not None:
                 results = await self._retrieve_with_langchain_store(
-                    query=search_query,
+                    query=query,
                     collection_filter=collection_filter,
                     access_tier=access_tier,
                     top_k=top_k,
                 )
             else:
-                # Return mock results for development
                 logger.warning("No vector store configured, returning mock results")
                 return self._mock_retrieve(query, top_k)
 
@@ -1155,6 +1424,10 @@ class RAGService:
 
         # Sort by score (descending) and limit to top_k
         all_results.sort(key=lambda x: x[1], reverse=True)
+
+        # Apply semantic deduplication if enabled (removes near-duplicate content)
+        if self.config.enable_semantic_dedup and len(all_results) > 1 and len(queries_to_search) > 1:
+            all_results = self._semantic_dedupe(all_results, self.config.semantic_dedup_threshold)
 
         if len(queries_to_search) > 1:
             logger.debug(
@@ -1253,24 +1526,40 @@ class RAGService:
                         )
                         return []
 
-            # Perform search
+            # Perform search - use hierarchical retrieval if enabled
             logger.info(
                 "Calling vectorstore search",
                 query_length=len(query),
                 has_embedding=query_embedding is not None and len(query_embedding) > 0,
                 search_type=search_type.value,
                 document_ids_count=len(document_ids) if document_ids else 0,
+                hierarchical=self._hierarchical_retriever is not None,
             )
-            results = await self._custom_vectorstore.search(
-                query=query,
-                query_embedding=query_embedding,
-                search_type=search_type,
-                top_k=top_k,
-                access_tier_level=access_tier,
-                document_ids=document_ids,
-                vector_weight=vector_weight,
-                keyword_weight=keyword_weight,
-            )
+
+            if self._hierarchical_retriever is not None:
+                # Use hierarchical retrieval for better document diversity
+                results = await self._hierarchical_retriever.retrieve(
+                    query=query,
+                    query_embedding=query_embedding,
+                    search_type=search_type,
+                    top_k=top_k,
+                    access_tier_level=access_tier,
+                    document_ids=document_ids,
+                    vector_weight=vector_weight,
+                    keyword_weight=keyword_weight,
+                )
+            else:
+                # Standard retrieval
+                results = await self._custom_vectorstore.search(
+                    query=query,
+                    query_embedding=query_embedding,
+                    search_type=search_type,
+                    top_k=top_k,
+                    access_tier_level=access_tier,
+                    document_ids=document_ids,
+                    vector_weight=vector_weight,
+                    keyword_weight=keyword_weight,
+                )
 
             # Convert SearchResult to LangChain Document format
             langchain_results = []
@@ -1311,6 +1600,14 @@ class RAGService:
                 vector_weight=vector_weight,
                 keyword_weight=keyword_weight,
             )
+
+            # Enhance with knowledge graph if enabled
+            if self._enable_knowledge_graph:
+                langchain_results = await self._enhance_with_knowledge_graph(
+                    query=query,
+                    existing_results=langchain_results,
+                    top_k=top_k,
+                )
 
             return langchain_results
 
@@ -1408,6 +1705,178 @@ class RAGService:
         ]
 
         return [(doc, 0.85 - i * 0.05) for i, doc in enumerate(mock_docs[:top_k])]
+
+    async def _enhance_with_knowledge_graph(
+        self,
+        query: str,
+        existing_results: List[Tuple[Document, float]],
+        top_k: int = 5,
+    ) -> List[Tuple[Document, float]]:
+        """
+        Enhance retrieval results with knowledge graph context.
+
+        Uses the knowledge graph to find entities mentioned in the query,
+        traverse relationships to discover related entities, and retrieve
+        chunks that contain these entities but might not have high
+        vector similarity to the query.
+
+        This improves recall for entity-centric queries like:
+        - "What did Company X do in 2024?"
+        - "Who worked with Person Y on Project Z?"
+        - "What are the relationships between A and B?"
+
+        Args:
+            query: Search query
+            existing_results: Results from vector search
+            top_k: Maximum additional chunks to add from KG
+
+        Returns:
+            Merged results with KG-enhanced chunks (original + KG chunks)
+        """
+        if not self._enable_knowledge_graph:
+            return existing_results
+
+        try:
+            # Import lazily to avoid circular import
+            from backend.services.knowledge_graph import (
+                get_knowledge_graph_service,
+                GraphRAGContext,
+            )
+
+            async with async_session_context() as db:
+                kg_service = await get_knowledge_graph_service(db)
+
+                # Get graph-enhanced context
+                graph_context: GraphRAGContext = await kg_service.graph_search(
+                    query=query,
+                    max_hops=self._knowledge_graph_max_hops,
+                    top_k=top_k,
+                )
+
+                if not graph_context.chunks:
+                    logger.debug(
+                        "No additional chunks from knowledge graph",
+                        query=query[:50],
+                    )
+                    return existing_results
+
+                # Get existing chunk IDs to avoid duplicates
+                existing_chunk_ids = set()
+                for doc, _ in existing_results:
+                    chunk_id = doc.metadata.get("chunk_id")
+                    if chunk_id:
+                        existing_chunk_ids.add(str(chunk_id))
+
+                # Convert KG chunks to LangChain Document format
+                kg_results: List[Tuple[Document, float]] = []
+                for chunk in graph_context.chunks:
+                    if str(chunk.id) in existing_chunk_ids:
+                        continue  # Skip duplicates
+
+                    # Build metadata from chunk attributes (Chunk model doesn't have metadata dict)
+                    doc = Document(
+                        page_content=chunk.content,
+                        metadata={
+                            "document_id": str(chunk.document_id),
+                            "document_name": f"Document {str(chunk.document_id)[:8]}",
+                            "chunk_id": str(chunk.id),
+                            "page_number": chunk.page_number,
+                            "section_title": chunk.section_title,
+                            "chunk_index": chunk.chunk_index,
+                            "source": "knowledge_graph",  # Mark as KG-enhanced
+                            "kg_entities": [e.name for e in graph_context.entities[:5]],  # Top entities
+                        },
+                    )
+
+                    # KG chunks get a boosted score but lower than top vector results
+                    # This ensures they're included but don't dominate
+                    base_score = 0.5 if not existing_results else min(r[1] for r in existing_results) * 0.9
+                    kg_results.append((doc, base_score))
+
+                # Merge results: keep all original + add KG results up to limit
+                merged = list(existing_results)
+                space_for_kg = max(0, top_k - len(merged))
+                merged.extend(kg_results[:space_for_kg])
+
+                logger.info(
+                    "Knowledge graph enhancement complete",
+                    original_count=len(existing_results),
+                    kg_chunks_found=len(graph_context.chunks),
+                    kg_chunks_added=min(len(kg_results), space_for_kg),
+                    entities_found=len(graph_context.entities),
+                    relations_found=len(graph_context.relations),
+                )
+
+                return merged
+
+        except Exception as e:
+            logger.warning(
+                "Knowledge graph enhancement failed, returning original results",
+                error=str(e),
+            )
+            return existing_results
+
+    def _semantic_dedupe(
+        self,
+        results: List[Tuple[Document, float]],
+        threshold: float = 0.95,
+    ) -> List[Tuple[Document, float]]:
+        """
+        Remove semantically duplicate chunks from results.
+
+        Uses a simple character-level n-gram similarity (Jaccard) for efficiency.
+        Results that are too similar to a higher-scored result are removed.
+
+        Args:
+            results: List of (document, score) tuples, already sorted by score desc
+            threshold: Similarity threshold (0-1), above which chunks are considered duplicates
+
+        Returns:
+            Deduplicated list of results
+        """
+        if len(results) <= 1:
+            return results
+
+        def get_ngrams(text: str, n: int = 3) -> set:
+            """Get character n-grams from text."""
+            text = text.lower().replace(" ", "")
+            return set(text[i:i+n] for i in range(len(text) - n + 1))
+
+        def jaccard_similarity(set1: set, set2: set) -> float:
+            """Calculate Jaccard similarity between two sets."""
+            if not set1 or not set2:
+                return 0.0
+            intersection = len(set1 & set2)
+            union = len(set1 | set2)
+            return intersection / union if union > 0 else 0.0
+
+        deduped = []
+        seen_ngrams: List[set] = []
+
+        for doc, score in results:
+            content = doc.page_content
+            ngrams = get_ngrams(content)
+
+            # Check similarity against already-included results
+            is_duplicate = False
+            for seen in seen_ngrams:
+                if jaccard_similarity(ngrams, seen) > threshold:
+                    is_duplicate = True
+                    break
+
+            if not is_duplicate:
+                deduped.append((doc, score))
+                seen_ngrams.append(ngrams)
+
+        if len(deduped) < len(results):
+            logger.debug(
+                "Semantic deduplication removed duplicates",
+                original_count=len(results),
+                deduped_count=len(deduped),
+                removed=len(results) - len(deduped),
+            )
+
+        return deduped
 
     def _format_context(
         self,

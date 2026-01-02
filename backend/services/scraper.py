@@ -165,21 +165,33 @@ class FallbackScraper:
         # Convert to basic markdown
         content = self._html_to_markdown(soup)
 
-        # Extract links
+        # Extract links - handle both absolute and relative URLs
         links = []
         if config.extract_links:
             for link in soup.find_all("a", href=True):
                 href = link["href"]
-                if href.startswith("http"):
+                # Skip empty, anchor-only, javascript, and mailto links
+                if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                    continue
+                # Normalize relative URLs to absolute
+                if not href.startswith(('http://', 'https://')):
+                    href = urljoin(url, href)
+                # Validate it's a proper URL
+                parsed = urlparse(href)
+                if parsed.scheme in ['http', 'https'] and parsed.netloc:
                     links.append(href)
 
-        # Extract images
+        # Extract images - handle both absolute and relative URLs
         images = []
         if config.extract_images:
             for img in soup.find_all("img", src=True):
                 src = img["src"]
-                if src.startswith("http"):
-                    images.append(src)
+                if not src or src.startswith('data:'):
+                    continue
+                # Normalize relative URLs to absolute
+                if not src.startswith(('http://', 'https://')):
+                    src = urljoin(url, src)
+                images.append(src)
 
         # Extract metadata
         metadata = {}
@@ -273,6 +285,33 @@ class WebScraperService:
             # Compute hash
             content_hash = hashlib.sha256(content.encode()).hexdigest()
 
+            # Extract links - crawl4ai returns dicts with 'href' key
+            links = []
+            if result.links:
+                internal = result.links.get("internal", [])
+                external = result.links.get("external", [])
+                for link_item in internal + external:
+                    if isinstance(link_item, dict):
+                        href = link_item.get("href", "")
+                    else:
+                        href = str(link_item)
+                    if href:
+                        # Normalize relative URLs
+                        if not href.startswith(('http://', 'https://')):
+                            href = urljoin(url, href)
+                        links.append(href)
+
+            # Extract images
+            images = []
+            if result.media:
+                for img_item in result.media.get("images", []):
+                    if isinstance(img_item, dict):
+                        src = img_item.get("src", "")
+                    else:
+                        src = str(img_item)
+                    if src:
+                        images.append(src)
+
             return ScrapedPage(
                 url=url,
                 title=result.metadata.get("title", urlparse(url).netloc),
@@ -280,8 +319,8 @@ class WebScraperService:
                 html=result.html,
                 text=text,
                 metadata=result.metadata or {},
-                links=result.links.get("internal", []) + result.links.get("external", []) if result.links else [],
-                images=result.media.get("images", []) if result.media else [],
+                links=links,
+                images=images,
                 content_hash=content_hash,
                 word_count=len(text.split()) if text else 0,
             )
@@ -581,9 +620,13 @@ Please answer the question based on the web page content above."""
         pages: List[ScrapedPage] = []
         base_domain = urlparse(start_url).netloc
 
-        async def normalize_url(url: str, base_url: str) -> Optional[str]:
+        def normalize_url(url: str, base_url: str) -> Optional[str]:
             """Normalize a URL, handling relative paths."""
             if not url:
+                return None
+
+            # Skip non-navigable links
+            if url.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
                 return None
 
             # Handle relative URLs
@@ -595,7 +638,10 @@ Please answer the question based on the web page content above."""
             if parsed.scheme not in ['http', 'https']:
                 return None
 
-            # Remove fragments and normalize
+            if not parsed.netloc:
+                return None
+
+            # Remove fragments and normalize (trailing slashes matter for some sites)
             normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
             if parsed.query:
                 normalized += f"?{parsed.query}"
@@ -630,9 +676,17 @@ Please answer the question based on the web page content above."""
                 if depth < max_depth and len(visited) < config.max_pages:
                     child_links = []
                     for link in page.links:
-                        normalized = await normalize_url(link, url)
+                        normalized = normalize_url(link, url)
                         if normalized and normalized not in visited:
                             child_links.append(normalized)
+
+                    logger.debug(
+                        "Found child links",
+                        url=url,
+                        depth=depth,
+                        total_links=len(page.links),
+                        valid_links=len(child_links),
+                    )
 
                     # Crawl child links with rate limiting
                     for child_url in child_links[:config.max_pages - len(visited)]:

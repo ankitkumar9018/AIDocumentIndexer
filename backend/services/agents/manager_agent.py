@@ -907,27 +907,47 @@ Please complete this task and provide your response."""
         step_results: Dict[str, AgentResult],
     ) -> str:
         """Synthesize final output from all step results."""
-        # Collect outputs from all steps
+        # Collect outputs from all steps, normalizing dict outputs to strings
         outputs = []
         for step in plan.steps:
             if step.id in step_results and step_results[step.id].output:
+                output = step_results[step.id].output
+                # Normalize dict outputs to strings for consistent synthesis
+                if isinstance(output, dict):
+                    # Extract meaningful content from structured outputs
+                    if "findings" in output:
+                        output = output["findings"]  # Research agent
+                    elif "evaluation" in output:
+                        output = str(output.get("evaluation", output))  # Critic agent
+                    elif "result" in output:
+                        output = str(output.get("result", output))  # Tool agent
+                    else:
+                        output = str(output)
                 outputs.append({
                     "step": step.task.name,
-                    "output": step_results[step.id].output,
+                    "output": output,
                 })
 
         if len(outputs) == 1:
             # Single step - return its output directly
             return outputs[0]["output"]
 
-        # Multiple steps - synthesize
-        synthesis_prompt = f"""The following outputs were generated for the user's request:
+        # Multiple steps - synthesize with clear formatting
+        step_outputs_text = "\n\n".join([
+            f"=== Step {i+1}: {o['step']} ===\n{o['output']}"
+            for i, o in enumerate(outputs)
+        ])
+
+        synthesis_prompt = f"""The user asked:
 "{plan.user_request}"
 
-Step outputs:
-{json.dumps(outputs, indent=2)}
+The following steps were completed to fulfill this request:
 
-Please synthesize these into a coherent final response for the user."""
+{step_outputs_text}
+
+Please synthesize these outputs into a coherent final response that DIRECTLY addresses what the user asked for.
+IMPORTANT: If the user asked to CREATE something (slogan, content, strategy, etc.), make sure your response INCLUDES that creation.
+Do not just summarize the research - provide the requested deliverable."""
 
         messages = [
             SystemMessage(content="You are synthesizing multiple outputs into a final response."),

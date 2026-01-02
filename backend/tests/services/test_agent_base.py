@@ -14,6 +14,7 @@ from uuid import uuid4
 from backend.services.agents.agent_base import (
     AgentTask,
     AgentResult,
+    AgentConfig,
     ValidationResult,
     TrajectoryStep,
     BaseAgent,
@@ -86,7 +87,7 @@ class TestAgentResult:
         result = AgentResult(
             task_id="task-1",
             agent_id="agent-1",
-            status=TaskStatus.SUCCESS,
+            status=TaskStatus.COMPLETED,
             output={"content": "Generated content"},
             reasoning_trace=["Step 1", "Step 2"],
             tool_calls=[{"tool": "search", "args": {}}],
@@ -95,7 +96,7 @@ class TestAgentResult:
             error_message=None,
         )
 
-        assert result.status == TaskStatus.SUCCESS
+        assert result.status == TaskStatus.COMPLETED
         assert result.confidence_score == 0.95
         assert result.error_message is None
 
@@ -156,9 +157,8 @@ class TestExecutionPlan:
         """Test creating an ExecutionPlan."""
         steps = [
             PlanStep(
-                step_id="step-1",
-                step_number=1,
-                agent_id="research-agent",
+                id="step-1",
+                agent_type="research",
                 task=AgentTask(
                     id="task-1",
                     type=TaskType.RESEARCH,
@@ -173,9 +173,8 @@ class TestExecutionPlan:
                 estimated_cost_usd=0.01,
             ),
             PlanStep(
-                step_id="step-2",
-                step_number=2,
-                agent_id="generator-agent",
+                id="step-2",
+                agent_type="generator",
                 task=AgentTask(
                     id="task-2",
                     type=TaskType.GENERATION,
@@ -192,16 +191,17 @@ class TestExecutionPlan:
         ]
 
         plan = ExecutionPlan(
-            plan_id=str(uuid4()),
+            id=str(uuid4()),
             session_id=str(uuid4()),
             user_id=str(uuid4()),
             user_request="Generate a report",
+            request_type="document_generation",
             steps=steps,
-            estimated_total_cost=0.06,
+            total_estimated_cost_usd=0.06,
         )
 
         assert len(plan.steps) == 2
-        assert plan.estimated_total_cost == 0.06
+        assert plan.total_estimated_cost_usd == 0.06
 
 
 # =============================================================================
@@ -216,7 +216,7 @@ class MockAgent(BaseAgent):
         return AgentResult(
             task_id=task.id,
             agent_id=self.agent_id,
-            status=TaskStatus.SUCCESS,
+            status=TaskStatus.COMPLETED,
             output={"result": "Mock output"},
             reasoning_trace=["Executed mock task"],
             tool_calls=[],
@@ -226,12 +226,22 @@ class MockAgent(BaseAgent):
         )
 
 
+def create_mock_agent(agent_id: str = "test-agent", name: str = "Test Agent", description: str = "A test agent") -> MockAgent:
+    """Helper to create a MockAgent with proper AgentConfig."""
+    config = AgentConfig(
+        agent_id=agent_id,
+        name=name,
+        description=description,
+    )
+    return MockAgent(config=config)
+
+
 class TestBaseAgent:
     """Tests for BaseAgent abstract class."""
 
     def test_create_agent(self):
         """Test creating an agent."""
-        agent = MockAgent(
+        agent = create_mock_agent(
             agent_id="test-agent",
             name="Test Agent",
             description="A test agent",
@@ -242,18 +252,14 @@ class TestBaseAgent:
 
     def test_validate_inputs_valid(self):
         """Test input validation with valid inputs."""
-        agent = MockAgent(
-            agent_id="test-agent",
-            name="Test Agent",
-            description="A test agent",
-        )
+        agent = create_mock_agent()
 
         task = AgentTask(
             id="task-1",
             type=TaskType.GENERATION,
             name="Test",
             description="Test task",
-            expected_inputs={"query": "str", "limit": "int"},
+            expected_inputs={"query": {"type": "str", "required": True}, "limit": {"type": "int", "required": True}},
             expected_outputs={},
             success_criteria=[],
             fallback_strategy=FallbackStrategy.RETRY,
@@ -266,18 +272,14 @@ class TestBaseAgent:
 
     def test_validate_inputs_missing(self):
         """Test input validation with missing inputs."""
-        agent = MockAgent(
-            agent_id="test-agent",
-            name="Test Agent",
-            description="A test agent",
-        )
+        agent = create_mock_agent()
 
         task = AgentTask(
             id="task-1",
             type=TaskType.GENERATION,
             name="Test",
             description="Test task",
-            expected_inputs={"query": "str", "limit": "int"},
+            expected_inputs={"query": {"type": "str", "required": True}, "limit": {"type": "int", "required": True}},
             expected_outputs={},
             success_criteria=[],
             fallback_strategy=FallbackStrategy.RETRY,
@@ -292,11 +294,7 @@ class TestBaseAgent:
     @pytest.mark.asyncio
     async def test_execute_with_retry_success(self):
         """Test execute_with_retry on first attempt success."""
-        agent = MockAgent(
-            agent_id="test-agent",
-            name="Test Agent",
-            description="A test agent",
-        )
+        agent = create_mock_agent()
 
         task = AgentTask(
             id="task-1",
@@ -312,7 +310,7 @@ class TestBaseAgent:
 
         result = await agent.execute_with_retry(task, {})
 
-        assert result.status == TaskStatus.SUCCESS
+        assert result.status == TaskStatus.COMPLETED
 
 
 class TestTaskType:
@@ -324,7 +322,8 @@ class TestTaskType:
         assert TaskType.EVALUATION.value == "evaluation"
         assert TaskType.RESEARCH.value == "research"
         assert TaskType.TOOL_EXECUTION.value == "tool_execution"
-        assert TaskType.ORCHESTRATION.value == "orchestration"
+        assert TaskType.DECOMPOSITION.value == "decomposition"
+        assert TaskType.SYNTHESIS.value == "synthesis"
 
 
 class TestFallbackStrategy:

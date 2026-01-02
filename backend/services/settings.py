@@ -346,6 +346,134 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         description="Minimum similarity score for document retrieval (0.0-1.0)"
     ),
 
+    # HyDE (Hypothetical Document Embeddings) Settings
+    SettingDefinition(
+        key="rag.hyde_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable HyDE for short/abstract queries (generates hypothetical documents to improve recall)"
+    ),
+    SettingDefinition(
+        key="rag.hyde_min_query_words",
+        category=SettingCategory.RAG,
+        default_value=5,
+        value_type=ValueType.NUMBER,
+        description="Use HyDE only for queries shorter than this word count (2-10)"
+    ),
+
+    # CRAG (Corrective RAG) Settings
+    SettingDefinition(
+        key="rag.crag_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable CRAG for auto-correcting low-confidence results"
+    ),
+    SettingDefinition(
+        key="rag.crag_confidence_threshold",
+        category=SettingCategory.RAG,
+        default_value=0.5,
+        value_type=ValueType.NUMBER,
+        description="Trigger CRAG when confidence is below this threshold (0.0-1.0)"
+    ),
+
+    # Hierarchical Retrieval Settings
+    SettingDefinition(
+        key="rag.hierarchical_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable hierarchical retrieval (document-first strategy for better diversity across large collections)"
+    ),
+    SettingDefinition(
+        key="rag.hierarchical_doc_limit",
+        category=SettingCategory.RAG,
+        default_value=10,
+        value_type=ValueType.NUMBER,
+        description="Maximum documents to consider in hierarchical retrieval stage 1 (5-20)"
+    ),
+    SettingDefinition(
+        key="rag.hierarchical_chunks_per_doc",
+        category=SettingCategory.RAG,
+        default_value=3,
+        value_type=ValueType.NUMBER,
+        description="Chunks to retrieve per document in hierarchical retrieval stage 2 (1-5)"
+    ),
+
+    # Semantic Deduplication Settings
+    SettingDefinition(
+        key="rag.semantic_dedup_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable semantic deduplication (removes near-duplicate chunks from expanded queries)"
+    ),
+    SettingDefinition(
+        key="rag.semantic_dedup_threshold",
+        category=SettingCategory.RAG,
+        default_value=0.95,
+        value_type=ValueType.NUMBER,
+        description="Similarity threshold for deduplication (0.0-1.0, higher = more strict)"
+    ),
+
+    # Knowledge Graph Integration Settings
+    SettingDefinition(
+        key="rag.knowledge_graph_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable knowledge graph-enhanced retrieval (uses entity relationships for better recall)"
+    ),
+    SettingDefinition(
+        key="rag.knowledge_graph_max_hops",
+        category=SettingCategory.RAG,
+        default_value=2,
+        value_type=ValueType.NUMBER,
+        description="Maximum graph traversal depth (1-3, higher = more related entities)"
+    ),
+
+    # Query Expansion Settings
+    SettingDefinition(
+        key="rag.query_expansion_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable query expansion (generates paraphrased queries for better recall)"
+    ),
+    SettingDefinition(
+        key="rag.parallel_query_search",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Search expanded queries in parallel (faster but uses more resources)"
+    ),
+
+    # Verification/Self-RAG Settings
+    SettingDefinition(
+        key="rag.verification_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable self-verification of retrieved documents"
+    ),
+    SettingDefinition(
+        key="rag.verification_level",
+        category=SettingCategory.RAG,
+        default_value="quick",
+        value_type=ValueType.STRING,
+        description="Verification thoroughness (none, quick, standard, thorough)"
+    ),
+
+    # Dynamic Query Weighting
+    SettingDefinition(
+        key="rag.dynamic_weighting_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable dynamic vector/keyword weighting based on query intent"
+    ),
+
     # OCR Configuration
     SettingDefinition(
         key="ocr.provider",

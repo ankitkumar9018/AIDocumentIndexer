@@ -257,6 +257,10 @@ class ChatResponse(BaseModel):
     # Confidence/verification fields
     confidence_score: Optional[float] = None  # 0-1 confidence in the answer
     confidence_level: Optional[str] = None  # "high", "medium", "low"
+    # Confidence warning message for UI display
+    confidence_warning: Optional[str] = None
+    # Suggested follow-up questions
+    suggested_questions: Optional[List[str]] = None
 
 
 class ChatStreamChunk(BaseModel):
@@ -621,6 +625,8 @@ async def create_chat_completion(
                 created_at=datetime.now(),
                 confidence_score=response.confidence_score,
                 confidence_level=response.confidence_level,
+                confidence_warning=response.confidence_warning if response.confidence_warning else None,
+                suggested_questions=response.suggested_questions if response.suggested_questions else None,
             )
 
     except Exception as e:

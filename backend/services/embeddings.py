@@ -37,7 +37,10 @@ logger = structlog.get_logger(__name__)
 
 # Embedding cache for deduplication (content hash -> embedding)
 _embedding_cache: Dict[str, List[float]] = {}
-_CACHE_MAX_SIZE = int(os.getenv("EMBEDDING_CACHE_SIZE", "10000"))
+# Increased default cache size from 10k to 100k for better hit rate at scale
+# At 1536 dimensions * 4 bytes * 100k = ~600MB memory usage
+# For production with millions of docs, use Redis-backed cache instead
+_CACHE_MAX_SIZE = int(os.getenv("EMBEDDING_CACHE_SIZE", "100000"))
 
 
 @dataclass
