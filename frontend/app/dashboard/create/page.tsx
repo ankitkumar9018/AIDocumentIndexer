@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import {
   PenTool,
@@ -22,6 +22,8 @@ import {
   Image,
   AlertCircle,
   Filter,
+  BookOpen,
+  Palette,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,18 +45,22 @@ import {
   useDownloadGeneratedDocument,
   useCancelGenerationJob,
   useCollections,
+  useGetThemes,
+  useSuggestTheme,
 } from "@/lib/api";
+import type { ThemeInfo, StyleGuide } from "@/lib/api";
 import { toast } from "sonner";
 import { DocumentFilterPanel } from "@/components/chat/document-filter-panel";
 import { FolderSelector } from "@/components/folder-selector";
 
 type Step = "format" | "topic" | "outline" | "content" | "download";
-type OutputFormat = "docx" | "pptx" | "pdf" | "markdown" | "html" | "txt";
+type OutputFormat = "docx" | "pptx" | "pdf" | "markdown" | "html" | "txt" | "xlsx";
 
 const formatOptions: { id: OutputFormat; name: string; icon: React.ElementType; description: string }[] = [
   { id: "docx", name: "Word Document", icon: FileText, description: "Microsoft Word format (.docx)" },
   { id: "pptx", name: "PowerPoint", icon: Presentation, description: "Presentation slides (.pptx)" },
   { id: "pdf", name: "PDF", icon: FileText, description: "Portable Document Format (.pdf)" },
+  { id: "xlsx", name: "Excel Spreadsheet", icon: FileSpreadsheet, description: "Structured data format (.xlsx)" },
   { id: "markdown", name: "Markdown", icon: FileText, description: "Plain text with formatting (.md)" },
   { id: "html", name: "HTML", icon: FileText, description: "Web page format (.html)" },
   { id: "txt", name: "Plain Text", icon: FileText, description: "Simple text file (.txt)" },
@@ -91,11 +97,27 @@ export default function CreatePage() {
   const [outline, setOutline] = useState<OutlineSection[]>([]);
   const [documentTitle, setDocumentTitle] = useState("");
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
+  const [pageCount, setPageCount] = useState<number | null>(null); // null = auto mode
+  const [showCustomPageCount, setShowCustomPageCount] = useState(false);
+  const [customPageCountValue, setCustomPageCountValue] = useState<number>(5);
+  const [selectedTheme, setSelectedTheme] = useState<string>("business");
+  const [themeSuggestionReason, setThemeSuggestionReason] = useState<string | null>(null);
+  const [isLoadingThemeSuggestion, setIsLoadingThemeSuggestion] = useState(false);
+  const [themeManuallyChanged, setThemeManuallyChanged] = useState(false);
+  const [includeSources, setIncludeSources] = useState(true);
+
+  // Style learning from existing documents
+  const [useExistingDocs, setUseExistingDocs] = useState(false);
+  const [styleCollections, setStyleCollections] = useState<string[]>([]);
+  const [styleFolderId, setStyleFolderId] = useState<string | null>(null);
+  const [includeStyleSubfolders, setIncludeStyleSubfolders] = useState(true);
 
   // Queries - only fetch when authenticated
   const { data: job, isLoading: jobLoading } = useGenerationJob(currentJobId || "");
   const { data: recentJobs } = useGenerationJobs();
   const { data: collectionsData, isLoading: isLoadingCollections, refetch: refetchCollections } = useCollections({ enabled: isAuthenticated });
+  const { data: themesData } = useGetThemes();
+  const suggestTheme = useSuggestTheme();
 
   // Mutations
   const createJob = useCreateGenerationJob();
@@ -106,6 +128,52 @@ export default function CreatePage() {
   const cancelJob = useCancelGenerationJob();
 
   const currentStepIndex = steps.findIndex((s) => s.id === currentStep);
+
+  // Auto-suggest theme when topic and context are provided (debounced)
+  useEffect(() => {
+    if (topic.length > 10 && currentStep === "topic") {
+      const timer = setTimeout(async () => {
+        setIsLoadingThemeSuggestion(true);
+        try {
+          const suggestion = await suggestTheme.mutateAsync({
+            title: topic,
+            description: context || topic,
+          });
+          setSelectedTheme(suggestion.recommended);
+          setThemeSuggestionReason(suggestion.reason);
+        } catch {
+          // Silently fail - theme suggestion is optional
+        }
+        setIsLoadingThemeSuggestion(false);
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [topic, context, currentStep]);
+
+  // Re-suggest theme after outline is generated (has more context from section titles/descriptions)
+  useEffect(() => {
+    if (job?.outline && currentStep === "outline" && outline.length > 0 && !themeManuallyChanged) {
+      const outlineContext = outline.map(s => `${s.title}: ${s.description}`).join('\n');
+      const timer = setTimeout(async () => {
+        setIsLoadingThemeSuggestion(true);
+        try {
+          const suggestion = await suggestTheme.mutateAsync({
+            title: job.title || topic,
+            description: outlineContext,  // Use full outline for better context
+          });
+          // Only update if user hasn't manually changed theme
+          if (!themeManuallyChanged) {
+            setSelectedTheme(suggestion.recommended);
+            setThemeSuggestionReason(suggestion.reason);
+          }
+        } catch {
+          // Silently fail - theme suggestion is optional
+        }
+        setIsLoadingThemeSuggestion(false);
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [job?.outline, currentStep, outline, themeManuallyChanged]);
 
   const handleNext = async () => {
     switch (currentStep) {
@@ -123,9 +191,20 @@ export default function CreatePage() {
               collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
               folder_id: selectedFolderId || undefined,
               include_subfolders: includeSubfolders,
+              page_count: pageCount, // null = auto mode
+              theme: selectedTheme,
+              include_sources: includeSources,
+              // Style learning from existing documents
+              use_existing_docs: useExistingDocs,
+              style_collection_filters: useExistingDocs && styleCollections.length > 0 ? styleCollections : undefined,
+              style_folder_id: useExistingDocs && styleFolderId ? styleFolderId : undefined,
+              include_style_subfolders: useExistingDocs ? includeStyleSubfolders : undefined,
             });
             setCurrentJobId(newJob.id);
-            await generateOutline.mutateAsync({ jobId: newJob.id });
+            await generateOutline.mutateAsync({
+              jobId: newJob.id,
+              numSections: pageCount ?? undefined  // Pass user's selection, undefined for auto
+            });
             setCurrentStep("outline");
           } catch (error) {
             console.error("Failed to create job:", error);
@@ -141,6 +220,7 @@ export default function CreatePage() {
                 title: documentTitle || undefined,
                 sections: outline.length > 0 ? outline : undefined,
                 tone,
+                theme: selectedTheme,  // Pass theme (allows changing after outline)
               },
             });
             // Only generate content if the job is in the correct state
@@ -191,7 +271,8 @@ export default function CreatePage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${documentTitle || "document"}.${selectedFormat}`;
+      // Use the original job title (from creation), not the outline title which may have been modified
+      a.download = `${job?.title || documentTitle || "document"}.${selectedFormat}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -383,6 +464,74 @@ export default function CreatePage() {
                   </select>
                 </div>
 
+                {/* Page/Slide Count Selector */}
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">
+                    Number of {selectedFormat === "pptx" ? "Slides" : "Pages/Sections"}
+                  </label>
+                  {showCustomPageCount ? (
+                    <div className="flex gap-2">
+                      <Input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={customPageCountValue}
+                        onChange={(e) => setCustomPageCountValue(Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
+                        className="w-24"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setPageCount(customPageCountValue);
+                          setShowCustomPageCount(false);
+                        }}
+                      >
+                        Set
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowCustomPageCount(false)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : (
+                    <select
+                      value={pageCount === null ? "auto" : pageCount.toString()}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        if (value === "custom") {
+                          setShowCustomPageCount(true);
+                        } else if (value === "auto") {
+                          setPageCount(null);
+                        } else {
+                          setPageCount(parseInt(value));
+                        }
+                      }}
+                      className="w-full h-10 px-3 rounded-md border bg-background"
+                    >
+                      <option value="auto">✨ Auto (AI decides based on content)</option>
+                      <option value="3">3 {selectedFormat === "pptx" ? "slides" : "sections"}</option>
+                      <option value="5">5 {selectedFormat === "pptx" ? "slides" : "sections"}</option>
+                      <option value="7">7 {selectedFormat === "pptx" ? "slides" : "sections"}</option>
+                      <option value="10">10 {selectedFormat === "pptx" ? "slides" : "sections"}</option>
+                      <option value="12">12 {selectedFormat === "pptx" ? "slides" : "sections"}</option>
+                      <option value="15">15 {selectedFormat === "pptx" ? "slides" : "sections"}</option>
+                      <option value="20">20 {selectedFormat === "pptx" ? "slides" : "sections"}</option>
+                      <option value="custom">⚙️ Custom (1-20)...</option>
+                    </select>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    {pageCount === null
+                      ? "AI will determine the optimal length based on topic complexity"
+                      : `Document will have exactly ${pageCount} content ${selectedFormat === "pptx" ? "slides" : "sections"}`}
+                  </p>
+                </div>
+
                 {/* Source Filter Toggle */}
                 <div className="space-y-3">
                   <div
@@ -486,6 +635,184 @@ export default function CreatePage() {
                     </div>
                   )}
                 </div>
+
+                {/* Learn from Existing Documents Toggle */}
+                <div className="space-y-2">
+                  <div
+                    className={`flex items-center justify-between p-4 rounded-lg border cursor-pointer transition-colors ${
+                      useExistingDocs
+                        ? "bg-primary/5 border-primary/30"
+                        : "bg-muted/30 border-border hover:bg-muted/50"
+                    }`}
+                    onClick={() => setUseExistingDocs(!useExistingDocs)}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`p-2 rounded-lg ${useExistingDocs ? "bg-primary/10" : "bg-muted"}`}>
+                        <BookOpen className={`h-5 w-5 ${useExistingDocs ? "text-primary" : "text-muted-foreground"}`} />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium">Learn from Existing Documents</p>
+                        <p className="text-xs text-muted-foreground">
+                          Use your documents to guide style, tone, and content structure
+                        </p>
+                      </div>
+                    </div>
+                    <div
+                      className={`w-11 h-6 rounded-full transition-colors flex items-center ${
+                        useExistingDocs ? "bg-primary justify-end" : "bg-muted-foreground/30 justify-start"
+                      }`}
+                    >
+                      <div className="w-5 h-5 bg-white rounded-full shadow-sm mx-0.5" />
+                    </div>
+                  </div>
+                  {useExistingDocs && (
+                    <div className="pl-4 space-y-3 mt-3">
+                      <div className="text-xs text-muted-foreground mb-2">
+                        <Sparkles className="h-3 w-3 inline mr-1" />
+                        AI will analyze selected documents to match their writing style
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">Select source collections/folders</label>
+                        <p className="text-xs text-muted-foreground">
+                          The AI will learn formatting, tone, and style from these documents
+                        </p>
+                        {/* Collection selector for style learning */}
+                        <div className="space-y-2">
+                          {isLoadingCollections ? (
+                            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Loading collections...
+                            </div>
+                          ) : (
+                            <div className="flex flex-wrap gap-2">
+                              {(collectionsData?.collections || []).map((collection: { name: string; document_count: number }) => (
+                                <button
+                                  key={collection.name}
+                                  type="button"
+                                  onClick={() => {
+                                    if (styleCollections.includes(collection.name)) {
+                                      setStyleCollections(styleCollections.filter(c => c !== collection.name));
+                                    } else {
+                                      setStyleCollections([...styleCollections, collection.name]);
+                                    }
+                                  }}
+                                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                                    styleCollections.includes(collection.name)
+                                      ? "bg-primary text-primary-foreground"
+                                      : "bg-muted hover:bg-muted/80 text-muted-foreground"
+                                  }`}
+                                >
+                                  {collection.name} ({collection.document_count})
+                                </button>
+                              ))}
+                              {(collectionsData?.collections || []).length === 0 && (
+                                <p className="text-xs text-muted-foreground">
+                                  No collections available. Upload documents first.
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        {styleCollections.length > 0 && (
+                          <p className="text-xs text-primary">
+                            {styleCollections.length} collection{styleCollections.length > 1 ? "s" : ""} selected for style learning
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Include Sources Toggle - only shown when Learn from Existing Docs is enabled */}
+                      <div
+                        className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-colors ${
+                          includeSources
+                            ? "bg-primary/5 border-primary/30"
+                            : "bg-muted/30 border-border hover:bg-muted/50"
+                        }`}
+                        onClick={() => setIncludeSources(!includeSources)}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-lg ${includeSources ? "bg-primary/10" : "bg-muted"}`}>
+                            <FileText className={`h-4 w-4 ${includeSources ? "text-primary" : "text-muted-foreground"}`} />
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">Include Sources & References</p>
+                            <p className="text-xs text-muted-foreground">
+                              Add a {selectedFormat === "pptx" ? "slide" : selectedFormat === "xlsx" ? "sheet" : "page"} listing referenced documents
+                            </p>
+                          </div>
+                        </div>
+                        <div
+                          className={`w-10 h-5 rounded-full transition-colors flex items-center ${
+                            includeSources ? "bg-primary justify-end" : "bg-muted-foreground/30 justify-start"
+                          }`}
+                        >
+                          <div className="w-4 h-4 bg-white rounded-full shadow-sm mx-0.5" />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Theme Selector */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium">Document Theme</label>
+                    {isLoadingThemeSuggestion && (
+                      <span className="text-xs text-muted-foreground flex items-center gap-1">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        Suggesting theme...
+                      </span>
+                    )}
+                  </div>
+                  {themeSuggestionReason && (
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                      <Sparkles className="h-3 w-3" />
+                      AI suggests: {themeSuggestionReason}
+                    </p>
+                  )}
+                  <div className="grid grid-cols-2 gap-2">
+                    {(themesData?.themes || [
+                      { key: "business", name: "Business Professional", description: "Clean, corporate look", primary: "#1E3A5F", secondary: "#3D5A80", accent: "#E0E1DD", text: "#2D3A45" },
+                      { key: "creative", name: "Creative & Bold", description: "Vibrant marketing style", primary: "#6B4C9A", secondary: "#9B6B9E", accent: "#F4E4BA", text: "#333333" },
+                      { key: "modern", name: "Modern Minimal", description: "Sleek, contemporary design", primary: "#212529", secondary: "#495057", accent: "#00B4D8", text: "#212529" },
+                      { key: "nature", name: "Nature & Organic", description: "Earthy, sustainable tones", primary: "#2D5016", secondary: "#5A7D3A", accent: "#F5F0E1", text: "#2D3A2E" },
+                    ] as ThemeInfo[]).map((theme: ThemeInfo) => (
+                      <div
+                        key={theme.key}
+                        onClick={() => {
+                          setSelectedTheme(theme.key);
+                          setThemeSuggestionReason(null);
+                          setThemeManuallyChanged(true);  // User manually selected a theme
+                        }}
+                        className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                          selectedTheme === theme.key
+                            ? "border-primary ring-2 ring-primary/20"
+                            : "border-border hover:border-primary/50"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-2">
+                          {/* Color swatches */}
+                          <div
+                            className="w-4 h-4 rounded-full"
+                            style={{ backgroundColor: theme.primary }}
+                          />
+                          <div
+                            className="w-4 h-4 rounded-full"
+                            style={{ backgroundColor: theme.secondary }}
+                          />
+                          <div
+                            className="w-4 h-4 rounded-full border"
+                            style={{ backgroundColor: theme.accent }}
+                          />
+                        </div>
+                        <p className="text-sm font-medium">{theme.name}</p>
+                        <p className="text-xs text-muted-foreground">{theme.description}</p>
+                        {themeSuggestionReason && selectedTheme === theme.key && (
+                          <span className="text-xs text-primary mt-1 inline-block">✨ Recommended</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -507,6 +834,45 @@ export default function CreatePage() {
               </div>
 
               <div className="space-y-4">
+                {/* Style Analysis Display */}
+                {(() => {
+                  const styleGuide = job?.metadata?.style_guide as StyleGuide | undefined;
+                  if (!styleGuide) return null;
+                  return (
+                    <div className="bg-muted/30 rounded-lg p-4 border">
+                      <h4 className="text-sm font-medium flex items-center gap-2 mb-3">
+                        <Palette className="h-4 w-4 text-primary" />
+                        Style Analysis from Existing Documents
+                      </h4>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground">Tone:</span>
+                          <span className="font-medium capitalize">{styleGuide.tone}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground">Vocabulary:</span>
+                          <span className="font-medium capitalize">{styleGuide.vocabulary_level}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground">Structure:</span>
+                          <span className="font-medium capitalize">{styleGuide.structure_pattern?.replace(/-/g, ' ')}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground">Sentences:</span>
+                          <span className="font-medium capitalize">{styleGuide.sentence_style?.replace(/-/g, ' ')}</span>
+                        </div>
+                      </div>
+                      {styleGuide.source_documents && styleGuide.source_documents.length > 0 && (
+                        <p className="text-xs text-muted-foreground mt-3 pt-3 border-t">
+                          <Sparkles className="h-3 w-3 inline mr-1" />
+                          Based on: {styleGuide.source_documents.slice(0, 3).join(', ')}
+                          {styleGuide.source_documents.length > 3 && ` +${styleGuide.source_documents.length - 3} more`}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Document Title</label>
                   <Input

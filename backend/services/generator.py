@@ -10,6 +10,8 @@ Configure the "content_generation" operation in Admin > Settings > LLM Configura
 """
 
 import os
+import re
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -28,6 +30,271 @@ from backend.services.image_generator import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+# =============================================================================
+# Theme Configuration
+# =============================================================================
+
+THEMES = {
+    "business": {
+        "name": "Business Professional",
+        "primary": "#1E3A5F",
+        "secondary": "#3D5A80",
+        "accent": "#E0E1DD",
+        "text": "#2D3A45",
+        "light_gray": "#888888",
+        "description": "Clean, corporate look ideal for business presentations"
+    },
+    "creative": {
+        "name": "Creative & Bold",
+        "primary": "#6B4C9A",
+        "secondary": "#9B6B9E",
+        "accent": "#F4E4BA",
+        "text": "#333333",
+        "light_gray": "#666666",
+        "description": "Vibrant colors for marketing and creative content"
+    },
+    "modern": {
+        "name": "Modern Minimal",
+        "primary": "#212529",
+        "secondary": "#495057",
+        "accent": "#00B4D8",
+        "text": "#212529",
+        "light_gray": "#6C757D",
+        "description": "Sleek, contemporary design with bold accents"
+    },
+    "nature": {
+        "name": "Nature & Organic",
+        "primary": "#2D5016",
+        "secondary": "#5A7D3A",
+        "accent": "#F5F0E1",
+        "text": "#2D3A2E",
+        "light_gray": "#7A8B6E",
+        "description": "Earthy tones for sustainability and wellness topics"
+    },
+    "elegant": {
+        "name": "Elegant & Refined",
+        "primary": "#2C3E50",
+        "secondary": "#7F8C8D",
+        "accent": "#BDC3C7",
+        "text": "#2C3E50",
+        "light_gray": "#95A5A6",
+        "description": "Sophisticated look for executive presentations"
+    },
+    "vibrant": {
+        "name": "Vibrant & Energetic",
+        "primary": "#E74C3C",
+        "secondary": "#F39C12",
+        "accent": "#FDF2E9",
+        "text": "#2D3436",
+        "light_gray": "#BDC3C7",
+        "description": "Bold colors for high-energy content"
+    },
+    "tech": {
+        "name": "Tech & Digital",
+        "primary": "#0984E3",
+        "secondary": "#6C5CE7",
+        "accent": "#DFE6E9",
+        "text": "#2D3436",
+        "light_gray": "#B2BEC3",
+        "description": "Modern tech aesthetic for digital topics"
+    },
+    "warm": {
+        "name": "Warm & Inviting",
+        "primary": "#D35400",
+        "secondary": "#E67E22",
+        "accent": "#FDEBD0",
+        "text": "#2C3E50",
+        "light_gray": "#A6ACAF",
+        "description": "Cozy colors for community and wellness"
+    },
+}
+
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+def strip_markdown(text: str) -> str:
+    """Remove markdown formatting, returning clean text.
+
+    Used by PPTX, XLSX, and other generators that don't support markdown.
+    """
+    if not text:
+        return ""
+    # Remove headers (# ## ### #### etc.)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Remove bold **text** or __text__
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    text = re.sub(r'__([^_]+)__', r'\1', text)
+    # Remove italic *text* or _text_ (but not bullet points)
+    text = re.sub(r'(?<!\s)\*([^*\n]+)\*(?!\s)', r'\1', text)
+    text = re.sub(r'(?<!\s)_([^_\n]+)_(?!\s)', r'\1', text)
+    # Remove code backticks
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Remove link syntax [text](url)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    # Clean up multiple spaces
+    text = re.sub(r'  +', ' ', text)
+    return text.strip()
+
+
+def smart_truncate(text: str, max_chars: int) -> str:
+    """Truncate text at word boundaries to avoid mid-word cuts."""
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    last_space = truncated.rfind(' ')
+    if last_space > max_chars * 0.7:  # Don't cut too much
+        return truncated[:last_space] + '...'
+    return truncated + '...'
+
+
+def sentence_truncate(text: str, max_chars: int) -> str:
+    """Truncate text at sentence boundaries, avoiding mid-sentence cuts.
+
+    Handles common abbreviations and ensures meaningful content is preserved.
+    Falls back to clause boundaries, then word boundaries.
+
+    Args:
+        text: Text to truncate
+        max_chars: Maximum character limit
+
+    Returns:
+        Truncated text ending at a complete sentence, clause, or word boundary
+    """
+    if len(text) <= max_chars:
+        return text
+
+    truncated = text[:max_chars]
+
+    # Common abbreviations that shouldn't be treated as sentence ends
+    # Use negative lookbehind to exclude these
+    abbreviations = r'(?<![Mm]r)(?<![Mm]rs)(?<![Mm]s)(?<![Dd]r)(?<![Pp]rof)(?<![Ii]nc)(?<![Ll]td)(?<![Jj]r)(?<![Ss]r)(?<![Vv]s)(?<!etc)(?<!e\.g)(?<!i\.e)'
+
+    # Find sentence endings: period/exclamation/question followed by space or end
+    # Exclude common abbreviations
+    pattern = abbreviations + r'[.!?](?:\s|$)'
+    sentence_ends = list(re.finditer(pattern, truncated))
+
+    if sentence_ends:
+        last_end = sentence_ends[-1].end()
+        # Use 50% threshold to preserve more complete sentences
+        if last_end > max_chars * 0.5:
+            return text[:last_end].strip()
+
+    # Fallback: find last complete clause (before comma, semicolon, colon, or dash)
+    clause_ends = list(re.finditer(r'[,;:—–-]\s', truncated))
+    if clause_ends and clause_ends[-1].start() > max_chars * 0.5:
+        return text[:clause_ends[-1].start()].strip() + '...'
+
+    # Final fallback to word boundary
+    return smart_truncate(text, max_chars)
+
+
+def hex_to_rgb(hex_color: str) -> tuple:
+    """Convert hex color string to RGB tuple."""
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+
+def sanitize_filename(title: str, max_length: int = 50) -> str:
+    """Sanitize title for use as filename.
+
+    Removes/replaces invalid characters for cross-platform compatibility.
+    Handles special characters like /, :, |, ?, * that cause issues on various OS.
+
+    Args:
+        title: Document title to sanitize
+        max_length: Maximum filename length (default 50)
+
+    Returns:
+        Safe filename string with only alphanumeric, underscores, and hyphens
+    """
+    # Normalize unicode characters (e.g., convert é to e)
+    title = unicodedata.normalize('NFKD', title)
+    title = title.encode('ascii', 'ignore').decode('ascii')
+    # Keep only alphanumeric, spaces, hyphens, underscores
+    title = re.sub(r'[^\w\s-]', '', title)
+    # Replace spaces and multiple hyphens/underscores with single underscore
+    title = re.sub(r'[-\s]+', '_', title)
+    # Remove leading/trailing underscores
+    title = title.strip('_')
+    # Limit length
+    return title[:max_length] if title else 'document'
+
+
+def get_theme_colors(theme_key: str = "business") -> dict:
+    """Get theme colors, with fallback to business theme."""
+    theme = THEMES.get(theme_key, THEMES["business"])
+    return theme
+
+
+def check_spelling(text: str) -> dict:
+    """Check spelling and return suggestions for review.
+
+    This flags potential spelling issues for user approval rather than
+    auto-correcting, allowing users to decide what to fix.
+
+    Returns:
+        dict with:
+        - has_issues: bool indicating if spelling issues were found
+        - issues: list of dicts with word, position, suggestion, context
+        - original: the original text
+    """
+    if not text:
+        return {"has_issues": False, "issues": [], "original": text}
+
+    try:
+        from spellchecker import SpellChecker
+
+        spell = SpellChecker()
+        words = text.split()
+        issues = []
+
+        for i, word in enumerate(words):
+            # Clean punctuation from word
+            clean_word = word.strip('.,!?:;"\'-()[]{}')
+            if not clean_word or len(clean_word) < 3:
+                continue
+
+            # Skip common patterns that aren't words
+            if clean_word.isdigit():
+                continue
+            if any(c.isdigit() for c in clean_word):  # Skip alphanumeric codes
+                continue
+            if clean_word.startswith(('@', '#', 'http', 'www')):
+                continue
+
+            # Check if word is known
+            if clean_word.lower() not in spell:
+                correction = spell.correction(clean_word.lower())
+                # Only suggest if we have a different correction
+                if correction and correction != clean_word.lower():
+                    # Get context (surrounding words)
+                    context_start = max(0, i - 2)
+                    context_end = min(len(words), i + 3)
+                    context = ' '.join(words[context_start:context_end])
+
+                    issues.append({
+                        "word": clean_word,
+                        "position": i,
+                        "suggestion": correction,
+                        "context": context
+                    })
+
+        return {
+            "has_issues": len(issues) > 0,
+            "issues": issues[:20],  # Limit to top 20 issues
+            "original": text
+        }
+    except ImportError:
+        logger.warning("pyspellchecker not installed, skipping spell check")
+        return {"has_issues": False, "issues": [], "original": text}
+    except Exception as e:
+        logger.warning(f"Spell check failed: {e}")
+        return {"has_issues": False, "issues": [], "original": text}
 
 
 # =============================================================================
@@ -356,14 +623,14 @@ class DocumentGenerationService:
     async def generate_outline(
         self,
         job_id: str,
-        num_sections: int = 5,
+        num_sections: Optional[int] = None,
     ) -> DocumentOutline:
         """
         Generate an outline for the document.
 
         Args:
             job_id: Job ID
-            num_sections: Number of sections to generate
+            num_sections: Number of sections to generate. None = auto mode (LLM decides)
 
         Returns:
             Generated outline
@@ -376,16 +643,71 @@ class DocumentGenerationService:
         job.status = GenerationStatus.OUTLINE_PENDING
         job.updated_at = datetime.utcnow()
 
-        logger.info("Generating outline", job_id=job_id, num_sections=num_sections)
+        logger.info(
+            "Generating outline",
+            job_id=job_id,
+            num_sections=num_sections,
+            mode="auto" if num_sections is None else "manual",
+        )
+
+        # Analyze style from existing documents if enabled
+        style_guide = None
+        if job.metadata.get("use_existing_docs"):
+            logger.info(
+                "Analyzing document styles for style-aware generation",
+                job_id=job_id,
+                style_collections=job.metadata.get("style_collection_filters"),
+                style_folder=job.metadata.get("style_folder_id"),
+            )
+            style_guide = await self._analyze_document_styles(
+                collection_filters=job.metadata.get("style_collection_filters"),
+                folder_id=job.metadata.get("style_folder_id"),
+                include_subfolders=job.metadata.get("include_style_subfolders", True),
+            )
+            if style_guide:
+                # Store for later use in content generation
+                job.metadata["style_guide"] = style_guide
+                logger.info(
+                    "Style analysis complete",
+                    job_id=job_id,
+                    tone=style_guide.get("tone"),
+                    vocabulary=style_guide.get("vocabulary_level"),
+                    source_docs=len(style_guide.get("source_documents", [])),
+                )
+            else:
+                logger.warning(
+                    "No documents found for style analysis",
+                    job_id=job_id,
+                )
 
         # Use RAG to find relevant sources
         sources = []
+
+        # Add style source documents to sources for references slide/page
+        # These are the documents used for style, language, and pattern learning
+        if style_guide and style_guide.get("source_documents"):
+            style_sources = style_guide.get("source_documents", [])
+            logger.info(
+                "Adding style source documents to references",
+                job_id=job_id,
+                count=len(style_sources),
+            )
+            for doc_name in style_sources:
+                sources.append(SourceReference(
+                    document_id="",  # Style sources identified by name
+                    document_name=doc_name,
+                    chunk_id="",
+                    page_number=None,
+                    relevance_score=1.0,
+                    snippet="Used for style, language, and pattern learning",
+                ))
         if self.config.use_rag:
-            sources = await self._search_sources(
+            rag_sources = await self._search_sources(
                 query=f"{job.title}: {job.description}",
                 collection_filter=job.metadata.get("collection_filter"),
                 max_results=self.config.max_sources,
             )
+            sources.extend(rag_sources)  # Add RAG sources to style sources
 
         # Generate outline using LLM
         outline = await self._generate_outline_with_llm(
@@ -393,6 +715,8 @@ class DocumentGenerationService:
             description=job.description,
             sources=sources,
             num_sections=num_sections,
+            output_format=job.output_format.value,
+            style_guide=style_guide,
         )
 
         job.outline = outline
@@ -438,6 +762,10 @@ class DocumentGenerationService:
                 job.outline.sections = modifications["sections"]
             if "tone" in modifications:
                 job.outline.tone = modifications["tone"]
+            # Allow theme change after outline generation
+            if "theme" in modifications and modifications["theme"]:
+                job.metadata["theme"] = modifications["theme"]
+                logger.info(f"Theme changed to: {modifications['theme']}")
 
         job.status = GenerationStatus.OUTLINE_APPROVED
         job.updated_at = datetime.utcnow()
@@ -715,14 +1043,260 @@ class DocumentGenerationService:
             logger.warning("Failed to search sources", error=str(e))
             return []
 
+    async def _analyze_document_styles(
+        self,
+        collection_filters: Optional[List[str]] = None,
+        folder_id: Optional[str] = None,
+        include_subfolders: bool = True,
+        sample_size: int = 5,
+    ) -> Optional[dict]:
+        """Analyze existing documents to extract style patterns for new document generation.
+
+        This method retrieves sample documents from the specified collections/folders
+        and uses LLM to analyze their writing style, tone, vocabulary, and structure.
+
+        Args:
+            collection_filters: List of collections to sample from
+            folder_id: Folder ID to scope the search
+            include_subfolders: Whether to include subfolders
+            sample_size: Number of unique documents to sample
+
+        Returns:
+            Style analysis dict with tone, vocabulary_level, structure_pattern, etc.
+            Returns None if no documents found or analysis fails.
+        """
+        try:
+            import json
+            from backend.services.vectorstore import get_vector_store, SearchType
+            from backend.db.database import async_session_context
+            from backend.db.models import Document as DBDocument, Folder
+            from sqlalchemy import select, cast, String, literal, or_
+
+            vector_store = get_vector_store()
+
+            # Build document ID filter based on collection/folder filters
+            document_ids = None
+
+            # Get document IDs matching collection filters
+            if collection_filters:
+                async with async_session_context() as db:
+                    all_collection_doc_ids = set()
+                    for collection in collection_filters:
+                        if collection == "(Untagged)":
+                            query_stmt = select(DBDocument.id).where(
+                                or_(
+                                    DBDocument.tags.is_(None),
+                                    DBDocument.tags == [],
+                                )
+                            )
+                        else:
+                            # Escape LIKE special characters
+                            safe_filter = collection.replace("\\", "\\\\")
+                            safe_filter = safe_filter.replace("%", "\\%")
+                            safe_filter = safe_filter.replace("_", "\\_")
+                            safe_filter = safe_filter.replace('"', '\\"')
+                            pattern = f'%"{safe_filter}"%'
+                            query_stmt = select(DBDocument.id).where(
+                                cast(DBDocument.tags, String).like(literal(pattern))
+                            )
+                        result = await db.execute(query_stmt)
+                        all_collection_doc_ids.update(str(row[0]) for row in result.fetchall())
+
+                    if all_collection_doc_ids:
+                        document_ids = list(all_collection_doc_ids)
+                        logger.info(
+                            "Style analysis filtered by collections",
+                            collections=collection_filters,
+                            document_count=len(document_ids),
+                        )
+                    else:
+                        logger.info("No documents match collection filters for style analysis")
+                        return None
+
+            # Get document IDs from folder filter
+            if folder_id:
+                async with async_session_context() as db:
+                    folder_doc_ids = set()
+
+                    if include_subfolders:
+                        # Get folder and all subfolders
+                        folder_ids = [folder_id]
+                        # Get subfolders recursively
+                        result = await db.execute(
+                            select(Folder.id).where(Folder.parent_id == folder_id)
+                        )
+                        subfolder_ids = [str(row[0]) for row in result.fetchall()]
+                        folder_ids.extend(subfolder_ids)
+
+                        # Get documents in all folders
+                        for fid in folder_ids:
+                            result = await db.execute(
+                                select(DBDocument.id).where(DBDocument.folder_id == fid)
+                            )
+                            folder_doc_ids.update(str(row[0]) for row in result.fetchall())
+                    else:
+                        # Just the specified folder
+                        result = await db.execute(
+                            select(DBDocument.id).where(DBDocument.folder_id == folder_id)
+                        )
+                        folder_doc_ids.update(str(row[0]) for row in result.fetchall())
+
+                    if folder_doc_ids:
+                        if document_ids:
+                            # Intersect with collection filter results
+                            document_ids = list(set(document_ids) & folder_doc_ids)
+                        else:
+                            document_ids = list(folder_doc_ids)
+                        logger.info(
+                            "Style analysis filtered by folder",
+                            folder_id=folder_id,
+                            include_subfolders=include_subfolders,
+                            document_count=len(document_ids),
+                        )
+                    else:
+                        logger.info("No documents in folder for style analysis")
+                        return None
+
+            # Log if searching all documents (no filters)
+            if document_ids is None:
+                logger.info("Style analysis searching all documents (no filters specified)")
+
+            # Get document samples directly from database (more reliable than search)
+            # This approach ensures we get samples even when search terms don't match
+            from backend.db.models import Chunk as DBChunk
+
+            samples = []
+            async with async_session_context() as db:
+                # Build query for chunks with content
+                chunk_query = select(
+                    DBChunk.content,
+                    DBChunk.document_id,
+                    DBDocument.name.label("document_name"),
+                    DBDocument.tags.label("collection"),
+                ).join(DBDocument, DBChunk.document_id == DBDocument.id)
+
+                # Apply document_ids filter if specified
+                if document_ids:
+                    chunk_query = chunk_query.where(
+                        cast(DBChunk.document_id, String).in_(document_ids)
+                    )
+
+                # Order by document to get variety, limit results
+                chunk_query = chunk_query.order_by(DBDocument.id).limit(sample_size * 5)
+
+                result = await db.execute(chunk_query)
+                rows = result.fetchall()
+
+                # Extract unique document samples
+                seen_docs = set()
+                for row in rows:
+                    doc_id = str(row.document_id) if row.document_id else None
+                    if doc_id and doc_id not in seen_docs and len(samples) < sample_size:
+                        seen_docs.add(doc_id)
+                        # Get document name - may be in tags JSON or name field
+                        doc_name = row.document_name or ""
+                        collection_tags = row.collection if row.collection else []
+                        samples.append({
+                            "content": row.content or "",
+                            "document_name": doc_name,
+                            "collection": collection_tags[0] if collection_tags else "",
+                        })
+                        logger.debug(
+                            "Style sample added",
+                            doc_id=doc_id,
+                            doc_name=doc_name,
+                        )
+
+            if not samples:
+                logger.info("No document samples found for style analysis")
+                return None
+
+            logger.info(
+                "Style analysis samples collected",
+                sample_count=len(samples),
+                document_names=[s["document_name"] for s in samples],
+            )
+
+            # Use LLM to analyze style patterns
+            sample_text = "\n\n".join([
+                f"--- Sample from {s['document_name'] or 'Unknown'} ---\n{s['content'][:1000]}"
+                for s in samples
+            ])
+
+            analysis_prompt = f"""Analyze the following document excerpts and extract their writing style patterns.
+
+DOCUMENT SAMPLES:
+{sample_text}
+
+Analyze and return a JSON object with:
+{{
+    "tone": "formal" | "casual" | "technical" | "friendly" | "academic",
+    "vocabulary_level": "simple" | "moderate" | "advanced",
+    "structure_pattern": "bullet-lists" | "paragraphs" | "mixed" | "headers-heavy",
+    "sentence_style": "short-concise" | "medium" | "long-detailed",
+    "key_phrases": ["common phrases or terms used"],
+    "formatting_notes": "any notable formatting patterns observed",
+    "recommended_approach": "brief recommendation for matching this style"
+}}
+
+Return ONLY valid JSON, no other text."""
+
+            response = await self.llm.ainvoke(analysis_prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+
+            # Parse the JSON response
+            import json
+            # Try to extract JSON from the response
+            json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
+            if json_match:
+                style_analysis = json.loads(json_match.group())
+            else:
+                style_analysis = json.loads(response_text)
+
+            style_analysis["source_documents"] = [s["document_name"] for s in samples if s["document_name"]]
+
+            logger.info(
+                "Style analysis completed",
+                tone=style_analysis.get("tone"),
+                vocabulary=style_analysis.get("vocabulary_level"),
+                num_sources=len(style_analysis.get("source_documents", [])),
+            )
+
+            return style_analysis
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse style analysis JSON: {e}")
+            # Return default style guide
+            return {
+                "tone": "professional",
+                "vocabulary_level": "moderate",
+                "structure_pattern": "mixed",
+                "sentence_style": "medium",
+                "source_documents": [],
+            }
+        except Exception as e:
+            logger.warning(f"Failed to analyze document styles: {e}")
+            return None
+
     async def _generate_outline_with_llm(
         self,
         title: str,
         description: str,
         sources: List[SourceReference],
-        num_sections: int,
+        num_sections: Optional[int] = None,
+        output_format: str = "docx",
+        style_guide: Optional[Dict[str, Any]] = None,
     ) -> DocumentOutline:
-        """Generate outline using LLM."""
+        """Generate outline using LLM.
+
+        Args:
+            title: Document title
+            description: Document description
+            sources: Relevant sources from RAG
+            num_sections: Number of sections. None = auto mode (LLM decides)
+            output_format: Target output format (affects section count guidance)
+            style_guide: Optional style analysis from existing documents
+        """
         # Build context from sources
         context = ""
         if sources:
@@ -730,15 +1304,53 @@ class DocumentGenerationService:
             for source in sources[:5]:
                 context += f"- {source.snippet}...\n\n"
 
+        # Build style instructions if available
+        style_instructions = ""
+        if style_guide:
+            style_instructions = f"""
+STYLE GUIDE (based on existing documents in your collection):
+- Tone: {style_guide.get('tone', 'professional')}
+- Vocabulary Level: {style_guide.get('vocabulary_level', 'moderate')}
+- Structure Pattern: {style_guide.get('structure_pattern', 'mixed')}
+- Sentence Style: {style_guide.get('sentence_style', 'medium')}
+{f"- Formatting Notes: {style_guide.get('formatting_notes')}" if style_guide.get('formatting_notes') else ""}
+{f"- Key Phrases: {', '.join(style_guide.get('key_phrases', []))}" if style_guide.get('key_phrases') else ""}
+
+IMPORTANT: Match the style, tone, and structure of the existing documents.
+The new document should feel like it belongs to the same collection.
+Use similar vocabulary and phrasing patterns as found in the source documents.
+"""
+
+        # Build section instruction based on mode
+        if num_sections is None:
+            # Auto mode - LLM decides optimal count
+            section_instruction = f"""Analyze the topic complexity and determine the optimal number of sections.
+
+Consider:
+- Topic depth and complexity
+- Output format: {output_format} (presentations typically need 5-10 slides, documents 3-8 pages)
+- Amount of source material available
+- Target audience expectations
+
+First, output your recommended section count on a line by itself like:
+SECTION_COUNT: N
+
+Where N is between 3 and 15.
+
+Then generate exactly N sections with specific, descriptive titles."""
+        else:
+            section_instruction = f"Generate exactly {num_sections} sections with specific, descriptive titles."
+
         # Create prompt for outline generation
         prompt = f"""Create a professional document outline for the following:
+{style_instructions}
 
 Title: {title}
 Description: {description}
 
 {context}
 
-Generate exactly {num_sections} sections with specific, descriptive titles.
+{section_instruction}
 
 IMPORTANT RULES:
 - Each section title MUST be specific and descriptive (e.g., "Market Analysis and Trends", "Implementation Strategy")
@@ -776,6 +1388,21 @@ Generate the outline now:"""
             sections = []
             lines = response.content.split("\n")
             current_section = None
+
+            # In auto mode, extract the section count from LLM response
+            target_sections = num_sections
+            if num_sections is None:
+                # Look for SECTION_COUNT: N pattern
+                section_count_match = re.search(r'SECTION_COUNT:\s*(\d+)', response.content)
+                if section_count_match:
+                    target_sections = int(section_count_match.group(1))
+                    # Clamp to valid range
+                    target_sections = max(3, min(15, target_sections))
+                    logger.info(f"Auto mode: LLM suggested {target_sections} sections")
+                else:
+                    # Fallback: count sections in response, or default to 5
+                    target_sections = 5
+                    logger.warning("Auto mode: Could not extract section count, defaulting to 5")
 
             # Generic title patterns to reject
             generic_patterns = [
@@ -826,7 +1453,7 @@ Generate the outline now:"""
             topic_words = title.split()[:3] if title else ["Document"]
             topic_prefix = " ".join(topic_words)
 
-            while len(sections) < num_sections:
+            while len(sections) < target_sections:
                 section_num = len(sections) + 1
                 # Generate contextual fallback titles
                 fallback_titles = [
@@ -846,12 +1473,14 @@ Generate the outline now:"""
             return DocumentOutline(
                 title=title,
                 description=description,
-                sections=sections[:num_sections],
+                sections=sections[:target_sections],
             )
 
         except Exception as e:
             logger.error("Failed to generate outline with LLM", error=str(e))
             # Return a more descriptive fallback outline
+            # Use num_sections if specified, otherwise default to 5
+            fallback_count = num_sections if num_sections is not None else 5
             fallback_section_templates = [
                 ("Background and Context", f"Overview and background information about {title}"),
                 ("Key Analysis and Findings", f"Main analysis and findings related to {title}"),
@@ -868,7 +1497,7 @@ Generate the outline now:"""
                         "title": fallback_section_templates[min(i, len(fallback_section_templates) - 1)][0],
                         "description": fallback_section_templates[min(i, len(fallback_section_templates) - 1)][1]
                     }
-                    for i in range(num_sections)
+                    for i in range(fallback_count)
                 ],
             )
 
@@ -896,17 +1525,89 @@ Generate the outline now:"""
             for source in sources:
                 context += f"- {source.snippet}\n\n"
 
+        # Generate format-specific prompts
+        if job.output_format == OutputFormat.PPTX:
+            format_instructions = """FORMAT REQUIREMENTS FOR PRESENTATION SLIDES:
+- Write 6-10 bullet points maximum
+- Each bullet MUST be a COMPLETE sentence under 90 characters
+- If a point is too long, split it into two shorter points
+- Use simple, concise language - avoid complex sentences
+- NO markdown formatting (no **, no ##, no _)
+- Focus on key takeaways, not detailed explanations
+- Start each point with an action verb or key noun
+- NEVER leave a sentence incomplete or cut off
+
+CRITICAL: Every bullet point must be a complete, standalone thought.
+If you cannot express an idea in under 90 characters, break it into multiple shorter points.
+
+Example format (each is a complete sentence):
+• Revenue increased 25% year-over-year across all regions.
+• Customer acquisition cost reduced by 15% through optimization.
+• New market expansion in Q3 shows promising early results."""
+        elif job.output_format in (OutputFormat.DOCX, OutputFormat.PDF):
+            format_instructions = """FORMAT REQUIREMENTS FOR DOCUMENT:
+- Write 3-5 well-structured paragraphs
+- Use clear topic sentences for each paragraph
+- Include relevant details and examples
+- Maintain professional, formal tone
+- Use **bold** for key terms (will be styled)
+- Use _italic_ for emphasis (will be styled)
+- Avoid excessive bullet points - prefer prose
+- Target 200-400 words per section"""
+        elif job.output_format == OutputFormat.XLSX:
+            format_instructions = """FORMAT REQUIREMENTS FOR SPREADSHEET:
+- Write concise, data-oriented content
+- Use short sentences that fit in cells
+- NO markdown formatting (no **, no ##, no _)
+- Focus on quantifiable information
+- Use clear, structured points
+- Each point on a new line
+- Target 5-10 key points
+- Avoid long paragraphs"""
+        else:
+            format_instructions = """Write clear, well-structured content.
+Include relevant details and maintain a professional tone."""
+
+        # Calculate section position context
+        total_sections = len(job.outline.sections) if job.outline else 5
+        current_section_num = order + 1  # order is 0-indexed
+
+        if current_section_num <= 2:
+            position_context = "This is an EARLY section - set the stage and introduce key concepts."
+        elif current_section_num >= total_sections - 1:
+            position_context = "This is a CONCLUDING section - summarize key points and provide actionable takeaways."
+        else:
+            position_context = "This is a MIDDLE section - dive into details, analysis, and supporting information."
+
+        # Build style context if available from style analysis
+        style_context = ""
+        style_guide = job.metadata.get("style_guide")
+        if style_guide:
+            style_context = f"""
+STYLE REQUIREMENTS (based on existing documents):
+- Write in a {style_guide.get('tone', 'professional')} tone
+- Use {style_guide.get('vocabulary_level', 'moderate')} vocabulary
+- Follow {style_guide.get('structure_pattern', 'mixed')} structure
+- Keep sentences {style_guide.get('sentence_style', 'medium')}
+{f"- Recommended approach: {style_guide.get('recommended_approach')}" if style_guide.get('recommended_approach') else ""}
+{f"- Use key phrases like: {', '.join(style_guide.get('key_phrases', [])[:5])}" if style_guide.get('key_phrases') else ""}
+
+IMPORTANT: The new content should match the style and tone of existing documents in the collection.
+"""
+
         # Generate content
-        prompt = f"""Write content for the following section of a {job.output_format.value} document:
+        prompt = f"""Write content for the following section:
+{style_context}
 
 Document Title: {job.title}
-Section: {section_title}
+Section: {section_title} (Section {current_section_num} of {total_sections})
 Description: {section_description}
+
+Position guidance: {position_context}
 
 {context}
 
-Write clear, well-structured content that fits the document's purpose.
-Include relevant details and maintain a professional tone."""
+{format_instructions}"""
 
         try:
             from backend.services.llm import EnhancedLLMFactory
@@ -971,7 +1672,8 @@ Please revise the content to address the feedback while maintaining quality and 
 
     async def _generate_output_file(self, job: GenerationJob) -> str:
         """Generate the output file in the requested format."""
-        filename = f"{job.id}_{job.title.replace(' ', '_')[:50]}"
+        safe_title = sanitize_filename(job.title)
+        filename = f"{job.id}_{safe_title}"
 
         if job.output_format == OutputFormat.PPTX:
             output_path = await self._generate_pptx(job, filename)
@@ -1004,11 +1706,22 @@ Please revise the content to address the feedback while maintaining quality and 
             prs.slide_width = Inches(13.333)  # 16:9 aspect ratio
             prs.slide_height = Inches(7.5)
 
-            # Define professional color scheme
-            PRIMARY_COLOR = RGBColor(0x1E, 0x3A, 0x5F)  # Deep blue
-            SECONDARY_COLOR = RGBColor(0x3D, 0x5A, 0x80)  # Medium blue
-            ACCENT_COLOR = RGBColor(0xE0, 0xE1, 0xDD)  # Light gray
-            TEXT_COLOR = RGBColor(0x2D, 0x3A, 0x45)  # Dark gray
+            # Get theme colors from job metadata or use default
+            theme_key = job.metadata.get("theme", "business")
+            theme = get_theme_colors(theme_key)
+
+            # Apply theme color scheme
+            primary_rgb = hex_to_rgb(theme["primary"])
+            secondary_rgb = hex_to_rgb(theme["secondary"])
+            accent_rgb = hex_to_rgb(theme["accent"])
+            text_rgb = hex_to_rgb(theme["text"])
+            light_gray_rgb = hex_to_rgb(theme["light_gray"])
+
+            PRIMARY_COLOR = RGBColor(*primary_rgb)
+            SECONDARY_COLOR = RGBColor(*secondary_rgb)
+            ACCENT_COLOR = RGBColor(*accent_rgb)
+            TEXT_COLOR = RGBColor(*text_rgb)
+            LIGHT_GRAY = RGBColor(*light_gray_rgb)
             WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 
             def apply_title_style(shape, font_size=44, bold=True, color=WHITE):
@@ -1052,26 +1765,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 text = text.replace('\x0c', ' ')  # Form feed
                 return text
 
-            def strip_markdown(text: str) -> str:
-                """Remove markdown formatting, returning clean text for slides."""
-                if not text:
-                    return ""
-                import re
-                # Remove headers (# ## ### #### etc.)
-                text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-                # Remove bold **text** or __text__
-                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
-                text = re.sub(r'__([^_]+)__', r'\1', text)
-                # Remove italic *text* or _text_ (but not bullet points)
-                text = re.sub(r'(?<!\s)\*([^*\n]+)\*(?!\s)', r'\1', text)
-                text = re.sub(r'(?<!\s)_([^_\n]+)_(?!\s)', r'\1', text)
-                # Remove code backticks
-                text = re.sub(r'`([^`]+)`', r'\1', text)
-                # Remove link syntax [text](url)
-                text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-                # Clean up multiple spaces
-                text = re.sub(r'  +', ' ', text)
-                return text.strip()
+            # Note: strip_markdown is now a module-level function
 
             def add_footer(slide, page_num, total_pages):
                 """Add footer with page number."""
@@ -1083,12 +1777,26 @@ Please revise the content to address the feedback while maintaining quality and 
                 tf = footer.text_frame
                 tf.paragraphs[0].text = footer_text
                 tf.paragraphs[0].font.size = Pt(10)
-                tf.paragraphs[0].font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+                tf.paragraphs[0].font.color.rgb = LIGHT_GRAY
                 tf.paragraphs[0].alignment = PP_ALIGN.RIGHT
 
-            total_slides = len(job.sections) + 2  # Title + sections + sources
+            # Determine include_sources from job metadata or fall back to config
+            include_sources_override = job.metadata.get("include_sources")
+            if include_sources_override is not None:
+                include_sources = include_sources_override
+            else:
+                include_sources = self.config.include_sources
+
+            logger.info(f"PPTX include_sources check - override: {include_sources_override}, config: {self.config.include_sources}, resolved: {include_sources}")
+            logger.info(f"PPTX sources_used count: {len(job.sources_used) if job.sources_used else 0}")
+
+            # Calculate total slides accurately
+            total_slides = 1  # Title slide
             if self.config.include_toc:
-                total_slides += 1
+                total_slides += 1  # TOC slide
+            total_slides += len(job.sections)  # Content slides
+            if include_sources and job.sources_used:
+                total_slides += 1  # Sources slide only if both conditions met
 
             current_slide = 0
 
@@ -1270,10 +1978,12 @@ Please revise the content to address the feedback while maintaining quality and 
                 # Strip markdown formatting for clean slide content
                 content = strip_markdown(content)
 
-                # Limit content for presentation readability (~300 words max)
-                words = content.split()
-                if len(words) > 300:
-                    content = ' '.join(words[:300]) + '...'
+                # Limit content for presentation readability with sentence awareness
+                # ~450 words = ~3000 chars, but truncate at sentence boundaries
+                if len(content) > 3000:
+                    content = sentence_truncate(content, 3000)
+                    if not content.endswith(('.', '!', '?')):
+                        content += '...'
 
                 if has_image:
                     # Content on left, image on right
@@ -1294,13 +2004,51 @@ Please revise the content to address the feedback while maintaining quality and 
                 # Split content into bullet points for cleaner slides
                 paragraphs = content.split('\n')
                 first_para_used = False
-                max_paras = 12 if has_image else 15  # Allow more items for complete content
+                max_paras = 10 if has_image else 12  # Reasonable limits for readability
                 para_count = 0
 
+                # Collect valid paragraphs first to calculate dynamic sizing
+                valid_paragraphs = []
                 for para_text in paragraphs:
                     para_text = para_text.strip()
-                    if not para_text or para_count >= max_paras:
-                        continue
+                    if para_text:
+                        # Format as bullet point for cleaner slides
+                        if para_text.startswith(('- ', '• ', '* ', '1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.')):
+                            bullet_text = para_text.lstrip('-•* 0123456789.').strip()
+                        else:
+                            bullet_text = para_text
+                        if bullet_text:
+                            valid_paragraphs.append(bullet_text)
+
+                # Dynamic font sizing based on content volume
+                # Increased max_chars limits to reduce truncation
+                total_bullets = min(len(valid_paragraphs), max_paras)
+                total_chars = sum(len(p) for p in valid_paragraphs[:max_paras])
+
+                if total_bullets <= 5 and total_chars < 500:
+                    font_size = Pt(20)
+                    max_chars = 180  # Was 120
+                    line_spacing = Pt(10)
+                elif total_bullets <= 8 and total_chars < 900:
+                    font_size = Pt(18)
+                    max_chars = 150  # Was 100
+                    line_spacing = Pt(8)
+                elif total_bullets <= 10 and total_chars < 1200:
+                    font_size = Pt(16)
+                    max_chars = 130  # Was 90
+                    line_spacing = Pt(6)
+                else:
+                    font_size = Pt(14)
+                    max_chars = 110  # Was 80
+                    line_spacing = Pt(4)
+
+                # Adjust max chars if we have an image (narrower content area)
+                if has_image:
+                    max_chars = int(max_chars * 0.75)  # Was 0.7
+
+                for bullet_text in valid_paragraphs:
+                    if para_count >= max_paras:
+                        break
 
                     if first_para_used:
                         p = tf.add_paragraph()
@@ -1309,21 +2057,18 @@ Please revise the content to address the feedback while maintaining quality and 
                         first_para_used = True
                     para_count += 1
 
-                    # Format as bullet point for cleaner slides
-                    if para_text.startswith(('- ', '• ', '* ', '1.', '2.', '3.', '4.', '5.')):
-                        bullet_text = para_text.lstrip('-•* 0123456789.').strip()
-                    else:
-                        bullet_text = para_text
-
-                    # Limit line length for readability (150 chars to avoid mid-sentence cuts)
-                    if len(bullet_text) > 150:
-                        bullet_text = bullet_text[:147] + '...'
+                    # Use sentence-aware truncation to avoid mid-sentence cuts
+                    if len(bullet_text) > max_chars:
+                        bullet_text = sentence_truncate(bullet_text, max_chars)
+                        # Ensure truncated content shows it was cut
+                        if not bullet_text.endswith(('.', '!', '?', '...')):
+                            bullet_text += '...'
 
                     p.text = '• ' + bullet_text
                     p.font.name = "Calibri"
-                    p.font.size = Pt(18)  # Larger font for better slide readability
+                    p.font.size = font_size
                     p.font.color.rgb = TEXT_COLOR
-                    p.space_after = Pt(8)  # Slightly more spacing with larger font
+                    p.space_after = line_spacing
 
                 # Ensure first paragraph is initialized even if content was empty
                 if not first_para_used:
@@ -1354,7 +2099,11 @@ Please revise the content to address the feedback while maintaining quality and 
                 add_footer(slide, current_slide, total_slides)
 
             # ========== SOURCES SLIDE ==========
-            if self.config.include_sources and job.sources_used:
+            if not include_sources:
+                logger.warning(f"Sources slide SKIPPED - include_sources is False")
+            elif not job.sources_used:
+                logger.warning(f"Sources slide SKIPPED - no sources_used (RAG may have returned no results)")
+            if include_sources and job.sources_used:
                 current_slide += 1
                 slide = prs.slides.add_slide(prs.slide_layouts[6])
                 add_header_bar(slide)
@@ -1424,11 +2173,23 @@ Please revise the content to address the feedback while maintaining quality and 
 
             doc = Document()
 
-            # Define professional colors
-            PRIMARY_COLOR = RGBColor(0x1E, 0x3A, 0x5F)  # Deep blue
-            SECONDARY_COLOR = RGBColor(0x3D, 0x5A, 0x80)  # Medium blue
-            TEXT_COLOR = RGBColor(0x2D, 0x3A, 0x45)  # Dark gray
-            LIGHT_GRAY = RGBColor(0x88, 0x88, 0x88)
+            # Get theme colors from job metadata or use default
+            theme_key = job.metadata.get("theme", "business")
+            theme = get_theme_colors(theme_key)
+
+            # Apply theme color scheme
+            primary_rgb = hex_to_rgb(theme["primary"])
+            secondary_rgb = hex_to_rgb(theme["secondary"])
+            text_rgb = hex_to_rgb(theme["text"])
+            light_gray_rgb = hex_to_rgb(theme["light_gray"])
+
+            PRIMARY_COLOR = RGBColor(*primary_rgb)
+            SECONDARY_COLOR = RGBColor(*secondary_rgb)
+            TEXT_COLOR = RGBColor(*text_rgb)
+            LIGHT_GRAY = RGBColor(*light_gray_rgb)
+
+            # Determine include_sources from job metadata or fall back to config
+            include_sources = job.metadata.get("include_sources", self.config.include_sources)
 
             # Initialize image generator if images are enabled
             include_images = job.metadata.get("include_images", self.config.include_images)
@@ -1635,7 +2396,7 @@ Please revise the content to address the feedback while maintaining quality and 
                         logger.warning(f"Failed to add image to DOCX: {e}")
 
                 # Add section sources
-                if self.config.include_sources and section.sources:
+                if include_sources and section.sources:
                     doc.add_paragraph()
                     source_label = doc.add_paragraph()
                     label_run = source_label.add_run("Sources for this section:")
@@ -1657,7 +2418,7 @@ Please revise the content to address the feedback while maintaining quality and 
                     doc.add_page_break()
 
             # ========== REFERENCES SECTION ==========
-            if self.config.include_sources and job.sources_used:
+            if include_sources and job.sources_used:
                 doc.add_page_break()
 
                 ref_heading = doc.add_heading("References", level=1)
@@ -1697,6 +2458,9 @@ Please revise the content to address the feedback while maintaining quality and 
             )
             from reportlab.lib.units import inch, cm
 
+            # Determine include_sources from job metadata or fall back to config
+            include_sources = job.metadata.get("include_sources", self.config.include_sources)
+
             # Initialize image generator if images are enabled
             include_images = job.metadata.get("include_images", self.config.include_images)
             section_images = {}
@@ -1733,12 +2497,16 @@ Please revise the content to address the feedback while maintaining quality and 
                 except Exception as e:
                     logger.warning(f"Image generation failed, continuing without images: {e}")
 
-            # Define professional colors
-            PRIMARY_COLOR = HexColor('#1E3A5F')  # Deep blue
-            SECONDARY_COLOR = HexColor('#3D5A80')  # Medium blue
-            TEXT_COLOR = HexColor('#2D3A45')  # Dark gray
-            LIGHT_GRAY = HexColor('#888888')
-            ACCENT_BG = HexColor('#F5F5F5')  # Light background
+            # Get theme colors from job metadata or use default
+            theme_key = job.metadata.get("theme", "business")
+            theme = get_theme_colors(theme_key)
+
+            # Apply theme color scheme
+            PRIMARY_COLOR = HexColor(theme["primary"])
+            SECONDARY_COLOR = HexColor(theme["secondary"])
+            TEXT_COLOR = HexColor(theme["text"])
+            LIGHT_GRAY = HexColor(theme["light_gray"])
+            ACCENT_BG = HexColor('#F5F5F5')  # Light background (keep neutral)
 
             output_path = os.path.join(self.config.output_dir, f"{filename}.pdf")
 
@@ -1990,7 +2758,7 @@ Please revise the content to address the feedback while maintaining quality and 
                         logger.warning(f"Failed to add image to PDF: {e}")
 
                 # Section sources
-                if self.config.include_sources and section.sources:
+                if include_sources and section.sources:
                     story.append(Spacer(1, 0.2*inch))
                     story.append(Paragraph("Sources for this section:", source_style))
                     for source in section.sources[:3]:
@@ -2000,7 +2768,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 story.append(Spacer(1, 0.3*inch))
 
             # ========== REFERENCES ==========
-            if self.config.include_sources and job.sources_used:
+            if include_sources and job.sources_used:
                 story.append(PageBreak())
                 story.append(Paragraph("References", heading_style))
                 story.append(Spacer(1, 0.2*inch))
@@ -2031,6 +2799,9 @@ Please revise the content to address the feedback while maintaining quality and 
 
     async def _generate_markdown(self, job: GenerationJob, filename: str) -> str:
         """Generate Markdown document."""
+        # Determine include_sources from job metadata or fall back to config
+        include_sources = job.metadata.get("include_sources", self.config.include_sources)
+
         lines = []
 
         # Title
@@ -2060,14 +2831,14 @@ Please revise the content to address the feedback while maintaining quality and 
             lines.append("")
 
             # Sources
-            if self.config.include_sources and section.sources:
+            if include_sources and section.sources:
                 lines.append("**Sources:**")
                 for source in section.sources[:3]:
                     lines.append(f"- {source.document_name or source.document_id}")
                 lines.append("")
 
         # References
-        if self.config.include_sources and job.sources_used:
+        if include_sources and job.sources_used:
             lines.append("## References")
             lines.append("")
             for source in job.sources_used:
@@ -2082,6 +2853,9 @@ Please revise the content to address the feedback while maintaining quality and 
 
     async def _generate_html(self, job: GenerationJob, filename: str) -> str:
         """Generate HTML document."""
+        # Determine include_sources from job metadata or fall back to config
+        include_sources = job.metadata.get("include_sources", self.config.include_sources)
+
         html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -2107,7 +2881,7 @@ Please revise the content to address the feedback while maintaining quality and 
         <h2>{section.title}</h2>
         <p>{content.replace(chr(10), '</p><p>')}</p>
 """
-            if self.config.include_sources and section.sources:
+            if include_sources and section.sources:
                 html += '        <div class="sources">Sources: '
                 html += ", ".join(s.document_name or s.document_id for s in section.sources[:3])
                 html += "</div>\n"
@@ -2138,11 +2912,21 @@ Please revise the content to address the feedback while maintaining quality and 
             from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
             from openpyxl.utils import get_column_letter
 
+            # Determine include_sources from job metadata or fall back to config
+            include_sources = job.metadata.get("include_sources", self.config.include_sources)
+
             wb = Workbook()
 
-            # Define styles
+            # Get theme colors from job metadata or use default
+            theme_key = job.metadata.get("theme", "business")
+            theme = get_theme_colors(theme_key)
+
+            # Convert theme color to Excel format (without #)
+            primary_hex = theme["primary"].lstrip('#')
+
+            # Define styles with theme colors
             header_font = Font(bold=True, size=12, color="FFFFFF")
-            header_fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+            header_fill = PatternFill(start_color=primary_hex, end_color=primary_hex, fill_type="solid")
             header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell_alignment = Alignment(vertical="top", wrap_text=True)
             thin_border = Border(
@@ -2215,8 +2999,8 @@ Please revise the content to address the feedback while maintaining quality and 
             ws_content.column_dimensions['D'].width = 12
             ws_content.column_dimensions['E'].width = 40
 
-            # Sheet 3: Sources
-            if job.sources_used:
+            # Sheet 3: Sources (only if include_sources is enabled)
+            if include_sources and job.sources_used:
                 ws_sources = wb.create_sheet("Sources")
 
                 # Headers

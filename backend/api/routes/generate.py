@@ -26,6 +26,8 @@ from backend.services.generator import (
     Section,
     SourceReference,
     get_generation_service,
+    THEMES,
+    check_spelling,
 )
 from backend.services.image_generator import (
     ImageGeneratorService,
@@ -59,6 +61,40 @@ class CreateJobRequest(BaseModel):
         default=None,
         description="Include images in generated document. If not set, uses admin setting."
     )
+    # Theme selection - defaults to business if not specified
+    theme: Optional[str] = Field(
+        default="business",
+        description="Visual theme for the document. Options: business, creative, modern, nature"
+    )
+    # Page/slide count control - None means auto (LLM decides)
+    page_count: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=20,
+        description="Number of pages/slides (1-20). None = auto (LLM decides based on content)"
+    )
+    # Include sources page/slide/sheet
+    include_sources: Optional[bool] = Field(
+        default=None,
+        description="Include sources page in generated document. If not set, uses admin setting."
+    )
+    # Style learning from existing documents
+    use_existing_docs: bool = Field(
+        default=False,
+        description="Learn style and formatting from existing documents via RAG"
+    )
+    style_collection_filters: Optional[List[str]] = Field(
+        default=None,
+        description="Collections to learn style from (multi-select)"
+    )
+    style_folder_id: Optional[str] = Field(
+        default=None,
+        description="Folder to scope style learning"
+    )
+    include_style_subfolders: bool = Field(
+        default=True,
+        description="Include subfolders in style learning"
+    )
 
     @property
     def effective_collection_filter(self) -> Optional[str]:
@@ -73,6 +109,7 @@ class OutlineModifications(BaseModel):
     title: Optional[str] = None
     sections: Optional[List[dict]] = None
     tone: Optional[str] = None
+    theme: Optional[str] = None  # Allow changing theme after outline generation
 
 
 class SectionFeedback(BaseModel):
@@ -235,6 +272,35 @@ async def create_generation_job(
 
     service = get_generation_service()
 
+    # Build metadata with theme and page_count
+    metadata = request.metadata or {}
+    if request.theme:
+        # Validate theme exists
+        if request.theme not in THEMES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid theme: {request.theme}. Valid themes: {list(THEMES.keys())}",
+            )
+        metadata["theme"] = request.theme
+
+    # Store page_count in metadata for outline generation
+    if request.page_count is not None:
+        metadata["page_count"] = request.page_count
+        metadata["page_count_mode"] = "manual"
+    else:
+        metadata["page_count_mode"] = "auto"
+
+    # Store include_sources preference (None means use admin setting)
+    if request.include_sources is not None:
+        metadata["include_sources"] = request.include_sources
+
+    # Store style learning settings if enabled
+    if request.use_existing_docs:
+        metadata["use_existing_docs"] = True
+        metadata["style_collection_filters"] = request.style_collection_filters
+        metadata["style_folder_id"] = request.style_folder_id
+        metadata["include_style_subfolders"] = request.include_style_subfolders
+
     job = await service.create_job(
         user_id=user.user_id,
         title=request.title,
@@ -243,7 +309,7 @@ async def create_generation_job(
         collection_filter=request.effective_collection_filter,
         folder_id=request.folder_id,
         include_subfolders=request.include_subfolders,
-        metadata=request.metadata,
+        metadata=metadata,
         include_images=request.include_images,  # Pass through to override admin setting
     )
 
@@ -314,16 +380,19 @@ async def get_generation_job(
 async def generate_outline(
     job_id: str,
     user: AuthenticatedUser,
-    num_sections: int = Query(default=5, ge=1, le=20),
+    num_sections: Optional[int] = Query(default=None, ge=1, le=20),
 ):
     """
     Generate an outline for the document.
 
     The outline will be generated based on the job description and
     relevant sources from the knowledge base.
-    """
-    logger.info("Generating outline", job_id=job_id, num_sections=num_sections)
 
+    num_sections priority:
+    1. Query parameter (if provided) - highest priority, allows override
+    2. Job metadata page_count (from CreateJobRequest)
+    3. Auto mode (None) - LLM decides optimal count based on content
+    """
     service = get_generation_service()
 
     try:
@@ -341,8 +410,22 @@ async def generate_outline(
             detail="You don't have access to this job",
         )
 
+    # Determine effective num_sections from priority order
+    effective_num_sections = num_sections
+    if effective_num_sections is None:
+        # Fall back to job metadata page_count
+        effective_num_sections = job.metadata.get("page_count")
+    # If still None, auto mode - service will handle LLM-based determination
+
+    logger.info(
+        "Generating outline",
+        job_id=job_id,
+        num_sections=effective_num_sections,
+        mode="auto" if effective_num_sections is None else "manual",
+    )
+
     try:
-        await service.generate_outline(job_id, num_sections=num_sections)
+        await service.generate_outline(job_id, num_sections=effective_num_sections)
         job = await service.get_job(job_id)
     except ValueError as e:
         raise HTTPException(
@@ -576,7 +659,7 @@ async def download_generated_document(
         iter([file_bytes]),
         media_type=content_type,
         headers={
-            "Content-Disposition": f"attachment; filename={filename}",
+            "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Length": str(len(file_bytes)),
         },
     )
@@ -847,3 +930,282 @@ async def get_image_backends(user: AuthenticatedUser):
         "current_backend": service.config.backend.value,
         "enabled": service.config.enabled,
     }
+
+
+# =============================================================================
+# Theme Models and Endpoints
+# =============================================================================
+
+class ThemeInfo(BaseModel):
+    """Information about a theme."""
+    key: str
+    name: str
+    description: str
+    primary: str
+    secondary: str
+    accent: str
+    text: str
+
+
+class ThemeSuggestionRequest(BaseModel):
+    """Request for theme suggestions."""
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(..., min_length=10)
+
+
+class ThemeSuggestionResponse(BaseModel):
+    """Response with theme suggestions."""
+    recommended: str
+    reason: str
+    alternatives: List[str]
+    themes: dict  # Full theme info for all themes
+
+
+@router.get("/themes")
+async def list_themes():
+    """
+    Get all available themes for document generation.
+
+    Returns a list of themes with their colors and descriptions.
+    """
+    themes_list = []
+    for key, theme in THEMES.items():
+        themes_list.append(ThemeInfo(
+            key=key,
+            name=theme["name"],
+            description=theme["description"],
+            primary=theme["primary"],
+            secondary=theme["secondary"],
+            accent=theme["accent"],
+            text=theme["text"],
+        ))
+
+    return {"themes": themes_list}
+
+
+@router.post("/themes/suggest", response_model=ThemeSuggestionResponse)
+async def suggest_theme(
+    request: ThemeSuggestionRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Get LLM-suggested themes based on document topic.
+
+    The LLM analyzes the document title and description to recommend
+    the most appropriate theme. User can still override with any theme.
+    """
+    logger.info(
+        "Suggesting themes",
+        user_id=user.user_id,
+        title=request.title,
+    )
+
+    try:
+        from backend.services.llm import EnhancedLLMFactory
+
+        prompt = f"""Based on this document topic, recommend the best visual theme for a presentation/document:
+
+Topic: {request.title}
+Description: {request.description}
+
+Available themes:
+- business: Corporate, professional presentations (blue tones)
+- creative: Marketing, design, artistic content (purple/warm tones)
+- modern: Tech, startups, contemporary topics (dark with cyan accent)
+- nature: Sustainability, wellness, environmental (green/earth tones)
+
+Respond with ONLY valid JSON in this exact format:
+{{"recommended": "theme_key", "reason": "Brief 1-sentence explanation", "alternatives": ["theme2", "theme3"]}}
+
+Choose the most appropriate theme for this content. Be decisive."""
+
+        llm, config = await EnhancedLLMFactory.get_chat_model_for_operation(
+            operation="content_generation",
+            user_id=None,
+        )
+        response = await llm.ainvoke(prompt)
+
+        import json
+        # Extract JSON from response - it may have extra text
+        response_text = response.content.strip()
+
+        # Try to find JSON in the response
+        try:
+            # First try direct parse
+            result = json.loads(response_text)
+        except json.JSONDecodeError:
+            # Try to extract JSON from response
+            import re
+            json_match = re.search(r'\{[^{}]*\}', response_text)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                # Fallback to business theme
+                result = {
+                    "recommended": "business",
+                    "reason": "Default professional theme",
+                    "alternatives": ["modern", "creative"]
+                }
+
+        # Validate the recommended theme exists
+        if result.get("recommended") not in THEMES:
+            result["recommended"] = "business"
+
+        # Validate alternatives
+        valid_alternatives = [alt for alt in result.get("alternatives", []) if alt in THEMES]
+        if not valid_alternatives:
+            valid_alternatives = [k for k in THEMES.keys() if k != result["recommended"]][:2]
+        result["alternatives"] = valid_alternatives
+
+        return ThemeSuggestionResponse(
+            recommended=result["recommended"],
+            reason=result.get("reason", "Recommended based on content analysis"),
+            alternatives=result["alternatives"],
+            themes=THEMES,
+        )
+
+    except Exception as e:
+        logger.error("Theme suggestion failed", error=str(e))
+        # Return default on error
+        return ThemeSuggestionResponse(
+            recommended="business",
+            reason="Default professional theme (LLM unavailable)",
+            alternatives=["modern", "creative"],
+            themes=THEMES,
+        )
+
+
+# =============================================================================
+# Spell Checking Models and Endpoints
+# =============================================================================
+
+class SpellCheckRequest(BaseModel):
+    """Request to check spelling in text."""
+    text: str = Field(..., min_length=1, max_length=50000)
+
+
+class SpellIssue(BaseModel):
+    """A spelling issue found in text."""
+    word: str
+    position: int
+    suggestion: str
+    context: str
+
+
+class SpellCheckResponse(BaseModel):
+    """Response from spell checking."""
+    has_issues: bool
+    issues: List[SpellIssue]
+
+
+class SpellApplyRequest(BaseModel):
+    """Request to apply spelling corrections."""
+    job_id: str
+    corrections: dict = Field(
+        ...,
+        description="Map of original word to corrected word"
+    )
+
+
+@router.post("/spell-check", response_model=SpellCheckResponse)
+async def check_text_spelling(
+    request: SpellCheckRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Check spelling in provided text.
+
+    Returns a list of potential spelling issues for user review.
+    The user can then decide which corrections to apply.
+    """
+    logger.info(
+        "Checking spelling",
+        user_id=user.user_id,
+        text_length=len(request.text),
+    )
+
+    result = check_spelling(request.text)
+
+    return SpellCheckResponse(
+        has_issues=result["has_issues"],
+        issues=[
+            SpellIssue(
+                word=issue["word"],
+                position=issue["position"],
+                suggestion=issue["suggestion"],
+                context=issue["context"],
+            )
+            for issue in result["issues"]
+        ],
+    )
+
+
+@router.post("/jobs/{job_id}/spell-check", response_model=SpellCheckResponse)
+async def check_job_spelling(
+    job_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Check spelling in a generation job's content.
+
+    Checks the title and all section titles and content for spelling issues.
+    Returns a list of issues for user review before final document generation.
+    """
+    logger.info("Checking job spelling", job_id=job_id, user_id=user.user_id)
+
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    # Collect all text to check
+    all_issues = []
+
+    # Check title
+    title_result = check_spelling(job.title)
+    for issue in title_result["issues"]:
+        issue["source"] = "title"
+        all_issues.append(issue)
+
+    # Check section titles and content
+    for section in job.sections:
+        # Check section title
+        title_result = check_spelling(section.title)
+        for issue in title_result["issues"]:
+            issue["source"] = f"section_{section.id}_title"
+            all_issues.append(issue)
+
+        # Check section content
+        content = section.revised_content or section.content
+        content_result = check_spelling(content)
+        for issue in content_result["issues"]:
+            issue["source"] = f"section_{section.id}_content"
+            all_issues.append(issue)
+
+    # Limit total issues
+    all_issues = all_issues[:50]
+
+    return SpellCheckResponse(
+        has_issues=len(all_issues) > 0,
+        issues=[
+            SpellIssue(
+                word=issue["word"],
+                position=issue["position"],
+                suggestion=issue["suggestion"],
+                context=issue["context"],
+            )
+            for issue in all_issues
+        ],
+    )
