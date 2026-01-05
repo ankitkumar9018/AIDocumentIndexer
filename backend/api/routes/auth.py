@@ -12,10 +12,15 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 import jwt
 import os
 from passlib.context import CryptContext
+
+from backend.db.database import get_async_session
+from backend.db.models import User
 
 logger = structlog.get_logger(__name__)
 
@@ -274,7 +279,7 @@ def require_tier(min_tier: int):
 # =============================================================================
 
 @router.post("/login", response_model=TokenResponse)
-async def login(request: LoginRequest):
+async def login(request: LoginRequest, db: AsyncSession = Depends(get_async_session)):
     """
     Authenticate user with email and password.
 
@@ -311,6 +316,17 @@ async def login(request: LoginRequest):
         role=user["role"],
         access_tier=user["access_tier"],
     )
+
+    # Update last_login_at in database
+    try:
+        await db.execute(
+            update(User).where(User.email == request.email).values(last_login_at=datetime.utcnow())
+        )
+        await db.commit()
+        logger.info("Updated last_login_at", email=request.email)
+    except Exception as e:
+        logger.warning("Failed to update last_login_at", email=request.email, error=str(e))
+        # Don't fail the login if we can't update the timestamp
 
     logger.info("Login successful", email=request.email, role=user["role"])
 

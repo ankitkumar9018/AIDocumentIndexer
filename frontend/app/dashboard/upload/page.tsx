@@ -63,6 +63,7 @@ import {
   useAccessTiers,
   ProcessingStatus,
 } from "@/lib/api";
+import { FolderSelector } from "@/components/folder-selector";
 
 const getFileIconFromName = (filename: string) => {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
@@ -111,6 +112,7 @@ export default function UploadPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [collection, setCollection] = useState("");
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
 
@@ -225,6 +227,7 @@ export default function UploadPage() {
     // Build upload options including processing settings
     const uploadOptions = {
       ...(collection && { collection }),
+      ...(selectedFolderId && { folder_id: selectedFolderId }),
       ...processingOptions,
     };
 
@@ -469,6 +472,22 @@ export default function UploadPage() {
                 value={collection}
                 onChange={(e) => setCollection(e.target.value)}
               />
+            </div>
+
+            {/* Folder Selection */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium flex items-center gap-2">
+                <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                Upload to Folder (optional)
+              </label>
+              <FolderSelector
+                value={selectedFolderId}
+                onChange={setSelectedFolderId}
+                placeholder="Root (no folder)"
+              />
+              <p className="text-xs text-muted-foreground">
+                Leave empty to upload to root level
+              </p>
             </div>
 
             {/* Access Tier Selection */}

@@ -88,6 +88,7 @@ import { TextToSpeech } from "@/components/chat/text-to-speech";
 import { VoiceConversationIndicator, type VoiceState } from "@/components/chat/voice-conversation-indicator";
 import { TempDocumentPanel } from "@/components/chat/temp-document-panel";
 import { ImageUploadCompact, ImagePreviewBar } from "@/components/chat/image-upload";
+import { FolderSelector } from "@/components/folder-selector";
 import { api, type PlanStep, type ExecutionMode } from "@/lib/api/client";
 
 /**
@@ -264,6 +265,9 @@ export default function ChatPage() {
   const [historySearchQuery, setHistorySearchQuery] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [selectedCollections, setSelectedCollections] = useState<string[]>([]);
+  // Folder filter for scoped queries
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [includeSubfolders, setIncludeSubfolders] = useState(true);
   // Voice conversation mode
   const [voiceModeEnabled, setVoiceModeEnabled] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
@@ -628,6 +632,8 @@ export default function ChatPage() {
           },
           include_collection_context: includeCollectionContext,
           collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
+          folder_id: selectedFolderId || undefined,
+          include_subfolders: includeSubfolders,
           top_k: topK || undefined,
         })) {
           switch (chunk.type) {
@@ -885,6 +891,8 @@ export default function ChatPage() {
           mode: hasImages ? "vision" : apiMode, // Use vision mode if images attached, otherwise computed mode
           include_collection_context: includeCollectionContext,
           collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
+          folder_id: selectedFolderId || undefined,
+          include_subfolders: includeSubfolders,
           temp_session_id: tempSessionId || undefined,
           top_k: topK || undefined,
         };
@@ -1944,7 +1952,7 @@ export default function ChatPage() {
 
             {/* Document Filter Panel */}
             {showFilters && sourceMode === "documents" && (
-              <div className="max-w-3xl mx-auto mb-3 max-h-48 sm:max-h-none overflow-y-auto">
+              <div className="max-w-3xl mx-auto mb-3 max-h-48 sm:max-h-none overflow-y-auto space-y-3">
                 <DocumentFilterPanel
                   collections={collectionsData?.collections || []}
                   selectedCollections={selectedCollections}
@@ -1953,6 +1961,20 @@ export default function ChatPage() {
                   isLoading={isLoadingCollections}
                   onRefresh={() => refetchCollections()}
                 />
+                {/* Folder Filter */}
+                <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/50">
+                  <span className="text-sm font-medium whitespace-nowrap">Folder scope:</span>
+                  <div className="flex-1">
+                    <FolderSelector
+                      value={selectedFolderId}
+                      onChange={setSelectedFolderId}
+                      includeSubfolders={includeSubfolders}
+                      onIncludeSubfoldersChange={setIncludeSubfolders}
+                      showSubfoldersToggle={true}
+                      placeholder="All folders"
+                    />
+                  </div>
+                </div>
               </div>
             )}
 

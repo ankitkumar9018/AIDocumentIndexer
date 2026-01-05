@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, B
 from fastapi.responses import FileResponse, StreamingResponse
 from pathlib import Path
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, and_, or_, desc, asc
+from sqlalchemy import select, func, and_, or_, desc, asc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 import structlog
@@ -269,6 +269,14 @@ async def list_documents(
     status: Optional[str] = None,
     sort_by: str = Query(default="created_at"),
     sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    # Date range filtering
+    created_after: Optional[datetime] = Query(default=None, description="Filter documents created after this date (ISO 8601)"),
+    created_before: Optional[datetime] = Query(default=None, description="Filter documents created before this date (ISO 8601)"),
+    updated_after: Optional[datetime] = Query(default=None, description="Filter documents updated after this date (ISO 8601)"),
+    updated_before: Optional[datetime] = Query(default=None, description="Filter documents updated before this date (ISO 8601)"),
+    # Folder filtering
+    folder_id: Optional[str] = Query(default=None, description="Filter by folder ID"),
+    include_subfolders: bool = Query(default=True, description="Include documents from subfolders"),
 ):
     """
     List documents with pagination and filtering.
@@ -312,6 +320,42 @@ async def list_documents(
             base_query = base_query.where(Document.processing_status == status_enum)
         except ValueError:
             pass  # Invalid status, ignore filter
+
+    # Apply date range filters
+    if created_after:
+        base_query = base_query.where(Document.created_at >= created_after)
+    if created_before:
+        base_query = base_query.where(Document.created_at <= created_before)
+    if updated_after:
+        base_query = base_query.where(Document.updated_at >= updated_after)
+    if updated_before:
+        base_query = base_query.where(Document.updated_at <= updated_before)
+
+    # Apply folder filter
+    if folder_id:
+        import uuid as uuid_module
+        try:
+            folder_uuid = uuid_module.UUID(folder_id)
+            if include_subfolders:
+                # Get all documents in folder and subfolders
+                from backend.services.folder_service import get_folder_service
+                folder_service = get_folder_service()
+                folder_doc_ids = await folder_service.get_folder_document_ids(
+                    folder_id=folder_id,
+                    include_subfolders=True,
+                    user_tier_level=user.access_tier_level,
+                )
+                if folder_doc_ids:
+                    doc_uuids = [uuid_module.UUID(d) for d in folder_doc_ids]
+                    base_query = base_query.where(Document.id.in_(doc_uuids))
+                else:
+                    # No documents in folder, return empty
+                    base_query = base_query.where(Document.id == None)
+            else:
+                # Only direct children
+                base_query = base_query.where(Document.folder_id == folder_uuid)
+        except ValueError:
+            pass  # Invalid UUID, ignore filter
 
     # Count total before pagination
     count_query = select(func.count()).select_from(base_query.subquery())
@@ -1693,4 +1737,420 @@ async def fix_document_names(
         total=len(documents),
         fixed=fixed,
         results=results,
+    )
+
+
+# =============================================================================
+# Document Move Endpoints
+# =============================================================================
+
+class MoveDocumentRequest(BaseModel):
+    """Request to move a document to a folder."""
+    folder_id: Optional[str] = Field(None, description="Target folder ID (null to remove from folder)")
+
+
+class BulkMoveRequest(BaseModel):
+    """Request to move multiple documents."""
+    document_ids: List[str] = Field(..., min_length=1, description="List of document IDs to move")
+    folder_id: Optional[str] = Field(None, description="Target folder ID (null to remove from folders)")
+
+
+class MoveDocumentResponse(BaseModel):
+    """Response for document move operation."""
+    document_id: str
+    folder_id: Optional[str]
+    folder_name: Optional[str]
+    message: str
+
+
+class BulkMoveResponse(BaseModel):
+    """Response for bulk move operation."""
+    moved: int
+    failed: int
+    folder_id: Optional[str]
+    folder_name: Optional[str]
+    errors: List[Dict]
+
+
+@router.post("/{document_id}/move", response_model=MoveDocumentResponse)
+async def move_document(
+    document_id: str,
+    request: MoveDocumentRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Move a document to a folder.
+
+    - Set folder_id to move document into a folder
+    - Set folder_id to null to remove document from its current folder
+    """
+    from backend.services.folder_service import get_folder_service
+    import uuid as uuid_module
+
+    # Get document
+    result = await db.execute(
+        select(Document)
+        .options(selectinload(Document.access_tier))
+        .where(Document.id == document_id)
+    )
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Check document access
+    user_tier = user.access_tier_level
+    doc_tier = document.access_tier.level if document.access_tier else 1
+    if user_tier < doc_tier:
+        raise HTTPException(status_code=403, detail="No access to this document")
+
+    folder_service = get_folder_service()
+    folder_name = None
+
+    if request.folder_id:
+        # Check target folder access
+        target_folder = await folder_service.get_folder_by_id(request.folder_id)
+        if not target_folder:
+            raise HTTPException(status_code=404, detail="Target folder not found")
+
+        effective_tier = await folder_service.get_effective_tier_level(target_folder)
+        if user_tier < effective_tier:
+            raise HTTPException(status_code=403, detail="No access to target folder")
+
+        document.folder_id = uuid_module.UUID(request.folder_id)
+        folder_name = target_folder.name
+    else:
+        # Remove from folder
+        document.folder_id = None
+
+    await db.commit()
+
+    logger.info(
+        "Document moved",
+        document_id=document_id,
+        folder_id=request.folder_id,
+    )
+
+    return MoveDocumentResponse(
+        document_id=document_id,
+        folder_id=request.folder_id,
+        folder_name=folder_name,
+        message=f"Document moved to {'folder ' + folder_name if folder_name else 'root'}",
+    )
+
+
+@router.post("/bulk/move", response_model=BulkMoveResponse)
+async def bulk_move_documents(
+    request: BulkMoveRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Move multiple documents to a folder.
+
+    Moves all documents that the user has access to.
+    Returns count of moved documents and any errors.
+    """
+    from backend.services.folder_service import get_folder_service
+    import uuid as uuid_module
+
+    folder_service = get_folder_service()
+    user_tier = user.access_tier_level
+    folder_name = None
+
+    # Validate target folder
+    if request.folder_id:
+        target_folder = await folder_service.get_folder_by_id(request.folder_id)
+        if not target_folder:
+            raise HTTPException(status_code=404, detail="Target folder not found")
+
+        effective_tier = await folder_service.get_effective_tier_level(target_folder)
+        if user_tier < effective_tier:
+            raise HTTPException(status_code=403, detail="No access to target folder")
+
+        folder_name = target_folder.name
+
+    # Get all documents
+    result = await db.execute(
+        select(Document)
+        .options(selectinload(Document.access_tier))
+        .where(Document.id.in_(request.document_ids))
+    )
+    documents = result.scalars().all()
+
+    moved = 0
+    failed = 0
+    errors = []
+
+    for doc in documents:
+        doc_tier = doc.access_tier.level if doc.access_tier else 1
+
+        if user_tier < doc_tier:
+            failed += 1
+            errors.append({
+                "document_id": str(doc.id),
+                "error": "No access to this document",
+            })
+            continue
+
+        if request.folder_id:
+            doc.folder_id = uuid_module.UUID(request.folder_id)
+        else:
+            doc.folder_id = None
+
+        moved += 1
+
+    # Check for documents not found
+    found_ids = {str(doc.id) for doc in documents}
+    for doc_id in request.document_ids:
+        if doc_id not in found_ids:
+            failed += 1
+            errors.append({
+                "document_id": doc_id,
+                "error": "Document not found",
+            })
+
+    await db.commit()
+
+    logger.info(
+        "Bulk move completed",
+        moved=moved,
+        failed=failed,
+        folder_id=request.folder_id,
+    )
+
+    return BulkMoveResponse(
+        moved=moved,
+        failed=failed,
+        folder_id=request.folder_id,
+        folder_name=folder_name,
+        errors=errors,
+    )
+
+
+# =============================================================================
+# Bulk Delete
+# =============================================================================
+
+class BulkDeleteRequest(BaseModel):
+    """Request to delete multiple documents."""
+    document_ids: List[str] = Field(..., min_length=1, max_length=100, description="List of document IDs to delete")
+    permanent: bool = Field(False, description="If true, permanently delete. If false, soft delete.")
+
+
+class BulkDeleteResponse(BaseModel):
+    """Response for bulk delete operation."""
+    deleted: int
+    failed: int
+    permanent: bool
+    errors: List[Dict]
+
+
+@router.post("/bulk/delete", response_model=BulkDeleteResponse)
+async def bulk_delete_documents(
+    request: BulkDeleteRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete multiple documents.
+
+    Soft deletes by default (sets status to FAILED with "Deleted by user").
+    Set permanent=true to permanently remove documents and their chunks.
+
+    Requires access to each document. Returns count of deleted and failed.
+    """
+    from backend.db.models import ProcessingStatus
+    import uuid as uuid_module
+
+    user_tier = user.access_tier_level
+
+    # Get all documents
+    doc_uuids = []
+    for doc_id in request.document_ids:
+        try:
+            doc_uuids.append(uuid_module.UUID(doc_id))
+        except ValueError:
+            pass
+
+    result = await db.execute(
+        select(Document)
+        .options(selectinload(Document.access_tier))
+        .where(Document.id.in_(doc_uuids))
+    )
+    documents = result.scalars().all()
+
+    deleted = 0
+    failed = 0
+    errors = []
+
+    for doc in documents:
+        doc_tier = doc.access_tier.level if doc.access_tier else 1
+
+        if user_tier < doc_tier:
+            failed += 1
+            errors.append({
+                "document_id": str(doc.id),
+                "error": "No access to this document",
+            })
+            continue
+
+        if request.permanent:
+            # Delete chunks first
+            await db.execute(
+                delete(Chunk).where(Chunk.document_id == doc.id)
+            )
+            # Delete document
+            await db.delete(doc)
+        else:
+            # Soft delete
+            doc.processing_status = ProcessingStatus.FAILED
+            doc.processing_error = "Deleted by user"
+
+        deleted += 1
+
+    # Check for documents not found
+    found_ids = {str(doc.id) for doc in documents}
+    for doc_id in request.document_ids:
+        if doc_id not in found_ids:
+            failed += 1
+            errors.append({
+                "document_id": doc_id,
+                "error": "Document not found",
+            })
+
+    await db.commit()
+
+    logger.info(
+        "Bulk delete completed",
+        deleted=deleted,
+        failed=failed,
+        permanent=request.permanent,
+    )
+
+    return BulkDeleteResponse(
+        deleted=deleted,
+        failed=failed,
+        permanent=request.permanent,
+        errors=errors,
+    )
+
+
+# =============================================================================
+# Bulk Tag Update
+# =============================================================================
+
+class BulkTagRequest(BaseModel):
+    """Request to update tags on multiple documents."""
+    document_ids: List[str] = Field(..., min_length=1, max_length=100, description="List of document IDs")
+    add_tags: List[str] = Field(default_factory=list, description="Tags to add to all documents")
+    remove_tags: List[str] = Field(default_factory=list, description="Tags to remove from all documents")
+    set_collection: Optional[str] = Field(None, description="Set collection for all documents")
+
+
+class BulkTagResponse(BaseModel):
+    """Response for bulk tag operation."""
+    updated: int
+    failed: int
+    errors: List[Dict]
+
+
+@router.post("/bulk/tags", response_model=BulkTagResponse)
+async def bulk_update_tags(
+    request: BulkTagRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update tags and/or collection on multiple documents.
+
+    - add_tags: Tags to add to each document
+    - remove_tags: Tags to remove from each document
+    - set_collection: Set the collection field for all documents
+    """
+    import uuid as uuid_module
+    import json
+
+    user_tier = user.access_tier_level
+
+    # Get all documents
+    doc_uuids = []
+    for doc_id in request.document_ids:
+        try:
+            doc_uuids.append(uuid_module.UUID(doc_id))
+        except ValueError:
+            pass
+
+    result = await db.execute(
+        select(Document)
+        .options(selectinload(Document.access_tier))
+        .where(Document.id.in_(doc_uuids))
+    )
+    documents = result.scalars().all()
+
+    updated = 0
+    failed = 0
+    errors = []
+
+    for doc in documents:
+        doc_tier = doc.access_tier.level if doc.access_tier else 1
+
+        if user_tier < doc_tier:
+            failed += 1
+            errors.append({
+                "document_id": str(doc.id),
+                "error": "No access to this document",
+            })
+            continue
+
+        # Update tags
+        if request.add_tags or request.remove_tags:
+            # Parse existing tags
+            existing_tags = set()
+            if doc.tags:
+                try:
+                    existing_tags = set(json.loads(doc.tags)) if isinstance(doc.tags, str) else set(doc.tags)
+                except (json.JSONDecodeError, TypeError):
+                    existing_tags = set()
+
+            # Add new tags
+            existing_tags.update(request.add_tags)
+
+            # Remove tags
+            existing_tags -= set(request.remove_tags)
+
+            # Save back
+            doc.tags = json.dumps(list(existing_tags))
+
+        # Update collection
+        if request.set_collection is not None:
+            doc.collection = request.set_collection if request.set_collection else None
+
+        updated += 1
+
+    # Check for documents not found
+    found_ids = {str(doc.id) for doc in documents}
+    for doc_id in request.document_ids:
+        if doc_id not in found_ids:
+            failed += 1
+            errors.append({
+                "document_id": doc_id,
+                "error": "Document not found",
+            })
+
+    await db.commit()
+
+    logger.info(
+        "Bulk tag update completed",
+        updated=updated,
+        failed=failed,
+        add_tags=request.add_tags,
+        remove_tags=request.remove_tags,
+    )
+
+    return BulkTagResponse(
+        updated=updated,
+        failed=failed,
+        errors=errors,
     )

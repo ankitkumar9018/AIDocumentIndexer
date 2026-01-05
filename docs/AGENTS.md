@@ -90,11 +90,12 @@ The orchestrator that coordinates all worker agents:
 - Monitors progress and handles failures
 - Aggregates results into final output
 
-**Recent Improvements (2025-12):**
+**Recent Improvements (2025-12/2026-01):**
 - **Fallback Research Step**: If the user's request contains document-related keywords (e.g., "documents", "files", "my data") but the LLM plan doesn't include a research step, the Manager automatically prepends one
 - **Context Passing**: Research findings are now passed to the Generator agent as context, improving output quality
 - **Streaming Output**: Step outputs are streamed in real-time via SSE `content` events
 - **Source Attribution**: Research agent sources are propagated to the frontend for display
+- **Multi-Step Synthesis Fix** (2026-01): Fixed an issue where multi-step tasks (e.g., "research X and create Y") would only return research findings without the creative/generated output. The synthesis now properly combines all step outputs and emphasizes completing the user's full request
 
 ### Generator Agent
 Handles content creation tasks:

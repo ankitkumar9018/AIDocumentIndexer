@@ -78,6 +78,8 @@ from backend.services.retrieval_strategies import (
     HierarchicalRetriever,
     HierarchicalConfig,
     get_hierarchical_retriever,
+    TwoStageRetriever,
+    TwoStageConfig,
 )
 # Note: KnowledgeGraphService is imported lazily inside _enhance_with_knowledge_graph
 # to avoid circular imports (knowledge_graph -> llm -> services.__init__ -> rag)
@@ -179,6 +181,11 @@ class RAGConfig:
         enable_crag: bool = None,  # Read from env if not set
         crag_confidence_threshold: float = 0.5,  # Trigger CRAG below this confidence
 
+        # Two-stage retrieval - fast ANN + ColBERT reranking for better precision at scale
+        enable_two_stage_retrieval: bool = None,  # Read from settings if not set
+        two_stage_candidates: int = 150,  # Stage 1 candidates (ANN retrieval)
+        use_colbert_reranker: bool = True,  # Use ColBERT (else cross-encoder) in stage 2
+
         # Hierarchical retrieval - document-first strategy for better diversity
         enable_hierarchical_retrieval: bool = None,  # Read from settings if not set
         hierarchical_doc_limit: int = 10,  # Max documents in stage 1
@@ -204,33 +211,38 @@ class RAGConfig:
         if top_k is None:
             top_k = settings.get_default_value("rag.top_k") or 10
         if similarity_threshold is None:
-            similarity_threshold = settings.get_default_value("rag.similarity_threshold") or 0.4
+            similarity_threshold = settings.get_default_value("rag.similarity_threshold") or 0.55
         if rerank_results is None:
             rerank_results = settings.get_default_value("rag.rerank_results")
             if rerank_results is None:
                 rerank_results = True
 
-        # Read RAG settings from environment with sensible defaults
+        # Read RAG settings - try settings service first, then environment variables
         if enable_query_expansion is None:
-            enable_query_expansion = os.getenv("ENABLE_QUERY_EXPANSION", "true").lower() == "true"
+            enable_query_expansion = settings.get_default_value("rag.query_expansion_enabled")
+            if enable_query_expansion is None:
+                enable_query_expansion = os.getenv("ENABLE_QUERY_EXPANSION", "true").lower() == "true"
         if query_expansion_count is None:
-            # Try settings service first, fall back to env
             query_expansion_count = settings.get_default_value("rag.query_expansion_count")
             if query_expansion_count is None:
                 query_expansion_count = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))
         if enable_verification is None:
-            enable_verification = os.getenv("ENABLE_VERIFICATION", "true").lower() == "true"
+            enable_verification = settings.get_default_value("rag.verification_enabled")
+            if enable_verification is None:
+                enable_verification = os.getenv("ENABLE_VERIFICATION", "true").lower() == "true"
         if verification_level is None:
-            verification_level = os.getenv("VERIFICATION_LEVEL", "quick")
+            verification_level = settings.get_default_value("rag.verification_level")
+            if verification_level is None:
+                verification_level = os.getenv("VERIFICATION_LEVEL", "quick")
         if enable_dynamic_weighting is None:
-            enable_dynamic_weighting = os.getenv("ENABLE_DYNAMIC_WEIGHTING", "true").lower() == "true"
+            enable_dynamic_weighting = settings.get_default_value("rag.dynamic_weighting_enabled")
+            if enable_dynamic_weighting is None:
+                enable_dynamic_weighting = os.getenv("ENABLE_DYNAMIC_WEIGHTING", "true").lower() == "true"
         if enable_hyde is None:
-            # Try settings service first, fall back to env
             enable_hyde = settings.get_default_value("rag.hyde_enabled")
             if enable_hyde is None:
                 enable_hyde = os.getenv("ENABLE_HYDE", "true").lower() == "true"
         if enable_crag is None:
-            # Try settings service first, fall back to env
             enable_crag = settings.get_default_value("rag.crag_enabled")
             if enable_crag is None:
                 enable_crag = os.getenv("ENABLE_CRAG", "true").lower() == "true"
@@ -243,6 +255,20 @@ class RAGConfig:
             stored_value = settings.get_default_value("rag.crag_confidence_threshold")
             if stored_value is not None:
                 crag_confidence_threshold = stored_value
+
+        # Read two-stage retrieval settings
+        if enable_two_stage_retrieval is None:
+            enable_two_stage_retrieval = settings.get_default_value("rag.two_stage_retrieval_enabled")
+            if enable_two_stage_retrieval is None:
+                enable_two_stage_retrieval = os.getenv("TWO_STAGE_RETRIEVAL_ENABLED", "false").lower() == "true"
+        if two_stage_candidates == 150:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.stage1_candidates")
+            if stored_value is not None:
+                two_stage_candidates = stored_value
+        if use_colbert_reranker:  # Default is True, check settings for override
+            stored_value = settings.get_default_value("rag.use_colbert_reranker")
+            if stored_value is not None:
+                use_colbert_reranker = stored_value
 
         # Read hierarchical retrieval settings
         if enable_hierarchical_retrieval is None:
@@ -305,6 +331,10 @@ class RAGConfig:
         # CRAG
         self.enable_crag = enable_crag
         self.crag_confidence_threshold = crag_confidence_threshold
+        # Two-stage retrieval
+        self.enable_two_stage_retrieval = enable_two_stage_retrieval
+        self.two_stage_candidates = two_stage_candidates
+        self.use_colbert_reranker = use_colbert_reranker
         # Hierarchical retrieval
         self.enable_hierarchical_retrieval = enable_hierarchical_retrieval
         self.hierarchical_doc_limit = hierarchical_doc_limit
@@ -605,6 +635,20 @@ class RAGService:
                 chunks_per_doc=self.config.hierarchical_chunks_per_doc,
             )
 
+        # Initialize two-stage retriever for ColBERT reranking at scale
+        self._two_stage_retriever: Optional[TwoStageRetriever] = None
+        if self.config.enable_two_stage_retrieval and self._custom_vectorstore:
+            two_stage_config = TwoStageConfig(
+                stage1_candidates=self.config.two_stage_candidates,
+                final_top_k=self.config.top_k,
+                use_colbert=self.config.use_colbert_reranker,
+                use_hybrid_stage1=self.config.use_hybrid_search,
+            )
+            self._two_stage_retriever = TwoStageRetriever(
+                vectorstore=self._custom_vectorstore,
+                config=two_stage_config,
+            )
+
         # Knowledge graph is initialized lazily per-request (requires db session)
         self._enable_knowledge_graph = self.config.enable_knowledge_graph
         self._knowledge_graph_max_hops = self.config.knowledge_graph_max_hops
@@ -623,6 +667,7 @@ class RAGService:
             dynamic_weighting=self.config.enable_dynamic_weighting,
             hyde=self.config.enable_hyde,
             crag=self.config.enable_crag,
+            two_stage_retrieval=self.config.enable_two_stage_retrieval,
             hierarchical_retrieval=self.config.enable_hierarchical_retrieval,
             semantic_dedup=self.config.enable_semantic_dedup,
             knowledge_graph=self.config.enable_knowledge_graph,
@@ -648,6 +693,8 @@ class RAGService:
             "rerank_results": settings.get("rag.rerank_results", self.config.rerank_results),
             "query_expansion_count": settings.get("rag.query_expansion_count", self.config.query_expansion_count),
             "similarity_threshold": settings.get("rag.similarity_threshold", self.config.similarity_threshold),
+            "query_decomposition_enabled": settings.get("rag.query_decomposition_enabled", False),
+            "decomposition_min_words": settings.get("rag.decomposition_min_words", 10),
         }
 
     @property
@@ -876,6 +923,8 @@ class RAGService:
         include_collection_context: bool = True,
         additional_context: Optional[str] = None,
         top_k: Optional[int] = None,  # Override documents to retrieve per query
+        folder_id: Optional[str] = None,  # Folder-scoped query
+        include_subfolders: bool = True,  # Include subfolders in folder query
     ) -> RAGResponse:
         """
         Query the RAG system.
@@ -889,6 +938,8 @@ class RAGService:
             include_collection_context: Whether to include collection tags in LLM context
             additional_context: Additional context to include (e.g., from temp documents)
             top_k: Optional override for number of documents to retrieve
+            folder_id: Optional folder ID to scope query to specific folder
+            include_subfolders: Whether to include documents from subfolders
 
         Returns:
             RAGResponse with answer and sources
@@ -909,20 +960,94 @@ class RAGService:
             top_k=top_k,
         )
 
+        # Check if query decomposition is enabled
+        decomposition_enabled = runtime_settings.get("query_decomposition_enabled", False)
+        decomposed_query = None
+
+        if decomposition_enabled:
+            try:
+                from backend.services.query_decomposer import get_query_decomposer
+                decomposer = get_query_decomposer()
+                decomposed_query = await decomposer.decompose(question)
+
+                if len(decomposed_query.sub_queries) > 1:
+                    logger.info(
+                        "Query decomposed",
+                        original=question,
+                        sub_queries=decomposed_query.sub_queries,
+                        query_type=decomposed_query.query_type,
+                    )
+            except Exception as e:
+                logger.warning("Query decomposition failed", error=str(e))
+                decomposed_query = None
+
         # Get LLM for this session (with database-driven config)
         llm, llm_config = await self.get_llm_for_session(
             session_id=session_id,
             user_id=user_id,
         )
 
+        # Get folder-scoped document IDs if folder_id is specified
+        folder_document_ids = None
+        if folder_id:
+            from backend.services.folder_service import get_folder_service
+            folder_service = get_folder_service()
+            folder_document_ids = await folder_service.get_folder_document_ids(
+                folder_id=folder_id,
+                include_subfolders=include_subfolders,
+                user_tier_level=access_tier,
+            )
+            logger.debug(
+                "Folder-scoped query",
+                folder_id=folder_id,
+                document_count=len(folder_document_ids),
+            )
+            # If no documents in folder, return empty response early
+            if not folder_document_ids:
+                logger.info("No documents found in specified folder")
+                return RAGResponse(
+                    content="No documents found in the specified folder.",
+                    sources=[],
+                    confidence_score=0.0,
+                    confidence_level="low",
+                )
+
         # Retrieve relevant documents
-        retrieved_docs = await self._retrieve(
-            question,
-            collection_filter=collection_filter,
-            access_tier=access_tier,
-            top_k=top_k,
-        )
-        logger.debug("Retrieved documents from vectorstore", count=len(retrieved_docs))
+        # If query was decomposed, retrieve for each sub-query and merge
+        if decomposed_query and len(decomposed_query.sub_queries) > 1:
+            all_retrieved_docs = []
+            seen_chunk_ids = set()
+
+            for sub_query in decomposed_query.sub_queries:
+                sub_docs = await self._retrieve(
+                    sub_query,
+                    collection_filter=collection_filter,
+                    access_tier=access_tier,
+                    top_k=max(top_k // len(decomposed_query.sub_queries), 3),
+                    document_ids=folder_document_ids,
+                )
+                # Deduplicate by chunk_id
+                for doc in sub_docs:
+                    chunk_id = doc.metadata.get("chunk_id")
+                    if chunk_id and chunk_id not in seen_chunk_ids:
+                        seen_chunk_ids.add(chunk_id)
+                        all_retrieved_docs.append(doc)
+
+            retrieved_docs = all_retrieved_docs[:top_k]
+            logger.debug(
+                "Retrieved documents for decomposed query",
+                sub_query_count=len(decomposed_query.sub_queries),
+                total_docs=len(retrieved_docs),
+            )
+        else:
+            retrieved_docs = await self._retrieve(
+                question,
+                collection_filter=collection_filter,
+                access_tier=access_tier,
+                top_k=top_k,
+                document_ids=folder_document_ids,  # Filter to folder documents
+            )
+            logger.debug("Retrieved documents from vectorstore", count=len(retrieved_docs))
 
         # Verify retrieved documents if enabled
         verification_result = None
@@ -1061,23 +1186,59 @@ class RAGService:
                     llm=llm,
                 )
 
-                if crag_result.action_taken in ["filtered", "refined_query"]:
+                if crag_result.action_taken == "refined_query" and crag_result.refined_query:
+                    # Re-search with the refined query
                     logger.info(
-                        "CRAG applied to low-confidence results",
-                        action=crag_result.action_taken,
+                        "CRAG refined query - re-searching",
+                        original_query=question[:50],
+                        refined_query=crag_result.refined_query[:50],
+                    )
+
+                    # Re-search with refined query using _retrieve
+                    new_retrieved_docs = await self._retrieve(
+                        query=crag_result.refined_query,
+                        collection_filter=collection_filter,
+                        access_tier=access_tier,
+                        top_k=top_k,
+                        document_ids=document_ids,  # Maintain folder filtering if applicable
+                    )
+
+                    if new_retrieved_docs and len(new_retrieved_docs) > 0:
+                        # Convert to Source objects using _format_context
+                        _, new_sources = self._format_context(new_retrieved_docs, include_collection_context)
+
+                        if new_sources:
+                            # Calculate new confidence from similarity scores
+                            new_confidence = sum(s.similarity_score or s.relevance_score for s in new_sources) / len(new_sources)
+                            if new_confidence > confidence_score:
+                                # Use new results - also update context for response
+                                sources = new_sources
+                                confidence_score = new_confidence
+                                # Regenerate context with new sources
+                                context, _ = self._format_context(new_retrieved_docs, include_collection_context)
+                                logger.info(
+                                    "CRAG re-search improved results",
+                                    new_source_count=len(sources),
+                                    new_confidence=confidence_score,
+                                )
+
+                elif crag_result.action_taken == "filtered":
+                    logger.info(
+                        "CRAG filtered results",
                         original_count=len(sources),
                         filtered_count=len(crag_result.filtered_results),
                         new_confidence=crag_result.confidence,
                     )
-                    # Update confidence based on CRAG evaluation
-                    if crag_result.confidence > confidence_score:
-                        confidence_score = crag_result.confidence
-                        if confidence_score >= 0.7:
-                            confidence_level = "high"
-                            confidence_warning = ""
-                        elif confidence_score >= 0.5:
-                            confidence_level = "medium"
-                            confidence_warning = ""
+
+                # Update confidence based on CRAG evaluation
+                if crag_result.confidence > confidence_score:
+                    confidence_score = crag_result.confidence
+                    if confidence_score >= 0.7:
+                        confidence_level = "high"
+                        confidence_warning = ""
+                    elif confidence_score >= 0.5:
+                        confidence_level = "medium"
+                        confidence_warning = ""
 
             except Exception as e:
                 logger.warning("CRAG processing failed", error=str(e))
@@ -1111,6 +1272,8 @@ class RAGService:
         user_id: Optional[str] = None,
         include_collection_context: bool = True,
         top_k: Optional[int] = None,  # Override documents to retrieve per query
+        folder_id: Optional[str] = None,  # Folder to scope query to
+        include_subfolders: bool = True,  # Include subfolders in folder-scoped query
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Query RAG with streaming response.
@@ -1123,6 +1286,8 @@ class RAGService:
             user_id: User ID for usage tracking
             include_collection_context: Whether to include collection tags in LLM context
             top_k: Optional override for number of documents to retrieve
+            folder_id: Optional folder ID to restrict search to
+            include_subfolders: When folder_id is set, include documents in subfolders
 
         Yields:
             StreamChunk objects with response parts
@@ -1148,12 +1313,35 @@ class RAGService:
             user_id=user_id,
         )
 
+        # Resolve folder_id to document IDs if provided
+        document_ids = None
+        if folder_id:
+            from backend.services.folder_service import get_folder_service
+            folder_service = get_folder_service()
+            document_ids = await folder_service.get_folder_document_ids(
+                folder_id=folder_id,
+                include_subfolders=include_subfolders,
+                user_tier_level=access_tier,
+            )
+            if not document_ids:
+                logger.info(
+                    "No documents found in folder for streaming query",
+                    folder_id=folder_id,
+                    include_subfolders=include_subfolders,
+                )
+                yield StreamChunk(
+                    type="error",
+                    data="No documents found in the selected folder.",
+                )
+                return
+
         # Retrieve documents
         retrieved_docs = await self._retrieve(
             question,
             collection_filter=collection_filter,
             access_tier=access_tier,
             top_k=top_k,
+            document_ids=document_ids,
         )
 
         context, sources = self._format_context(retrieved_docs, include_collection_context)
@@ -1264,6 +1452,7 @@ class RAGService:
         collection_filter: Optional[str] = None,
         access_tier: int = 100,
         top_k: Optional[int] = None,
+        document_ids: Optional[List[str]] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve relevant documents for query.
@@ -1273,6 +1462,7 @@ class RAGService:
             collection_filter: Filter by collection
             access_tier: User's access tier
             top_k: Number of results to return
+            document_ids: Optional list of document IDs to filter to (for folder-scoped queries)
 
         Returns:
             List of (document, score) tuples
@@ -1349,6 +1539,7 @@ class RAGService:
                     collection_filter=collection_filter,
                     access_tier=access_tier,
                     top_k=top_k,
+                    document_ids=document_ids,
                 )
             elif self._vector_store is not None:
                 return await self._retrieve_with_langchain_store(
@@ -1356,6 +1547,7 @@ class RAGService:
                     collection_filter=collection_filter,
                     access_tier=access_tier,
                     top_k=top_k,
+                    document_ids=document_ids,
                 )
             else:
                 return []
@@ -1396,6 +1588,7 @@ class RAGService:
                 has_custom_vectorstore=self._custom_vectorstore is not None,
                 vectorstore_type=type(self._custom_vectorstore).__name__ if self._custom_vectorstore else None,
                 collection_filter=collection_filter,
+                has_folder_filter=document_ids is not None,
             )
             if self._custom_vectorstore is not None:
                 results = await self._retrieve_with_custom_store(
@@ -1403,6 +1596,7 @@ class RAGService:
                     collection_filter=collection_filter,
                     access_tier=access_tier,
                     top_k=top_k,
+                    document_ids=document_ids,
                 )
             elif self._vector_store is not None:
                 results = await self._retrieve_with_langchain_store(
@@ -1410,6 +1604,7 @@ class RAGService:
                     collection_filter=collection_filter,
                     access_tier=access_tier,
                     top_k=top_k,
+                    document_ids=document_ids,
                 )
             else:
                 logger.warning("No vector store configured, returning mock results")
@@ -1450,6 +1645,7 @@ class RAGService:
         collection_filter: Optional[str] = None,
         access_tier: int = 100,
         top_k: int = 5,
+        document_ids: Optional[List[str]] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve using our custom VectorStore service.
@@ -1459,6 +1655,7 @@ class RAGService:
             collection_filter: Filter by collection (or "(Untagged)" for untagged docs)
             access_tier: User's access tier
             top_k: Number of results
+            document_ids: Optional list of document IDs to filter to (for folder-scoped queries)
 
         Returns:
             List of (Document, score) tuples
@@ -1488,7 +1685,10 @@ class RAGService:
                 )
 
             # Get document IDs matching the collection filter
-            document_ids = None
+            # Start with folder-filtered document IDs if provided
+            filtered_document_ids = document_ids  # From folder filtering
+            collection_document_ids = None
+
             if collection_filter:
                 async with async_session_context() as db:
                     if collection_filter == "(Untagged)":
@@ -1501,42 +1701,91 @@ class RAGService:
                         )
                     else:
                         # Filter for documents with matching tag
-                        # SQLite stores JSON arrays as text, so we use raw SQL LIKE
-                        # to avoid the custom StringArrayType's JSON encoding of the pattern.
+                        # SQLite stores JSON arrays as text, so we use LIKE pattern
+                        # SECURITY FIX: Escape special LIKE characters to prevent injection
+                        from sqlalchemy import cast, String, literal
+
+                        # Escape LIKE special characters: %, _, \
+                        safe_filter = collection_filter.replace("\\", "\\\\")
+                        safe_filter = safe_filter.replace("%", "\\%")
+                        safe_filter = safe_filter.replace("_", "\\_")
+                        # Also escape quotes to prevent breaking out of the pattern
+                        safe_filter = safe_filter.replace('"', '\\"')
+
                         # e.g., tags = '["German", "Marketing"]' LIKE '%"German"%'
-                        from sqlalchemy import text, cast, String
-                        pattern = "%" + '"' + collection_filter + '"' + "%"
+                        pattern = f'%"{safe_filter}"%'
+
                         # Cast tags column to String to bypass StringArrayType processing
-                        # and use a literal pattern to avoid parameter binding issues
                         query_stmt = select(DBDocument.id).where(
-                            cast(DBDocument.tags, String).like(pattern)
+                            cast(DBDocument.tags, String).like(literal(pattern))
                         )
                     result = await db.execute(query_stmt)
-                    document_ids = [str(row[0]) for row in result.fetchall()]
+                    collection_document_ids = [str(row[0]) for row in result.fetchall()]
                     logger.info(
                         "Collection filter results",
-                        document_ids=document_ids[:5] if document_ids else [],
-                        count=len(document_ids),
+                        document_ids=collection_document_ids[:5] if collection_document_ids else [],
+                        count=len(collection_document_ids),
                     )
 
-                    if not document_ids:
+                    if not collection_document_ids:
                         logger.debug(
                             "No documents match collection filter",
                             collection_filter=collection_filter,
                         )
                         return []
 
-            # Perform search - use hierarchical retrieval if enabled
+            # Merge folder and collection filters (intersection if both exist)
+            if filtered_document_ids is not None and collection_document_ids is not None:
+                # Both folder and collection filters - take intersection
+                document_ids = list(set(filtered_document_ids) & set(collection_document_ids))
+                if not document_ids:
+                    logger.debug(
+                        "No documents match both folder and collection filters",
+                        folder_doc_count=len(filtered_document_ids),
+                        collection_doc_count=len(collection_document_ids),
+                    )
+                    return []
+                logger.info(
+                    "Merged folder and collection filters",
+                    folder_count=len(filtered_document_ids),
+                    collection_count=len(collection_document_ids),
+                    merged_count=len(document_ids),
+                )
+            elif filtered_document_ids is not None:
+                # Only folder filter
+                document_ids = filtered_document_ids
+            elif collection_document_ids is not None:
+                # Only collection filter
+                document_ids = collection_document_ids
+            else:
+                # No filters
+                document_ids = None
+
+            # Perform search - use two-stage (ColBERT) or hierarchical retrieval if enabled
+            # Two-stage takes priority as it includes reranking for better precision
             logger.info(
                 "Calling vectorstore search",
                 query_length=len(query),
                 has_embedding=query_embedding is not None and len(query_embedding) > 0,
                 search_type=search_type.value,
                 document_ids_count=len(document_ids) if document_ids else 0,
+                two_stage=self._two_stage_retriever is not None,
                 hierarchical=self._hierarchical_retriever is not None,
             )
 
-            if self._hierarchical_retriever is not None:
+            if self._two_stage_retriever is not None:
+                # Use two-stage retrieval with ColBERT reranking for better precision
+                results = await self._two_stage_retriever.retrieve(
+                    query=query,
+                    query_embedding=query_embedding,
+                    search_type=search_type,
+                    top_k=top_k,
+                    access_tier_level=access_tier,
+                    document_ids=document_ids,
+                    vector_weight=vector_weight,
+                    keyword_weight=keyword_weight,
+                )
+            elif self._hierarchical_retriever is not None:
                 # Use hierarchical retrieval for better document diversity
                 results = await self._hierarchical_retriever.retrieve(
                     query=query,
@@ -1621,6 +1870,7 @@ class RAGService:
         collection_filter: Optional[str] = None,
         access_tier: int = 100,
         top_k: int = 5,
+        document_ids: Optional[List[str]] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve using LangChain vector store.
@@ -1630,6 +1880,7 @@ class RAGService:
             collection_filter: Filter by collection
             access_tier: User's access tier
             top_k: Number of results
+            document_ids: Optional list of document IDs to restrict search to (from folder filtering)
 
         Returns:
             List of (Document, score) tuples
@@ -1638,6 +1889,8 @@ class RAGService:
         filter_dict = {"access_tier": {"$lte": access_tier}}
         if collection_filter:
             filter_dict["collection"] = collection_filter
+        if document_ids:
+            filter_dict["document_id"] = {"$in": document_ids}
 
         try:
             # Vector similarity search
@@ -1657,6 +1910,7 @@ class RAGService:
                 "Retrieved documents with LangChain store",
                 num_results=len(results),
                 query_length=len(query),
+                document_ids_filter=len(document_ids) if document_ids else 0,
             )
 
             return results
@@ -1824,8 +2078,11 @@ class RAGService:
         """
         Remove semantically duplicate chunks from results.
 
-        Uses a simple character-level n-gram similarity (Jaccard) for efficiency.
-        Results that are too similar to a higher-scored result are removed.
+        Uses MinHash (locality-sensitive hashing) for efficient approximate
+        Jaccard similarity. This reduces O(n²) pairwise comparisons to O(n)
+        by using fixed-size hash signatures.
+
+        For small result sets (<50), falls back to exact Jaccard for accuracy.
 
         Args:
             results: List of (document, score) tuples, already sorted by score desc
@@ -1841,6 +2098,21 @@ class RAGService:
             """Get character n-grams from text."""
             text = text.lower().replace(" ", "")
             return set(text[i:i+n] for i in range(len(text) - n + 1))
+
+        # For small result sets, use exact Jaccard (more accurate)
+        if len(results) < 50:
+            return self._semantic_dedupe_exact(results, threshold, get_ngrams)
+
+        # For larger result sets, use MinHash approximation (O(n) vs O(n²))
+        return self._semantic_dedupe_minhash(results, threshold, get_ngrams)
+
+    def _semantic_dedupe_exact(
+        self,
+        results: List[Tuple[Document, float]],
+        threshold: float,
+        get_ngrams,
+    ) -> List[Tuple[Document, float]]:
+        """Exact Jaccard deduplication for small result sets."""
 
         def jaccard_similarity(set1: set, set2: set) -> float:
             """Calculate Jaccard similarity between two sets."""
@@ -1870,7 +2142,92 @@ class RAGService:
 
         if len(deduped) < len(results):
             logger.debug(
-                "Semantic deduplication removed duplicates",
+                "Semantic deduplication removed duplicates (exact)",
+                original_count=len(results),
+                deduped_count=len(deduped),
+                removed=len(results) - len(deduped),
+            )
+
+        return deduped
+
+    def _semantic_dedupe_minhash(
+        self,
+        results: List[Tuple[Document, float]],
+        threshold: float,
+        get_ngrams,
+        num_hashes: int = 128,
+    ) -> List[Tuple[Document, float]]:
+        """
+        MinHash-based deduplication for large result sets.
+
+        Uses locality-sensitive hashing to approximate Jaccard similarity
+        in O(n) time instead of O(n²).
+
+        Args:
+            results: List of (document, score) tuples
+            threshold: Similarity threshold for deduplication
+            get_ngrams: Function to extract n-grams from text
+            num_hashes: Number of hash functions (more = more accurate but slower)
+        """
+        import random
+
+        # Generate hash function parameters (a*x + b mod p)
+        # Use a large prime and fixed seed for reproducibility
+        random.seed(42)
+        MAX_HASH = (1 << 32) - 1
+        PRIME = 4294967311  # Large prime > MAX_HASH
+
+        hash_params = [
+            (random.randint(1, MAX_HASH), random.randint(0, MAX_HASH))
+            for _ in range(num_hashes)
+        ]
+
+        def compute_minhash(ngrams: set) -> List[int]:
+            """Compute MinHash signature for a set of n-grams."""
+            if not ngrams:
+                return [MAX_HASH] * num_hashes
+
+            signature = []
+            for a, b in hash_params:
+                min_hash = MAX_HASH
+                for ngram in ngrams:
+                    # Hash the n-gram using polynomial rolling hash
+                    h = hash(ngram) & MAX_HASH
+                    # Apply hash function
+                    hash_val = ((a * h + b) % PRIME) & MAX_HASH
+                    min_hash = min(min_hash, hash_val)
+                signature.append(min_hash)
+            return signature
+
+        def minhash_similarity(sig1: List[int], sig2: List[int]) -> float:
+            """Estimate Jaccard similarity from MinHash signatures."""
+            if not sig1 or not sig2:
+                return 0.0
+            matches = sum(1 for h1, h2 in zip(sig1, sig2) if h1 == h2)
+            return matches / len(sig1)
+
+        deduped = []
+        seen_signatures: List[List[int]] = []
+
+        for doc, score in results:
+            content = doc.page_content
+            ngrams = get_ngrams(content)
+            signature = compute_minhash(ngrams)
+
+            # Check similarity against already-included results
+            is_duplicate = False
+            for seen in seen_signatures:
+                if minhash_similarity(signature, seen) > threshold:
+                    is_duplicate = True
+                    break
+
+            if not is_duplicate:
+                deduped.append((doc, score))
+                seen_signatures.append(signature)
+
+        if len(deduped) < len(results):
+            logger.debug(
+                "Semantic deduplication removed duplicates (minhash)",
                 original_count=len(results),
                 deduped_count=len(deduped),
                 removed=len(results) - len(deduped),

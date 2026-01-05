@@ -4,6 +4,18 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import { getErrorMessage } from "@/lib/errors";
 import {
+  DndContext,
+  DragEndEvent,
+  DragOverlay,
+  DragStartEvent,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  closestCenter,
+} from "@dnd-kit/core";
+import { useDraggable, useDroppable } from "@dnd-kit/core";
+import { CSS } from "@dnd-kit/utilities";
+import {
   FileText,
   Search,
   Filter,
@@ -35,6 +47,10 @@ import {
   Bookmark,
   X,
   Plus,
+  PanelLeftClose,
+  PanelLeft,
+  FolderTree as FolderTreeIcon,
+  GripVertical,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -69,7 +85,7 @@ import {
   Document,
   api,
 } from "@/lib/api";
-import { Wand2, Zap, Settings, Info, Bot, Tag } from "lucide-react";
+import { Wand2, Zap, Settings, Info, Bot, Tag, FolderInput } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -99,6 +115,9 @@ import {
   DocumentGridSkeleton,
   DocumentStatsSkeleton,
 } from "@/components/skeletons";
+import { FolderTree } from "@/components/folder-tree";
+import { FolderSelector } from "@/components/folder-selector";
+import { SavedSearchesPanel, type SearchFilters } from "@/components/saved-searches-panel";
 
 type ViewMode = "grid" | "list";
 
@@ -169,6 +188,10 @@ export default function DocumentsPage() {
   const [selectedDateRange, setSelectedDateRange] = useState<string>("");
   const [autoTagEnabled, setAutoTagEnabled] = useState(false);
 
+  // Folder navigation
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
   // Favorites and recently viewed
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [recentlyViewed, setRecentlyViewed] = useState<string[]>([]);
@@ -178,6 +201,15 @@ export default function DocumentsPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [documentToDelete, setDocumentToDelete] = useState<{ id: string; name: string } | null>(null);
   const [hardDeleteEnabled, setHardDeleteEnabled] = useState(false);
+
+  // Move to folder dialog
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [moveFolderId, setMoveFolderId] = useState<string | null>(null);
+  const [isMoving, setIsMoving] = useState(false);
+
+  // Drag and drop state
+  const [activeDocId, setActiveDocId] = useState<string | null>(null);
+  const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
 
   // Load favorites and recently viewed from localStorage
   useEffect(() => {
@@ -239,90 +271,34 @@ export default function DocumentsPage() {
     });
   }, [saveRecentlyViewed]);
 
-  // Saved searches
-  interface SavedSearch {
-    id: string;
-    name: string;
-    query: string;
-    fileType: string;
-    sizeFilter: string;
-    dateRange: string;
-    collection: string | null;
-  }
-
-  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
-  const [showSavedSearches, setShowSavedSearches] = useState(false);
-
-  // Load saved searches from localStorage
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem("document_saved_searches");
-      if (saved) {
-        setSavedSearches(JSON.parse(saved));
-      }
-    } catch (error) {
-      console.error("Failed to load saved searches:", error);
-    }
-  }, []);
-
-  // Save a new search
-  const handleSaveSearch = useCallback(() => {
-    const hasFilters = searchQuery || selectedFileType || selectedSizeFilter || selectedDateRange || selectedCollection;
-    if (!hasFilters) {
-      toast.error("No filters to save", { description: "Apply some filters first" });
-      return;
-    }
-
-    const name = prompt("Enter a name for this search:");
-    if (!name) return;
-
-    const newSearch: SavedSearch = {
-      id: Date.now().toString(),
-      name,
-      query: searchQuery,
-      fileType: selectedFileType,
-      sizeFilter: selectedSizeFilter,
-      dateRange: selectedDateRange,
-      collection: selectedCollection,
-    };
-
-    setSavedSearches((prev) => {
-      const updated = [...prev, newSearch];
-      localStorage.setItem("document_saved_searches", JSON.stringify(updated));
-      return updated;
-    });
-
-    toast.success("Search saved", { description: `"${name}" saved to your searches` });
-  }, [searchQuery, selectedFileType, selectedSizeFilter, selectedDateRange, selectedCollection]);
-
-  // Apply a saved search
-  const handleApplySavedSearch = useCallback((search: SavedSearch) => {
-    setSearchQuery(search.query);
-    setSelectedFileType(search.fileType);
-    setSelectedSizeFilter(search.sizeFilter);
-    setSelectedDateRange(search.dateRange);
-    setSelectedCollection(search.collection);
+  // Handle applying saved search from the SavedSearchesPanel
+  const handleApplySavedSearch = useCallback((filters: SearchFilters) => {
+    setSearchQuery(filters.query || "");
+    setSelectedCollection(filters.collection || null);
+    setSelectedFolderId(filters.folder_id || null);
+    setSelectedDateRange("");  // Convert date_from/date_to to range if needed
+    setSelectedFileType(filters.file_types?.[0] || "");
     setCurrentPage(1);
-    setShowSavedSearches(false);
-    toast.success("Search applied", { description: `Applied "${search.name}"` });
   }, []);
 
-  // Delete a saved search
-  const handleDeleteSavedSearch = useCallback((searchId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setSavedSearches((prev) => {
-      const updated = prev.filter((s) => s.id !== searchId);
-      localStorage.setItem("document_saved_searches", JSON.stringify(updated));
-      return updated;
-    });
-    toast.info("Search deleted");
-  }, []);
+  // Get current search filters for the SavedSearchesPanel
+  const currentFilters: SearchFilters = useMemo(() => ({
+    query: searchQuery,
+    collection: selectedCollection,
+    folder_id: selectedFolderId,
+    date_from: null,
+    date_to: null,
+    file_types: selectedFileType ? [selectedFileType] : null,
+    search_mode: "hybrid",
+  }), [searchQuery, selectedCollection, selectedFolderId, selectedFileType]);
 
   // Queries - only fetch when authenticated
   const { data: documentsData, isLoading, refetch } = useDocuments({
     page: currentPage,
     page_size: pageSize,
     collection: selectedCollection || undefined,
+    folder_id: selectedFolderId || undefined,
+    include_subfolders: true,
     sort_by: sortBy,
     sort_order: sortOrder,
   }, { enabled: isAuthenticated });
@@ -350,6 +326,66 @@ export default function DocumentsPage() {
 
   // Use real documents from API (no mock fallback)
   const documents: Document[] = documentsData?.documents ?? [];
+
+  // DnD sensors - require minimum distance before starting drag to allow clicking
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8, // 8px minimum movement before drag starts
+      },
+    })
+  );
+
+  // Handle drag start
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    const { active } = event;
+    setActiveDocId(active.id as string);
+  }, []);
+
+  // Handle drag end - move document to folder
+  const handleDragEnd = useCallback(async (event: DragEndEvent) => {
+    const { active, over } = event;
+    setActiveDocId(null);
+    setDragOverFolderId(null);
+
+    if (!over) return;
+
+    const documentId = active.id as string;
+    const folderId = String(over.id);
+
+    // Skip if not a folder target
+    if (!folderId.startsWith("folder-")) return;
+
+    const targetFolderId = folderId === "folder-root" ? null : folderId.replace("folder-", "");
+
+    try {
+      setIsMoving(true);
+      const doc = documents.find((d) => d.id === documentId);
+      const result = await api.moveDocument(documentId, targetFolderId);
+      if (result.success) {
+        toast.success("Document moved", {
+          description: `Moved "${doc?.name || "document"}" to ${targetFolderId ? "folder" : "root level"}`,
+        });
+        refetch();
+      }
+    } catch (error) {
+      console.error("Failed to move document:", error);
+      toast.error("Failed to move document", {
+        description: getErrorMessage(error, "An error occurred"),
+      });
+    } finally {
+      setIsMoving(false);
+    }
+  }, [documents, refetch]);
+
+  // Handle drag over folder
+  const handleDragOver = useCallback((event: DragEndEvent) => {
+    if (event.over && String(event.over.id).startsWith("folder-")) {
+      setDragOverFolderId(String(event.over.id));
+    } else {
+      setDragOverFolderId(null);
+    }
+  }, []);
 
   // Filter documents by search query, file type, size, and date
   const filteredDocuments = useMemo(() => {
@@ -647,6 +683,37 @@ export default function DocumentsPage() {
     }
   };
 
+  const handleBulkMove = async () => {
+    if (selectedDocuments.size === 0) return;
+
+    try {
+      setIsMoving(true);
+      const result = await api.bulkMoveDocuments(
+        Array.from(selectedDocuments),
+        moveFolderId
+      );
+      if (result.moved_count > 0) {
+        toast.success("Documents moved", {
+          description: `Moved ${result.moved_count} document${result.moved_count > 1 ? "s" : ""} to ${moveFolderId ? "folder" : "root"}`,
+        });
+      }
+      if (result.failed_count > 0) {
+        toast.error(`Failed to move ${result.failed_count} document${result.failed_count > 1 ? "s" : ""}`);
+      }
+      setSelectedDocuments(new Set());
+      setMoveDialogOpen(false);
+      setMoveFolderId(null);
+      refetch();
+    } catch (error) {
+      console.error("Bulk move failed:", error);
+      toast.error("Failed to move documents", {
+        description: getErrorMessage(error, "An error occurred"),
+      });
+    } finally {
+      setIsMoving(false);
+    }
+  };
+
   const handleProviderChange = async (providerId: string) => {
     try {
       await setOperationConfig.mutateAsync({
@@ -705,6 +772,59 @@ export default function DocumentsPage() {
       setIsSavingTags(false);
     }
   };
+
+  // Draggable document row component
+  const DraggableDocumentRow = ({ doc, children }: { doc: Document; children: React.ReactNode }) => {
+    const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+      id: doc.id,
+    });
+
+    const style = {
+      transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
+      opacity: isDragging ? 0.5 : 1,
+    };
+
+    return (
+      <tr
+        ref={setNodeRef}
+        style={style}
+        className={`border-b last:border-0 hover:bg-muted/50 ${isDragging ? "shadow-lg" : ""}`}
+      >
+        <td className="p-3 cursor-grab" {...attributes} {...listeners}>
+          <GripVertical className="h-4 w-4 text-muted-foreground hover:text-foreground" />
+        </td>
+        {children}
+      </tr>
+    );
+  };
+
+  // Draggable document card component for grid view
+  const DraggableDocumentCard = ({ doc, children }: { doc: Document; children: React.ReactNode }) => {
+    const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+      id: doc.id,
+    });
+
+    const style = {
+      transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
+      opacity: isDragging ? 0.5 : 1,
+    };
+
+    return (
+      <div ref={setNodeRef} style={style} className={isDragging ? "shadow-lg z-50" : ""}>
+        <div
+          className="absolute top-2 left-2 cursor-grab p-1 rounded hover:bg-muted"
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical className="h-4 w-4 text-muted-foreground" />
+        </div>
+        {children}
+      </div>
+    );
+  };
+
+  // Get the currently dragged document for the overlay
+  const activeDraggedDoc = activeDocId ? documents.find((d) => d.id === activeDocId) : null;
 
   return (
     <div className="space-y-6">
@@ -789,187 +909,171 @@ export default function DocumentsPage() {
         </div>
       </div>
 
-      {/* Toolbar */}
-      <div className="flex flex-col sm:flex-row gap-4">
-        {/* Search with Saved Searches */}
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search documents..."
-            value={searchQuery}
-            onChange={(e) => handleSearchChange(e.target.value)}
-            className="pl-9 pr-20"
-            aria-label="Search documents"
-          />
-          <div className="absolute right-1 top-1/2 -translate-y-1/2 flex gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7"
-              onClick={handleSaveSearch}
-              title="Save current search"
-            >
-              <Bookmark className="h-3.5 w-3.5" />
-            </Button>
-            {savedSearches.length > 0 && (
-              <Button
-                variant={showSavedSearches ? "secondary" : "ghost"}
-                size="icon"
-                className="h-7 w-7"
-                onClick={() => setShowSavedSearches(!showSavedSearches)}
-                title="Saved searches"
-              >
-                <ChevronDown className="h-3.5 w-3.5" />
-              </Button>
-            )}
-          </div>
-
-          {/* Saved Searches Dropdown */}
-          {showSavedSearches && savedSearches.length > 0 && (
-            <Card className="absolute z-10 top-full mt-1 w-full p-2 shadow-lg">
-              <div className="flex items-center justify-between px-2 pb-2 border-b mb-2">
-                <span className="text-sm font-medium">Saved Searches</span>
-                <span className="text-xs text-muted-foreground">{savedSearches.length} saved</span>
-              </div>
-              <div className="max-h-48 overflow-y-auto space-y-1">
-                {savedSearches.map((search) => (
-                  <div
-                    key={search.id}
-                    className="flex items-center justify-between p-2 rounded hover:bg-muted cursor-pointer"
-                    onClick={() => handleApplySavedSearch(search)}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Bookmark className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium truncate">{search.name}</p>
-                        <p className="text-xs text-muted-foreground truncate">
-                          {[
-                            search.query && `"${search.query}"`,
-                            search.fileType && search.fileType,
-                            search.sizeFilter && search.sizeFilter,
-                            search.dateRange && search.dateRange,
-                            search.collection && search.collection,
-                          ].filter(Boolean).join(" • ") || "No filters"}
-                        </p>
-                      </div>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 shrink-0"
-                      onClick={(e) => handleDeleteSavedSearch(search.id, e)}
-                    >
-                      <X className="h-3 w-3" />
-                    </Button>
-                  </div>
-                ))}
-              </div>
+      {/* Main Content with Sidebar - wrapped in DndContext for drag-drop */}
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+        onDragOver={handleDragOver}
+      >
+      <div className="flex gap-6">
+        {/* Sidebar - Folder Tree & Saved Searches */}
+        {sidebarOpen && (
+          <div className="w-64 shrink-0 space-y-4">
+            <Card className="p-3">
+              <FolderTree
+                selectedFolderId={selectedFolderId}
+                onFolderSelect={(folderId) => {
+                  setSelectedFolderId(folderId);
+                  setCurrentPage(1);
+                }}
+                dragOverFolderId={dragOverFolderId}
+                isDropTarget={true}
+              />
             </Card>
-          )}
-        </div>
-
-        {/* Filters */}
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* File Type Filter */}
-          <select
-            value={selectedFileType}
-            onChange={(e) => handleFileTypeChange(e.target.value)}
-            className="h-10 px-3 rounded-md border bg-background text-sm"
-            aria-label="Filter by file type"
-          >
-            {FILE_TYPE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-
-          {/* Size Filter */}
-          <select
-            value={selectedSizeFilter}
-            onChange={(e) => handleSizeFilterChange(e.target.value)}
-            className="h-10 px-3 rounded-md border bg-background text-sm"
-            aria-label="Filter by file size"
-          >
-            {FILE_SIZE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-
-          {/* Date Range Filter */}
-          <select
-            value={selectedDateRange}
-            onChange={(e) => handleDateRangeChange(e.target.value)}
-            className="h-10 px-3 rounded-md border bg-background text-sm"
-            aria-label="Filter by date"
-          >
-            {DATE_RANGE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-
-          {/* Collection Filter */}
-          <select
-            value={selectedCollection || ""}
-            onChange={(e) => {
-              setSelectedCollection(e.target.value || null);
-              setCurrentPage(1);
-            }}
-            className="h-10 px-3 rounded-md border bg-background text-sm"
-            aria-label="Filter by collection"
-          >
-            <option value="">All Collections</option>
-            {collectionsList.map((col: string) => (
-              <option key={col} value={col}>
-                {col}
-              </option>
-            ))}
-          </select>
-
-          {/* Favorites Toggle */}
-          <Button
-            variant={showFavoritesOnly ? "default" : "outline"}
-            size="sm"
-            className="h-10"
-            onClick={() => {
-              setShowFavoritesOnly(!showFavoritesOnly);
-              setCurrentPage(1);
-            }}
-            aria-label="Show favorites only"
-          >
-            <Star className={`h-4 w-4 mr-1 ${showFavoritesOnly ? "fill-current" : ""}`} />
-            Favorites {favorites.size > 0 && `(${favorites.size})`}
-          </Button>
-
-          {/* View Toggle */}
-          <div className="flex rounded-lg border bg-muted p-1">
-            <Button
-              variant={viewMode === "list" ? "secondary" : "ghost"}
-              size="sm"
-              className="h-8 px-2"
-              onClick={() => setViewMode("list")}
-              aria-label="List view"
-            >
-              <List className="h-4 w-4" />
-            </Button>
-            <Button
-              variant={viewMode === "grid" ? "secondary" : "ghost"}
-              size="sm"
-              className="h-8 px-2"
-              onClick={() => setViewMode("grid")}
-              aria-label="Grid view"
-            >
-              <Grid className="h-4 w-4" />
-            </Button>
+            <Card className="p-3">
+              <SavedSearchesPanel
+                currentFilters={currentFilters}
+                onApplySearch={handleApplySavedSearch}
+                collections={collections?.collections}
+              />
+            </Card>
           </div>
-        </div>
-      </div>
+        )}
 
-      {/* Recently Viewed Section */}
+        {/* Main Content Area */}
+        <div className="flex-1 min-w-0 space-y-4">
+          {/* Toolbar */}
+          <div className="flex flex-col sm:flex-row gap-4">
+            {/* Sidebar Toggle + Search */}
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              >
+                {sidebarOpen ? (
+                  <PanelLeftClose className="h-4 w-4" />
+                ) : (
+                  <PanelLeft className="h-4 w-4" />
+                )}
+              </Button>
+              <div className="relative flex-1 min-w-0">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search documents..."
+                  value={searchQuery}
+                  onChange={(e) => handleSearchChange(e.target.value)}
+                  className="pl-9"
+                  aria-label="Search documents"
+                />
+              </div>
+            </div>
+
+            {/* Filters */}
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* File Type Filter */}
+              <select
+                value={selectedFileType}
+                onChange={(e) => handleFileTypeChange(e.target.value)}
+                className="h-10 px-3 rounded-md border bg-background text-sm"
+                aria-label="Filter by file type"
+              >
+                {FILE_TYPE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+
+              {/* Size Filter */}
+              <select
+                value={selectedSizeFilter}
+                onChange={(e) => handleSizeFilterChange(e.target.value)}
+                className="h-10 px-3 rounded-md border bg-background text-sm"
+                aria-label="Filter by file size"
+              >
+                {FILE_SIZE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+
+              {/* Date Range Filter */}
+              <select
+                value={selectedDateRange}
+                onChange={(e) => handleDateRangeChange(e.target.value)}
+                className="h-10 px-3 rounded-md border bg-background text-sm"
+                aria-label="Filter by date"
+              >
+                {DATE_RANGE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+
+              {/* Collection Filter */}
+              <select
+                value={selectedCollection || ""}
+                onChange={(e) => {
+                  setSelectedCollection(e.target.value || null);
+                  setCurrentPage(1);
+                }}
+                className="h-10 px-3 rounded-md border bg-background text-sm"
+                aria-label="Filter by collection"
+              >
+                <option value="">All Collections</option>
+                {collectionsList.map((col: string) => (
+                  <option key={col} value={col}>
+                    {col}
+                  </option>
+                ))}
+              </select>
+
+              {/* Favorites Toggle */}
+              <Button
+                variant={showFavoritesOnly ? "default" : "outline"}
+                size="sm"
+                className="h-10"
+                onClick={() => {
+                  setShowFavoritesOnly(!showFavoritesOnly);
+                  setCurrentPage(1);
+                }}
+                aria-label="Show favorites only"
+              >
+                <Star className={`h-4 w-4 mr-1 ${showFavoritesOnly ? "fill-current" : ""}`} />
+                Favorites {favorites.size > 0 && `(${favorites.size})`}
+              </Button>
+
+              {/* View Toggle */}
+              <div className="flex rounded-lg border bg-muted p-1">
+                <Button
+                  variant={viewMode === "list" ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-8 px-2"
+                  onClick={() => setViewMode("list")}
+                  aria-label="List view"
+                >
+                  <List className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant={viewMode === "grid" ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-8 px-2"
+                  onClick={() => setViewMode("grid")}
+                  aria-label="Grid view"
+                >
+                  <Grid className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Recently Viewed Section */}
       {recentlyViewed.length > 0 && !showFavoritesOnly && !searchQuery && (
         <Card className="bg-muted/30">
           <CardHeader className="pb-3">
@@ -1050,6 +1154,15 @@ export default function DocumentsPage() {
           <Button
             variant="outline"
             size="sm"
+            onClick={() => setMoveDialogOpen(true)}
+            disabled={isMoving}
+          >
+            <FolderInput className="h-4 w-4 mr-2" />
+            {isMoving ? "Moving..." : "Move to Folder"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={handleDeleteSelected}
             disabled={deleteDocument.isPending}
           >
@@ -1075,6 +1188,43 @@ export default function DocumentsPage() {
         </div>
       )}
 
+      {/* Move to Folder Dialog */}
+      <Dialog open={moveDialogOpen} onOpenChange={setMoveDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Move Documents to Folder</DialogTitle>
+            <DialogDescription>
+              Select a folder to move {selectedDocuments.size} document{selectedDocuments.size > 1 ? "s" : ""} to.
+              Select &quot;Root&quot; to move to the root level.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <FolderSelector
+              value={moveFolderId}
+              onChange={setMoveFolderId}
+              placeholder="Select folder (or leave empty for root)"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setMoveDialogOpen(false);
+                setMoveFolderId(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleBulkMove}
+              disabled={isMoving}
+            >
+              {isMoving ? "Moving..." : "Move"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Documents */}
       {isLoading ? (
         viewMode === "list" ? (
@@ -1089,6 +1239,9 @@ export default function DocumentsPage() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b bg-muted/50">
+                    <th className="w-8 p-3" title="Drag to move">
+                      {/* Drag handle column header */}
+                    </th>
                     <th className="w-12 p-3">
                       <Button
                         variant="ghost"
@@ -1153,10 +1306,7 @@ export default function DocumentsPage() {
                   {paginatedDocuments.map((doc) => {
                     const FileIcon = getFileIcon(doc.file_type);
                     return (
-                      <tr
-                        key={doc.id}
-                        className="border-b last:border-0 hover:bg-muted/50"
-                      >
+                      <DraggableDocumentRow key={doc.id} doc={doc}>
                         <td className="p-3">
                           <Button
                             variant="ghost"
@@ -1289,7 +1439,7 @@ export default function DocumentsPage() {
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </td>
-                      </tr>
+                      </DraggableDocumentRow>
                     );
                   })}
                 </tbody>
@@ -1532,7 +1682,23 @@ export default function DocumentsPage() {
             <p className="text-sm text-muted-foreground">Total Size</p>
           </CardContent>
         </Card>
+        </div>
+        {/* End of Main Content Area */}
+        </div>
+      {/* End of Sidebar + Content flex container */}
       </div>
+
+      {/* Drag Overlay - shows preview of dragged document */}
+      <DragOverlay>
+        {activeDraggedDoc && (
+          <div className="px-4 py-2 bg-background border rounded-lg shadow-lg flex items-center gap-2">
+            <GripVertical className="h-4 w-4 text-muted-foreground" />
+            <File className="h-4 w-4 text-muted-foreground" />
+            <span className="font-medium text-sm">{activeDraggedDoc.name}</span>
+          </div>
+        )}
+      </DragOverlay>
+      </DndContext>
 
       {/* Edit Tags Dialog */}
       <Dialog open={editTagsDialogOpen} onOpenChange={setEditTagsDialogOpen}>

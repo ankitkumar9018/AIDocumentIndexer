@@ -36,6 +36,7 @@ class SettingCategory(str, Enum):
     GENERAL = "general"
     RAG = "rag"  # Advanced RAG features
     OCR = "ocr"  # OCR configuration
+    GENERATION = "generation"  # Document generation settings
 
 
 class ValueType(str, Enum):
@@ -341,9 +342,9 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="rag.similarity_threshold",
         category=SettingCategory.RAG,
-        default_value=0.4,
+        default_value=0.55,
         value_type=ValueType.NUMBER,
-        description="Minimum similarity score for document retrieval (0.0-1.0)"
+        description="Minimum similarity score for document retrieval (0.0-1.0). Higher = stricter filtering, lower = more results but potentially less relevant."
     ),
 
     # HyDE (Hypothetical Document Embeddings) Settings
@@ -376,6 +377,29 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=0.5,
         value_type=ValueType.NUMBER,
         description="Trigger CRAG when confidence is below this threshold (0.0-1.0)"
+    ),
+
+    # Two-Stage Retrieval Settings (ColBERT reranking)
+    SettingDefinition(
+        key="rag.two_stage_retrieval_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable two-stage retrieval (fast ANN search + ColBERT reranking for 15-30% better precision)"
+    ),
+    SettingDefinition(
+        key="rag.stage1_candidates",
+        category=SettingCategory.RAG,
+        default_value=150,
+        value_type=ValueType.NUMBER,
+        description="Number of candidates to retrieve in stage 1 (50-300, higher = better recall but slower)"
+    ),
+    SettingDefinition(
+        key="rag.use_colbert_reranker",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Use ColBERT reranker in stage 2 (else cross-encoder, ColBERT is faster with similar quality)"
     ),
 
     # Hierarchical Retrieval Settings
@@ -447,6 +471,22 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Search expanded queries in parallel (faster but uses more resources)"
+    ),
+
+    # Query Decomposition Settings
+    SettingDefinition(
+        key="rag.query_decomposition_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable query decomposition for complex multi-step queries (improves accuracy on comparison/aggregation queries)"
+    ),
+    SettingDefinition(
+        key="rag.decomposition_min_words",
+        category=SettingCategory.RAG,
+        default_value=10,
+        value_type=ValueType.NUMBER,
+        description="Minimum query word count to trigger decomposition (5-20)"
     ),
 
     # Verification/Self-RAG Settings
@@ -574,6 +614,81 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=7,
         value_type=ValueType.NUMBER,
         description="Embedding cache TTL in days"
+    ),
+
+    # ==========================================================================
+    # Document Generation Configuration
+    # ==========================================================================
+
+    SettingDefinition(
+        key="generation.default_format",
+        category=SettingCategory.GENERATION,
+        default_value="docx",
+        value_type=ValueType.STRING,
+        description="Default output format for document generation (docx, pptx, pdf, md, html)"
+    ),
+    SettingDefinition(
+        key="generation.include_images",
+        category=SettingCategory.GENERATION,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Include AI-generated or stock images in generated documents"
+    ),
+    SettingDefinition(
+        key="generation.image_backend",
+        category=SettingCategory.GENERATION,
+        default_value="unsplash",
+        value_type=ValueType.STRING,
+        description="Image source backend (unsplash, stability, automatic1111, disabled)"
+    ),
+    SettingDefinition(
+        key="generation.default_tone",
+        category=SettingCategory.GENERATION,
+        default_value="professional",
+        value_type=ValueType.STRING,
+        description="Default writing tone (professional, casual, academic, creative)"
+    ),
+    SettingDefinition(
+        key="generation.default_style",
+        category=SettingCategory.GENERATION,
+        default_value="business",
+        value_type=ValueType.STRING,
+        description="Default document style (business, academic, creative, technical)"
+    ),
+    SettingDefinition(
+        key="generation.max_sections",
+        category=SettingCategory.GENERATION,
+        default_value=10,
+        value_type=ValueType.NUMBER,
+        description="Maximum number of sections to generate (1-20)"
+    ),
+    SettingDefinition(
+        key="generation.include_sources",
+        category=SettingCategory.GENERATION,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Include source citations in generated documents"
+    ),
+    SettingDefinition(
+        key="generation.auto_charts",
+        category=SettingCategory.GENERATION,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Auto-generate charts from data in source documents"
+    ),
+    SettingDefinition(
+        key="generation.chart_style",
+        category=SettingCategory.GENERATION,
+        default_value="business",
+        value_type=ValueType.STRING,
+        description="Chart styling theme: business, academic, minimal"
+    ),
+    SettingDefinition(
+        key="generation.chart_dpi",
+        category=SettingCategory.GENERATION,
+        default_value=150,
+        value_type=ValueType.NUMBER,
+        description="Chart image resolution (DPI) - higher = larger file size (100-300)"
     ),
 ]
 

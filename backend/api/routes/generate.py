@@ -49,8 +49,23 @@ class CreateJobRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     description: str = Field(..., min_length=10)
     output_format: str = Field(default="docx")
-    collection_filter: Optional[str] = None
+    collection_filter: Optional[str] = None  # Single collection filter (legacy)
+    collection_filters: Optional[List[str]] = None  # Multiple collection filters
+    folder_id: Optional[str] = Field(default=None, description="Folder ID to scope query to")
+    include_subfolders: bool = Field(default=True, description="Include documents in subfolders")
     metadata: Optional[dict] = None
+    # Image generation - overrides admin setting if provided
+    include_images: Optional[bool] = Field(
+        default=None,
+        description="Include images in generated document. If not set, uses admin setting."
+    )
+
+    @property
+    def effective_collection_filter(self) -> Optional[str]:
+        """Get effective collection filter - prioritize collection_filters list."""
+        if self.collection_filters:
+            return ",".join(self.collection_filters)  # Join multiple as comma-separated
+        return self.collection_filter
 
 
 class OutlineModifications(BaseModel):
@@ -113,6 +128,9 @@ class JobResponse(BaseModel):
     completed_at: Optional[datetime]
     has_output: bool
     error_message: Optional[str]
+    # Generation settings used
+    include_images: bool = False
+    image_backend: Optional[str] = None
 
 
 class JobListResponse(BaseModel):
@@ -176,6 +194,9 @@ def job_to_response(job: GenerationJob) -> JobResponse:
         completed_at=job.completed_at,
         has_output=job.output_path is not None,
         error_message=job.error_message,
+        # Image generation settings from job metadata
+        include_images=job.metadata.get("include_images", False),
+        image_backend=job.metadata.get("image_backend"),
     )
 
 
@@ -219,8 +240,11 @@ async def create_generation_job(
         title=request.title,
         description=request.description,
         output_format=output_format,
-        collection_filter=request.collection_filter,
+        collection_filter=request.effective_collection_filter,
+        folder_id=request.folder_id,
+        include_subfolders=request.include_subfolders,
         metadata=request.metadata,
+        include_images=request.include_images,  # Pass through to override admin setting
     )
 
     return job_to_response(job)

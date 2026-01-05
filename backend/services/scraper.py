@@ -21,8 +21,7 @@ logger = structlog.get_logger(__name__)
 
 # Try to import crawl4ai, provide fallback if not available
 try:
-    from crawl4ai import AsyncWebCrawler
-    from crawl4ai.extraction_strategy import LLMExtractionStrategy, NoExtractionStrategy
+    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
     CRAWL4AI_AVAILABLE = True
 except ImportError:
     CRAWL4AI_AVAILABLE = False
@@ -268,11 +267,27 @@ class WebScraperService:
         if not CRAWL4AI_AVAILABLE:
             raise RuntimeError("crawl4ai not installed")
 
-        async with AsyncWebCrawler() as crawler:
+        # Configure browser settings
+        browser_config = BrowserConfig(
+            headless=True,
+            user_agent=config.user_agent or "Mozilla/5.0 (compatible; AIDocumentIndexer/1.0)",
+        )
+
+        # Configure crawl run settings - use new API style
+        run_config = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
+            word_count_threshold=10,
+            # Link extraction settings - key for subpage crawling
+            exclude_external_links=False,  # Keep external links for analysis
+            exclude_social_media_links=True,  # Skip social media links
+            # Wait for JavaScript if configured
+            wait_until="domcontentloaded",
+        )
+
+        async with AsyncWebCrawler(config=browser_config) as crawler:
             result = await crawler.arun(
                 url=url,
-                word_count_threshold=10,
-                bypass_cache=True,
+                config=run_config,
             )
 
             if not result.success:
@@ -290,6 +305,12 @@ class WebScraperService:
             if result.links:
                 internal = result.links.get("internal", [])
                 external = result.links.get("external", [])
+                logger.debug(
+                    "Extracted links from page",
+                    url=url,
+                    internal_count=len(internal),
+                    external_count=len(external),
+                )
                 for link_item in internal + external:
                     if isinstance(link_item, dict):
                         href = link_item.get("href", "")
@@ -300,6 +321,8 @@ class WebScraperService:
                         if not href.startswith(('http://', 'https://')):
                             href = urljoin(url, href)
                         links.append(href)
+            else:
+                logger.warning("No links extracted from page", url=url)
 
             # Extract images
             images = []

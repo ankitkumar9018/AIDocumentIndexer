@@ -42,6 +42,10 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 | **File Watcher** | Automatically index new files from monitored directories |
 | **Advanced OCR Management** | PaddleOCR, EasyOCR, Tesseract with performance metrics & batch downloads |
 | **Tabbed Admin Settings** | Organized settings UI with 8 tabs for easy configuration |
+| **Folder Management** | Hierarchical folders with permissions, folder-scoped searches |
+| **Saved Searches** | Save complex search queries with filters for quick access |
+| **Search Operators** | AND, OR, NOT, phrase matching, and grouping support |
+| **User Preferences** | Persistent theme, view mode, default collection settings |
 | **Beautiful UI** | Modern, responsive interface built with Next.js 15 and shadcn/ui |
 
 ---
@@ -454,6 +458,12 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for more solutions.
   - [x] Document favorites and recently viewed
   - [x] Chat history search
   - [x] Bulk operations for documents
+- [x] Phase 8: Document Organization
+  - [x] Hierarchical folder management
+  - [x] User preferences persistence (theme, view mode, defaults)
+  - [x] Saved searches with filters
+  - [x] Advanced search operators (AND, OR, NOT, phrases)
+  - [x] Folder-scoped RAG queries
 
 ---
 

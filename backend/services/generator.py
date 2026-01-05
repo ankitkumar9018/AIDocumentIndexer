@@ -20,6 +20,13 @@ from typing import Optional, List, Dict, Any, AsyncGenerator
 
 import structlog
 
+from backend.services.image_generator import (
+    ImageGeneratorService,
+    ImageGeneratorConfig,
+    ImageBackend,
+    get_image_generator,
+)
+
 logger = structlog.get_logger(__name__)
 
 
@@ -106,6 +113,32 @@ class GenerationJob:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+def _get_generation_setting(key: str, env_key: str, default: Any) -> Any:
+    """
+    Get a generation setting with fallback chain:
+    1. Database settings (via settings service defaults)
+    2. Environment variable
+    3. Hardcoded default
+    """
+    from backend.services.settings import get_settings_service
+    settings = get_settings_service()
+
+    # Try settings service first
+    value = settings.get_default_value(key)
+    if value is not None:
+        return value
+
+    # Fall back to environment variable
+    env_value = os.getenv(env_key)
+    if env_value is not None:
+        # Handle boolean conversion
+        if isinstance(default, bool):
+            return env_value.lower() in ("true", "1", "yes", "on")
+        return env_value
+
+    return default
+
+
 @dataclass
 class GenerationConfig:
     """Configuration for document generation."""
@@ -119,14 +152,58 @@ class GenerationConfig:
     max_sources: int = 10
     min_relevance_score: float = 0.5
 
-    # Output settings
+    # Output settings - loaded from database settings or environment
     output_dir: str = "/tmp/generated_docs"
-    include_sources: bool = True
+    include_sources: bool = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.include_sources", "GENERATION_INCLUDE_SOURCES", True
+        )
+    )
     include_toc: bool = True
 
-    # Image generation settings (DISABLED by default)
-    include_images: bool = False  # Disabled by default
-    image_backend: str = "ollama"  # "ollama" or "unsplash"
+    # Image generation settings - loaded from database settings
+    # Configure via Admin UI: Settings > Document Generation
+    include_images: bool = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.include_images", "GENERATION_INCLUDE_IMAGES", True
+        )
+    )
+    # Image backend: "unsplash" (free, requires API key), "stability" (Stable Diffusion API),
+    # "automatic1111" (local Stable Diffusion), or "disabled"
+    image_backend: str = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.image_backend", "GENERATION_IMAGE_BACKEND", "unsplash"
+        )
+    )
+
+    # Style settings - loaded from database settings
+    default_tone: str = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.default_tone", "GENERATION_DEFAULT_TONE", "professional"
+        )
+    )
+    default_style: str = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.default_style", "GENERATION_DEFAULT_STYLE", "business"
+        )
+    )
+
+    # Chart generation settings
+    auto_charts: bool = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.auto_charts", "GENERATION_AUTO_CHARTS", False
+        )
+    )
+    chart_style: str = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.chart_style", "GENERATION_CHART_STYLE", "business"
+        )
+    )
+    chart_dpi: int = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.chart_dpi", "GENERATION_CHART_DPI", 150
+        )
+    )
 
     # Workflow settings
     require_outline_approval: bool = True
@@ -158,6 +235,53 @@ class DocumentGenerationService:
         # Ensure output directory exists
         Path(self.config.output_dir).mkdir(parents=True, exist_ok=True)
 
+    async def reload_settings(self) -> None:
+        """
+        Reload generation settings from database.
+
+        Call this to pick up admin setting changes without service restart.
+        Settings are read from Admin UI > Settings > Document Generation.
+        """
+        from backend.services.settings import get_settings_service
+        settings_service = get_settings_service()
+
+        # Get current database settings (async)
+        include_images = await settings_service.get_setting("generation.include_images")
+        image_backend = await settings_service.get_setting("generation.image_backend")
+        include_sources = await settings_service.get_setting("generation.include_sources")
+        default_tone = await settings_service.get_setting("generation.default_tone")
+        default_style = await settings_service.get_setting("generation.default_style")
+        auto_charts = await settings_service.get_setting("generation.auto_charts")
+        chart_style = await settings_service.get_setting("generation.chart_style")
+        chart_dpi = await settings_service.get_setting("generation.chart_dpi")
+
+        # Update config with database values
+        if include_images is not None:
+            self.config.include_images = include_images
+        if image_backend is not None:
+            self.config.image_backend = image_backend
+        if include_sources is not None:
+            self.config.include_sources = include_sources
+        if default_tone is not None:
+            self.config.default_tone = default_tone
+        if default_style is not None:
+            self.config.default_style = default_style
+        if auto_charts is not None:
+            self.config.auto_charts = auto_charts
+        if chart_style is not None:
+            self.config.chart_style = chart_style
+        if chart_dpi is not None:
+            self.config.chart_dpi = int(chart_dpi)
+
+        logger.info(
+            "Generation settings reloaded",
+            include_images=self.config.include_images,
+            image_backend=self.config.image_backend,
+            default_tone=self.config.default_tone,
+            default_style=self.config.default_style,
+            auto_charts=self.config.auto_charts,
+        )
+
     async def create_job(
         self,
         user_id: str,
@@ -165,7 +289,10 @@ class DocumentGenerationService:
         description: str,
         output_format: OutputFormat = OutputFormat.DOCX,
         collection_filter: Optional[str] = None,
+        folder_id: Optional[str] = None,
+        include_subfolders: bool = True,
         metadata: Optional[Dict[str, Any]] = None,
+        include_images: Optional[bool] = None,  # Override from request
     ) -> GenerationJob:
         """
         Create a new document generation job.
@@ -175,12 +302,18 @@ class DocumentGenerationService:
             title: Title for the document
             description: Description of what to generate
             output_format: Desired output format
-            collection_filter: Optional collection to search
+            collection_filter: Optional collection(s) to search (comma-separated for multiple)
+            folder_id: Optional folder ID to scope search to
+            include_subfolders: Whether to include subfolders when folder_id is set
             metadata: Additional metadata
+            include_images: Override image generation setting for this job
 
         Returns:
             New GenerationJob instance
         """
+        # Reload settings from database to pick up admin changes
+        await self.reload_settings()
+
         job_id = str(uuid.uuid4())
 
         job = GenerationJob(
@@ -195,6 +328,17 @@ class DocumentGenerationService:
 
         if collection_filter:
             job.metadata["collection_filter"] = collection_filter
+        if folder_id:
+            job.metadata["folder_id"] = folder_id
+            job.metadata["include_subfolders"] = include_subfolders
+
+        # Store image generation setting - use request override or config setting
+        job.metadata["include_images"] = (
+            include_images if include_images is not None else self.config.include_images
+        )
+        job.metadata["image_backend"] = self.config.image_backend
+        job.metadata["default_tone"] = self.config.default_tone
+        job.metadata["default_style"] = self.config.default_style
 
         self._jobs[job_id] = job
 
@@ -203,6 +347,8 @@ class DocumentGenerationService:
             job_id=job_id,
             user_id=user_id,
             title=title,
+            include_images=job.metadata["include_images"],
+            image_backend=job.metadata["image_backend"],
         )
 
         return job
@@ -849,8 +995,8 @@ Please revise the content to address the feedback while maintaining quality and 
         """Generate professional PowerPoint file with modern styling."""
         try:
             from pptx import Presentation
-            from pptx.util import Inches, Pt, Emu
-            from pptx.dml.color import RgbColor
+            from pptx.util import Inches, Pt
+            from pptx.dml.color import RGBColor
             from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
             from pptx.enum.shapes import MSO_SHAPE
 
@@ -859,11 +1005,11 @@ Please revise the content to address the feedback while maintaining quality and 
             prs.slide_height = Inches(7.5)
 
             # Define professional color scheme
-            PRIMARY_COLOR = RgbColor(0x1E, 0x3A, 0x5F)  # Deep blue
-            SECONDARY_COLOR = RgbColor(0x3D, 0x5A, 0x80)  # Medium blue
-            ACCENT_COLOR = RgbColor(0xE0, 0xE1, 0xDD)  # Light gray
-            TEXT_COLOR = RgbColor(0x2D, 0x3A, 0x45)  # Dark gray
-            WHITE = RgbColor(0xFF, 0xFF, 0xFF)
+            PRIMARY_COLOR = RGBColor(0x1E, 0x3A, 0x5F)  # Deep blue
+            SECONDARY_COLOR = RGBColor(0x3D, 0x5A, 0x80)  # Medium blue
+            ACCENT_COLOR = RGBColor(0xE0, 0xE1, 0xDD)  # Light gray
+            TEXT_COLOR = RGBColor(0x2D, 0x3A, 0x45)  # Dark gray
+            WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 
             def apply_title_style(shape, font_size=44, bold=True, color=WHITE):
                 """Apply consistent title styling."""
@@ -893,6 +1039,40 @@ Please revise the content to address the feedback while maintaining quality and 
                 header.fill.fore_color.rgb = PRIMARY_COLOR
                 header.line.fill.background()
 
+            def sanitize_text(text: str) -> str:
+                """Sanitize text for PPTX XML compatibility."""
+                if not text:
+                    return ""
+                # Remove control characters that can corrupt XML
+                import re
+                # Remove ASCII control chars except tab, newline, carriage return
+                text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+                # Replace common problematic characters
+                text = text.replace('\x0b', ' ')  # Vertical tab
+                text = text.replace('\x0c', ' ')  # Form feed
+                return text
+
+            def strip_markdown(text: str) -> str:
+                """Remove markdown formatting, returning clean text for slides."""
+                if not text:
+                    return ""
+                import re
+                # Remove headers (# ## ### #### etc.)
+                text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+                # Remove bold **text** or __text__
+                text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+                text = re.sub(r'__([^_]+)__', r'\1', text)
+                # Remove italic *text* or _text_ (but not bullet points)
+                text = re.sub(r'(?<!\s)\*([^*\n]+)\*(?!\s)', r'\1', text)
+                text = re.sub(r'(?<!\s)_([^_\n]+)_(?!\s)', r'\1', text)
+                # Remove code backticks
+                text = re.sub(r'`([^`]+)`', r'\1', text)
+                # Remove link syntax [text](url)
+                text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+                # Clean up multiple spaces
+                text = re.sub(r'  +', ' ', text)
+                return text.strip()
+
             def add_footer(slide, page_num, total_pages):
                 """Add footer with page number."""
                 footer_text = f"{page_num} / {total_pages}"
@@ -903,7 +1083,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 tf = footer.text_frame
                 tf.paragraphs[0].text = footer_text
                 tf.paragraphs[0].font.size = Pt(10)
-                tf.paragraphs[0].font.color.rgb = RgbColor(0x88, 0x88, 0x88)
+                tf.paragraphs[0].font.color.rgb = RGBColor(0x88, 0x88, 0x88)
                 tf.paragraphs[0].alignment = PP_ALIGN.RIGHT
 
             total_slides = len(job.sections) + 2  # Title + sections + sources
@@ -911,6 +1091,42 @@ Please revise the content to address the feedback while maintaining quality and 
                 total_slides += 1
 
             current_slide = 0
+
+            # Initialize image generator if images are enabled
+            include_images = job.metadata.get("include_images", self.config.include_images)
+            section_images = {}
+            if include_images:
+                try:
+                    image_config = ImageGeneratorConfig(
+                        enabled=True,
+                        backend=ImageBackend(self.config.image_backend),
+                        default_width=400,
+                        default_height=300,
+                    )
+                    image_service = get_image_generator(image_config)
+
+                    # Generate images for all sections in parallel
+                    sections_data = [
+                        (section.title, section.revised_content or section.content)
+                        for section in job.sections
+                    ]
+                    images = await image_service.generate_batch(
+                        sections=sections_data,
+                        document_title=job.title,
+                    )
+
+                    # Map images to sections by index
+                    for idx, img in enumerate(images):
+                        if img and img.success and img.path:
+                            section_images[idx] = img.path
+
+                    logger.info(
+                        "Generated images for PPTX",
+                        total_sections=len(job.sections),
+                        images_generated=len(section_images),
+                    )
+                except Exception as e:
+                    logger.warning(f"Image generation failed, continuing without images: {e}")
 
             # ========== TITLE SLIDE ==========
             current_slide += 1
@@ -944,7 +1160,7 @@ Please revise the content to address the feedback while maintaining quality and 
             tf = title_box.text_frame
             tf.word_wrap = True
             p = tf.paragraphs[0]
-            p.text = job.title
+            p.text = sanitize_text(job.title) or "Untitled"
             p.font.name = "Calibri"
             p.font.size = Pt(48)
             p.font.bold = True
@@ -958,7 +1174,8 @@ Please revise the content to address the feedback while maintaining quality and 
             tf = desc_box.text_frame
             tf.word_wrap = True
             p = tf.paragraphs[0]
-            p.text = job.outline.description if job.outline else job.description
+            desc_text = job.outline.description if job.outline else job.description
+            p.text = sanitize_text(desc_text) or ""
             p.font.name = "Calibri"
             p.font.size = Pt(20)
             p.font.color.rgb = ACCENT_COLOR
@@ -1003,24 +1220,37 @@ Please revise the content to address the feedback while maintaining quality and 
                 tf = toc_box.text_frame
                 tf.word_wrap = True
 
+                first_toc_used = False
                 for idx, section in enumerate(job.sections):
-                    if idx > 0:
+                    if first_toc_used:
                         p = tf.add_paragraph()
                     else:
                         p = tf.paragraphs[0]
-                    p.text = f"{idx + 1}.  {section.title}"
+                        first_toc_used = True
+                    section_title = sanitize_text(section.title) or f"Section {idx + 1}"
+                    p.text = f"{idx + 1}.  {section_title}"
                     p.font.name = "Calibri"
                     p.font.size = Pt(20)
                     p.font.color.rgb = TEXT_COLOR
                     p.space_after = Pt(12)
 
+                # Ensure first paragraph is initialized even if no sections
+                if not first_toc_used:
+                    p = tf.paragraphs[0]
+                    p.text = "No sections"
+                    p.font.name = "Calibri"
+                    p.font.size = Pt(20)
+
                 add_footer(slide, current_slide, total_slides)
 
             # ========== CONTENT SLIDES ==========
-            for section in job.sections:
+            for section_idx, section in enumerate(job.sections):
                 current_slide += 1
                 slide = prs.slides.add_slide(prs.slide_layouts[6])
                 add_header_bar(slide)
+
+                # Check if we have an image for this section
+                has_image = section_idx in section_images
 
                 # Section title
                 section_title = slide.shapes.add_textbox(
@@ -1029,44 +1259,97 @@ Please revise the content to address the feedback while maintaining quality and 
                 )
                 tf = section_title.text_frame
                 p = tf.paragraphs[0]
-                p.text = section.title
+                p.text = sanitize_text(section.title) or f"Section {section_idx + 1}"
                 p.font.name = "Calibri"
                 p.font.size = Pt(32)
                 p.font.bold = True
                 p.font.color.rgb = WHITE
 
-                # Content
-                content = section.revised_content or section.content
-                content_box = slide.shapes.add_textbox(
-                    Inches(0.8), Inches(1.6),
-                    Inches(11.5), Inches(5.2)
-                )
+                # Adjust content area based on whether we have an image
+                content = sanitize_text(section.revised_content or section.content) or ""
+                # Strip markdown formatting for clean slide content
+                content = strip_markdown(content)
+
+                # Limit content for presentation readability (~300 words max)
+                words = content.split()
+                if len(words) > 300:
+                    content = ' '.join(words[:300]) + '...'
+
+                if has_image:
+                    # Content on left, image on right
+                    content_box = slide.shapes.add_textbox(
+                        Inches(0.8), Inches(1.6),
+                        Inches(7.5), Inches(5.2)
+                    )
+                else:
+                    # Full width content
+                    content_box = slide.shapes.add_textbox(
+                        Inches(0.8), Inches(1.6),
+                        Inches(11.5), Inches(5.2)
+                    )
+
                 tf = content_box.text_frame
                 tf.word_wrap = True
 
-                # Split content into bullet points or paragraphs
+                # Split content into bullet points for cleaner slides
                 paragraphs = content.split('\n')
-                for idx, para_text in enumerate(paragraphs[:12]):  # Limit to 12 items
+                first_para_used = False
+                max_paras = 12 if has_image else 15  # Allow more items for complete content
+                para_count = 0
+
+                for para_text in paragraphs:
                     para_text = para_text.strip()
-                    if not para_text:
+                    if not para_text or para_count >= max_paras:
                         continue
 
-                    if idx > 0:
+                    if first_para_used:
                         p = tf.add_paragraph()
                     else:
                         p = tf.paragraphs[0]
+                        first_para_used = True
+                    para_count += 1
 
-                    # Add bullet if content looks like a list item
-                    if para_text.startswith(('- ', '• ', '* ', '1.', '2.', '3.')):
-                        p.text = para_text.lstrip('-•* 0123456789.')
-                        p.level = 0
+                    # Format as bullet point for cleaner slides
+                    if para_text.startswith(('- ', '• ', '* ', '1.', '2.', '3.', '4.', '5.')):
+                        bullet_text = para_text.lstrip('-•* 0123456789.').strip()
                     else:
-                        p.text = para_text
+                        bullet_text = para_text
 
+                    # Limit line length for readability (150 chars to avoid mid-sentence cuts)
+                    if len(bullet_text) > 150:
+                        bullet_text = bullet_text[:147] + '...'
+
+                    p.text = '• ' + bullet_text
+                    p.font.name = "Calibri"
+                    p.font.size = Pt(18)  # Larger font for better slide readability
+                    p.font.color.rgb = TEXT_COLOR
+                    p.space_after = Pt(8)  # Slightly more spacing with larger font
+
+                # Ensure first paragraph is initialized even if content was empty
+                if not first_para_used:
+                    p = tf.paragraphs[0]
+                    p.text = ""  # Empty but properly initialized
                     p.font.name = "Calibri"
                     p.font.size = Pt(16)
-                    p.font.color.rgb = TEXT_COLOR
-                    p.space_after = Pt(8)
+
+                # Add image if available
+                if has_image:
+                    try:
+                        image_path = section_images[section_idx]
+                        # Position image on right side of slide
+                        slide.shapes.add_picture(
+                            image_path,
+                            Inches(8.5), Inches(1.8),
+                            width=Inches(4.3),
+                            height=Inches(3.2),
+                        )
+                        logger.debug(
+                            "Added image to PPTX slide",
+                            section=section.title,
+                            image_path=image_path,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to add image to slide: {e}")
 
                 add_footer(slide, current_slide, total_slides)
 
@@ -1097,17 +1380,26 @@ Please revise the content to address the feedback while maintaining quality and 
                 tf = sources_box.text_frame
                 tf.word_wrap = True
 
-                for idx, source in enumerate(job.sources_used[:10]):
-                    if idx > 0:
+                first_source_used = False
+                for source in job.sources_used[:10]:
+                    if first_source_used:
                         p = tf.add_paragraph()
                     else:
                         p = tf.paragraphs[0]
-                    doc_name = source.document_name or source.document_id[:20]
+                        first_source_used = True
+                    doc_name = sanitize_text(source.document_name or source.document_id[:20])
                     p.text = f"•  {doc_name}"
                     p.font.name = "Calibri"
                     p.font.size = Pt(14)
                     p.font.color.rgb = TEXT_COLOR
                     p.space_after = Pt(6)
+
+                # Ensure first paragraph is initialized even if no sources
+                if not first_source_used:
+                    p = tf.paragraphs[0]
+                    p.text = "No sources available"
+                    p.font.name = "Calibri"
+                    p.font.size = Pt(14)
 
                 add_footer(slide, current_slide, total_slides)
 
@@ -1117,8 +1409,8 @@ Please revise the content to address the feedback while maintaining quality and 
             logger.info("Professional PPTX generated", path=output_path)
             return output_path
 
-        except ImportError:
-            logger.error("python-pptx not installed")
+        except ImportError as e:
+            logger.error(f"python-pptx import error: {e}")
             return await self._generate_txt(job, filename)
 
     async def _generate_docx(self, job: GenerationJob, filename: str) -> str:
@@ -1137,6 +1429,42 @@ Please revise the content to address the feedback while maintaining quality and 
             SECONDARY_COLOR = RGBColor(0x3D, 0x5A, 0x80)  # Medium blue
             TEXT_COLOR = RGBColor(0x2D, 0x3A, 0x45)  # Dark gray
             LIGHT_GRAY = RGBColor(0x88, 0x88, 0x88)
+
+            # Initialize image generator if images are enabled
+            include_images = job.metadata.get("include_images", self.config.include_images)
+            section_images = {}
+            if include_images:
+                try:
+                    image_config = ImageGeneratorConfig(
+                        enabled=True,
+                        backend=ImageBackend(self.config.image_backend),
+                        default_width=600,
+                        default_height=400,
+                    )
+                    image_service = get_image_generator(image_config)
+
+                    # Generate images for all sections in parallel
+                    sections_data = [
+                        (section.title, section.revised_content or section.content)
+                        for section in job.sections
+                    ]
+                    images = await image_service.generate_batch(
+                        sections=sections_data,
+                        document_title=job.title,
+                    )
+
+                    # Map images to sections by index
+                    for idx, img in enumerate(images):
+                        if img and img.success and img.path:
+                            section_images[idx] = img.path
+
+                    logger.info(
+                        "Generated images for DOCX",
+                        total_sections=len(job.sections),
+                        images_generated=len(section_images),
+                    )
+                except Exception as e:
+                    logger.warning(f"Image generation failed, continuing without images: {e}")
 
             # Configure document margins
             for section in doc.sections:
@@ -1259,16 +1587,52 @@ Please revise the content to address the feedback while maintaining quality and 
                                 bullet_run.font.name = "Calibri"
                                 bullet_run.font.size = Pt(11)
                                 bullet_run.font.color.rgb = TEXT_COLOR
-                    # Regular paragraph
+                    # Regular paragraph with inline formatting support
                     else:
                         para = doc.add_paragraph()
                         para.paragraph_format.line_spacing = 1.5
                         para.paragraph_format.space_after = Pt(8)
 
-                        run = para.add_run(para_text)
-                        run.font.name = "Calibri"
-                        run.font.size = Pt(11)
-                        run.font.color.rgb = TEXT_COLOR
+                        # Parse inline bold (**text**) and italic (*text*) formatting
+                        import re
+                        # Pattern to match **bold**, *italic*, or plain text
+                        pattern = r'(\*\*[^*]+\*\*|\*[^*]+\*|[^*]+)'
+                        parts = re.findall(pattern, para_text)
+
+                        for part in parts:
+                            if part.startswith('**') and part.endswith('**'):
+                                # Bold text
+                                run = para.add_run(part[2:-2])
+                                run.bold = True
+                            elif part.startswith('*') and part.endswith('*') and len(part) > 2:
+                                # Italic text
+                                run = para.add_run(part[1:-1])
+                                run.italic = True
+                            else:
+                                # Plain text
+                                run = para.add_run(part)
+
+                            run.font.name = "Calibri"
+                            run.font.size = Pt(11)
+                            run.font.color.rgb = TEXT_COLOR
+
+                # Add image for this section if available
+                if idx in section_images:
+                    try:
+                        image_path = section_images[idx]
+                        doc.add_paragraph()  # Add spacing before image
+                        img_para = doc.add_paragraph()
+                        img_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        run = img_para.add_run()
+                        run.add_picture(image_path, width=Inches(5.0))
+                        doc.add_paragraph()  # Add spacing after image
+                        logger.debug(
+                            "Added image to DOCX section",
+                            section=section.title,
+                            image_path=image_path,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to add image to DOCX: {e}")
 
                 # Add section sources
                 if self.config.include_sources and section.sources:
@@ -1329,9 +1693,45 @@ Please revise the content to address the feedback while maintaining quality and 
             from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
             from reportlab.platypus import (
                 SimpleDocTemplate, Paragraph, Spacer, PageBreak,
-                Table, TableStyle, ListFlowable, ListItem
+                Table, TableStyle, ListFlowable, ListItem, Image
             )
             from reportlab.lib.units import inch, cm
+
+            # Initialize image generator if images are enabled
+            include_images = job.metadata.get("include_images", self.config.include_images)
+            section_images = {}
+            if include_images:
+                try:
+                    image_config = ImageGeneratorConfig(
+                        enabled=True,
+                        backend=ImageBackend(self.config.image_backend),
+                        default_width=600,
+                        default_height=400,
+                    )
+                    image_service = get_image_generator(image_config)
+
+                    # Generate images for all sections in parallel
+                    sections_data = [
+                        (section.title, section.revised_content or section.content)
+                        for section in job.sections
+                    ]
+                    images = await image_service.generate_batch(
+                        sections=sections_data,
+                        document_title=job.title,
+                    )
+
+                    # Map images to sections by index
+                    for idx, img in enumerate(images):
+                        if img and img.success and img.path:
+                            section_images[idx] = img.path
+
+                    logger.info(
+                        "Generated images for PDF",
+                        total_sections=len(job.sections),
+                        images_generated=len(section_images),
+                    )
+                except Exception as e:
+                    logger.warning(f"Image generation failed, continuing without images: {e}")
 
             # Define professional colors
             PRIMARY_COLOR = HexColor('#1E3A5F')  # Deep blue
@@ -1559,13 +1959,35 @@ Please revise the content to address the feedback while maintaining quality and 
                         if current_list:
                             story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
                             current_list = []
-                        # Escape XML special characters
-                        para_text = para_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                        story.append(Paragraph(para_text, body_style))
+                        # Escape XML special characters first
+                        formatted = para_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        # Convert markdown bold (**text**) to HTML bold for ReportLab
+                        import re
+                        formatted = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', formatted)
+                        # Convert markdown italic (*text*) to HTML italic
+                        formatted = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', formatted)
+                        story.append(Paragraph(formatted, body_style))
 
                 # Flush remaining list items
                 if current_list:
                     story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
+
+                # Add image for this section if available
+                if idx in section_images:
+                    try:
+                        image_path = section_images[idx]
+                        story.append(Spacer(1, 0.2*inch))
+                        # Create image with max width of 5 inches
+                        img = Image(image_path, width=5*inch, height=3.5*inch)
+                        story.append(img)
+                        story.append(Spacer(1, 0.2*inch))
+                        logger.debug(
+                            "Added image to PDF section",
+                            section=section.title,
+                            image_path=image_path,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to add image to PDF: {e}")
 
                 # Section sources
                 if self.config.include_sources and section.sources:
@@ -1776,6 +2198,9 @@ Please revise the content to address the feedback while maintaining quality and 
             # Content rows
             for i, section in enumerate(job.sections, start=2):
                 content = section.revised_content or section.content
+                # Strip markdown formatting for clean Excel content
+                content = strip_markdown(content) if content else ""
+
                 ws_content.cell(row=i, column=1, value=section.order).border = thin_border
                 ws_content.cell(row=i, column=2, value=section.title).border = thin_border
                 ws_content.cell(row=i, column=3, value=content).border = thin_border

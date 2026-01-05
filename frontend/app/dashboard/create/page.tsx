@@ -21,6 +21,7 @@ import {
   GripVertical,
   Image,
   AlertCircle,
+  Filter,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,8 +42,11 @@ import {
   useGenerateContent,
   useDownloadGeneratedDocument,
   useCancelGenerationJob,
+  useCollections,
 } from "@/lib/api";
 import { toast } from "sonner";
+import { DocumentFilterPanel } from "@/components/chat/document-filter-panel";
+import { FolderSelector } from "@/components/folder-selector";
 
 type Step = "format" | "topic" | "outline" | "content" | "download";
 type OutputFormat = "docx" | "pptx" | "pdf" | "markdown" | "html" | "txt";
@@ -80,6 +84,10 @@ export default function CreatePage() {
   const [context, setContext] = useState("");
   const [tone, setTone] = useState("professional");
   const [includeImages, setIncludeImages] = useState(false); // Disabled by default
+  const [selectedCollections, setSelectedCollections] = useState<string[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [includeSubfolders, setIncludeSubfolders] = useState(true);
+  const [showFilters, setShowFilters] = useState(false);
   const [outline, setOutline] = useState<OutlineSection[]>([]);
   const [documentTitle, setDocumentTitle] = useState("");
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
@@ -87,6 +95,7 @@ export default function CreatePage() {
   // Queries - only fetch when authenticated
   const { data: job, isLoading: jobLoading } = useGenerationJob(currentJobId || "");
   const { data: recentJobs } = useGenerationJobs();
+  const { data: collectionsData, isLoading: isLoadingCollections, refetch: refetchCollections } = useCollections({ enabled: isAuthenticated });
 
   // Mutations
   const createJob = useCreateGenerationJob();
@@ -110,6 +119,10 @@ export default function CreatePage() {
               title: topic,
               description: context || topic,
               output_format: selectedFormat!,
+              include_images: includeImages,
+              collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
+              folder_id: selectedFolderId || undefined,
+              include_subfolders: includeSubfolders,
             });
             setCurrentJobId(newJob.id);
             await generateOutline.mutateAsync({ jobId: newJob.id });
@@ -368,6 +381,70 @@ export default function CreatePage() {
                     <option value="technical">Technical</option>
                     <option value="creative">Creative</option>
                   </select>
+                </div>
+
+                {/* Source Filter Toggle */}
+                <div className="space-y-3">
+                  <div
+                    className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-colors ${
+                      showFilters
+                        ? "bg-primary/5 border-primary/30"
+                        : "bg-muted/30 border-border hover:bg-muted/50"
+                    }`}
+                    onClick={() => setShowFilters(!showFilters)}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`p-2 rounded-lg ${showFilters ? "bg-primary/10" : "bg-muted"}`}>
+                        <Filter className={`h-4 w-4 ${showFilters ? "text-primary" : "text-muted-foreground"}`} />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium">Filter Source Documents</p>
+                        <p className="text-xs text-muted-foreground">
+                          Select collections and folders to use as reference
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {(selectedCollections.length > 0 || selectedFolderId) && (
+                        <span className="text-xs bg-primary/10 text-primary px-2 py-1 rounded">
+                          {selectedCollections.length > 0 && `${selectedCollections.length} collections`}
+                          {selectedCollections.length > 0 && selectedFolderId && " + "}
+                          {selectedFolderId && "folder"}
+                        </span>
+                      )}
+                      <ChevronRight className={`h-4 w-4 transition-transform ${showFilters ? "rotate-90" : ""}`} />
+                    </div>
+                  </div>
+
+                  {/* Expanded Filter Panel */}
+                  {showFilters && (
+                    <div className="space-y-3 pl-2 border-l-2 border-primary/20">
+                      {/* Collections Filter */}
+                      <DocumentFilterPanel
+                        collections={collectionsData?.collections || []}
+                        selectedCollections={selectedCollections}
+                        onCollectionsChange={setSelectedCollections}
+                        totalDocuments={collectionsData?.total_documents}
+                        isLoading={isLoadingCollections}
+                        onRefresh={() => refetchCollections()}
+                      />
+
+                      {/* Folder Filter */}
+                      <div className="p-3 rounded-lg border bg-card">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-sm font-medium">Folder Scope</span>
+                        </div>
+                        <FolderSelector
+                          value={selectedFolderId}
+                          onChange={setSelectedFolderId}
+                          includeSubfolders={includeSubfolders}
+                          onIncludeSubfoldersChange={setIncludeSubfolders}
+                          showSubfoldersToggle={true}
+                          placeholder="All folders"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Image Generation Toggle */}

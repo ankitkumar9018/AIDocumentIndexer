@@ -968,6 +968,272 @@ Delete a locally installed Ollama model (admin only).
 
 ---
 
+## Folder Endpoints
+
+### GET /folders
+
+List folders with optional parent filter.
+
+**Query Parameters:**
+- `parent_id` (string): Filter by parent folder ID (null for root)
+- `include_counts` (bool): Include document counts (default: true)
+
+**Response:**
+```json
+{
+  "folders": [
+    {
+      "id": "uuid",
+      "name": "Marketing",
+      "path": "/Marketing/",
+      "parent_folder_id": null,
+      "depth": 0,
+      "access_tier_level": 30,
+      "document_count": 15,
+      "created_at": "2025-01-01T00:00:00Z"
+    }
+  ],
+  "total": 5
+}
+```
+
+### POST /folders
+
+Create a new folder.
+
+**Request:**
+```json
+{
+  "name": "Q1 Reports",
+  "parent_folder_id": "optional-parent-uuid",
+  "access_tier_id": "tier-uuid",
+  "description": "First quarter financial reports",
+  "color": "#3D5A80"
+}
+```
+
+### GET /folders/tree
+
+Get the full folder hierarchy tree.
+
+**Response:**
+```json
+{
+  "tree": [
+    {
+      "id": "uuid",
+      "name": "Marketing",
+      "path": "/Marketing/",
+      "children": [
+        {
+          "id": "uuid",
+          "name": "Campaigns",
+          "path": "/Marketing/Campaigns/",
+          "children": []
+        }
+      ]
+    }
+  ]
+}
+```
+
+### GET /folders/{folder_id}
+
+Get a specific folder.
+
+### PATCH /folders/{folder_id}
+
+Update folder properties.
+
+**Request:**
+```json
+{
+  "name": "New Name",
+  "description": "Updated description",
+  "color": "#1E3A5F"
+}
+```
+
+### DELETE /folders/{folder_id}
+
+Delete a folder.
+
+**Query Parameters:**
+- `recursive` (bool): Delete folder and all contents (default: false)
+
+### POST /folders/{folder_id}/move
+
+Move a folder to a new parent.
+
+**Request:**
+```json
+{
+  "new_parent_id": "target-folder-uuid"
+}
+```
+
+### GET /folders/{folder_id}/documents
+
+List documents in a folder.
+
+**Query Parameters:**
+- `include_subfolders` (bool): Include documents from subfolders (default: false)
+- `page` (int): Page number
+- `page_size` (int): Items per page
+
+---
+
+## User Preferences Endpoints
+
+### GET /preferences
+
+Get current user's preferences.
+
+**Response:**
+```json
+{
+  "theme": "system",
+  "documents_view_mode": "grid",
+  "documents_sort_by": "created_at",
+  "documents_sort_order": "desc",
+  "documents_page_size": 20,
+  "default_collection": null,
+  "default_folder_id": null,
+  "search_include_content": true,
+  "search_results_per_page": 10,
+  "chat_show_sources": true,
+  "chat_expand_sources": false,
+  "sidebar_collapsed": false,
+  "recent_documents": ["doc-uuid-1", "doc-uuid-2"],
+  "recent_searches": ["search term 1", "search term 2"]
+}
+```
+
+### PATCH /preferences
+
+Update user preferences.
+
+**Request:**
+```json
+{
+  "theme": "dark",
+  "documents_view_mode": "list",
+  "documents_page_size": 50
+}
+```
+
+**Valid Values:**
+- `theme`: "light", "dark", "system"
+- `documents_view_mode`: "grid", "list", "table"
+- `documents_sort_by`: "created_at", "name", "file_size", "updated_at"
+- `documents_sort_order`: "asc", "desc"
+- `documents_page_size`: 5-100
+
+### POST /preferences/recent
+
+Add a recent item (document or search).
+
+**Request:**
+```json
+{
+  "item_type": "document",
+  "item": "document-uuid"
+}
+```
+
+### DELETE /preferences/recent/{item_type}
+
+Clear recent documents or searches.
+
+**Path Parameters:**
+- `item_type`: "documents" or "searches"
+
+### POST /preferences/reset
+
+Reset all preferences to defaults.
+
+---
+
+## Saved Searches Endpoints
+
+### GET /preferences/searches
+
+List all saved searches.
+
+**Response:**
+```json
+{
+  "searches": [
+    {
+      "name": "Marketing PDFs",
+      "query": "marketing campaign",
+      "collection": "Marketing",
+      "folder_id": null,
+      "include_subfolders": true,
+      "file_types": ["pdf", "pptx"],
+      "search_mode": "hybrid",
+      "created_at": "2025-01-01T00:00:00Z"
+    }
+  ],
+  "count": 3
+}
+```
+
+### POST /preferences/searches
+
+Save a search configuration.
+
+**Request:**
+```json
+{
+  "name": "German Lessons",
+  "query": "german vocabulary",
+  "collection": "Learning",
+  "folder_id": "optional-folder-uuid",
+  "include_subfolders": true,
+  "date_from": "2024-01-01",
+  "date_to": "2024-12-31",
+  "file_types": ["pdf", "docx"],
+  "search_mode": "hybrid"
+}
+```
+
+**Valid Values:**
+- `search_mode`: "hybrid", "vector", "keyword"
+- Maximum 20 saved searches per user
+
+### GET /preferences/searches/{name}
+
+Get a specific saved search by name.
+
+### DELETE /preferences/searches/{name}
+
+Delete a saved search.
+
+---
+
+## Search Operators
+
+The search system supports advanced operators for keyword search:
+
+| Operator | Syntax | Example | Description |
+|----------|--------|---------|-------------|
+| AND | `term1 AND term2` | `marketing AND strategy` | Both terms required |
+| OR | `term1 OR term2` | `budget OR finance` | Either term matches |
+| NOT | `NOT term` | `NOT draft` | Exclude term |
+| Phrase | `"exact phrase"` | `"quarterly report"` | Match exact phrase |
+| Grouping | `(term1 OR term2)` | `(Q1 OR Q2) AND report` | Group expressions |
+
+**Examples:**
+```
+marketing AND (strategy OR plan)
+"quarterly report" NOT draft
+budget OR finance OR accounting
+German AND vocabulary NOT test
+```
+
+---
+
 ## Health Check
 
 ### GET /health

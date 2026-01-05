@@ -230,6 +230,9 @@ class ChatRequest(BaseModel):
     temp_session_id: Optional[str] = Field(default=None, description="Temporary document session ID for quick chat")
     top_k: Optional[int] = Field(default=None, ge=3, le=25, description="Number of documents to search (3-25). Uses admin setting if not specified.")
     images: Optional[List[ImageAttachment]] = Field(default=None, description="Image attachments for vision mode")
+    # Folder-scoped queries
+    folder_id: Optional[str] = Field(default=None, description="Folder ID to scope query to. Only documents in this folder (and subfolders) will be searched.")
+    include_subfolders: bool = Field(default=True, description="When folder_id is set, include documents in subfolders")
 
     @property
     def effective_collection_filters(self) -> Optional[List[str]]:
@@ -546,6 +549,8 @@ async def create_chat_completion(
                 include_collection_context=request.include_collection_context,
                 additional_context=temp_context,  # Include temporary document context if available
                 top_k=request.top_k,  # Per-query document count override
+                folder_id=request.folder_id,  # Folder-scoped query
+                include_subfolders=request.include_subfolders,
             )
 
             # Convert sources to API format
@@ -839,6 +844,8 @@ async def create_streaming_completion(
                 access_tier=100,  # Default tier; use user.access_tier when auth is enabled
                 include_collection_context=request.include_collection_context,
                 top_k=request.top_k,  # Per-query document count override
+                folder_id=request.folder_id,  # Folder-scoped query
+                include_subfolders=request.include_subfolders,
             ):
                 if chunk.type == "content":
                     accumulated_content.append(chunk.data)

@@ -50,9 +50,10 @@ class CRAGResult:
     original_results: List[SearchResult]
     filtered_results: List[SearchResult]
     evaluations: List[RelevanceEvaluation]
-    action_taken: str  # "use_as_is", "filtered", "refined_query", "web_fallback"
+    action_taken: str  # "use_as_is", "filtered", "refined_query", "web_fallback", "low_confidence"
     confidence: float
     needs_web_search: bool
+    refined_query: Optional[str] = None  # Set when action_taken == "refined_query"
 
 
 class CorrectiveRAG:
@@ -159,7 +160,35 @@ class CorrectiveRAG:
             confidence = sum(e.score for e in correct + ambiguous) / len(correct + ambiguous)
 
         else:
-            # Poor results - may need fallback
+            # Poor results - try query refinement first, then consider web fallback
+            refined_query = None
+
+            # Try query refinement if enabled and LLM is available
+            if self.enable_query_refinement and llm and incorrect:
+                try:
+                    refined_query = await self.refine_query(
+                        original_query=query,
+                        poor_results=[r for r in search_results if r.chunk_id in set(e.chunk_id for e in incorrect)],
+                        llm=llm,
+                    )
+                    # If we got a different query, signal for re-search
+                    if refined_query and refined_query.lower().strip() != query.lower().strip():
+                        # Return with refined_query action - caller should re-search
+                        filtered_ids = set(e.chunk_id for e in correct + ambiguous)
+                        filtered_results = [r for r in search_results if r.chunk_id in filtered_ids]
+                        return CRAGResult(
+                            original_results=search_results,
+                            filtered_results=filtered_results,
+                            evaluations=evaluations,
+                            action_taken="refined_query",
+                            confidence=0.3,
+                            needs_web_search=False,
+                            refined_query=refined_query,
+                        )
+                except Exception as e:
+                    logger.warning("Query refinement failed in CRAG process", error=str(e))
+
+            # If refinement didn't help, consider web fallback
             if self.enable_web_fallback:
                 # Keep some results but flag for web search
                 filtered_ids = set(e.chunk_id for e in correct + ambiguous[:3])
@@ -182,6 +211,7 @@ class CorrectiveRAG:
             action_taken=action,
             confidence=min(1.0, confidence),
             needs_web_search=needs_web,
+            refined_query=None,
         )
 
     def _evaluate_heuristic(

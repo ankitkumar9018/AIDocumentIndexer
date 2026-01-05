@@ -37,14 +37,20 @@ nano .env  # Add your OpenAI API key
 # 3. Start all services
 docker-compose -f docker/docker-compose.yml up -d
 
-# 4. Check status
+# 4. Run database migrations (required for new installations)
+docker-compose -f docker/docker-compose.yml exec backend \
+  alembic -c backend/alembic.ini upgrade head
+
+# 5. Check status
 docker-compose -f docker/docker-compose.yml ps
 
-# 5. Access the application
+# 6. Access the application
 # Frontend: http://localhost:3000
 # Backend API: http://localhost:8000
 # Ray Dashboard: http://localhost:8265
 ```
+
+**Note:** Migrations run automatically on startup in development mode. For production, run migrations explicitly before deploying new versions.
 
 ---
 
@@ -163,6 +169,173 @@ pip install -r backend/requirements.txt
 # Install PaddleOCR (may require additional setup)
 pip install paddlepaddle paddleocr
 ```
+
+### Step 3.5: Initialize the Database
+
+AIDocumentIndexer supports two database modes. Choose based on your needs:
+
+---
+
+#### Option A: SQLite (Development / Quick Start)
+
+SQLite is the simplest option for development and testing. Tables are created automatically.
+
+**Step 1: Configure environment**
+```bash
+cd AIDocumentIndexer
+
+# Copy environment template
+cp .env.example .env
+
+# Edit .env and set SQLite database:
+# DATABASE_URL=sqlite:////path/to/AIDocumentIndexer/aidocindexer.db
+```
+
+**Step 2: Set environment variables**
+```bash
+# Set environment variables (or add to .env)
+export DATABASE_URL=sqlite:////Users/yourname/AIDocumentIndexer/aidocindexer.db
+export APP_ENV=development
+export PYTHONPATH=.
+```
+
+**Step 3: Start the backend (tables created automatically)**
+```bash
+source venv/bin/activate
+cd backend
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Tables are created automatically via SQLAlchemy on first startup. No migrations needed for SQLite.
+
+**SQLite Limitations:**
+- No pgvector (vector search uses slower brute-force method)
+- No full-text search indexes
+- No row-level security
+- Single-user only (file locking)
+- **Not recommended for production**
+
+---
+
+#### Option B: PostgreSQL (Production / Full Features)
+
+PostgreSQL with pgvector provides the best performance and all features.
+
+**Step 1: Install PostgreSQL and pgvector**
+
+```bash
+# macOS
+brew install postgresql@16 pgvector
+brew services start postgresql@16
+
+# Ubuntu/Debian
+sudo apt install postgresql-16 postgresql-16-pgvector
+sudo systemctl start postgresql
+
+# Windows
+# Download PostgreSQL from https://www.postgresql.org/download/windows/
+# Install pgvector manually: https://github.com/pgvector/pgvector#windows
+```
+
+**Step 2: Create database and enable pgvector**
+
+```bash
+# Connect to PostgreSQL
+sudo -u postgres psql
+
+# Run these SQL commands:
+CREATE USER aidoc WITH PASSWORD 'your_secure_password';
+CREATE DATABASE aidocindexer OWNER aidoc;
+\c aidocindexer
+CREATE EXTENSION vector;
+GRANT ALL PRIVILEGES ON DATABASE aidocindexer TO aidoc;
+\q
+```
+
+**Step 3: Configure environment**
+
+```bash
+cd AIDocumentIndexer
+cp .env.example .env
+
+# Edit .env and set:
+# DATABASE_URL=postgresql://aidoc:your_secure_password@localhost:5432/aidocindexer
+```
+
+**Step 4: Run database migrations**
+
+```bash
+source venv/bin/activate
+export DATABASE_URL=postgresql://aidoc:your_secure_password@localhost:5432/aidocindexer
+export APP_ENV=development
+export PYTHONPATH=.
+
+# Run all migrations
+alembic -c backend/alembic.ini upgrade head
+
+# Verify migration success (should show 20260102_012)
+alembic -c backend/alembic.ini current
+```
+
+**Step 5: Start the backend**
+
+```bash
+cd backend
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+---
+
+### PostgreSQL Migration Reference
+
+**Full migration chain:**
+```
+001_initial_schema           → Core tables, pgvector, RLS policies
+002_ai_optimization          → AI optimization fields
+003_ocr_settings             → OCR configuration
+20251230_004                 → OCR metrics
+20251230_005                 → EasyOCR settings
+20251230_006                 → Performance indexes
+20251230_007                 → Chat feedback
+20260102_008                 → HNSW + FTS indexes (critical for scale)
+20260102_009                 → Upload jobs table
+20260102_010                 → Folders table
+20260102_011                 → User preferences table
+20260102_012 (head)          → Saved searches column
+```
+
+**Common migration commands:**
+```bash
+# Check current version
+alembic -c backend/alembic.ini current
+
+# Run all pending migrations
+alembic -c backend/alembic.ini upgrade head
+
+# Run migrations to specific version
+alembic -c backend/alembic.ini upgrade 20260102_008
+
+# Rollback one migration
+alembic -c backend/alembic.ini downgrade -1
+
+# View migration history
+alembic -c backend/alembic.ini history --verbose
+
+# Generate new migration after model changes
+alembic -c backend/alembic.ini revision --autogenerate -m "description"
+
+# Mark database as up-to-date (skip migrations)
+alembic -c backend/alembic.ini stamp head
+```
+
+**Troubleshooting migrations:**
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| "relation already exists" | Table created outside migrations | Run `alembic stamp head` |
+| "extension vector does not exist" | pgvector not installed | Install pgvector and run `CREATE EXTENSION vector;` |
+| "no such revision" | Migration chain broken | Check down_revision in migration files |
+| "CONCURRENTLY cannot be executed from a function" | Migration in transaction | Run index creation manually outside alembic |
 
 ### Step 4: Set Up Node.js Frontend
 

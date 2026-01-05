@@ -283,6 +283,7 @@ class DocumentPipeline:
         metadata: Optional[Dict[str, Any]] = None,
         access_tier: int = 10,
         collection: Optional[str] = None,
+        folder_id: Optional[str] = None,
     ) -> ProcessingResult:
         """
         Process a single document through the full pipeline.
@@ -293,6 +294,7 @@ class DocumentPipeline:
             metadata: Additional metadata to attach
             access_tier: Access tier for the document
             collection: Collection name for organization
+            folder_id: Optional folder ID to place the document in
 
         Returns:
             ProcessingResult with all extracted data
@@ -373,6 +375,7 @@ class DocumentPipeline:
                 **extracted.metadata,
                 "access_tier": access_tier,
                 "collection": collection,
+                "folder_id": folder_id,
                 "language": extracted.language,
             }
 

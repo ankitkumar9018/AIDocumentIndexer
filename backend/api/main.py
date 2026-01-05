@@ -255,12 +255,16 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.agent import router as agent_router
     from backend.api.routes.temp_upload import router as temp_upload_router
     from backend.api.routes.metrics import router as metrics_router
+    from backend.api.routes.folders import router as folders_router
+    from backend.api.routes.preferences import router as preferences_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
     app.include_router(agent_router, prefix="/api/v1/agent", tags=["Agent Orchestration"])
     app.include_router(temp_upload_router, prefix="/api/v1/temp", tags=["Temporary Uploads"])
     app.include_router(metrics_router, prefix="/api/v1/metrics", tags=["Metrics & Monitoring"])
+    app.include_router(folders_router, prefix="/api/v1/folders", tags=["Folders"])
+    app.include_router(preferences_router, prefix="/api/v1/preferences", tags=["User Preferences"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

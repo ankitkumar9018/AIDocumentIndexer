@@ -6,6 +6,7 @@ Provides vector storage and similarity search using PostgreSQL + pgvector.
 Supports hybrid search (vector + keyword) with access tier filtering.
 """
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -20,6 +21,120 @@ from backend.db.database import async_session_context, get_async_session_factory
 from backend.db.models import Chunk, Document, AccessTier, HAS_PGVECTOR, ProcessingStatus
 
 logger = structlog.get_logger(__name__)
+
+
+# =============================================================================
+# Query Parser for Search Operators
+# =============================================================================
+
+def parse_search_query(query: str) -> Tuple[str, bool]:
+    """
+    Parse a search query with AND/OR/NOT operators into PostgreSQL tsquery format.
+
+    Supports:
+    - AND: term1 AND term2 → term1 & term2
+    - OR: term1 OR term2 → term1 | term2
+    - NOT: NOT term → !term
+    - Phrases: "exact phrase" → preserved with <->
+    - Parentheses: (term1 OR term2) AND term3
+
+    Args:
+        query: User search query with optional operators
+
+    Returns:
+        Tuple of (tsquery_string, has_operators)
+        - tsquery_string: PostgreSQL-compatible tsquery
+        - has_operators: True if explicit operators were found
+
+    Examples:
+        "python AND machine learning" → ("python & machine & learning", True)
+        "python OR java" → ("python | java", True)
+        "python NOT java" → ("python & !java", True)
+        "machine learning" → ("machine & learning", False)
+        '"exact phrase"' → ("exact <-> phrase", True)
+    """
+    if not query or not query.strip():
+        return ("", False)
+
+    original_query = query.strip()
+
+    # Check if query has explicit operators
+    has_operators = bool(re.search(r'\b(AND|OR|NOT)\b', query, re.IGNORECASE))
+
+    # Extract quoted phrases first and replace with placeholders
+    phrases = []
+    phrase_pattern = r'"([^"]+)"'
+
+    def replace_phrase(match):
+        phrase = match.group(1).strip()
+        phrases.append(phrase)
+        return f"__PHRASE_{len(phrases) - 1}__"
+
+    query = re.sub(phrase_pattern, replace_phrase, query)
+
+    # If no explicit operators, convert to simple tsquery (plainto_tsquery behavior)
+    if not has_operators and not phrases:
+        # Just return the original - let PostgreSQL handle it with plainto_tsquery
+        return (original_query, False)
+
+    # Normalize operators to uppercase for consistent processing
+    query = re.sub(r'\bAND\b', ' & ', query, flags=re.IGNORECASE)
+    query = re.sub(r'\bOR\b', ' | ', query, flags=re.IGNORECASE)
+    query = re.sub(r'\bNOT\s+', ' !', query, flags=re.IGNORECASE)
+
+    # Handle parentheses - keep them for grouping
+    # Convert spaces between words (not operators) to &
+
+    # Split by operators and parentheses while keeping them
+    tokens = re.split(r'(\s*[&|!()]\s*)', query)
+
+    result_parts = []
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+
+        # Keep operators and parentheses as-is
+        if token in ['&', '|', '!', '(', ')']:
+            result_parts.append(token)
+        elif token.startswith('__PHRASE_') and token.endswith('__'):
+            # Restore phrase with phrase search operator
+            idx = int(token.replace('__PHRASE_', '').replace('__', ''))
+            phrase_words = phrases[idx].split()
+            if len(phrase_words) > 1:
+                # Use <-> for phrase matching (adjacent words)
+                phrase_tsquery = ' <-> '.join(phrase_words)
+                result_parts.append(f"({phrase_tsquery})")
+            else:
+                result_parts.append(phrase_words[0])
+        else:
+            # Regular term - might contain multiple words
+            words = token.split()
+            if len(words) > 1:
+                # Multiple words without operator - AND them together
+                result_parts.append('(' + ' & '.join(words) + ')')
+            elif len(words) == 1:
+                result_parts.append(words[0])
+
+    # Join result
+    result = ' '.join(result_parts)
+
+    # Clean up multiple spaces and fix operator spacing
+    result = re.sub(r'\s+', ' ', result)
+    result = re.sub(r'\s*&\s*', ' & ', result)
+    result = re.sub(r'\s*\|\s*', ' | ', result)
+    result = re.sub(r'\s*!\s*', ' !', result)
+
+    # Remove trailing/leading operators
+    result = re.sub(r'^[\s&|]+', '', result)
+    result = re.sub(r'[\s&|]+$', '', result)
+
+    # If result is empty after processing, use original
+    if not result.strip():
+        return (original_query, False)
+
+    return (result.strip(), True)
+
 
 # Cross-encoder reranking support
 try:
@@ -73,7 +188,7 @@ class VectorStoreConfig:
     """Configuration for vector store."""
     # Search settings
     default_top_k: int = 10
-    similarity_threshold: float = 0.4  # Lower threshold for OCR'd documents
+    similarity_threshold: float = 0.55  # Balanced threshold (0.4 was too permissive, 0.7 too strict for OCR)
     search_type: SearchType = SearchType.HYBRID
 
     # Context expansion (surrounding chunks)
@@ -133,6 +248,9 @@ class VectorStore:
                 self._reranker = None
         elif self.config.enable_reranking:
             logger.warning("Reranking enabled but sentence-transformers not installed")
+
+        # ColBERT reranker (lazy-loaded when setting is enabled)
+        self._colbert_reranker = None
 
     # =========================================================================
     # Storage Operations
@@ -373,10 +491,17 @@ class VectorStore:
         session: Optional[AsyncSession] = None,
     ) -> List[SearchResult]:
         """
-        Perform full-text keyword search.
+        Perform full-text keyword search with operator support.
+
+        Supports search operators:
+        - AND: term1 AND term2 (both must match)
+        - OR: term1 OR term2 (either must match)
+        - NOT: NOT term (exclude matches)
+        - Phrases: "exact phrase" (words must appear adjacent)
+        - Parentheses: (term1 OR term2) AND term3 (grouping)
 
         Args:
-            query: Search query string
+            query: Search query string (may contain operators)
             top_k: Number of results to return
             access_tier_level: Maximum access tier level for filtering
             document_ids: Optional list of document IDs to search within
@@ -387,10 +512,18 @@ class VectorStore:
         """
         top_k = top_k or self.config.default_top_k
 
+        # Parse query for operators (AND, OR, NOT, phrases)
+        parsed_query, has_operators = parse_search_query(query)
+
         async def _search(db: AsyncSession) -> List[SearchResult]:
             # PostgreSQL full-text search
-            # Using to_tsvector and to_tsquery for ranking
-            ts_query = func.plainto_tsquery('english', query)
+            # Use to_tsquery for operator support, plainto_tsquery for simple queries
+            if has_operators:
+                # Use to_tsquery for advanced queries with operators
+                ts_query = func.to_tsquery('english', parsed_query)
+            else:
+                # Use plainto_tsquery for simple queries (handles stemming better)
+                ts_query = func.plainto_tsquery('english', query)
             ts_rank = func.ts_rank(
                 func.to_tsvector('english', Chunk.content),
                 ts_query
@@ -446,6 +579,8 @@ class VectorStore:
                     metadata={
                         "chunk_index": chunk.chunk_index,
                         "search_type": "keyword",
+                        "used_operators": has_operators,
+                        "parsed_query": parsed_query if has_operators else None,
                     },
                     document_title=doc.title or doc.filename,
                     document_filename=doc.filename,
@@ -742,14 +877,114 @@ class VectorStore:
         )
 
         # Apply reranking if enabled and available
-        if self.config.enable_reranking and self._reranker is not None and query:
-            final_results = self._rerank_results(query, final_results, top_k)
+        if self.config.enable_reranking and query:
+            final_results = await self._rerank_results_async(query, final_results, top_k)
 
         # Expand context with surrounding chunks
         if self.config.enable_context_expansion:
             final_results = await self.expand_context(final_results, session=session)
 
         return final_results
+
+    async def _rerank_results_async(
+        self,
+        query: str,
+        results: List[SearchResult],
+        top_k: int,
+    ) -> List[SearchResult]:
+        """
+        Rerank search results using ColBERT or cross-encoder based on settings.
+
+        Checks rag.use_colbert_reranker setting to decide which reranker to use.
+        ColBERT provides 10-20% better precision with similar speed.
+
+        Args:
+            query: Original search query
+            results: List of search results to rerank
+            top_k: Number of results to return after reranking
+
+        Returns:
+            Reranked list of SearchResult objects
+        """
+        if not results:
+            return results
+
+        # Check if ColBERT reranking is enabled
+        try:
+            from backend.services.settings import get_settings_service
+            settings = get_settings_service()
+            use_colbert = await settings.get_setting("rag.use_colbert_reranker")
+
+            if use_colbert:
+                return await self._rerank_with_colbert(query, results, top_k)
+        except Exception as e:
+            logger.debug("Could not check ColBERT setting, using cross-encoder", error=str(e))
+
+        # Fall back to cross-encoder
+        return self._rerank_results(query, results, top_k)
+
+    async def _rerank_with_colbert(
+        self,
+        query: str,
+        results: List[SearchResult],
+        top_k: int,
+    ) -> List[SearchResult]:
+        """
+        Rerank results using ColBERT reranker.
+
+        ColBERT uses late interaction (MaxSim) scoring for better precision.
+        """
+        try:
+            # Lazy-load ColBERT reranker
+            if self._colbert_reranker is None:
+                from backend.services.colbert_reranker import ColBERTReranker
+                self._colbert_reranker = ColBERTReranker()
+                logger.info("Initialized ColBERT reranker")
+
+            # Prepare documents for ColBERT (expects list of dicts)
+            documents = [
+                {
+                    "content": result.content,
+                    "chunk_id": result.chunk_id,
+                    "document_id": result.document_id,
+                    "score": result.score,
+                    "metadata": result.metadata,
+                }
+                for result in results
+            ]
+
+            # Rerank using ColBERT
+            reranked_results = await self._colbert_reranker.rerank(
+                query=query,
+                documents=documents,
+                top_k=top_k,
+            )
+
+            # Build lookup for original results by chunk_id
+            result_lookup = {r.chunk_id: r for r in results}
+
+            # Map reranked results back to SearchResult objects
+            reranked = []
+            for rr in reranked_results:
+                if rr.chunk_id in result_lookup:
+                    result = result_lookup[rr.chunk_id]
+                    result.score = rr.rerank_score
+                    result.metadata["reranked"] = True
+                    result.metadata["rerank_score"] = rr.rerank_score
+                    result.metadata["reranker"] = "colbert"
+                    reranked.append(result)
+
+            logger.debug(
+                "ColBERT reranked results",
+                original_count=len(results),
+                reranked_count=len(reranked),
+            )
+
+            return reranked
+
+        except Exception as e:
+            logger.warning("ColBERT reranking failed, falling back to cross-encoder", error=str(e))
+            return self._rerank_results(query, results, top_k)
 
     def _rerank_results(
         self,
@@ -793,10 +1028,11 @@ class VectorStore:
                 result.score = float(score)  # Use rerank score
                 result.metadata["reranked"] = True
                 result.metadata["rerank_score"] = float(score)
+                result.metadata["reranker"] = "cross-encoder"
                 reranked.append(result)
 
             logger.debug(
-                "Reranked results",
+                "Cross-encoder reranked results",
                 original_count=len(results),
                 reranked_count=len(reranked),
             )

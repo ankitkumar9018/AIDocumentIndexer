@@ -185,6 +185,20 @@ class ProcessingStatus(str, PyEnum):
     FAILED = "failed"
 
 
+class UploadStatus(str, PyEnum):
+    """Upload job status for tracking file uploads before document creation."""
+    QUEUED = "queued"
+    VALIDATING = "validating"
+    EXTRACTING = "extracting"
+    CHUNKING = "chunking"
+    EMBEDDING = "embedding"
+    INDEXING = "indexing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    DUPLICATE = "duplicate"
+
+
 class ProcessingMode(str, PyEnum):
     """Document processing mode."""
     FULL = "full"
@@ -369,10 +383,21 @@ class Document(Base, UUIDMixin, TimestampMixin):
         GUID(),
         ForeignKey("users.id"),
     )
+    folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("folders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     # Relationships
     access_tier: Mapped["AccessTier"] = relationship("AccessTier", back_populates="documents")
     uploaded_by: Mapped[Optional["User"]] = relationship("User", back_populates="documents")
+    folder: Mapped[Optional["Folder"]] = relationship(
+        "Folder",
+        back_populates="documents",
+        foreign_keys=[folder_id],
+    )
     chunks: Mapped[List["Chunk"]] = relationship(
         "Chunk",
         back_populates="document",
@@ -726,6 +751,63 @@ class ProcessingQueue(Base, UUIDMixin):
 
     def __repr__(self) -> str:
         return f"<ProcessingQueue(document_id='{self.document_id}', status='{self.status}')>"
+
+
+class UploadJob(Base, UUIDMixin, TimestampMixin):
+    """
+    Upload job tracking.
+
+    Persists file upload status to database so it survives server restarts.
+    This model exists independently of Document - the document_id is only
+    set after the document is successfully created during processing.
+    """
+    __tablename__ = "upload_jobs"
+
+    # File info
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    file_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    # Processing status
+    status: Mapped[UploadStatus] = mapped_column(
+        Enum(UploadStatus),
+        default=UploadStatus.QUEUED,
+        index=True,
+    )
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    current_step: Mapped[str] = mapped_column(String(100), default="Queued")
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Processing options
+    collection: Mapped[Optional[str]] = mapped_column(String(200))
+    access_tier: Mapped[int] = mapped_column(Integer, default=1)
+    enable_ocr: Mapped[bool] = mapped_column(Boolean, default=True)
+    enable_image_analysis: Mapped[bool] = mapped_column(Boolean, default=True)
+    auto_generate_tags: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Results (populated after processing)
+    chunk_count: Mapped[Optional[int]] = mapped_column(Integer)
+    word_count: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Link to created document (null until processing completes)
+    document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Relationships
+    document: Mapped[Optional["Document"]] = relationship("Document")
+
+    # Indexes for common queries
+    __table_args__ = (
+        Index("idx_upload_jobs_status_created", status, "created_at"),
+        Index("idx_upload_jobs_file_hash", file_hash),
+    )
+
+    def __repr__(self) -> str:
+        return f"<UploadJob(id='{self.id}', filename='{self.filename}', status='{self.status}')>"
 
 
 class SystemSettings(Base, UUIDMixin, TimestampMixin):
@@ -1674,6 +1756,103 @@ class ExecutionModePreference(Base, UUIDMixin, TimestampMixin):
         return f"<ExecutionModePreference(user_id={self.user_id}, mode='{self.default_mode}')>"
 
 
+class UserPreferences(Base, UUIDMixin, TimestampMixin):
+    """
+    User UI and application preferences.
+
+    Stores per-user settings for:
+    - UI theme and display preferences
+    - Default filters and search settings
+    - Document view preferences
+    """
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    # UI Theme
+    theme: Mapped[str] = mapped_column(String(20), default="system")
+    # Values: "light", "dark", "system"
+
+    # Document List View
+    documents_view_mode: Mapped[str] = mapped_column(String(20), default="grid")
+    # Values: "grid", "list", "table"
+
+    documents_sort_by: Mapped[str] = mapped_column(String(30), default="created_at")
+    # Values: "created_at", "name", "file_size", "updated_at"
+
+    documents_sort_order: Mapped[str] = mapped_column(String(4), default="desc")
+    # Values: "asc", "desc"
+
+    documents_page_size: Mapped[int] = mapped_column(Integer, default=20)
+    # Number of documents per page
+
+    # Default Filters
+    default_collection: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # Default collection/tag filter
+
+    default_folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("folders.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Default folder to show
+
+    # Search Preferences
+    search_include_content: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Include document content in search
+
+    search_results_per_page: Mapped[int] = mapped_column(Integer, default=10)
+
+    # Chat/RAG Preferences
+    chat_show_sources: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Show source documents in chat responses
+
+    chat_expand_sources: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Auto-expand source references
+
+    # Sidebar State
+    sidebar_collapsed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Remember sidebar collapsed state
+
+    # Recent Items (stored as JSON)
+    recent_documents: Mapped[Optional[List[str]]] = mapped_column(
+        StringArrayType(),
+        nullable=True,
+    )
+    # List of recently viewed document IDs (last 10)
+
+    recent_searches: Mapped[Optional[List[str]]] = mapped_column(
+        StringArrayType(),
+        nullable=True,
+    )
+    # List of recent search queries (last 10)
+
+    # Saved searches (named searches with filters)
+    # Format: [{"name": "...", "query": "...", "filters": {...}, "created_at": "..."}, ...]
+    saved_searches: Mapped[Optional[list]] = mapped_column(
+        JSONType(),
+        nullable=True,
+    )
+    # List of saved search configurations (max 20)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User")
+    default_folder: Mapped[Optional["Folder"]] = relationship("Folder")
+
+    __table_args__ = (
+        Index("idx_user_preferences_user", "user_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<UserPreferences(user_id={self.user_id}, theme='{self.theme}')>"
+
+
 # =============================================================================
 # GraphRAG Models - Knowledge Graph for Multi-Hop Reasoning
 # =============================================================================
@@ -1963,6 +2142,90 @@ class OCRMetrics(Base, UUIDMixin, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<OCRMetrics(provider='{self.provider}', language='{self.language}', time={self.processing_time_ms}ms)>"
+
+
+# =============================================================================
+# Folder Model - Hierarchical Document Organization
+# =============================================================================
+
+class Folder(Base, UUIDMixin, TimestampMixin):
+    """
+    Hierarchical folder structure for organizing documents.
+
+    Uses materialized path pattern for efficient subtree queries:
+    - Root folder path: "/FolderName/"
+    - Nested folder path: "/Parent/Child/Grandchild/"
+
+    Permission model:
+    - Each folder has an access_tier_id
+    - If inherit_permissions=True, folder uses parent's effective tier
+    - Admin users (tier 100) can access all folders
+    """
+    __tablename__ = "folders"
+
+    # Folder name (displayed in UI)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Materialized path for efficient hierarchy queries
+    # Format: "/folder1/folder2/" - always starts and ends with /
+    path: Mapped[str] = mapped_column(String(2000), nullable=False, index=True)
+
+    # Hierarchy relationships
+    parent_folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("folders.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    depth: Mapped[int] = mapped_column(Integer, default=0)
+    # depth=0 for root folders, depth=1 for first-level children, etc.
+
+    # Permission settings
+    access_tier_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("access_tiers.id"),
+        nullable=False,
+        index=True,
+    )
+    inherit_permissions: Mapped[bool] = mapped_column(Boolean, default=True)
+    # If True, effective permission = parent's effective tier
+    # If False, effective permission = this folder's access_tier_id
+
+    # Ownership tracking
+    created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Metadata
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    color: Mapped[Optional[str]] = mapped_column(String(7))  # Hex color e.g., "#1E3A5F"
+
+    # Relationships
+    parent_folder: Mapped[Optional["Folder"]] = relationship(
+        "Folder",
+        remote_side="Folder.id",
+        backref="subfolders",
+        foreign_keys=[parent_folder_id],
+    )
+    access_tier: Mapped["AccessTier"] = relationship("AccessTier")
+    created_by: Mapped[Optional["User"]] = relationship("User")
+    documents: Mapped[List["Document"]] = relationship(
+        "Document",
+        back_populates="folder",
+        foreign_keys="Document.folder_id",
+    )
+
+    __table_args__ = (
+        Index("idx_folders_path_prefix", "path", postgresql_using="btree"),
+        Index("idx_folders_parent_name", "parent_folder_id", "name"),
+        Index("idx_folders_access_tier", "access_tier_id"),
+        Index("idx_folders_created_by", "created_by_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Folder(name='{self.name}', path='{self.path}', depth={self.depth})>"
 
 
 # =============================================================================

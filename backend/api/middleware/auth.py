@@ -47,6 +47,11 @@ class CurrentUser(BaseModel):
     access_tier_name: str
     is_admin: bool
 
+    @property
+    def user_id(self) -> str:
+        """Alias for id for backwards compatibility."""
+        return self.id
+
     @classmethod
     def from_context(cls, ctx: UserContext) -> "CurrentUser":
         """Create CurrentUser from UserContext."""

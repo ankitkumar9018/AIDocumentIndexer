@@ -124,6 +124,23 @@ from backend.services.cost_tracking import (
     track_usage,
 )
 
+from backend.services.chart_generator import (
+    ChartGenerator,
+    ChartType,
+    ChartData,
+    ChartStyle,
+    GeneratedChart,
+    DataExtractor,
+    get_chart_generator,
+)
+
+from backend.services.query_decomposer import (
+    QueryDecomposer,
+    QueryDecomposerConfig,
+    DecomposedQuery,
+    get_query_decomposer,
+)
+
 __all__ = [
     # LLM
     "get_chat_model",
@@ -220,4 +237,17 @@ __all__ = [
     "CostAlert",
     "get_cost_service",
     "track_usage",
+    # Chart Generator
+    "ChartGenerator",
+    "ChartType",
+    "ChartData",
+    "ChartStyle",
+    "GeneratedChart",
+    "DataExtractor",
+    "get_chart_generator",
+    # Query Decomposer
+    "QueryDecomposer",
+    "QueryDecomposerConfig",
+    "DecomposedQuery",
+    "get_query_decomposer",
 ]

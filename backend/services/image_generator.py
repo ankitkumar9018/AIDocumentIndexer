@@ -29,7 +29,9 @@ class ImageBackend(str, Enum):
     AUTOMATIC1111 = "automatic1111"  # Local Stable Diffusion WebUI
     OPENAI = "openai"  # OpenAI DALL-E
     STABILITY = "stability"  # Stability AI
-    UNSPLASH = "unsplash"  # Free placeholder images
+    PEXELS = "pexels"  # Free stock photos with keyword search (requires API key)
+    UNSPLASH = "unsplash"  # Unsplash API with keyword search (requires API key)
+    PICSUM = "picsum"  # Free random placeholder images (no API key, no keywords)
     DISABLED = "disabled"
 
 
@@ -57,8 +59,19 @@ class ImageGeneratorConfig:
     stability_api_key: str = ""  # Set via env STABILITY_API_KEY
     stability_engine: str = "stable-diffusion-xl-1024-v1-0"
 
-    # Unsplash settings (fallback - always works, no setup needed)
-    unsplash_base_url: str = "https://source.unsplash.com"
+    # Pexels settings (free stock photos with keyword search)
+    # Get API key at: https://www.pexels.com/api/
+    pexels_api_key: str = ""  # Set via env PEXELS_API_KEY
+    pexels_base_url: str = "https://api.pexels.com/v1"
+
+    # Unsplash settings (free stock photos with keyword search)
+    # Get API key at: https://unsplash.com/developers
+    # Note: source.unsplash.com is deprecated, use the official API instead
+    unsplash_api_key: str = ""  # Set via env UNSPLASH_ACCESS_KEY
+    unsplash_base_url: str = "https://api.unsplash.com"
+
+    # Picsum settings (fallback - always works, no setup needed, but no keyword search)
+    picsum_base_url: str = "https://picsum.photos"
 
     # Output settings
     output_dir: str = "/tmp/generated_images"
@@ -241,8 +254,12 @@ class ImageGeneratorService:
             return await self._generate_openai(prompt, width, height)
         elif backend == ImageBackend.STABILITY:
             return await self._generate_stability(prompt, width, height)
+        elif backend == ImageBackend.PEXELS:
+            return await self._generate_pexels(prompt, width, height)
         elif backend == ImageBackend.UNSPLASH:
             return await self._generate_unsplash(prompt, width, height)
+        elif backend == ImageBackend.PICSUM:
+            return await self._generate_picsum(prompt, width, height)
         else:
             logger.error(f"Unknown backend: {backend}")
             return None
@@ -374,17 +391,26 @@ class ImageGeneratorService:
                 error=str(e),
             )
 
-    async def _generate_unsplash(
+    async def _generate_pexels(
         self,
         prompt: str,
         width: int,
         height: int,
     ) -> Optional[GeneratedImage]:
-        """Generate placeholder image from Unsplash."""
+        """Generate image from Pexels stock photo API with keyword search.
+
+        Pexels provides free stock photos with keyword-based search.
+        Get API key at: https://www.pexels.com/api/
+        """
+        api_key = self.config.pexels_api_key or os.getenv("PEXELS_API_KEY", "")
+
+        if not api_key:
+            logger.warning("Pexels API key not configured, falling back to Picsum")
+            return await self._generate_picsum(prompt, width, height)
+
         try:
-            # Extract keywords from prompt
+            # Extract keywords from prompt for search
             words = prompt.lower().split()
-            # Filter to meaningful keywords
             stop_words = {
                 "professional", "image", "for", "the", "a", "an", "and", "or",
                 "of", "to", "in", "on", "at", "by", "with", "from", "as",
@@ -392,13 +418,232 @@ class ImageGeneratorService:
                 "has", "had", "do", "does", "did", "will", "would", "could",
                 "should", "may", "might", "must", "shall", "can", "presentation",
                 "style", "clean", "modern", "corporate", "high-quality",
-                "illustration", "context", "theme",
+                "illustration", "context", "theme", "about", "related",
             }
-            keywords = [w for w in words if w not in stop_words and len(w) > 2][:5]
-            keyword_str = ",".join(keywords) if keywords else "business,office"
+            keywords = [w for w in words if w not in stop_words and len(w) > 2][:3]
+            query = " ".join(keywords) if keywords else "business technology"
 
-            # Build Unsplash URL
-            url = f"{self.config.unsplash_base_url}/{width}x{height}/?{keyword_str}"
+            # Search Pexels API
+            search_url = f"{self.config.pexels_base_url}/search"
+            headers = {"Authorization": api_key}
+            params = {
+                "query": query,
+                "per_page": 5,
+                "orientation": "landscape",
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    search_url,
+                    headers=headers,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        logger.warning(f"Pexels API request failed: {response.status}")
+                        return await self._generate_picsum(prompt, width, height)
+
+                    data = await response.json()
+                    photos = data.get("photos", [])
+
+                    if not photos:
+                        logger.warning(f"No Pexels results for query: {query}")
+                        return await self._generate_picsum(prompt, width, height)
+
+                    # Pick a photo based on prompt hash for consistency
+                    prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+                    photo_idx = int(prompt_hash[:4], 16) % len(photos)
+                    photo = photos[photo_idx]
+
+                    # Get the appropriately sized image URL
+                    # Pexels provides: original, large2x, large, medium, small, portrait, landscape, tiny
+                    image_url = photo.get("src", {}).get("large", photo.get("src", {}).get("original"))
+
+                    if not image_url:
+                        logger.warning("No image URL in Pexels response")
+                        return await self._generate_picsum(prompt, width, height)
+
+                    # Download the image
+                    async with session.get(
+                        image_url,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as img_response:
+                        if img_response.status != 200:
+                            logger.warning(f"Failed to download Pexels image: {img_response.status}")
+                            return await self._generate_picsum(prompt, width, height)
+
+                        image_data = await img_response.read()
+                        filename = f"pexels_{prompt_hash[:8]}.jpg"
+                        filepath = os.path.join(self.config.output_dir, filename)
+
+                        with open(filepath, "wb") as f:
+                            f.write(image_data)
+
+                        logger.info(
+                            "Image fetched from Pexels",
+                            path=filepath,
+                            query=query,
+                            photo_id=photo.get("id"),
+                            photographer=photo.get("photographer"),
+                        )
+
+                        return GeneratedImage(
+                            path=filepath,
+                            width=photo.get("width", width),
+                            height=photo.get("height", height),
+                            prompt=prompt,
+                            backend=ImageBackend.PEXELS,
+                            success=True,
+                            metadata={
+                                "query": query,
+                                "photo_id": photo.get("id"),
+                                "photographer": photo.get("photographer"),
+                                "pexels_url": photo.get("url"),
+                            },
+                        )
+
+        except Exception as e:
+            logger.error(f"Pexels image fetch error: {e}")
+            # Fall back to Picsum
+            return await self._generate_picsum(prompt, width, height)
+
+    async def _generate_unsplash(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+    ) -> Optional[GeneratedImage]:
+        """Generate image from Unsplash API with keyword search.
+
+        Unsplash provides free stock photos with keyword-based search.
+        Get API key at: https://unsplash.com/developers
+        """
+        api_key = self.config.unsplash_api_key or os.getenv("UNSPLASH_ACCESS_KEY", "")
+
+        if not api_key:
+            logger.warning("Unsplash API key not configured, falling back to Picsum")
+            return await self._generate_picsum(prompt, width, height)
+
+        try:
+            # Extract keywords from prompt for search
+            words = prompt.lower().split()
+            stop_words = {
+                "professional", "image", "for", "the", "a", "an", "and", "or",
+                "of", "to", "in", "on", "at", "by", "with", "from", "as",
+                "is", "it", "be", "was", "were", "been", "being", "have",
+                "has", "had", "do", "does", "did", "will", "would", "could",
+                "should", "may", "might", "must", "shall", "can", "presentation",
+                "style", "clean", "modern", "corporate", "high-quality",
+                "illustration", "context", "theme", "about", "related",
+            }
+            keywords = [w for w in words if w not in stop_words and len(w) > 2][:3]
+            query = " ".join(keywords) if keywords else "business technology"
+
+            # Search Unsplash API
+            search_url = f"{self.config.unsplash_base_url}/search/photos"
+            headers = {"Authorization": f"Client-ID {api_key}"}
+            params = {
+                "query": query,
+                "per_page": 5,
+                "orientation": "landscape",
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    search_url,
+                    headers=headers,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        logger.warning(f"Unsplash API request failed: {response.status}")
+                        return await self._generate_picsum(prompt, width, height)
+
+                    data = await response.json()
+                    photos = data.get("results", [])
+
+                    if not photos:
+                        logger.warning(f"No Unsplash results for query: {query}")
+                        return await self._generate_picsum(prompt, width, height)
+
+                    # Pick a photo based on prompt hash for consistency
+                    prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+                    photo_idx = int(prompt_hash[:4], 16) % len(photos)
+                    photo = photos[photo_idx]
+
+                    # Get the appropriately sized image URL
+                    # Unsplash provides: raw, full, regular, small, thumb
+                    urls = photo.get("urls", {})
+                    image_url = urls.get("regular") or urls.get("small") or urls.get("full")
+
+                    if not image_url:
+                        logger.warning("No image URL in Unsplash response")
+                        return await self._generate_picsum(prompt, width, height)
+
+                    # Download the image
+                    async with session.get(
+                        image_url,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as img_response:
+                        if img_response.status != 200:
+                            logger.warning(f"Failed to download Unsplash image: {img_response.status}")
+                            return await self._generate_picsum(prompt, width, height)
+
+                        image_data = await img_response.read()
+                        filename = f"unsplash_{prompt_hash[:8]}.jpg"
+                        filepath = os.path.join(self.config.output_dir, filename)
+
+                        with open(filepath, "wb") as f:
+                            f.write(image_data)
+
+                        user = photo.get("user", {})
+                        logger.info(
+                            "Image fetched from Unsplash",
+                            path=filepath,
+                            query=query,
+                            photo_id=photo.get("id"),
+                            photographer=user.get("name"),
+                        )
+
+                        return GeneratedImage(
+                            path=filepath,
+                            width=photo.get("width", width),
+                            height=photo.get("height", height),
+                            prompt=prompt,
+                            backend=ImageBackend.UNSPLASH,
+                            success=True,
+                            metadata={
+                                "query": query,
+                                "photo_id": photo.get("id"),
+                                "photographer": user.get("name"),
+                                "unsplash_url": photo.get("links", {}).get("html"),
+                            },
+                        )
+
+        except Exception as e:
+            logger.error(f"Unsplash image fetch error: {e}")
+            # Fall back to Picsum
+            return await self._generate_picsum(prompt, width, height)
+
+    async def _generate_picsum(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+    ) -> Optional[GeneratedImage]:
+        """Generate placeholder image from Picsum (Lorem Picsum).
+
+        Note: The old source.unsplash.com service is deprecated (503 errors).
+        Using picsum.photos which provides free, high-quality placeholder images.
+        """
+        try:
+            # Generate a seed from the prompt for consistent images per section
+            prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+            seed = int(prompt_hash[:8], 16) % 1000  # Use first 8 hex chars as seed
+
+            # Build Picsum URL with seed for reproducibility
+            # Format: https://picsum.photos/seed/{seed}/{width}/{height}
+            url = f"{self.config.picsum_base_url}/seed/{seed}/{width}/{height}"
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -407,29 +652,29 @@ class ImageGeneratorService:
                     allow_redirects=True,
                 ) as response:
                     if response.status != 200:
+                        logger.warning(f"Picsum request failed: {response.status}")
                         return GeneratedImage(
                             path="",
                             width=width,
                             height=height,
                             prompt=prompt,
-                            backend=ImageBackend.UNSPLASH,
+                            backend=ImageBackend.PICSUM,
                             success=False,
-                            error=f"Unsplash request failed: {response.status}",
+                            error=f"Picsum request failed: {response.status}",
                         )
 
                     # Save image
                     image_data = await response.read()
-                    prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:8]
-                    filename = f"unsplash_{prompt_hash}.jpg"
+                    filename = f"picsum_{prompt_hash[:8]}.jpg"
                     filepath = os.path.join(self.config.output_dir, filename)
 
                     with open(filepath, "wb") as f:
                         f.write(image_data)
 
                     logger.info(
-                        "Image fetched from Unsplash",
+                        "Image fetched from Picsum",
                         path=filepath,
-                        keywords=keyword_str,
+                        seed=seed,
                     )
 
                     return GeneratedImage(
@@ -437,19 +682,19 @@ class ImageGeneratorService:
                         width=width,
                         height=height,
                         prompt=prompt,
-                        backend=ImageBackend.UNSPLASH,
+                        backend=ImageBackend.PICSUM,
                         success=True,
-                        metadata={"keywords": keyword_str},
+                        metadata={"seed": seed},
                     )
 
         except Exception as e:
-            logger.error(f"Unsplash image fetch error: {e}")
+            logger.error(f"Picsum image fetch error: {e}")
             return GeneratedImage(
                 path="",
                 width=width,
                 height=height,
                 prompt=prompt,
-                backend=ImageBackend.UNSPLASH,
+                backend=ImageBackend.PICSUM,
                 success=False,
                 error=str(e),
             )
