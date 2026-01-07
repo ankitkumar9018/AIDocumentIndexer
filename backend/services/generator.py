@@ -283,6 +283,94 @@ def strip_markdown(text: str) -> str:
     return text.strip()
 
 
+def filter_llm_metatext(text: str) -> str:
+    """Remove common LLM conversational artifacts from generated content.
+
+    Filters out:
+    - Preamble text like "Here are the bullet points for..."
+    - Closing remarks like "Let me know if you need any adjustments"
+    - Conversational artifacts like "Certainly, here's...", "Sure, here are..."
+    """
+    if not text:
+        return ""
+
+    # Patterns to remove
+    patterns = [
+        # Preamble patterns (at start of content)
+        r'^.*?[Hh]ere (?:are|is) (?:the )?.*?:\s*\n?',           # "Here are the bullet points:"
+        r'^.*?[Ll]et me (?:provide|create|write|explain).*?:\s*\n?',  # "Let me provide..."
+        r'^.*?[Cc]ertainly[,!]?\s*[Hh]ere.*?:\s*\n?',              # "Certainly, here's..."
+        r'^.*?[Ss]ure[,!]?\s*[Hh]ere.*?:\s*\n?',                   # "Sure, here are..."
+        r'^.*?[Ii]\'ll (?:provide|create|write|give).*?:\s*\n?',  # "I'll provide..."
+        r'^.*?[Bb]elow (?:are|is).*?:\s*\n?',                      # "Below are the..."
+        # Closing patterns (at end of content)
+        r'\n?[Ll]et me know if you (?:need|want|have).*$',        # "Let me know if you need..."
+        r'\n?[Hh]ope this helps.*$',                              # "Hope this helps!"
+        r'\n?[Ff]eel free to (?:ask|reach|contact).*$',           # "Feel free to ask..."
+        r'\n?[Ii]f you (?:have|need) any (?:questions|changes).*$',  # "If you have any questions..."
+        r'\n?[Pp]lease let me know.*$',                           # "Please let me know..."
+        # Section metadata echoed as content
+        r'^\s*[-•*▪◦▸]?\s*\(Section \d+ of \d+\)\s*$',           # "(Section 1 of 8)" standalone
+        # Preamble with "we will" / "to measure"
+        r'^.*?[Ww]e (?:will|\'ll) (?:track|provide|create|use|measure).*?:\s*\n?',  # "We will track..."
+        r'^.*?[Tt]o (?:measure|track|monitor) (?:the )?success.*?:\s*\n?',  # "To measure the success..."
+        # Style instructions appearing as content (LLM outputting the style guide)
+        r'^\s*[-•*▪◦▸]?\s*(?:Writing )?[Ss]tyle [Rr]equirements?.*$',  # "Writing Style Requirements"
+        r'^\s*[-•*▪◦▸]?\s*[Mm]aintain a professional tone.*$',    # "Maintain a professional tone..."
+        r'^\s*[-•*▪◦▸]?\s*[Uu]se (?:simple|clear|concise) language.*$',  # "Use simple language..."
+        r'^\s*[-•*▪◦▸]?\s*[Tt]he (?:new )?content should (?:use|have|be|match).*$',  # "The content should use..."
+        r'^\s*[-•*▪◦▸]?\s*[Kk]ey characteristics of the desired writing style.*$',  # "Key characteristics..."
+        r'^\s*[-•*▪◦▸]?\s*[Uu]sing medium-length sentences.*$',   # "Using medium-length sentences..."
+        r'^\s*[-•*▪◦▸]?\s*[Ii]ncorporating action verbs.*$',      # "Incorporating action verbs..."
+        r'^\s*[-•*▪◦▸]?\s*[Bb]y following these style requirements.*$',  # "By following these style requirements..."
+    ]
+
+    result = text
+    for pattern in patterns:
+        result = re.sub(pattern, '', result, flags=re.MULTILINE | re.IGNORECASE)
+
+    return result.strip()
+
+
+def filter_title_echo(content: str, section_title: str) -> str:
+    """Remove bullet points that just echo the section title.
+
+    Filters out lines where the bullet text matches the section title,
+    including variants with section count suffix like "(Section 1 of 8)".
+    """
+    if not content or not section_title:
+        return content
+
+    # Normalize section title for comparison
+    title_normalized = section_title.upper().strip()
+    # Also handle roman numeral prefixes (I., II., III., etc.)
+    title_no_roman = re.sub(r'^[IVXLCDM]+\.\s*', '', title_normalized)
+
+    lines = content.split('\n')
+    filtered = []
+
+    for line in lines:
+        # Strip bullet markers for comparison
+        text = re.sub(r'^[-•*▪◦▸]\s*', '', line.strip())
+        # Remove section count suffix like "(Section 1 of 8)"
+        text = re.sub(r'\s*\(Section \d+ of \d+\)\s*$', '', text, flags=re.IGNORECASE)
+        text_normalized = text.upper().strip()
+
+        # Also remove roman numeral prefix from text
+        text_no_roman = re.sub(r'^[IVXLCDM]+\.\s*', '', text_normalized)
+
+        # Skip if it matches the title (with or without roman numerals)
+        if text_normalized == title_normalized or text_no_roman == title_no_roman:
+            continue
+        if text_normalized == title_no_roman or text_no_roman == title_normalized:
+            continue
+
+        # Keep the line
+        filtered.append(line)
+
+    return '\n'.join(filtered)
+
+
 def smart_truncate(text: str, max_chars: int) -> str:
     """Truncate text at word boundaries to avoid mid-word cuts."""
     if len(text) <= max_chars:
@@ -1947,12 +2035,21 @@ Generate the outline now:"""
 - Focus on key takeaways, not detailed explanations
 - Start each point with an action verb or key noun
 - NEVER leave a sentence incomplete or cut off
+- Use "• " (bullet) for main points, "  ◦ " (2-space indent + open circle) for sub-points
 
-CRITICAL: Every bullet point must be a complete, standalone thought.
+CRITICAL OUTPUT RULES:
+1. Start DIRECTLY with the first bullet point - NO introductory text
+2. Do NOT include phrases like "Here are the bullet points", "Let me provide", "I'll create"
+3. Do NOT include closing remarks like "Let me know if you need adjustments"
+4. ONLY output the bullet points themselves - nothing else
+
+Every bullet point must be a complete, standalone thought.
 If you cannot express an idea in under 90 characters, break it into multiple shorter points.
 
 Example format (each is a complete sentence):
 • Revenue increased 25% year-over-year across all regions.
+  ◦ North America led with 32% growth.
+  ◦ Europe showed steady 18% improvement.
 • Customer acquisition cost reduced by 15% through optimization.
 • New market expansion in Q3 shows promising early results."""
         elif job.output_format in (OutputFormat.DOCX, OutputFormat.PDF):
@@ -1995,30 +2092,29 @@ Include relevant details and maintain a professional tone."""
         style_guide = job.metadata.get("style_guide")
         if style_guide:
             style_context = f"""
-STYLE REQUIREMENTS (based on existing documents):
-- Write in a {style_guide.get('tone', 'professional')} tone
-- Use {style_guide.get('vocabulary_level', 'moderate')} vocabulary
-- Follow {style_guide.get('structure_pattern', 'mixed')} structure
-- Keep sentences {style_guide.get('sentence_style', 'medium')}
-{f"- Recommended approach: {style_guide.get('recommended_approach')}" if style_guide.get('recommended_approach') else ""}
-{f"- Use key phrases like: {', '.join(style_guide.get('key_phrases', [])[:5])}" if style_guide.get('key_phrases') else ""}
-
-IMPORTANT: The new content should match the style and tone of existing documents in the collection.
+---INTERNAL STYLE GUIDANCE (follow these rules but do NOT include them in your output)---
+Tone: {style_guide.get('tone', 'professional')}
+Vocabulary: {style_guide.get('vocabulary_level', 'moderate')}
+Structure: {style_guide.get('structure_pattern', 'mixed')}
+Sentence style: {style_guide.get('sentence_style', 'medium')}
+{f"Approach: {style_guide.get('recommended_approach')}" if style_guide.get('recommended_approach') else ""}
+Match the style and tone of existing documents. Do NOT output these instructions as content.
+---END INTERNAL GUIDANCE---
 """
 
         # Generate content
         prompt = f"""Write content for the following section:
-{style_context}
 
 Document Title: {job.title}
-Section: {section_title} (Section {current_section_num} of {total_sections})
+Section Title: {section_title}
 Description: {section_description}
 
-Position guidance: {position_context}
+{position_context}
 
 {context}
 
-{format_instructions}"""
+{format_instructions}
+{style_context}"""
 
         try:
             from backend.services.llm import EnhancedLLMFactory
@@ -2029,6 +2125,12 @@ Position guidance: {position_context}
             )
             response = await llm.ainvoke(prompt)
             content = response.content
+
+            # Filter out LLM conversational artifacts (meta-text)
+            content = filter_llm_metatext(content)
+
+            # Filter out bullets that just echo the section title
+            content = filter_title_echo(content, section_title)
 
         except Exception as e:
             logger.error("Failed to generate section", error=str(e))
@@ -2708,7 +2810,7 @@ Write the improved content:"""
                 text = text.replace('\x0c', ' ')  # Form feed
                 return text
 
-            # Note: strip_markdown is now a module-level function
+            # Note: strip_markdown and filter_llm_metatext are now module-level functions
 
             def add_footer(slide, page_num, total_pages):
                 """Add footer with page number."""
@@ -2888,7 +2990,14 @@ Write the improved content:"""
                         p = tf.paragraphs[0]
                         first_toc_used = True
                     section_title = sanitize_text(section.title) or f"Section {idx + 1}"
-                    p.text = f"{idx + 1}.  {section_title}"
+
+                    # Check if title already has Roman numeral prefix (I., II., III., etc.)
+                    # If so, don't add Arabic number to avoid double numbering
+                    roman_pattern = r'^[IVXLCDM]+\.\s+'
+                    if re.match(roman_pattern, section_title):
+                        p.text = f"{idx + 1}.  {re.sub(roman_pattern, '', section_title)}"
+                    else:
+                        p.text = f"{idx + 1}.  {section_title}"
                     p.font.name = body_font
                     p.font.size = Pt(20)
                     p.font.color.rgb = TEXT_COLOR
@@ -3039,7 +3148,22 @@ Write the improved content:"""
                 # Parse bullet hierarchy - collect (text, level) tuples
                 def parse_bullet_hierarchy(lines: list) -> list:
                     """Parse content lines into (text, level) tuples preserving hierarchy."""
+                    import re
                     result = []
+
+                    # Patterns to skip - LLM meta-text lines (safety net)
+                    skip_patterns = [
+                        r'^[Hh]ere (are|is) ',
+                        r'^[Ll]et me ',
+                        r'^[Cc]ertainly',
+                        r'^[Ss]ure[,!]',
+                        r'^[Ii]\'ll ',
+                        r'^[Bb]elow (are|is)',
+                        r'[Ll]et me know',
+                        r'[Hh]ope this helps',
+                        r'[Ff]eel free to',
+                    ]
+
                     for line in lines:
                         if not line:
                             continue
@@ -3047,15 +3171,23 @@ Write the improved content:"""
                         stripped = line.lstrip()
                         if not stripped:
                             continue
+
+                        # Skip meta-text lines
+                        if any(re.match(pattern, stripped, re.IGNORECASE) for pattern in skip_patterns):
+                            continue
+
                         indent = len(line) - len(stripped)
 
                         # Detect markdown nested lists (  - item,    - item)
                         # Each 2 spaces = 1 level of nesting
                         level = min(indent // 2, 3)  # Max 3 levels deep (0-3)
 
-                        # Strip bullet markers
-                        if stripped.startswith(('- ', '• ', '* ')):
+                        # Strip bullet markers - include ◦ (open circle) for sub-points
+                        if stripped.startswith(('- ', '• ', '* ', '◦ ', '○ ', '▪ ', '▸ ')):
                             text = stripped[2:].strip()
+                            # If it's a sub-point marker, ensure level >= 1
+                            if stripped.startswith(('◦ ', '○ ')) and level == 0:
+                                level = 1
                         elif stripped.startswith(tuple(f'{i}.' for i in range(1, 10))):
                             # Numbered list: "1. text" -> "text"
                             text = stripped.split('.', 1)[1].strip() if '.' in stripped else stripped
