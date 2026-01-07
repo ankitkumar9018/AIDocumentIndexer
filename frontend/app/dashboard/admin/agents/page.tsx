@@ -28,6 +28,14 @@ import {
   Plus,
   Pencil,
   Trash2,
+  Wand2,
+  Globe,
+  Code,
+  FolderOpen,
+  Link,
+  Key,
+  TestTube,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -86,8 +94,14 @@ import {
   useCreateAgent,
   useUpdateAgent,
   useDeleteAgent,
+  useAgentSettings,
+  useUpdateAgentSettings,
+  useEnhanceAgentPrompt,
+  useTestExternalAgent,
 } from "@/lib/api/hooks";
-import type { AgentDefinition, PromptOptimizationJob, AgentTrajectory } from "@/lib/api/client";
+import type { AgentDefinition, PromptOptimizationJob, AgentTrajectory, AgentToolsConfig, AgentExternalConfig } from "@/lib/api/client";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 
 const agentIcons: Record<string, React.ReactNode> = {
   manager: <Bot className="h-5 w-5" />,
@@ -155,6 +169,38 @@ export default function AgentsAdminPage() {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deletingAgent, setDeletingAgent] = useState<AgentDefinition | null>(null);
 
+  // Enhancement dialog state
+  const [showEnhanceDialog, setShowEnhanceDialog] = useState(false);
+  const [enhancingAgent, setEnhancingAgent] = useState<AgentDefinition | null>(null);
+  const [enhanceStrategy, setEnhanceStrategy] = useState<string>("auto");
+  const [enhanceInstructions, setEnhanceInstructions] = useState("");
+  const [enhanceDescription, setEnhanceDescription] = useState(false);
+  const [enhancedPrompt, setEnhancedPrompt] = useState<{
+    system_prompt: string;
+    task_prompt_template: string;
+    few_shot_examples: Array<{ input: string; output: string }>;
+  } | null>(null);
+  const [enhancedDescription, setEnhancedDescription] = useState<string | null>(null);
+  // Editable versions of enhanced prompts
+  const [editedSystemPrompt, setEditedSystemPrompt] = useState<string>("");
+  const [editedTaskTemplate, setEditedTaskTemplate] = useState<string>("");
+  const [editedDescription, setEditedDescription] = useState<string>("");
+
+  // Tools & External Agent dialog state
+  const [showToolsDialog, setShowToolsDialog] = useState(false);
+  const [toolsAgent, setToolsAgent] = useState<AgentDefinition | null>(null);
+  const [toolsConfig, setToolsConfig] = useState<AgentToolsConfig>({
+    web_search: false,
+    code_execution: false,
+    file_access: false,
+    mcp_server_url: null,
+  });
+  const [externalConfig, setExternalConfig] = useState<AgentExternalConfig>({
+    api_url: null,
+    api_key: null,
+    enabled: false,
+  });
+
   // Queries - only fetch when authenticated
   const { data: statusData, isLoading: statusLoading, refetch: refetchStatus } = useAgentStatus({ enabled: isAuthenticated });
   const { data: jobsData, isLoading: jobsLoading } = useOptimizationJobs(undefined, { enabled: isAuthenticated });
@@ -172,6 +218,9 @@ export default function AgentsAdminPage() {
   const createAgentMutation = useCreateAgent();
   const updateAgentMutation = useUpdateAgent();
   const deleteAgentMutation = useDeleteAgent();
+  const enhancePromptMutation = useEnhanceAgentPrompt();
+  const updateSettingsMutation = useUpdateAgentSettings();
+  const testExternalMutation = useTestExternalAgent();
 
   const agents = statusData?.agents || [];
   const jobs = jobsData?.jobs || [];
@@ -352,6 +401,129 @@ export default function AgentsAdminPage() {
     } catch (error: unknown) {
       console.error("Failed to delete agent:", error);
       const message = error instanceof Error ? error.message : "Failed to delete agent.";
+      toast.error("Error", { description: message });
+    }
+  };
+
+  // Enhancement handlers
+  const handleOpenEnhance = (agent: AgentDefinition) => {
+    setEnhancingAgent(agent);
+    setEnhanceStrategy("auto");
+    setEnhanceInstructions("");
+    setEnhanceDescription(!!agent.description); // Default to true if agent has description
+    setEnhancedPrompt(null);
+    setEnhancedDescription(null);
+    setShowEnhanceDialog(true);
+  };
+
+  const handleEnhancePrompt = async () => {
+    if (!enhancingAgent) return;
+    try {
+      const result = await enhancePromptMutation.mutateAsync({
+        agentId: enhancingAgent.id,
+        request: {
+          strategy: enhanceStrategy === "auto" ? undefined : enhanceStrategy,
+          custom_instructions: enhanceInstructions || undefined,
+          enhance_description: enhanceDescription,
+        },
+      });
+      setEnhancedPrompt(result.enhanced_prompt);
+      setEnhancedDescription(result.enhanced_description || null);
+      // Set editable versions
+      setEditedSystemPrompt(result.enhanced_prompt.system_prompt || "");
+      setEditedTaskTemplate(result.enhanced_prompt.task_prompt_template || "");
+      setEditedDescription(result.enhanced_description || "");
+      toast.success("Prompt Enhanced", {
+        description: `Strategy: ${result.strategy_used}. ${result.change_description}`,
+      });
+    } catch (error: unknown) {
+      console.error("Failed to enhance prompt:", error);
+      const message = error instanceof Error ? error.message : "Failed to enhance prompt.";
+      toast.error("Error", { description: message });
+    }
+  };
+
+  const handleApplyEnhancedPrompt = async () => {
+    if (!enhancingAgent || !enhancedPrompt) return;
+    try {
+      // Use edited values (which may have been modified by the user)
+      await updateAgentMutation.mutateAsync({
+        agentId: enhancingAgent.id,
+        data: {
+          system_prompt: editedSystemPrompt,
+          task_prompt_template: editedTaskTemplate,
+          // Include enhanced description if available and was edited
+          ...(editedDescription && { description: editedDescription }),
+        },
+      });
+      toast.success("Enhancements Applied", {
+        description: `Enhanced prompt${editedDescription ? " and description" : ""} saved to ${enhancingAgent.name}.`,
+      });
+      setShowEnhanceDialog(false);
+      setEnhancedPrompt(null);
+      setEnhancedDescription(null);
+      setEditedSystemPrompt("");
+      setEditedTaskTemplate("");
+      setEditedDescription("");
+      refetchStatus();
+    } catch (error: unknown) {
+      console.error("Failed to apply enhanced prompt:", error);
+      const message = error instanceof Error ? error.message : "Failed to apply prompt.";
+      toast.error("Error", { description: message });
+    }
+  };
+
+  // Tools & External Agent handlers
+  const handleOpenTools = async (agent: AgentDefinition) => {
+    setToolsAgent(agent);
+    // Load current settings from agent.settings or use defaults
+    const settings = (agent as { settings?: { tools_config?: AgentToolsConfig; external_agent?: AgentExternalConfig } }).settings || {};
+    setToolsConfig(settings.tools_config || {
+      web_search: false,
+      code_execution: false,
+      file_access: false,
+      mcp_server_url: null,
+    });
+    setExternalConfig(settings.external_agent || {
+      api_url: null,
+      api_key: null,
+      enabled: false,
+    });
+    setShowToolsDialog(true);
+  };
+
+  const handleSaveTools = async () => {
+    if (!toolsAgent) return;
+    try {
+      await updateSettingsMutation.mutateAsync({
+        agentId: toolsAgent.id,
+        data: {
+          tools_config: toolsConfig,
+          external_agent: externalConfig,
+        },
+      });
+      toast.success("Settings Saved", { description: "Agent tools and external configuration updated." });
+      setShowToolsDialog(false);
+      refetchStatus();
+    } catch (error: unknown) {
+      console.error("Failed to save settings:", error);
+      const message = error instanceof Error ? error.message : "Failed to save settings.";
+      toast.error("Error", { description: message });
+    }
+  };
+
+  const handleTestExternal = async () => {
+    if (!toolsAgent) return;
+    try {
+      const result = await testExternalMutation.mutateAsync(toolsAgent.id);
+      if (result.success) {
+        toast.success("Connection Successful", { description: result.message });
+      } else {
+        toast.error("Connection Failed", { description: result.message });
+      }
+    } catch (error: unknown) {
+      console.error("Failed to test external agent:", error);
+      const message = error instanceof Error ? error.message : "Failed to test connection.";
       toast.error("Error", { description: message });
     }
   };
@@ -590,6 +762,10 @@ export default function AgentsAdminPage() {
                               <Zap className="h-4 w-4 mr-2" />
                               Trigger Optimization
                             </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleOpenEnhance(agent)}>
+                              <Wand2 className="h-4 w-4 mr-2" />
+                              Enhance Prompt
+                            </DropdownMenuItem>
                             <DropdownMenuItem>
                               <History className="h-4 w-4 mr-2" />
                               View Prompt History
@@ -597,6 +773,10 @@ export default function AgentsAdminPage() {
                             <DropdownMenuItem onClick={() => handleOpenConfigure(agent)}>
                               <Settings2 className="h-4 w-4 mr-2" />
                               Configure LLM
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleOpenTools(agent)}>
+                              <Wrench className="h-4 w-4 mr-2" />
+                              Tools & External Agent
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem onClick={() => handleOpenEdit(agent)}>
@@ -1258,6 +1438,326 @@ export default function AgentsAdminPage() {
                 Delete Permanently
               </Button>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Enhance Prompt Dialog */}
+      <Dialog open={showEnhanceDialog} onOpenChange={setShowEnhanceDialog}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wand2 className="h-5 w-5" />
+              Enhance Agent Prompt
+            </DialogTitle>
+            <DialogDescription>
+              Use AI to analyze and improve the agent&apos;s prompt using GEPA-style optimization.
+            </DialogDescription>
+          </DialogHeader>
+          {enhancingAgent && (
+            <div className="space-y-4 py-4">
+              <div className="rounded-lg border p-4 bg-muted/50">
+                <div className="flex items-center gap-3">
+                  <div className={cn("p-2 rounded-lg", agentColors[enhancingAgent.agent_type] || "bg-gray-500")}>
+                    {agentIcons[enhancingAgent.agent_type] || <Bot className="h-5 w-5 text-white" />}
+                  </div>
+                  <div>
+                    <p className="font-medium">{enhancingAgent.name}</p>
+                    <p className="text-sm text-muted-foreground">{enhancingAgent.agent_type}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Current Prompt Display */}
+              <div className="space-y-3 border rounded-lg p-4 bg-muted/30">
+                <h4 className="font-medium text-sm">Current Prompt</h4>
+                <div className="space-y-2">
+                  {/* Description - metadata about what the agent does */}
+                  {enhancingAgent.description && (
+                    <div>
+                      <Label className="text-xs text-muted-foreground">Description (metadata)</Label>
+                      <pre className="text-xs bg-background p-3 rounded border max-h-24 overflow-auto whitespace-pre-wrap">
+                        {enhancingAgent.description}
+                      </pre>
+                    </div>
+                  )}
+                  <div>
+                    <Label className="text-xs text-muted-foreground">System Prompt</Label>
+                    <pre className="text-xs bg-background p-3 rounded border max-h-48 overflow-auto whitespace-pre-wrap">
+                      {enhancingAgent.system_prompt || "(No system prompt set - uses description or default)"}
+                    </pre>
+                  </div>
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Task Template</Label>
+                    <pre className="text-xs bg-background p-3 rounded border max-h-48 overflow-auto whitespace-pre-wrap">
+                      {enhancingAgent.task_prompt_template || "(No task template set)"}
+                    </pre>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="enhance-strategy">Enhancement Strategy</Label>
+                <Select value={enhanceStrategy} onValueChange={setEnhanceStrategy}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Auto-detect best strategy" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto-detect best strategy</SelectItem>
+                    <SelectItem value="rephrase_instructions">Rephrase Instructions</SelectItem>
+                    <SelectItem value="add_examples">Add Examples</SelectItem>
+                    <SelectItem value="add_guardrails">Add Guardrails</SelectItem>
+                    <SelectItem value="restructure_format">Restructure Format</SelectItem>
+                    <SelectItem value="add_chain_of_thought">Add Chain of Thought</SelectItem>
+                    <SelectItem value="simplify">Simplify</SelectItem>
+                    <SelectItem value="add_constraints">Add Constraints</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="enhance-instructions">Custom Instructions (optional)</Label>
+                <Textarea
+                  id="enhance-instructions"
+                  placeholder="Additional context or specific improvements you want..."
+                  value={enhanceInstructions}
+                  onChange={(e) => setEnhanceInstructions(e.target.value)}
+                  rows={3}
+                />
+              </div>
+
+              {/* Enhance Description Checkbox */}
+              {enhancingAgent.description && (
+                <div className="flex items-center space-x-2">
+                  <Checkbox
+                    id="enhance-description"
+                    checked={enhanceDescription}
+                    onCheckedChange={(checked) => setEnhanceDescription(checked === true)}
+                  />
+                  <Label htmlFor="enhance-description" className="text-sm cursor-pointer">
+                    Also enhance agent description
+                  </Label>
+                </div>
+              )}
+
+              {enhancedPrompt && (
+                <div className="space-y-3 border rounded-lg p-4 bg-green-50 dark:bg-green-950/20">
+                  <h4 className="font-medium text-green-700 dark:text-green-400">Enhanced Prompt Generated</h4>
+                  <p className="text-xs text-muted-foreground">Edit the prompts below before applying.</p>
+                  <div className="space-y-3">
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">Enhanced System Prompt</Label>
+                      <Textarea
+                        value={editedSystemPrompt}
+                        onChange={(e) => setEditedSystemPrompt(e.target.value)}
+                        className="text-xs font-mono min-h-[120px] max-h-[200px]"
+                        placeholder="System prompt..."
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">Enhanced Task Template</Label>
+                      <Textarea
+                        value={editedTaskTemplate}
+                        onChange={(e) => setEditedTaskTemplate(e.target.value)}
+                        className="text-xs font-mono min-h-[120px] max-h-[200px]"
+                        placeholder="Task template..."
+                      />
+                    </div>
+                    {enhancedPrompt.few_shot_examples.length > 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        + {enhancedPrompt.few_shot_examples.length} few-shot examples (not editable here)
+                      </p>
+                    )}
+                    {enhancedDescription && (
+                      <div className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">Enhanced Description</Label>
+                        <Textarea
+                          value={editedDescription}
+                          onChange={(e) => setEditedDescription(e.target.value)}
+                          className="text-xs min-h-[60px] max-h-[100px]"
+                          placeholder="Agent description..."
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setShowEnhanceDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleEnhancePrompt}
+              disabled={enhancePromptMutation.isPending || updateAgentMutation.isPending}
+              variant={enhancedPrompt ? "outline" : "default"}
+            >
+              {enhancePromptMutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Enhancing...
+                </>
+              ) : (
+                <>
+                  <Wand2 className="h-4 w-4 mr-2" />
+                  {enhancedPrompt ? "Re-enhance" : "Enhance Prompt"}
+                </>
+              )}
+            </Button>
+            {enhancedPrompt && (
+              <Button
+                onClick={handleApplyEnhancedPrompt}
+                disabled={updateAgentMutation.isPending}
+              >
+                {updateAgentMutation.isPending ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Applying...
+                  </>
+                ) : (
+                  <>
+                    <Check className="h-4 w-4 mr-2" />
+                    Apply Enhanced Prompt
+                  </>
+                )}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Tools & External Agent Dialog */}
+      <Dialog open={showToolsDialog} onOpenChange={setShowToolsDialog}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wrench className="h-5 w-5" />
+              Tools & External Agent
+            </DialogTitle>
+            <DialogDescription>
+              Configure agent capabilities and external agent connections.
+            </DialogDescription>
+          </DialogHeader>
+          {toolsAgent && (
+            <div className="space-y-6 py-4">
+              {/* Tools Configuration */}
+              <div className="space-y-4">
+                <h4 className="font-medium">Tools & Capabilities</h4>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Globe className="h-4 w-4 text-muted-foreground" />
+                      <Label htmlFor="web-search">Web Search</Label>
+                    </div>
+                    <Switch
+                      id="web-search"
+                      checked={toolsConfig.web_search}
+                      onCheckedChange={(checked) => setToolsConfig((prev) => ({ ...prev, web_search: checked }))}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Code className="h-4 w-4 text-muted-foreground" />
+                      <Label htmlFor="code-exec">Code Execution</Label>
+                    </div>
+                    <Switch
+                      id="code-exec"
+                      checked={toolsConfig.code_execution}
+                      onCheckedChange={(checked) => setToolsConfig((prev) => ({ ...prev, code_execution: checked }))}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                      <Label htmlFor="file-access">File Access</Label>
+                    </div>
+                    <Switch
+                      id="file-access"
+                      checked={toolsConfig.file_access}
+                      onCheckedChange={(checked) => setToolsConfig((prev) => ({ ...prev, file_access: checked }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="mcp-url">MCP Server URL</Label>
+                    <Input
+                      id="mcp-url"
+                      placeholder="http://localhost:3000/mcp"
+                      value={toolsConfig.mcp_server_url || ""}
+                      onChange={(e) => setToolsConfig((prev) => ({ ...prev, mcp_server_url: e.target.value || null }))}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t my-2" />
+
+              {/* External Agent Configuration */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-medium">External Agent</h4>
+                  <Switch
+                    id="external-enabled"
+                    checked={externalConfig.enabled}
+                    onCheckedChange={(checked) => setExternalConfig((prev) => ({ ...prev, enabled: checked }))}
+                  />
+                </div>
+                {externalConfig.enabled && (
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="ext-url">
+                        <Link className="h-3 w-3 inline mr-1" />
+                        API URL
+                      </Label>
+                      <Input
+                        id="ext-url"
+                        placeholder="https://external-agent.example.com/v1/chat"
+                        value={externalConfig.api_url || ""}
+                        onChange={(e) => setExternalConfig((prev) => ({ ...prev, api_url: e.target.value || null }))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="ext-key">
+                        <Key className="h-3 w-3 inline mr-1" />
+                        API Key
+                      </Label>
+                      <Input
+                        id="ext-key"
+                        type="password"
+                        placeholder="sk-..."
+                        value={externalConfig.api_key || ""}
+                        onChange={(e) => setExternalConfig((prev) => ({ ...prev, api_key: e.target.value || null }))}
+                      />
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleTestExternal}
+                      disabled={testExternalMutation.isPending || !externalConfig.api_url}
+                    >
+                      {testExternalMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <TestTube className="h-4 w-4 mr-2" />
+                      )}
+                      Test Connection
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowToolsDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveTools}
+              disabled={updateSettingsMutation.isPending}
+            >
+              {updateSettingsMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Save Settings
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

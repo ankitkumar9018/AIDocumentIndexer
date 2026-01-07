@@ -165,7 +165,7 @@ class ImageGeneratorService:
             backend=self.config.backend,
         )
 
-        # Fall back to Unsplash if primary fails
+        # Fall back chain: Primary -> Unsplash -> Picsum
         if not result or not result.success:
             if self.config.backend != ImageBackend.UNSPLASH:
                 logger.warning(
@@ -177,6 +177,20 @@ class ImageGeneratorService:
                     width=width,
                     height=height,
                     backend=ImageBackend.UNSPLASH,
+                )
+
+        # Final fallback to Picsum (always works, no API key needed)
+        if not result or not result.success:
+            if self.config.backend != ImageBackend.PICSUM:
+                logger.warning(
+                    "All backends failed, falling back to Picsum",
+                    primary_backend=self.config.backend.value,
+                )
+                result = await self._generate_with_backend(
+                    prompt=prompt,
+                    width=width,
+                    height=height,
+                    backend=ImageBackend.PICSUM,
                 )
 
         return result

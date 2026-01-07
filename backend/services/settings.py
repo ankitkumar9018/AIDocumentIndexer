@@ -630,16 +630,16 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="generation.include_images",
         category=SettingCategory.GENERATION,
-        default_value=False,
+        default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Include AI-generated or stock images in generated documents"
     ),
     SettingDefinition(
         key="generation.image_backend",
         category=SettingCategory.GENERATION,
-        default_value="unsplash",
+        default_value="picsum",
         value_type=ValueType.STRING,
-        description="Image source backend (unsplash, stability, automatic1111, disabled)"
+        description="Image source backend (picsum, unsplash, pexels, openai, stability, automatic1111, disabled)"
     ),
     SettingDefinition(
         key="generation.default_tone",

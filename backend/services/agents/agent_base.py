@@ -265,6 +265,26 @@ class PromptTemplate:
     output_schema: Optional[Dict[str, Any]] = None
     constitutional_guidelines: List[str] = field(default_factory=list)
 
+    def is_empty(self) -> bool:
+        """
+        Check if the prompt template has empty or whitespace-only content.
+
+        Returns:
+            True if both system_prompt and task_prompt_template are empty/whitespace
+        """
+        system_empty = not self.system_prompt or not self.system_prompt.strip()
+        task_empty = not self.task_prompt_template or not self.task_prompt_template.strip()
+        return system_empty and task_empty
+
+    def has_valid_content(self) -> bool:
+        """
+        Check if the prompt template has valid (non-empty) content.
+
+        Returns:
+            True if at least one prompt has content
+        """
+        return not self.is_empty()
+
     def render(
         self,
         task: str,
@@ -360,6 +380,10 @@ class BaseAgent(ABC):
     - execute(): Core execution logic
     """
 
+    # Default prompts - subclasses should override these
+    DEFAULT_SYSTEM_PROMPT: str = "You are a helpful AI assistant."
+    DEFAULT_TASK_PROMPT: str = "{{task}}\n\n{{context}}"
+
     def __init__(
         self,
         config: AgentConfig,
@@ -378,7 +402,7 @@ class BaseAgent(ABC):
         """
         self.config = config
         self._llm = llm
-        self.prompt_template = prompt_template
+        self.prompt_template = self._validate_and_get_prompt(prompt_template)
         self.trajectory_collector = trajectory_collector
         self._current_trajectory: List[TrajectoryStep] = []
 
@@ -388,6 +412,59 @@ class BaseAgent(ABC):
             name=config.name,
             provider=config.provider_type,
             model=config.model,
+        )
+
+    def _validate_and_get_prompt(
+        self,
+        prompt_template: Optional[PromptTemplate]
+    ) -> PromptTemplate:
+        """
+        Validate prompt template and fall back to defaults if empty.
+
+        This prevents agents from breaking when database prompts are empty.
+
+        Args:
+            prompt_template: The prompt template to validate
+
+        Returns:
+            Valid PromptTemplate (either provided or default)
+        """
+        # If no template provided, use defaults
+        if prompt_template is None:
+            logger.debug(
+                "No prompt template provided, using defaults",
+                agent=self.config.name,
+            )
+            return self._get_default_prompt()
+
+        # If template has valid content, use it
+        if prompt_template.has_valid_content():
+            return prompt_template
+
+        # Template exists but is empty - log warning and use defaults
+        logger.warning(
+            "Empty prompt template provided, falling back to defaults",
+            agent=self.config.name,
+            prompt_id=prompt_template.id,
+            prompt_version=prompt_template.version,
+        )
+        return self._get_default_prompt()
+
+    def _get_default_prompt(self) -> PromptTemplate:
+        """
+        Get the default prompt template for this agent.
+
+        Subclasses should override DEFAULT_SYSTEM_PROMPT and DEFAULT_TASK_PROMPT
+        class attributes to customize defaults.
+
+        Returns:
+            Default PromptTemplate
+        """
+        return PromptTemplate(
+            id=f"{self.__class__.__name__}_default",
+            version=0,
+            system_prompt=self.DEFAULT_SYSTEM_PROMPT,
+            task_prompt_template=self.DEFAULT_TASK_PROMPT,
         )
 
     @property

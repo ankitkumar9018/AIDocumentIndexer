@@ -73,6 +73,10 @@ class GeneratorAgent(BaseAgent):
     when include_document_context is True in context.
     """
 
+    # Override default prompts for automatic fallback if empty prompts provided
+    DEFAULT_SYSTEM_PROMPT = GENERATOR_SYSTEM_PROMPT
+    DEFAULT_TASK_PROMPT = GENERATOR_TASK_PROMPT
+
     def __init__(
         self,
         config: AgentConfig,
@@ -81,14 +85,8 @@ class GeneratorAgent(BaseAgent):
         trajectory_collector=None,
         rag_service=None,
     ):
-        if prompt_template is None:
-            prompt_template = PromptTemplate(
-                id="generator_default",
-                version=1,
-                system_prompt=GENERATOR_SYSTEM_PROMPT,
-                task_prompt_template=GENERATOR_TASK_PROMPT,
-            )
-
+        # BaseAgent._validate_and_get_prompt will use DEFAULT_SYSTEM_PROMPT/DEFAULT_TASK_PROMPT
+        # if prompt_template is None or empty
         super().__init__(
             config=config,
             llm=llm,
@@ -354,6 +352,10 @@ class CriticAgent(BaseAgent):
     Evaluates content against rubric with weighted criteria.
     """
 
+    # Override default prompts for automatic fallback if empty prompts provided
+    DEFAULT_SYSTEM_PROMPT = CRITIC_SYSTEM_PROMPT
+    DEFAULT_TASK_PROMPT = CRITIC_TASK_PROMPT
+
     # Evaluation rubric with weights
     EVALUATION_RUBRIC = {
         "factual_accuracy": {"weight": 0.30, "description": "Correctness of claims"},
@@ -372,14 +374,8 @@ class CriticAgent(BaseAgent):
         prompt_template: Optional[PromptTemplate] = None,
         trajectory_collector=None,
     ):
-        if prompt_template is None:
-            prompt_template = PromptTemplate(
-                id="critic_default",
-                version=1,
-                system_prompt=CRITIC_SYSTEM_PROMPT,
-                task_prompt_template=CRITIC_TASK_PROMPT,
-            )
-
+        # BaseAgent._validate_and_get_prompt will use DEFAULT_SYSTEM_PROMPT/DEFAULT_TASK_PROMPT
+        # if prompt_template is None or empty
         super().__init__(
             config=config,
             llm=llm,
@@ -599,6 +595,10 @@ class ResearchAgent(BaseAgent):
     Searches documents via RAGService and optionally web via ScraperService.
     """
 
+    # Override default prompts for automatic fallback if empty prompts provided
+    DEFAULT_SYSTEM_PROMPT = RESEARCH_SYSTEM_PROMPT
+    DEFAULT_TASK_PROMPT = RESEARCH_TASK_PROMPT
+
     def __init__(
         self,
         config: AgentConfig,
@@ -608,14 +608,8 @@ class ResearchAgent(BaseAgent):
         rag_service=None,
         scraper_service=None,
     ):
-        if prompt_template is None:
-            prompt_template = PromptTemplate(
-                id="research_default",
-                version=1,
-                system_prompt=RESEARCH_SYSTEM_PROMPT,
-                task_prompt_template=RESEARCH_TASK_PROMPT,
-            )
-
+        # BaseAgent._validate_and_get_prompt will use DEFAULT_SYSTEM_PROMPT/DEFAULT_TASK_PROMPT
+        # if prompt_template is None or empty
         super().__init__(
             config=config,
             llm=llm,
@@ -852,6 +846,10 @@ class ToolExecutionAgent(BaseAgent):
     content and delegating to GeneratorService.
     """
 
+    # Override default prompts for automatic fallback if empty prompts provided
+    DEFAULT_SYSTEM_PROMPT = TOOL_SYSTEM_PROMPT
+    DEFAULT_TASK_PROMPT = TOOL_TASK_PROMPT
+
     AVAILABLE_TOOLS = [
         "generate_pptx",
         "generate_docx",
@@ -867,14 +865,8 @@ class ToolExecutionAgent(BaseAgent):
         trajectory_collector=None,
         generator_service=None,
     ):
-        if prompt_template is None:
-            prompt_template = PromptTemplate(
-                id="tool_default",
-                version=1,
-                system_prompt=TOOL_SYSTEM_PROMPT,
-                task_prompt_template=TOOL_TASK_PROMPT,
-            )
-
+        # BaseAgent._validate_and_get_prompt will use DEFAULT_SYSTEM_PROMPT/DEFAULT_TASK_PROMPT
+        # if prompt_template is None or empty
         super().__init__(
             config=config,
             llm=llm,

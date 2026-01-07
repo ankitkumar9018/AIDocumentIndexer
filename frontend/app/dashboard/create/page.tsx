@@ -24,9 +24,13 @@ import {
   Filter,
   BookOpen,
   Palette,
+  FolderOpen,
+  Save,
+  SpellCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { TemplateSelector, SaveTemplateDialog } from "@/components/generation";
 import {
   Card,
   CardContent,
@@ -47,11 +51,13 @@ import {
   useCollections,
   useGetThemes,
   useSuggestTheme,
+  useSpellCheckJob,
 } from "@/lib/api";
-import type { ThemeInfo, StyleGuide } from "@/lib/api";
+import type { ThemeInfo, StyleGuide, GenerationTemplate, TemplateSettings, GenerationSection, SpellCheckResponse } from "@/lib/api";
 import { toast } from "sonner";
 import { DocumentFilterPanel } from "@/components/chat/document-filter-panel";
 import { FolderSelector } from "@/components/folder-selector";
+import { SectionFeedbackDialog } from "@/components/generation";
 
 type Step = "format" | "topic" | "outline" | "content" | "download";
 type OutputFormat = "docx" | "pptx" | "pdf" | "markdown" | "html" | "txt" | "xlsx";
@@ -106,11 +112,47 @@ export default function CreatePage() {
   const [themeManuallyChanged, setThemeManuallyChanged] = useState(false);
   const [includeSources, setIncludeSources] = useState(true);
 
+  // Enhanced theming - font, layout, animations
+  const [selectedFontFamily, setSelectedFontFamily] = useState<string>("modern");
+  const [selectedLayout, setSelectedLayout] = useState<string>("standard");
+  const [enableAnimations, setEnableAnimations] = useState<boolean>(false);
+  const [animationSpeed, setAnimationSpeed] = useState<'very_slow' | 'slow' | 'med' | 'fast' | 'very_fast'>('med');
+  const [useCustomDuration, setUseCustomDuration] = useState<boolean>(false);
+  const [customDuration, setCustomDuration] = useState<number>(750);
+  const [enableQualityReview, setEnableQualityReview] = useState<boolean>(false);
+  // AI Proofreading with CriticAgent
+  const [enableCriticReview, setEnableCriticReview] = useState<boolean>(false);
+  const [qualityThreshold, setQualityThreshold] = useState<number>(0.7);
+  const [fixStyling, setFixStyling] = useState<boolean>(true);
+  const [fixIncomplete, setFixIncomplete] = useState<boolean>(true);
+
+  const [availableFonts, setAvailableFonts] = useState<Record<string, any>>({});
+  const [availableLayouts, setAvailableLayouts] = useState<Record<string, any>>({});
+
+  // Custom colors - override theme colors
+  const [useCustomColors, setUseCustomColors] = useState(false);
+  const [customPrimaryColor, setCustomPrimaryColor] = useState<string>("#3D5A80");
+  const [customSecondaryColor, setCustomSecondaryColor] = useState<string>("#98C1D9");
+  const [customAccentColor, setCustomAccentColor] = useState<string>("#EE6C4D");
+
   // Style learning from existing documents
   const [useExistingDocs, setUseExistingDocs] = useState(false);
   const [styleCollections, setStyleCollections] = useState<string[]>([]);
   const [styleFolderId, setStyleFolderId] = useState<string | null>(null);
   const [includeStyleSubfolders, setIncludeStyleSubfolders] = useState(true);
+
+  // Template dialogs
+  const [showTemplateSelector, setShowTemplateSelector] = useState(false);
+  const [showSaveTemplate, setShowSaveTemplate] = useState(false);
+
+  // Section feedback
+  const [feedbackSection, setFeedbackSection] = useState<GenerationSection | null>(null);
+  const [showSectionReview, setShowSectionReview] = useState(false);
+
+  // Spell check state
+  const [spellCheckResult, setSpellCheckResult] = useState<SpellCheckResponse | null>(null);
+  const [isCheckingSpelling, setIsCheckingSpelling] = useState(false);
+  const spellCheckJob = useSpellCheckJob();
 
   // Queries - only fetch when authenticated
   const { data: job, isLoading: jobLoading } = useGenerationJob(currentJobId || "");
@@ -141,6 +183,13 @@ export default function CreatePage() {
           });
           setSelectedTheme(suggestion.recommended);
           setThemeSuggestionReason(suggestion.reason);
+          // Set enhanced suggestions
+          if (suggestion.font_family) setSelectedFontFamily(suggestion.font_family);
+          if (suggestion.layout) setSelectedLayout(suggestion.layout);
+          if (suggestion.animations !== undefined) setEnableAnimations(suggestion.animations);
+          // Store available options for UI
+          if (suggestion.available_fonts) setAvailableFonts(suggestion.available_fonts);
+          if (suggestion.available_layouts) setAvailableLayouts(suggestion.available_layouts);
         } catch {
           // Silently fail - theme suggestion is optional
         }
@@ -165,6 +214,13 @@ export default function CreatePage() {
           if (!themeManuallyChanged) {
             setSelectedTheme(suggestion.recommended);
             setThemeSuggestionReason(suggestion.reason);
+            // Set enhanced suggestions
+            if (suggestion.font_family) setSelectedFontFamily(suggestion.font_family);
+            if (suggestion.layout) setSelectedLayout(suggestion.layout);
+            if (suggestion.animations !== undefined) setEnableAnimations(suggestion.animations);
+            // Store available options for UI
+            if (suggestion.available_fonts) setAvailableFonts(suggestion.available_fonts);
+            if (suggestion.available_layouts) setAvailableLayouts(suggestion.available_layouts);
           }
         } catch {
           // Silently fail - theme suggestion is optional
@@ -194,6 +250,24 @@ export default function CreatePage() {
               page_count: pageCount, // null = auto mode
               theme: selectedTheme,
               include_sources: includeSources,
+              // Enhanced theming options
+              font_family: selectedFontFamily || undefined,
+              layout: selectedLayout || undefined,
+              animations: enableAnimations,
+              animation_speed: enableAnimations ? (useCustomDuration ? "custom" : animationSpeed) : undefined,
+              animation_duration_ms: enableAnimations && useCustomDuration ? customDuration : undefined,
+              enable_quality_review: enableQualityReview,
+              // AI Proofreading with CriticAgent
+              enable_critic_review: enableCriticReview,
+              quality_threshold: enableCriticReview ? qualityThreshold : undefined,
+              fix_styling: enableCriticReview ? fixStyling : undefined,
+              fix_incomplete: enableCriticReview ? fixIncomplete : undefined,
+              // Custom colors override theme
+              custom_colors: useCustomColors ? {
+                primary: customPrimaryColor,
+                secondary: customSecondaryColor,
+                accent: customAccentColor,
+              } : undefined,
               // Style learning from existing documents
               use_existing_docs: useExistingDocs,
               style_collection_filters: useExistingDocs && styleCollections.length > 0 ? styleCollections : undefined,
@@ -282,6 +356,32 @@ export default function CreatePage() {
     }
   };
 
+  const handleSpellCheck = async () => {
+    if (!currentJobId) return;
+    setIsCheckingSpelling(true);
+    setSpellCheckResult(null);
+    try {
+      const result = await spellCheckJob.mutateAsync(currentJobId);
+      setSpellCheckResult(result);
+      if (!result.has_issues || result.issues.length === 0) {
+        toast.success("No Spelling Errors", {
+          description: "Your document has no spelling errors.",
+        });
+      } else {
+        toast.info("Spelling Check Complete", {
+          description: `Found ${result.issues.length} potential spelling ${result.issues.length === 1 ? 'issue' : 'issues'}.`,
+        });
+      }
+    } catch (error) {
+      console.error("Spell check failed:", error);
+      toast.error("Spell Check Failed", {
+        description: "Could not check spelling. Please try again.",
+      });
+    } finally {
+      setIsCheckingSpelling(false);
+    }
+  };
+
   const handleAddSection = () => {
     setOutline([
       ...outline,
@@ -306,6 +406,77 @@ export default function CreatePage() {
     setDocumentTitle("");
     setCurrentJobId(null);
   };
+
+  // Apply a template's settings
+  const handleApplyTemplate = (template: GenerationTemplate) => {
+    const settings = template.settings as TemplateSettings;
+
+    // Apply format
+    if (settings.output_format) {
+      setSelectedFormat(settings.output_format as OutputFormat);
+    }
+
+    // Apply theme and styling
+    if (settings.theme) setSelectedTheme(settings.theme);
+    if (settings.font_family) setSelectedFontFamily(settings.font_family);
+    if (settings.layout_template) setSelectedLayout(settings.layout_template);
+    if (typeof settings.include_toc === 'boolean') {
+      // Note: TOC setting is stored but UI may not have this toggle yet
+    }
+    if (typeof settings.include_sources === 'boolean') setIncludeSources(settings.include_sources);
+    if (typeof settings.use_existing_docs === 'boolean') setUseExistingDocs(settings.use_existing_docs);
+    if (typeof settings.enable_animations === 'boolean') setEnableAnimations(settings.enable_animations);
+    if (settings.animation_speed) {
+      const speed = settings.animation_speed as 'very_slow' | 'slow' | 'med' | 'fast' | 'very_fast';
+      if (['very_slow', 'slow', 'med', 'fast', 'very_fast'].includes(speed)) {
+        setAnimationSpeed(speed);
+      }
+    }
+    if (settings.animation_duration_ms) {
+      setUseCustomDuration(true);
+      setCustomDuration(settings.animation_duration_ms);
+    }
+    if (typeof settings.enable_quality_review === 'boolean') setEnableQualityReview(settings.enable_quality_review);
+
+    // Apply custom colors
+    if (settings.custom_colors) {
+      setUseCustomColors(true);
+      if (settings.custom_colors.primary) setCustomPrimaryColor(settings.custom_colors.primary);
+      if (settings.custom_colors.secondary) setCustomSecondaryColor(settings.custom_colors.secondary);
+      if (settings.custom_colors.accent) setCustomAccentColor(settings.custom_colors.accent);
+    }
+
+    // Apply default collections for style learning
+    if (template.default_collections && template.default_collections.length > 0) {
+      setStyleCollections(template.default_collections);
+    }
+
+    toast.success(`Applied template: ${template.name}`);
+
+    // Move to topic step if format is set
+    if (settings.output_format) {
+      setCurrentStep("topic");
+    }
+  };
+
+  // Get current settings for saving as template
+  const getCurrentSettings = (): TemplateSettings => ({
+    output_format: selectedFormat || "docx",
+    theme: selectedTheme,
+    font_family: selectedFontFamily,
+    layout_template: selectedLayout,
+    include_toc: false,
+    include_sources: includeSources,
+    use_existing_docs: useExistingDocs,
+    enable_animations: enableAnimations,
+    animation_speed: animationSpeed,
+    enable_quality_review: enableQualityReview,
+    custom_colors: useCustomColors ? {
+      primary: customPrimaryColor,
+      secondary: customSecondaryColor,
+      accent: customAccentColor,
+    } : undefined,
+  });
 
   // Update outline from job data
   if (job?.outline && outline.length === 0 && currentStep === "outline") {
@@ -389,10 +560,22 @@ export default function CreatePage() {
           {/* Step 1: Format Selection */}
           {currentStep === "format" && (
             <div className="space-y-4">
-              <h2 className="text-xl font-semibold">Choose Output Format</h2>
-              <p className="text-muted-foreground">
-                Select the format for your generated document
-              </p>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-semibold">Choose Output Format</h2>
+                  <p className="text-muted-foreground">
+                    Select the format for your generated document
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => setShowTemplateSelector(true)}
+                  className="flex items-center gap-2"
+                >
+                  <FolderOpen className="h-4 w-4" />
+                  Use Template
+                </Button>
+              </div>
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {formatOptions.map((format) => (
                   <Card
@@ -769,12 +952,24 @@ export default function CreatePage() {
                       AI suggests: {themeSuggestionReason}
                     </p>
                   )}
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-3 gap-2">
                     {(themesData?.themes || [
-                      { key: "business", name: "Business Professional", description: "Clean, corporate look", primary: "#1E3A5F", secondary: "#3D5A80", accent: "#E0E1DD", text: "#2D3A45" },
-                      { key: "creative", name: "Creative & Bold", description: "Vibrant marketing style", primary: "#6B4C9A", secondary: "#9B6B9E", accent: "#F4E4BA", text: "#333333" },
-                      { key: "modern", name: "Modern Minimal", description: "Sleek, contemporary design", primary: "#212529", secondary: "#495057", accent: "#00B4D8", text: "#212529" },
-                      { key: "nature", name: "Nature & Organic", description: "Earthy, sustainable tones", primary: "#2D5016", secondary: "#5A7D3A", accent: "#F5F0E1", text: "#2D3A2E" },
+                      // Row 1: Professional themes
+                      { key: "business", name: "Business Professional", description: "Clean corporate look", primary: "#1E3A5F", secondary: "#3D5A80", accent: "#E0E1DD", text: "#2D3A45" },
+                      { key: "elegant", name: "Elegant & Refined", description: "Sophisticated executive", primary: "#2C3E50", secondary: "#7F8C8D", accent: "#BDC3C7", text: "#2C3E50" },
+                      { key: "academic", name: "Academic & Scholarly", description: "Research & education", primary: "#2C3E50", secondary: "#8E44AD", accent: "#ECF0F1", text: "#2C3E50" },
+                      // Row 2: Modern/Minimal themes
+                      { key: "modern", name: "Modern Minimal", description: "Sleek contemporary", primary: "#212529", secondary: "#495057", accent: "#00B4D8", text: "#212529" },
+                      { key: "minimalist", name: "Ultra Minimalist", description: "Maximum whitespace", primary: "#333333", secondary: "#666666", accent: "#F5F5F5", text: "#222222" },
+                      { key: "dark", name: "Dark Mode", description: "Low-light viewing", primary: "#1A1A2E", secondary: "#16213E", accent: "#0F3460", text: "#E4E4E4" },
+                      // Row 3: Creative themes
+                      { key: "creative", name: "Creative & Bold", description: "Vibrant marketing", primary: "#6B4C9A", secondary: "#9B6B9E", accent: "#F4E4BA", text: "#333333" },
+                      { key: "vibrant", name: "Vibrant & Energetic", description: "High-energy content", primary: "#E74C3C", secondary: "#F39C12", accent: "#FDF2E9", text: "#2D3436" },
+                      { key: "colorful", name: "Colorful & Fun", description: "Engaging & memorable", primary: "#FF6B6B", secondary: "#4ECDC4", accent: "#FFE66D", text: "#2C3E50" },
+                      // Row 4: Specialty themes
+                      { key: "tech", name: "Tech & Digital", description: "Digital aesthetics", primary: "#0984E3", secondary: "#6C5CE7", accent: "#DFE6E9", text: "#2D3436" },
+                      { key: "nature", name: "Nature & Organic", description: "Earthy sustainable", primary: "#2D5016", secondary: "#5A7D3A", accent: "#F5F0E1", text: "#2D3A2E" },
+                      { key: "warm", name: "Warm & Inviting", description: "Cozy community feel", primary: "#D35400", secondary: "#E67E22", accent: "#FDEBD0", text: "#2C3E50" },
                     ] as ThemeInfo[]).map((theme: ThemeInfo) => (
                       <div
                         key={theme.key}
@@ -783,35 +978,340 @@ export default function CreatePage() {
                           setThemeSuggestionReason(null);
                           setThemeManuallyChanged(true);  // User manually selected a theme
                         }}
-                        className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                        className={`p-2 rounded-lg border cursor-pointer transition-all ${
                           selectedTheme === theme.key
                             ? "border-primary ring-2 ring-primary/20"
                             : "border-border hover:border-primary/50"
                         }`}
                       >
-                        <div className="flex items-center gap-2 mb-2">
-                          {/* Color swatches */}
+                        {/* Theme preview mini-card */}
+                        <div
+                          className="w-full h-8 rounded mb-2 relative overflow-hidden"
+                          style={{
+                            background: theme.key === "dark"
+                              ? `linear-gradient(135deg, ${theme.primary} 0%, ${theme.secondary} 100%)`
+                              : theme.key === "colorful" || theme.key === "vibrant" || theme.key === "creative"
+                              ? `linear-gradient(135deg, ${theme.primary} 0%, ${theme.secondary} 50%, ${theme.accent} 100%)`
+                              : theme.primary
+                          }}
+                        >
+                          {/* Accent bar */}
                           <div
-                            className="w-4 h-4 rounded-full"
-                            style={{ backgroundColor: theme.primary }}
-                          />
-                          <div
-                            className="w-4 h-4 rounded-full"
-                            style={{ backgroundColor: theme.secondary }}
-                          />
-                          <div
-                            className="w-4 h-4 rounded-full border"
+                            className="absolute bottom-0 left-0 right-0 h-1"
                             style={{ backgroundColor: theme.accent }}
                           />
                         </div>
-                        <p className="text-sm font-medium">{theme.name}</p>
-                        <p className="text-xs text-muted-foreground">{theme.description}</p>
+                        {/* Color swatches */}
+                        <div className="flex items-center gap-1 mb-1">
+                          <div
+                            className="w-3 h-3 rounded-full"
+                            style={{ backgroundColor: theme.primary }}
+                          />
+                          <div
+                            className="w-3 h-3 rounded-full"
+                            style={{ backgroundColor: theme.secondary }}
+                          />
+                          <div
+                            className="w-3 h-3 rounded-full border"
+                            style={{ backgroundColor: theme.accent }}
+                          />
+                        </div>
+                        <p className="text-xs font-medium truncate">{theme.name}</p>
+                        <p className="text-[10px] text-muted-foreground truncate">{theme.description}</p>
                         {themeSuggestionReason && selectedTheme === theme.key && (
-                          <span className="text-xs text-primary mt-1 inline-block">✨ Recommended</span>
+                          <span className="text-[10px] text-primary mt-1 inline-block">✨ AI Pick</span>
                         )}
                       </div>
                     ))}
                   </div>
+
+                  {/* Custom Colors Toggle */}
+                  <div className="mt-4 p-3 rounded-lg border border-dashed">
+                    <div className="flex items-center gap-2 mb-2">
+                      <input
+                        type="checkbox"
+                        id="useCustomColors"
+                        checked={useCustomColors}
+                        onChange={(e) => {
+                          setUseCustomColors(e.target.checked);
+                          setThemeManuallyChanged(true);
+                        }}
+                        className="h-4 w-4 rounded border-border"
+                      />
+                      <label htmlFor="useCustomColors" className="text-sm font-medium">
+                        Use custom colors
+                      </label>
+                      <span className="text-xs text-muted-foreground">(override theme)</span>
+                    </div>
+                    {useCustomColors && (
+                      <div className="grid grid-cols-3 gap-3 mt-3">
+                        <div>
+                          <label className="block text-xs text-muted-foreground mb-1">Primary</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="color"
+                              value={customPrimaryColor}
+                              onChange={(e) => setCustomPrimaryColor(e.target.value)}
+                              className="w-8 h-8 rounded cursor-pointer border-0"
+                            />
+                            <input
+                              type="text"
+                              value={customPrimaryColor}
+                              onChange={(e) => setCustomPrimaryColor(e.target.value)}
+                              className="w-20 text-xs px-2 py-1 border rounded"
+                              placeholder="#000000"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-muted-foreground mb-1">Secondary</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="color"
+                              value={customSecondaryColor}
+                              onChange={(e) => setCustomSecondaryColor(e.target.value)}
+                              className="w-8 h-8 rounded cursor-pointer border-0"
+                            />
+                            <input
+                              type="text"
+                              value={customSecondaryColor}
+                              onChange={(e) => setCustomSecondaryColor(e.target.value)}
+                              className="w-20 text-xs px-2 py-1 border rounded"
+                              placeholder="#000000"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-muted-foreground mb-1">Accent</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="color"
+                              value={customAccentColor}
+                              onChange={(e) => setCustomAccentColor(e.target.value)}
+                              className="w-8 h-8 rounded cursor-pointer border-0"
+                            />
+                            <input
+                              type="text"
+                              value={customAccentColor}
+                              onChange={(e) => setCustomAccentColor(e.target.value)}
+                              className="w-20 text-xs px-2 py-1 border rounded"
+                              placeholder="#000000"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Font & Layout Selection (only for PPTX/DOCX/PDF) */}
+                {(selectedFormat === "pptx" || selectedFormat === "docx" || selectedFormat === "pdf") && Object.keys(availableFonts).length > 0 && (
+                  <div className="grid grid-cols-2 gap-4 mt-4">
+                    {/* Font Family Selection */}
+                    <div>
+                      <label className="block text-sm font-medium mb-2">Font Style</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {Object.entries(availableFonts).map(([key, font]: [string, any]) => (
+                          <div
+                            key={key}
+                            onClick={() => {
+                              setSelectedFontFamily(key);
+                              setThemeManuallyChanged(true);
+                            }}
+                            className={`p-2 rounded-lg border cursor-pointer transition-all text-center ${
+                              selectedFontFamily === key
+                                ? "border-primary ring-2 ring-primary/20"
+                                : "border-border hover:border-primary/50"
+                            }`}
+                          >
+                            <p className="text-sm font-medium">{font.name}</p>
+                            <p className="text-xs text-muted-foreground">{font.description}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Layout Selection (PPTX only) */}
+                    {selectedFormat === "pptx" && Object.keys(availableLayouts).length > 0 && (
+                      <div>
+                        <label className="block text-sm font-medium mb-2">Slide Layout</label>
+                        <div className="grid grid-cols-2 gap-2">
+                          {Object.entries(availableLayouts).map(([key, layout]: [string, any]) => (
+                            <div
+                              key={key}
+                              onClick={() => {
+                                setSelectedLayout(key);
+                                setThemeManuallyChanged(true);
+                              }}
+                              className={`p-2 rounded-lg border cursor-pointer transition-all text-center ${
+                                selectedLayout === key
+                                  ? "border-primary ring-2 ring-primary/20"
+                                  : "border-border hover:border-primary/50"
+                              }`}
+                            >
+                              <p className="text-sm font-medium">{layout.name}</p>
+                              <p className="text-xs text-muted-foreground">{layout.description}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Animations Toggle (PPTX only) */}
+                {selectedFormat === "pptx" && (
+                  <div className="mt-4 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="enableAnimations"
+                        checked={enableAnimations}
+                        onChange={(e) => {
+                          setEnableAnimations(e.target.checked);
+                          setThemeManuallyChanged(true);
+                        }}
+                        className="h-4 w-4 rounded border-border"
+                      />
+                      <label htmlFor="enableAnimations" className="text-sm font-medium">
+                        Enable slide animations
+                      </label>
+                      <span className="text-xs text-muted-foreground">(transitions between slides)</span>
+                    </div>
+                    {enableAnimations && (
+                      <div className="ml-6 space-y-3">
+                        <div className="flex items-center gap-4">
+                          <label className="text-sm">Speed:</label>
+                          <select
+                            value={animationSpeed}
+                            onChange={(e) => setAnimationSpeed(e.target.value as 'very_slow' | 'slow' | 'med' | 'fast' | 'very_fast')}
+                            className="px-3 py-1 rounded border border-border bg-background text-sm"
+                            disabled={useCustomDuration}
+                          >
+                            <option value="very_slow">Very Slow (2s)</option>
+                            <option value="slow">Slow (1.5s)</option>
+                            <option value="med">Medium (0.75s)</option>
+                            <option value="fast">Fast (0.4s)</option>
+                            <option value="very_fast">Very Fast (0.2s)</option>
+                          </select>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="useCustomDuration"
+                            checked={useCustomDuration}
+                            onChange={(e) => setUseCustomDuration(e.target.checked)}
+                            className="h-4 w-4 rounded border-border"
+                          />
+                          <label htmlFor="useCustomDuration" className="text-sm">Custom duration</label>
+                        </div>
+                        {useCustomDuration && (
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <label className="text-sm">Duration: {customDuration}ms ({(customDuration/1000).toFixed(1)}s)</label>
+                            </div>
+                            <input
+                              type="range"
+                              min={200}
+                              max={3000}
+                              step={100}
+                              value={customDuration}
+                              onChange={(e) => setCustomDuration(Number(e.target.value))}
+                              className="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer"
+                            />
+                            <div className="flex justify-between text-xs text-muted-foreground">
+                              <span>0.2s</span>
+                              <span>3s</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Quality Review Toggle - available for all formats */}
+                <div className="flex items-center gap-2 mt-4 pt-4 border-t">
+                  <input
+                    type="checkbox"
+                    id="enableQualityReview"
+                    checked={enableQualityReview}
+                    onChange={(e) => setEnableQualityReview(e.target.checked)}
+                    className="h-4 w-4 rounded border-border"
+                  />
+                  <label htmlFor="enableQualityReview" className="text-sm font-medium">
+                    Enable AI quality review
+                  </label>
+                  <span className="text-xs text-muted-foreground">(auto-improves low-quality sections)</span>
+                </div>
+
+                {/* AI Proofreading with CriticAgent */}
+                <div className="mt-4 pt-4 border-t space-y-4">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="enableCriticReview"
+                      checked={enableCriticReview}
+                      onChange={(e) => setEnableCriticReview(e.target.checked)}
+                      className="h-4 w-4 rounded border-border"
+                    />
+                    <label htmlFor="enableCriticReview" className="text-sm font-medium">
+                      Enable AI Proofreading
+                    </label>
+                    <span className="text-xs text-muted-foreground">(reviews and auto-fixes quality issues)</span>
+                  </div>
+
+                  {enableCriticReview && (
+                    <div className="ml-6 space-y-4 bg-muted/30 p-4 rounded-lg">
+                      {/* Quality Threshold Slider */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-sm font-medium">Quality Threshold</label>
+                          <span className="text-sm text-muted-foreground">{Math.round(qualityThreshold * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.6"
+                          max="0.9"
+                          step="0.05"
+                          value={qualityThreshold}
+                          onChange={(e) => setQualityThreshold(parseFloat(e.target.value))}
+                          className="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Content scoring below this threshold will be automatically improved
+                        </p>
+                      </div>
+
+                      {/* Fix Options */}
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="fixStyling"
+                            checked={fixStyling}
+                            onChange={(e) => setFixStyling(e.target.checked)}
+                            className="h-4 w-4 rounded border-border"
+                          />
+                          <label htmlFor="fixStyling" className="text-sm">
+                            Fix styling and formatting issues
+                          </label>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="fixIncomplete"
+                            checked={fixIncomplete}
+                            onChange={(e) => setFixIncomplete(e.target.checked)}
+                            className="h-4 w-4 rounded border-border"
+                          />
+                          <label htmlFor="fixIncomplete" className="text-sm">
+                            Complete incomplete bullet points and sentences
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -978,34 +1478,148 @@ export default function CreatePage() {
 
           {/* Step 5: Download */}
           {currentStep === "download" && (
-            <div className="flex flex-col items-center justify-center py-12 space-y-6">
-              <div className="p-6 rounded-full bg-primary/10">
-                <Download className="h-16 w-16 text-primary" />
+            <div className="space-y-6">
+              <div className="flex flex-col items-center justify-center py-8 space-y-4">
+                <div className="p-4 rounded-full bg-primary/10">
+                  <Download className="h-12 w-12 text-primary" />
+                </div>
+                <div className="text-center">
+                  <h2 className="text-xl font-semibold">Download Your Document</h2>
+                  <p className="text-muted-foreground mt-2">
+                    {documentTitle || "Your document"} is ready to download
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  <Button
+                    onClick={handleDownload}
+                    size="lg"
+                    disabled={downloadDocument.isPending}
+                  >
+                    {downloadDocument.isPending ? (
+                      <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                    ) : (
+                      <Download className="h-5 w-5 mr-2" />
+                    )}
+                    Download {selectedFormat?.toUpperCase()}
+                  </Button>
+                  <Button onClick={handleStartNew} variant="outline" size="lg">
+                    <Plus className="h-5 w-5 mr-2" />
+                    Create Another
+                  </Button>
+                </div>
               </div>
-              <div className="text-center">
-                <h2 className="text-xl font-semibold">Download Your Document</h2>
-                <p className="text-muted-foreground mt-2">
-                  {documentTitle || "Your document"} is ready to download
-                </p>
-              </div>
-              <div className="flex gap-3">
-                <Button
-                  onClick={handleDownload}
-                  size="lg"
-                  disabled={downloadDocument.isPending}
-                >
-                  {downloadDocument.isPending ? (
-                    <Loader2 className="h-5 w-5 animate-spin mr-2" />
-                  ) : (
-                    <Download className="h-5 w-5 mr-2" />
+
+              {/* Section Review - allow reviewing generated sections */}
+              {job?.sections && job.sections.length > 0 && (
+                <div className="border-t pt-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <div>
+                      <h3 className="font-medium">Review Sections</h3>
+                      <p className="text-sm text-muted-foreground">
+                        Click on a section to review and provide feedback
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleSpellCheck}
+                        disabled={isCheckingSpelling}
+                      >
+                        {isCheckingSpelling ? (
+                          <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                        ) : (
+                          <SpellCheck className="h-4 w-4 mr-1" />
+                        )}
+                        Check Spelling
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowSectionReview(!showSectionReview)}
+                      >
+                        {showSectionReview ? "Hide" : "Show"} Sections
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Spell Check Results */}
+                  {spellCheckResult && spellCheckResult.issues.length > 0 && (
+                    <div className="mb-4 p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+                      <div className="flex items-start gap-3">
+                        <AlertCircle className="h-5 w-5 text-yellow-600 mt-0.5" />
+                        <div className="flex-1">
+                          <h4 className="font-medium text-yellow-800 dark:text-yellow-300">
+                            {spellCheckResult.issues.length} Spelling {spellCheckResult.issues.length === 1 ? 'Issue' : 'Issues'} Found
+                          </h4>
+                          <div className="mt-2 space-y-2">
+                            {spellCheckResult.issues.slice(0, 5).map((issue, idx) => (
+                              <div key={idx} className="text-sm">
+                                <span className="font-mono bg-yellow-100 dark:bg-yellow-800 px-1 rounded text-yellow-900 dark:text-yellow-200">
+                                  {issue.word}
+                                </span>
+                                {issue.suggestion && (
+                                  <span className="text-muted-foreground ml-2">
+                                    Suggestion: {issue.suggestion}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                            {spellCheckResult.issues.length > 5 && (
+                              <p className="text-xs text-muted-foreground">
+                                ...and {spellCheckResult.issues.length - 5} more
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   )}
-                  Download {selectedFormat?.toUpperCase()}
-                </Button>
-                <Button onClick={handleStartNew} variant="outline" size="lg">
-                  <Plus className="h-5 w-5 mr-2" />
-                  Create Another
-                </Button>
-              </div>
+
+                  {showSectionReview && (
+                    <div className="space-y-3">
+                      {job.sections.map((section: GenerationSection) => (
+                        <div
+                          key={section.id}
+                          className="p-4 rounded-lg border hover:border-primary/50 cursor-pointer transition-colors"
+                          onClick={() => setFeedbackSection(section)}
+                        >
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <h4 className="font-medium text-sm">{section.title}</h4>
+                              <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                                {section.content.slice(0, 200)}...
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2 ml-4">
+                              {section.metadata?.quality_score !== undefined && (
+                                <span className={`text-xs px-2 py-1 rounded ${
+                                  section.metadata.quality_score >= 0.8
+                                    ? 'bg-green-100 text-green-700'
+                                    : section.metadata.quality_score >= 0.6
+                                    ? 'bg-yellow-100 text-yellow-700'
+                                    : 'bg-red-100 text-red-700'
+                                }`}>
+                                  {(section.metadata.quality_score * 100).toFixed(0)}%
+                                </span>
+                              )}
+                              {section.approved ? (
+                                <span className="text-xs px-2 py-1 rounded bg-green-100 text-green-700">
+                                  Approved
+                                </span>
+                              ) : section.feedback ? (
+                                <span className="text-xs px-2 py-1 rounded bg-yellow-100 text-yellow-700">
+                                  Needs Revision
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </CardContent>
@@ -1014,14 +1628,27 @@ export default function CreatePage() {
       {/* Navigation Buttons */}
       {currentStep !== "download" && (
         <div className="flex justify-between">
-          <Button
-            onClick={handleBack}
-            variant="outline"
-            disabled={currentStepIndex === 0}
-          >
-            <ChevronLeft className="h-4 w-4 mr-2" />
-            Back
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              onClick={handleBack}
+              variant="outline"
+              disabled={currentStepIndex === 0}
+            >
+              <ChevronLeft className="h-4 w-4 mr-2" />
+              Back
+            </Button>
+            {currentStep === "topic" && selectedFormat && (
+              <Button
+                onClick={() => setShowSaveTemplate(true)}
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground"
+              >
+                <Save className="h-4 w-4 mr-2" />
+                Save as Template
+              </Button>
+            )}
+          </div>
           <Button
             onClick={handleNext}
             disabled={
@@ -1094,6 +1721,35 @@ export default function CreatePage() {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* Template Dialogs */}
+      <TemplateSelector
+        open={showTemplateSelector}
+        onOpenChange={setShowTemplateSelector}
+        onSelect={handleApplyTemplate}
+      />
+      <SaveTemplateDialog
+        open={showSaveTemplate}
+        onOpenChange={setShowSaveTemplate}
+        currentSettings={getCurrentSettings()}
+        defaultCollections={styleCollections.length > 0 ? styleCollections : undefined}
+      />
+      {feedbackSection && currentJobId && (
+        <SectionFeedbackDialog
+          isOpen={!!feedbackSection}
+          onClose={() => setFeedbackSection(null)}
+          jobId={currentJobId}
+          sectionId={feedbackSection.id}
+          sectionTitle={feedbackSection.title}
+          sectionContent={feedbackSection.content}
+          qualityScore={feedbackSection.metadata?.quality_score}
+          qualitySummary={feedbackSection.metadata?.quality_summary}
+          onFeedbackSubmitted={() => {
+            // Refresh job data after feedback
+            setFeedbackSection(null);
+          }}
+        />
       )}
     </div>
   );

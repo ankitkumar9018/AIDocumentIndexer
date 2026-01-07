@@ -27,6 +27,8 @@ from backend.services.generator import (
     SourceReference,
     get_generation_service,
     THEMES,
+    FONT_FAMILIES,
+    LAYOUT_TEMPLATES,
     check_spelling,
 )
 from backend.services.image_generator import (
@@ -66,6 +68,34 @@ class CreateJobRequest(BaseModel):
         default="business",
         description="Visual theme for the document. Options: business, creative, modern, nature"
     )
+    # Enhanced theming options
+    font_family: Optional[str] = Field(
+        default=None,
+        description="Font family key: modern, classic, professional, technical"
+    )
+    layout: Optional[str] = Field(
+        default=None,
+        description="Layout template key: standard, two_column, image_focused, minimal"
+    )
+    animations: Optional[bool] = Field(
+        default=False,
+        description="Enable slide animations (PPTX only)"
+    )
+    animation_speed: Optional[str] = Field(
+        default="med",
+        description="Animation speed: very_slow, slow, med, fast, very_fast, or 'custom' (PPTX only)"
+    )
+    animation_duration_ms: Optional[int] = Field(
+        default=None,
+        ge=200,
+        le=5000,
+        description="Custom animation duration in milliseconds (200-5000). Only used when animation_speed='custom'"
+    )
+    # Custom colors - override theme colors with user-selected hex values
+    custom_colors: Optional[dict] = Field(
+        default=None,
+        description="Custom color overrides: {primary: '#hex', secondary: '#hex', accent: '#hex'}"
+    )
     # Page/slide count control - None means auto (LLM decides)
     page_count: Optional[int] = Field(
         default=None,
@@ -94,6 +124,25 @@ class CreateJobRequest(BaseModel):
     include_style_subfolders: bool = Field(
         default=True,
         description="Include subfolders in style learning"
+    )
+    # AI Proofreading settings (uses CriticAgent for quality review)
+    enable_critic_review: bool = Field(
+        default=False,
+        description="Enable AI proofreading - auto-reviews and fixes quality issues"
+    )
+    quality_threshold: float = Field(
+        default=0.7,
+        ge=0.6,
+        le=0.9,
+        description="Quality threshold (0.6-0.9). Content below this score will be auto-fixed."
+    )
+    fix_styling: bool = Field(
+        default=True,
+        description="Fix styling and formatting issues during proofreading"
+    )
+    fix_incomplete: bool = Field(
+        default=True,
+        description="Complete incomplete bullet points and sentences"
     )
 
     @property
@@ -197,7 +246,8 @@ def job_to_response(job: GenerationJob) -> JobResponse:
         SectionResponse(
             id=s.id,
             title=s.title,
-            content=s.revised_content or s.content,
+            # Use rendered_content (what appears in output) for preview consistency
+            content=s.rendered_content or s.revised_content or s.content,
             order=s.order,
             sources=[
                 SourceReferenceResponse(
@@ -283,6 +333,67 @@ async def create_generation_job(
             )
         metadata["theme"] = request.theme
 
+    # Enhanced theming options
+    if request.font_family:
+        if request.font_family not in FONT_FAMILIES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid font_family: {request.font_family}. Valid options: {list(FONT_FAMILIES.keys())}",
+            )
+        metadata["font_family"] = request.font_family
+
+    if request.layout:
+        if request.layout not in LAYOUT_TEMPLATES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid layout: {request.layout}. Valid options: {list(LAYOUT_TEMPLATES.keys())}",
+            )
+        metadata["layout"] = request.layout
+
+    if request.animations is not None:
+        metadata["animations"] = request.animations
+
+    # Animation speed validation and storage
+    if request.animation_speed:
+        valid_speeds = {"very_slow", "slow", "med", "fast", "very_fast", "custom"}
+        if request.animation_speed not in valid_speeds:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid animation_speed: {request.animation_speed}. Valid options: {valid_speeds}",
+            )
+        metadata["animation_speed"] = request.animation_speed
+
+        # If custom speed, require animation_duration_ms
+        if request.animation_speed == "custom":
+            if not request.animation_duration_ms:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="animation_duration_ms is required when animation_speed is 'custom'",
+                )
+            metadata["animation_duration_ms"] = request.animation_duration_ms
+
+    # Custom colors validation and storage
+    if request.custom_colors:
+        valid_color_keys = {"primary", "secondary", "accent", "text", "background"}
+        import re
+        hex_pattern = re.compile(r'^#[0-9A-Fa-f]{6}$')
+
+        validated_colors = {}
+        for key, value in request.custom_colors.items():
+            if key not in valid_color_keys:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid color key: {key}. Valid keys: {valid_color_keys}",
+                )
+            if not hex_pattern.match(value):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid hex color for {key}: {value}. Must be #RRGGBB format.",
+                )
+            validated_colors[key] = value
+
+        metadata["custom_colors"] = validated_colors
+
     # Store page_count in metadata for outline generation
     if request.page_count is not None:
         metadata["page_count"] = request.page_count
@@ -300,6 +411,13 @@ async def create_generation_job(
         metadata["style_collection_filters"] = request.style_collection_filters
         metadata["style_folder_id"] = request.style_folder_id
         metadata["include_style_subfolders"] = request.include_style_subfolders
+
+    # Store AI proofreading settings
+    if request.enable_critic_review:
+        metadata["enable_critic_review"] = True
+        metadata["quality_threshold"] = request.quality_threshold
+        metadata["fix_styling"] = request.fix_styling
+        metadata["fix_incomplete"] = request.fix_incomplete
 
     job = await service.create_job(
         user_id=user.user_id,
@@ -665,6 +783,237 @@ async def download_generated_document(
     )
 
 
+# =============================================================================
+# Preview Endpoints
+# =============================================================================
+
+@router.get("/jobs/{job_id}/preview")
+async def get_preview_metadata(
+    job_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Get preview metadata for a generated document.
+
+    Returns information about preview capabilities, page count, etc.
+    """
+    from backend.services.preview import preview_service
+
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    if job.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document not yet generated",
+        )
+
+    metadata = await preview_service.get_preview_metadata(job_id, job.output_format)
+    return {"job_id": job_id, "format": job.output_format, **metadata}
+
+
+@router.get("/jobs/{job_id}/preview/page/{page_num}")
+async def get_preview_page(
+    job_id: str,
+    page_num: int,
+    user: AuthenticatedUser,
+):
+    """
+    Get a preview image for a specific page/slide.
+
+    Returns a PNG image for PDF pages or PPTX slides.
+    Returns HTML for DOCX.
+    """
+    from backend.services.preview import preview_service, PreviewError
+
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    if job.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document not yet generated",
+        )
+
+    format_lower = job.output_format.lower()
+
+    try:
+        if format_lower == "pdf":
+            content, content_type = await preview_service.generate_pdf_preview(
+                job_id, page=page_num
+            )
+            return StreamingResponse(
+                iter([content]),
+                media_type=content_type,
+            )
+
+        elif format_lower == "pptx":
+            content, content_type = await preview_service.generate_pptx_slide_preview(
+                job_id, slide_num=page_num
+            )
+            return StreamingResponse(
+                iter([content]),
+                media_type=content_type,
+            )
+
+        elif format_lower == "docx":
+            html, content_type = await preview_service.generate_docx_preview(job_id)
+            return StreamingResponse(
+                iter([html.encode()]),
+                media_type=content_type,
+            )
+
+        elif format_lower in ["md", "markdown", "html", "txt"]:
+            content, content_type = await preview_service.generate_text_preview(
+                job_id, format_lower
+            )
+            return StreamingResponse(
+                iter([content.encode()]),
+                media_type=content_type,
+            )
+
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Preview not supported for format: {format_lower}",
+            )
+
+    except PreviewError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+
+@router.get("/jobs/{job_id}/preview/slides")
+async def get_all_slide_previews(
+    job_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Get preview images for all slides in a PPTX document.
+
+    Returns a list of base64-encoded PNG images.
+    """
+    from backend.services.preview import preview_service, PreviewError
+
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    if job.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document not yet generated",
+        )
+
+    if job.output_format.lower() != "pptx":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Slides preview only available for PPTX documents",
+        )
+
+    try:
+        slides = await preview_service.generate_pptx_all_slides(job_id)
+        return {"slides": slides, "count": len(slides)}
+    except PreviewError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+
+@router.get("/jobs/{job_id}/thumbnail")
+async def get_thumbnail(
+    job_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Get a thumbnail image for a generated document.
+
+    Returns a small PNG thumbnail.
+    """
+    from backend.services.preview import preview_service, PreviewError
+
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    if job.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document not yet generated",
+        )
+
+    try:
+        content, content_type = await preview_service.generate_thumbnail(
+            job_id, job.output_format
+        )
+        return StreamingResponse(
+            iter([content]),
+            media_type=content_type,
+        )
+    except PreviewError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+
 @router.delete("/jobs/{job_id}")
 async def cancel_generation_job(
     job_id: str,
@@ -950,7 +1299,7 @@ class ThemeInfo(BaseModel):
 class ThemeSuggestionRequest(BaseModel):
     """Request for theme suggestions."""
     title: str = Field(..., min_length=1, max_length=200)
-    description: str = Field(..., min_length=10)
+    description: str = Field(default="", description="Optional description for better suggestions")
 
 
 class ThemeSuggestionResponse(BaseModel):
@@ -959,6 +1308,16 @@ class ThemeSuggestionResponse(BaseModel):
     reason: str
     alternatives: List[str]
     themes: dict  # Full theme info for all themes
+    # Enhanced suggestions - font, layout, animations
+    font_family: Optional[str] = None
+    layout: Optional[str] = None
+    animations: Optional[bool] = None
+    # Full details for UI display
+    theme_details: Optional[dict] = None
+    font_details: Optional[dict] = None
+    layout_details: Optional[dict] = None
+    available_fonts: Optional[dict] = None
+    available_layouts: Optional[dict] = None
 
 
 @router.get("/themes")
@@ -989,10 +1348,11 @@ async def suggest_theme(
     user: AuthenticatedUser,
 ):
     """
-    Get LLM-suggested themes based on document topic.
+    Get LLM-suggested themes, fonts, layouts based on document topic.
 
     The LLM analyzes the document title and description to recommend
-    the most appropriate theme. User can still override with any theme.
+    the most appropriate theme, font family, layout, and animations.
+    User can still override with any settings.
     """
     logger.info(
         "Suggesting themes",
@@ -1001,67 +1361,32 @@ async def suggest_theme(
     )
 
     try:
-        from backend.services.llm import EnhancedLLMFactory
-
-        prompt = f"""Based on this document topic, recommend the best visual theme for a presentation/document:
-
-Topic: {request.title}
-Description: {request.description}
-
-Available themes:
-- business: Corporate, professional presentations (blue tones)
-- creative: Marketing, design, artistic content (purple/warm tones)
-- modern: Tech, startups, contemporary topics (dark with cyan accent)
-- nature: Sustainability, wellness, environmental (green/earth tones)
-
-Respond with ONLY valid JSON in this exact format:
-{{"recommended": "theme_key", "reason": "Brief 1-sentence explanation", "alternatives": ["theme2", "theme3"]}}
-
-Choose the most appropriate theme for this content. Be decisive."""
-
-        llm, config = await EnhancedLLMFactory.get_chat_model_for_operation(
-            operation="content_generation",
-            user_id=None,
+        # Use the DocumentGenerationService for full theme suggestions
+        service = get_generation_service()
+        result = await service.suggest_theme(
+            title=request.title,
+            description=request.description,
+            document_type="pptx",  # Default to PPTX for best suggestions
         )
-        response = await llm.ainvoke(prompt)
 
-        import json
-        # Extract JSON from response - it may have extra text
-        response_text = response.content.strip()
-
-        # Try to find JSON in the response
-        try:
-            # First try direct parse
-            result = json.loads(response_text)
-        except json.JSONDecodeError:
-            # Try to extract JSON from response
-            import re
-            json_match = re.search(r'\{[^{}]*\}', response_text)
-            if json_match:
-                result = json.loads(json_match.group())
-            else:
-                # Fallback to business theme
-                result = {
-                    "recommended": "business",
-                    "reason": "Default professional theme",
-                    "alternatives": ["modern", "creative"]
-                }
-
-        # Validate the recommended theme exists
-        if result.get("recommended") not in THEMES:
-            result["recommended"] = "business"
-
-        # Validate alternatives
-        valid_alternatives = [alt for alt in result.get("alternatives", []) if alt in THEMES]
-        if not valid_alternatives:
-            valid_alternatives = [k for k in THEMES.keys() if k != result["recommended"]][:2]
-        result["alternatives"] = valid_alternatives
+        # Get alternatives (other themes not selected)
+        alternatives = [k for k in THEMES.keys() if k != result.get("theme", "business")][:2]
 
         return ThemeSuggestionResponse(
-            recommended=result["recommended"],
+            recommended=result.get("theme", "business"),
             reason=result.get("reason", "Recommended based on content analysis"),
-            alternatives=result["alternatives"],
+            alternatives=alternatives,
             themes=THEMES,
+            # Enhanced suggestions
+            font_family=result.get("font_family"),
+            layout=result.get("layout"),
+            animations=result.get("animations"),
+            # Full details for UI
+            theme_details=result.get("theme_details"),
+            font_details=result.get("font_details"),
+            layout_details=result.get("layout_details"),
+            available_fonts=FONT_FAMILIES,
+            available_layouts=LAYOUT_TEMPLATES,
         )
 
     except Exception as e:
@@ -1072,6 +1397,14 @@ Choose the most appropriate theme for this content. Be decisive."""
             reason="Default professional theme (LLM unavailable)",
             alternatives=["modern", "creative"],
             themes=THEMES,
+            font_family="modern",
+            layout="standard",
+            animations=False,
+            theme_details=THEMES.get("business"),
+            font_details=FONT_FAMILIES.get("modern"),
+            layout_details=LAYOUT_TEMPLATES.get("standard"),
+            available_fonts=FONT_FAMILIES,
+            available_layouts=LAYOUT_TEMPLATES,
         )
 
 

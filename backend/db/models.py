@@ -2229,6 +2229,91 @@ class Folder(Base, UUIDMixin, TimestampMixin):
 
 
 # =============================================================================
+# Generation Template Model - Saved Document Generation Configurations
+# =============================================================================
+
+class TemplateCategory(str, PyEnum):
+    """Categories for generation templates."""
+    REPORT = "report"
+    PROPOSAL = "proposal"
+    PRESENTATION = "presentation"
+    MEETING_NOTES = "meeting_notes"
+    DOCUMENTATION = "documentation"
+    CUSTOM = "custom"
+
+
+class GenerationTemplate(Base, UUIDMixin, TimestampMixin):
+    """
+    Saved generation configuration templates.
+
+    Allows users to save and reuse document generation settings including:
+    - Output format, theme, fonts, layouts
+    - Default collections for style learning
+    - Custom colors and other preferences
+
+    System templates (user_id=NULL) are pre-built and available to all users.
+    """
+    __tablename__ = "generation_templates"
+
+    # Ownership (NULL = system template available to all)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # Template identification
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(
+        String(50),
+        default=TemplateCategory.CUSTOM.value,
+        index=True,
+    )
+
+    # Template thumbnail (base64 encoded PNG, optional)
+    thumbnail: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Generation settings (JSON)
+    # Contains: output_format, theme, font_family, layout_template,
+    # include_toc, include_sources, use_existing_docs, enable_animations,
+    # custom_colors, etc.
+    settings: Mapped[dict] = mapped_column(JSONType(), nullable=False)
+
+    # Default collections for "Learn from Existing Documents"
+    default_collections: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+
+    # Visibility settings
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Public templates are visible to all users but owned by creator
+
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False)
+    # System templates are built-in and cannot be deleted
+
+    # Usage tracking
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Tags for filtering/searching
+    tags: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+
+    # Relationships
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_generation_templates_user", "user_id"),
+        Index("idx_generation_templates_category", "category"),
+        Index("idx_generation_templates_public", "is_public"),
+        Index("idx_generation_templates_system", "is_system"),
+        Index("idx_generation_templates_use_count", "use_count"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<GenerationTemplate(name='{self.name}', category='{self.category}', system={self.is_system})>"
+
+
+# =============================================================================
 # Indexes (defined after models)
 # =============================================================================
 

@@ -28,6 +28,7 @@ from backend.services.image_generator import (
     ImageBackend,
     get_image_generator,
 )
+from backend.services.content_quality import ContentQualityScorer, QualityReport
 
 logger = structlog.get_logger(__name__)
 
@@ -37,6 +38,7 @@ logger = structlog.get_logger(__name__)
 # =============================================================================
 
 THEMES = {
+    # === EXISTING THEMES (Enhanced with distinctive visual properties) ===
     "business": {
         "name": "Business Professional",
         "primary": "#1E3A5F",
@@ -44,7 +46,11 @@ THEMES = {
         "accent": "#E0E1DD",
         "text": "#2D3A45",
         "light_gray": "#888888",
-        "description": "Clean, corporate look ideal for business presentations"
+        "description": "Clean, corporate look ideal for business presentations",
+        "slide_background": "solid",
+        "header_style": "underline",
+        "bullet_style": "circle",
+        "accent_position": "top",
     },
     "creative": {
         "name": "Creative & Bold",
@@ -53,7 +59,11 @@ THEMES = {
         "accent": "#F4E4BA",
         "text": "#333333",
         "light_gray": "#666666",
-        "description": "Vibrant colors for marketing and creative content"
+        "description": "Vibrant colors for marketing and creative content",
+        "slide_background": "gradient",
+        "header_style": "bar",
+        "bullet_style": "arrow",
+        "accent_position": "side",
     },
     "modern": {
         "name": "Modern Minimal",
@@ -62,7 +72,11 @@ THEMES = {
         "accent": "#00B4D8",
         "text": "#212529",
         "light_gray": "#6C757D",
-        "description": "Sleek, contemporary design with bold accents"
+        "description": "Sleek, contemporary design with bold accents",
+        "slide_background": "solid",
+        "header_style": "none",
+        "bullet_style": "dash",
+        "accent_position": "bottom",
     },
     "nature": {
         "name": "Nature & Organic",
@@ -71,7 +85,11 @@ THEMES = {
         "accent": "#F5F0E1",
         "text": "#2D3A2E",
         "light_gray": "#7A8B6E",
-        "description": "Earthy tones for sustainability and wellness topics"
+        "description": "Earthy tones for sustainability and wellness topics",
+        "slide_background": "textured",
+        "header_style": "leaf",
+        "bullet_style": "leaf",
+        "accent_position": "corner",
     },
     "elegant": {
         "name": "Elegant & Refined",
@@ -80,7 +98,11 @@ THEMES = {
         "accent": "#BDC3C7",
         "text": "#2C3E50",
         "light_gray": "#95A5A6",
-        "description": "Sophisticated look for executive presentations"
+        "description": "Sophisticated look for executive presentations",
+        "slide_background": "solid",
+        "header_style": "serif",
+        "bullet_style": "square",
+        "accent_position": "top",
     },
     "vibrant": {
         "name": "Vibrant & Energetic",
@@ -89,7 +111,11 @@ THEMES = {
         "accent": "#FDF2E9",
         "text": "#2D3436",
         "light_gray": "#BDC3C7",
-        "description": "Bold colors for high-energy content"
+        "description": "Bold colors for high-energy content",
+        "slide_background": "gradient",
+        "header_style": "colorblock",
+        "bullet_style": "circle-filled",
+        "accent_position": "diagonal",
     },
     "tech": {
         "name": "Tech & Digital",
@@ -98,7 +124,11 @@ THEMES = {
         "accent": "#DFE6E9",
         "text": "#2D3436",
         "light_gray": "#B2BEC3",
-        "description": "Modern tech aesthetic for digital topics"
+        "description": "Modern tech aesthetic for digital topics",
+        "slide_background": "gradient",
+        "header_style": "glow",
+        "bullet_style": "chevron",
+        "accent_position": "side",
     },
     "warm": {
         "name": "Warm & Inviting",
@@ -107,7 +137,120 @@ THEMES = {
         "accent": "#FDEBD0",
         "text": "#2C3E50",
         "light_gray": "#A6ACAF",
-        "description": "Cozy colors for community and wellness"
+        "description": "Cozy colors for community and wellness",
+        "slide_background": "warm-gradient",
+        "header_style": "rounded",
+        "bullet_style": "circle",
+        "accent_position": "corner",
+    },
+    # === NEW THEMES ===
+    "minimalist": {
+        "name": "Ultra Minimalist",
+        "primary": "#333333",
+        "secondary": "#666666",
+        "accent": "#F5F5F5",
+        "text": "#222222",
+        "light_gray": "#AAAAAA",
+        "description": "Ultra-clean design with maximum whitespace and focus on content",
+        "slide_background": "white",
+        "header_style": "none",
+        "bullet_style": "dash",
+        "accent_position": "none",
+    },
+    "dark": {
+        "name": "Dark Mode",
+        "primary": "#1A1A2E",
+        "secondary": "#16213E",
+        "accent": "#0F3460",
+        "text": "#E4E4E4",
+        "light_gray": "#7A7A8C",
+        "description": "Elegant dark theme for low-light viewing and modern aesthetics",
+        "slide_background": "dark",
+        "header_style": "glow",
+        "bullet_style": "square",
+        "accent_position": "border",
+    },
+    "colorful": {
+        "name": "Colorful & Fun",
+        "primary": "#FF6B6B",
+        "secondary": "#4ECDC4",
+        "accent": "#FFE66D",
+        "text": "#2C3E50",
+        "light_gray": "#95A5A6",
+        "description": "Bold, multi-color theme for engaging and memorable presentations",
+        "slide_background": "gradient-multi",
+        "header_style": "colorblock",
+        "bullet_style": "circle-filled",
+        "accent_position": "corners",
+    },
+    "academic": {
+        "name": "Academic & Scholarly",
+        "primary": "#2C3E50",
+        "secondary": "#8E44AD",
+        "accent": "#ECF0F1",
+        "text": "#2C3E50",
+        "light_gray": "#7F8C8D",
+        "description": "Traditional academic style ideal for research and educational presentations",
+        "slide_background": "solid",
+        "header_style": "underline",
+        "bullet_style": "number",
+        "accent_position": "footer",
+    },
+}
+
+# Font family configurations
+FONT_FAMILIES = {
+    "modern": {
+        "name": "Modern",
+        "heading": "Calibri",
+        "body": "Calibri",
+        "description": "Clean, contemporary sans-serif"
+    },
+    "classic": {
+        "name": "Classic",
+        "heading": "Georgia",
+        "body": "Times New Roman",
+        "description": "Traditional serif fonts for formal documents"
+    },
+    "professional": {
+        "name": "Professional",
+        "heading": "Arial",
+        "body": "Arial",
+        "description": "Universal business-standard fonts"
+    },
+    "technical": {
+        "name": "Technical",
+        "heading": "Consolas",
+        "body": "Courier New",
+        "description": "Monospace fonts for technical content"
+    },
+}
+
+# Layout templates for PPTX
+LAYOUT_TEMPLATES = {
+    "standard": {
+        "name": "Standard",
+        "description": "Title with bullet points",
+        "content_width": 0.85,
+        "image_position": "right"
+    },
+    "two_column": {
+        "name": "Two Column",
+        "description": "Split content into two columns",
+        "content_width": 0.45,
+        "image_position": "side"
+    },
+    "image_focused": {
+        "name": "Image Focused",
+        "description": "Large images with minimal text",
+        "content_width": 0.4,
+        "image_position": "center"
+    },
+    "minimal": {
+        "name": "Minimal",
+        "description": "Clean layout with lots of whitespace",
+        "content_width": 0.7,
+        "image_position": "bottom"
     },
 }
 
@@ -193,6 +336,55 @@ def sentence_truncate(text: str, max_chars: int) -> str:
     return smart_truncate(text, max_chars)
 
 
+async def llm_condense_text(text: str, max_chars: int, fallback_truncate: bool = True) -> str:
+    """Use LLM to condense text while preserving meaning.
+
+    Instead of truncating with '...', this function uses LLM to intelligently
+    rephrase the text to fit within the character limit.
+
+    Args:
+        text: The text to condense
+        max_chars: Maximum allowed characters
+        fallback_truncate: If True, fall back to sentence_truncate on LLM failure
+
+    Returns:
+        Condensed text that fits within max_chars
+    """
+    if len(text) <= max_chars:
+        return text
+
+    try:
+        from backend.services.llm import EnhancedLLMFactory
+
+        llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+            operation="content_generation",
+            user_id=None,
+        )
+
+        prompt = f"""Rewrite this text in under {max_chars} characters while preserving the key meaning.
+Do not add any prefixes or explanations - just output the condensed text directly.
+
+Original text: {text}
+
+Condensed version:"""
+
+        response = await llm.ainvoke(prompt)
+        condensed = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+
+        # Verify it fits
+        if len(condensed) <= max_chars:
+            return condensed
+
+        # If still too long, truncate the LLM output
+        return sentence_truncate(condensed, max_chars)
+
+    except Exception as e:
+        logger.warning(f"LLM condense failed, using fallback: {e}")
+        if fallback_truncate:
+            return sentence_truncate(text, max_chars)
+        return text[:max_chars]
+
+
 def hex_to_rgb(hex_color: str) -> tuple:
     """Convert hex color string to RGB tuple."""
     hex_color = hex_color.lstrip('#')
@@ -225,9 +417,27 @@ def sanitize_filename(title: str, max_length: int = 50) -> str:
     return title[:max_length] if title else 'document'
 
 
-def get_theme_colors(theme_key: str = "business") -> dict:
-    """Get theme colors, with fallback to business theme."""
-    theme = THEMES.get(theme_key, THEMES["business"])
+def get_theme_colors(theme_key: str = "business", custom_colors: dict = None) -> dict:
+    """Get theme colors, with fallback to business theme.
+
+    If custom_colors is provided, those values override the theme colors.
+    Custom colors can include: primary, secondary, accent, text, background.
+    """
+    theme = THEMES.get(theme_key, THEMES["business"]).copy()
+
+    # Apply custom color overrides if provided
+    if custom_colors:
+        if "primary" in custom_colors:
+            theme["primary"] = custom_colors["primary"]
+        if "secondary" in custom_colors:
+            theme["secondary"] = custom_colors["secondary"]
+        if "accent" in custom_colors:
+            theme["accent"] = custom_colors["accent"]
+        if "text" in custom_colors:
+            theme["text"] = custom_colors["text"]
+        if "background" in custom_colors:
+            theme["background"] = custom_colors["background"]
+
     return theme
 
 
@@ -347,6 +557,8 @@ class Section:
     approved: bool = False
     feedback: Optional[str] = None
     revised_content: Optional[str] = None
+    rendered_content: Optional[str] = None  # Final content after processing (what appears in output)
+    metadata: Optional[Dict[str, Any]] = None  # Quality scores, etc.
 
 
 @dataclass
@@ -435,11 +647,12 @@ class GenerationConfig:
             "generation.include_images", "GENERATION_INCLUDE_IMAGES", True
         )
     )
-    # Image backend: "unsplash" (free, requires API key), "stability" (Stable Diffusion API),
-    # "automatic1111" (local Stable Diffusion), or "disabled"
+    # Image backend: "picsum" (free, no API key), "unsplash" (requires API key),
+    # "pexels" (requires API key), "openai" (DALL-E, requires API key),
+    # "stability" (Stable Diffusion API), "automatic1111" (local SD), or "disabled"
     image_backend: str = field(
         default_factory=lambda: _get_generation_setting(
-            "generation.image_backend", "GENERATION_IMAGE_BACKEND", "unsplash"
+            "generation.image_backend", "GENERATION_IMAGE_BACKEND", "picsum"
         )
     )
 
@@ -476,6 +689,24 @@ class GenerationConfig:
     require_outline_approval: bool = True
     require_section_approval: bool = False
     auto_generate_on_approval: bool = True
+
+    # Quality scoring settings
+    enable_quality_review: bool = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.enable_quality_review", "GENERATION_ENABLE_QUALITY_REVIEW", False
+        )
+    )
+    min_quality_score: float = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.min_quality_score", "GENERATION_MIN_QUALITY_SCORE", 0.7
+        )
+    )
+    auto_regenerate_low_quality: bool = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.auto_regenerate_low_quality", "GENERATION_AUTO_REGENERATE", True
+        )
+    )
+    max_regeneration_attempts: int = 2  # Max times to regenerate a low-quality section
 
 
 # =============================================================================
@@ -548,6 +779,124 @@ class DocumentGenerationService:
             default_style=self.config.default_style,
             auto_charts=self.config.auto_charts,
         )
+
+    async def suggest_theme(
+        self,
+        title: str,
+        description: str,
+        document_type: str = "pptx",
+    ) -> Dict[str, Any]:
+        """
+        Use LLM to suggest optimal theming for a document based on its content.
+
+        Args:
+            title: Document title
+            description: Document description/topic
+            document_type: Type of document (pptx, docx, pdf, etc.)
+
+        Returns:
+            Dictionary with recommended theme, font_family, layout, and reason
+        """
+        try:
+            from backend.services.llm import EnhancedLLMFactory
+
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="content_generation",
+                user_id=None,
+            )
+
+            # Build theme options for the prompt
+            theme_options = "\n".join([
+                f"- {key}: {theme['name']} - {theme['description']}"
+                for key, theme in THEMES.items()
+            ])
+
+            font_options = "\n".join([
+                f"- {key}: {font['name']} - {font['description']}"
+                for key, font in FONT_FAMILIES.items()
+            ])
+
+            layout_options = "\n".join([
+                f"- {key}: {layout['name']} - {layout['description']}"
+                for key, layout in LAYOUT_TEMPLATES.items()
+            ])
+
+            prompt = f"""Analyze this document and suggest optimal theming.
+
+Document Title: {title}
+Document Description: {description}
+Document Type: {document_type}
+
+Available Themes:
+{theme_options}
+
+Available Font Families:
+{font_options}
+
+Available Layouts (for presentations):
+{layout_options}
+
+Based on the document topic, audience, and purpose, recommend the best options.
+Consider: industry conventions, emotional tone, readability, and visual impact.
+
+Return ONLY a JSON object with this exact structure:
+{{
+    "theme": "theme_key",
+    "font_family": "font_key",
+    "layout": "layout_key",
+    "animations": true/false,
+    "reason": "Brief explanation of why these choices suit this document"
+}}"""
+
+            response = await llm.ainvoke(prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+
+            # Parse JSON response
+            import json
+            import re
+
+            # Extract JSON from response
+            json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
+            if json_match:
+                suggestion = json.loads(json_match.group())
+            else:
+                suggestion = json.loads(response_text)
+
+            # Validate keys exist
+            if suggestion.get("theme") not in THEMES:
+                suggestion["theme"] = "business"
+            if suggestion.get("font_family") not in FONT_FAMILIES:
+                suggestion["font_family"] = "modern"
+            if suggestion.get("layout") not in LAYOUT_TEMPLATES:
+                suggestion["layout"] = "standard"
+
+            # Add full theme/font/layout details
+            suggestion["theme_details"] = THEMES.get(suggestion["theme"])
+            suggestion["font_details"] = FONT_FAMILIES.get(suggestion["font_family"])
+            suggestion["layout_details"] = LAYOUT_TEMPLATES.get(suggestion["layout"])
+
+            logger.info(
+                "Theme suggestion generated",
+                theme=suggestion.get("theme"),
+                font_family=suggestion.get("font_family"),
+                layout=suggestion.get("layout"),
+            )
+
+            return suggestion
+
+        except Exception as e:
+            logger.warning(f"Theme suggestion failed, using defaults: {e}")
+            # Return sensible defaults
+            return {
+                "theme": "business",
+                "font_family": "modern",
+                "layout": "standard",
+                "animations": False,
+                "reason": "Default professional theme selected",
+                "theme_details": THEMES["business"],
+                "font_details": FONT_FAMILIES["modern"],
+                "layout_details": LAYOUT_TEMPLATES["standard"],
+            }
 
     async def create_job(
         self,
@@ -758,6 +1107,8 @@ class DocumentGenerationService:
         if modifications:
             if "title" in modifications:
                 job.outline.title = modifications["title"]
+                # Also update the job title so it's used in document generation (PPTX, etc.)
+                job.title = modifications["title"]
             if "sections" in modifications:
                 job.outline.sections = modifications["sections"]
             if "tone" in modifications:
@@ -824,6 +1175,24 @@ class DocumentGenerationService:
                 )
 
             job.sections = sections
+
+            # Aggregate section sources into job.sources_used for reference slide
+            # This ensures sources found during section generation are included
+            if not job.sources_used:
+                job.sources_used = []
+            existing_source_ids = {s.document_id for s in job.sources_used}
+            for section in sections:
+                if section.sources:
+                    for source in section.sources:
+                        if source.document_id not in existing_source_ids:
+                            job.sources_used.append(source)
+                            existing_source_ids.add(source.document_id)
+
+            logger.info(
+                "Sources aggregated from sections",
+                job_id=job_id,
+                total_sources=len(job.sources_used),
+            )
 
             # Move to review or completed based on config
             if self.config.require_section_approval:
@@ -1048,18 +1417,19 @@ class DocumentGenerationService:
         collection_filters: Optional[List[str]] = None,
         folder_id: Optional[str] = None,
         include_subfolders: bool = True,
-        sample_size: int = 5,
+        sample_size: Optional[int] = None,  # None = use ALL documents
     ) -> Optional[dict]:
         """Analyze existing documents to extract style patterns for new document generation.
 
-        This method retrieves sample documents from the specified collections/folders
+        This method retrieves documents from the specified collections/folders
         and uses LLM to analyze their writing style, tone, vocabulary, and structure.
+        All document names are recorded for references, but content is sampled for LLM analysis.
 
         Args:
             collection_filters: List of collections to sample from
             folder_id: Folder ID to scope the search
             include_subfolders: Whether to include subfolders
-            sample_size: Number of unique documents to sample
+            sample_size: Number of unique documents to sample for content analysis (None = all)
 
         Returns:
             Style analysis dict with tone, vocabulary_level, structure_pattern, etc.
@@ -1166,12 +1536,13 @@ class DocumentGenerationService:
             from backend.db.models import Chunk as DBChunk
 
             samples = []
+            all_doc_names = set()  # Track ALL document names for references
             async with async_session_context() as db:
                 # Build query for chunks with content
                 chunk_query = select(
                     DBChunk.content,
                     DBChunk.document_id,
-                    DBDocument.name.label("document_name"),
+                    DBDocument.original_filename.label("document_name"),
                     DBDocument.tags.label("collection"),
                 ).join(DBDocument, DBChunk.document_id == DBDocument.id)
 
@@ -1181,20 +1552,30 @@ class DocumentGenerationService:
                         cast(DBChunk.document_id, String).in_(document_ids)
                     )
 
-                # Order by document to get variety, limit results
-                chunk_query = chunk_query.order_by(DBDocument.id).limit(sample_size * 5)
+                # Order by document to get variety
+                chunk_query = chunk_query.order_by(DBDocument.id)
+
+                # Only limit if sample_size is specified
+                if sample_size is not None:
+                    chunk_query = chunk_query.limit(sample_size * 5)
 
                 result = await db.execute(chunk_query)
                 rows = result.fetchall()
 
-                # Extract unique document samples
+                # Extract unique document samples (for LLM analysis, limit content samples)
                 seen_docs = set()
+                max_content_samples = sample_size if sample_size else 10  # Cap content samples at 10 for LLM
                 for row in rows:
                     doc_id = str(row.document_id) if row.document_id else None
-                    if doc_id and doc_id not in seen_docs and len(samples) < sample_size:
+                    doc_name = row.document_name or ""
+
+                    # Track ALL document names for references
+                    if doc_name:
+                        all_doc_names.add(doc_name)
+
+                    # Sample content for LLM analysis (limited)
+                    if doc_id and doc_id not in seen_docs and len(samples) < max_content_samples:
                         seen_docs.add(doc_id)
-                        # Get document name - may be in tags JSON or name field
-                        doc_name = row.document_name or ""
                         collection_tags = row.collection if row.collection else []
                         samples.append({
                             "content": row.content or "",
@@ -1214,7 +1595,8 @@ class DocumentGenerationService:
             logger.info(
                 "Style analysis samples collected",
                 sample_count=len(samples),
-                document_names=[s["document_name"] for s in samples],
+                total_documents=len(all_doc_names),
+                document_names=list(all_doc_names),
             )
 
             # Use LLM to analyze style patterns
@@ -1241,7 +1623,14 @@ Analyze and return a JSON object with:
 
 Return ONLY valid JSON, no other text."""
 
-            response = await self.llm.ainvoke(analysis_prompt)
+            # Use EnhancedLLMFactory to get LLM instance (same pattern as other methods)
+            from backend.services.llm import EnhancedLLMFactory
+
+            llm, llm_config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="content_generation",
+                user_id=None,  # System-level operation
+            )
+            response = await llm.ainvoke(analysis_prompt)
             response_text = response.content if hasattr(response, 'content') else str(response)
 
             # Parse the JSON response
@@ -1253,7 +1642,8 @@ Return ONLY valid JSON, no other text."""
             else:
                 style_analysis = json.loads(response_text)
 
-            style_analysis["source_documents"] = [s["document_name"] for s in samples if s["document_name"]]
+            # Use ALL document names for references, not just the sampled ones
+            style_analysis["source_documents"] = list(all_doc_names)
 
             logger.info(
                 "Style analysis completed",
@@ -1266,13 +1656,13 @@ Return ONLY valid JSON, no other text."""
 
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse style analysis JSON: {e}")
-            # Return default style guide
+            # Return default style guide with all document names for references
             return {
                 "tone": "professional",
                 "vocabulary_level": "moderate",
                 "structure_pattern": "mixed",
                 "sentence_style": "medium",
-                "source_documents": [],
+                "source_documents": list(all_doc_names) if all_doc_names else [],
             }
         except Exception as e:
             logger.warning(f"Failed to analyze document styles: {e}")
@@ -1419,35 +1809,56 @@ Generate the outline now:"""
                 if not line:
                     continue
 
+                # Skip SECTION_COUNT metadata line (already extracted above)
+                if re.match(r'^#*\s*SECTION_COUNT:', line, re.IGNORECASE):
+                    continue
+
+                # Skip conversational LLM artifacts (User:, Assistant:, Human:, etc.)
+                if re.match(r'^#*\s*(User|Assistant|Human|AI|System|Here is|Below is|I\'ll|Let me|Sure|Certainly)[:.]?\s', line, re.IGNORECASE):
+                    continue
+
                 # Check for section header (## Title or numbered)
                 if line.startswith("##") or (line[0].isdigit() and "." in line[:3]):
                     if current_section and current_section["title"]:
                         sections.append(current_section)
 
-                    # Extract title, removing markdown and numbering
-                    title = re.sub(r'^[#\d.\s]+', '', line).strip()
+                    # Extract section title, removing markdown and numbering
+                    # Use section_title to avoid shadowing the document title parameter
+                    section_title = re.sub(r'^[#\d.\s]+', '', line).strip()
 
                     # Check if title is generic
                     is_generic = any(
-                        re.match(pattern, title.lower().strip())
+                        re.match(pattern, section_title.lower().strip())
                         for pattern in generic_patterns
                     )
 
-                    if is_generic or not title:
+                    if is_generic or not section_title:
                         # Generate a better title based on document topic
-                        title = f"Key Aspect {len(sections) + 1} of {description[:30].split()[0].title() if description else 'Topic'}"
+                        section_title = f"Key Aspect {len(sections) + 1} of {description[:30].split()[0].title() if description else 'Topic'}"
 
-                    current_section = {"title": title, "description": ""}
+                    current_section = {"title": section_title, "description": ""}
 
                 elif current_section and line:
                     # Handle description lines
                     if line.lower().startswith("description:"):
-                        current_section["description"] = line[12:].strip() + " "
+                        desc_content = line[12:].strip()
+                        if desc_content:
+                            current_section["description"] = desc_content + " "
                     elif not current_section["description"]:
-                        current_section["description"] += line + " "
+                        # First non-header, non-description-prefixed line after section title
+                        current_section["description"] = line.strip() + " "
+                    elif current_section["description"] and not current_section["description"].strip():
+                        # Description was set but is empty/whitespace, use this line
+                        current_section["description"] = line.strip() + " "
 
             if current_section and current_section["title"]:
                 sections.append(current_section)
+
+            # Ensure all sections have non-empty descriptions
+            for section in sections:
+                if not section.get("description") or not section["description"].strip():
+                    # Generate a fallback description based on the section title
+                    section["description"] = f"Content covering {section['title'].lower()}. "
 
             # Ensure we have the requested number of sections with meaningful titles
             topic_words = title.split()[:3] if title else ["Document"]
@@ -1623,6 +2034,128 @@ Position guidance: {position_context}
             logger.error("Failed to generate section", error=str(e))
             content = f"[Content for {section_title} - generation failed]"
 
+        # Quality scoring and optional auto-regeneration
+        quality_report = None
+        regeneration_attempts = 0
+
+        # Check if quality review is enabled (from config or job metadata)
+        enable_quality = job.metadata.get("enable_quality_review", self.config.enable_quality_review)
+
+        if enable_quality and content and not content.startswith("[Content for"):
+            quality_scorer = ContentQualityScorer(min_score=self.config.min_quality_score)
+
+            # Get other sections' content for consistency check
+            other_sections_content = []
+            for section in getattr(job, 'sections', []):
+                if section.order != order and section.content:
+                    other_sections_content.append(section.content)
+
+            # Build context for quality scoring
+            quality_context = {
+                "title": job.title,
+                "description": job.description,
+                "output_format": job.output_format.value if hasattr(job.output_format, 'value') else str(job.output_format),
+            }
+
+            # Convert sources to dict format for quality scorer
+            sources_dicts = [{"snippet": s.snippet} for s in sources] if sources else None
+
+            # Score the content
+            quality_report = await quality_scorer.score_section(
+                content=content,
+                title=section_title,
+                sources=sources_dicts,
+                context=quality_context,
+                other_sections=other_sections_content if other_sections_content else None,
+            )
+
+            logger.info(
+                "Section quality scored",
+                section_title=section_title,
+                score=quality_report.overall_score,
+                needs_revision=quality_report.needs_revision,
+            )
+
+            # Auto-regenerate if quality is too low
+            if (quality_report.needs_revision and
+                self.config.auto_regenerate_low_quality and
+                regeneration_attempts < self.config.max_regeneration_attempts):
+
+                logger.info(
+                    "Auto-regenerating low quality section",
+                    section_title=section_title,
+                    score=quality_report.overall_score,
+                    issues=quality_report.critical_issues[:3],
+                )
+
+                # Create feedback from quality report
+                feedback_items = quality_report.critical_issues + quality_report.improvements[:3]
+                quality_feedback = "Quality issues to address:\n" + "\n".join(f"- {item}" for item in feedback_items)
+
+                # Build regeneration prompt
+                regen_prompt = f"""Revise this content to improve quality:
+
+ORIGINAL CONTENT:
+{content}
+
+QUALITY FEEDBACK:
+{quality_feedback}
+
+REQUIREMENTS:
+- Address all the quality issues listed above
+- Keep the same topic and key information
+- Maintain the required format ({format_instructions[:200]}...)
+
+Write the improved content:"""
+
+                try:
+                    regeneration_attempts += 1
+                    response = await llm.ainvoke(regen_prompt)
+                    improved_content = response.content
+
+                    # Re-score the improved content
+                    new_report = await quality_scorer.score_section(
+                        content=improved_content,
+                        title=section_title,
+                        sources=sources_dicts,
+                        context=quality_context,
+                        other_sections=other_sections_content if other_sections_content else None,
+                    )
+
+                    if new_report.overall_score > quality_report.overall_score:
+                        content = improved_content
+                        quality_report = new_report
+                        logger.info(
+                            "Section quality improved after regeneration",
+                            section_title=section_title,
+                            new_score=new_report.overall_score,
+                        )
+
+                except Exception as e:
+                    logger.warning("Failed to regenerate section", error=str(e))
+
+        # Initialize section metadata
+        section_metadata = {}
+
+        # CriticAgent proofreading - runs after basic quality scoring
+        enable_critic = job.metadata.get("enable_critic_review", False)
+        if enable_critic and content and not content.startswith("[Content for"):
+            content, critic_metadata = await self._review_with_critic(
+                content=content,
+                section_title=section_title,
+                job=job,
+                format_instructions=format_instructions,
+            )
+            # Merge critic metadata
+            if critic_metadata:
+                section_metadata.update(critic_metadata)
+
+        # Store quality report in section metadata
+        if quality_report:
+            section_metadata["quality_score"] = quality_report.overall_score
+            section_metadata["quality_summary"] = quality_report.summary
+            section_metadata["needs_revision"] = quality_report.needs_revision
+
         return Section(
             id=section_id,
             title=section_title,
@@ -1630,6 +2163,7 @@ Position guidance: {position_context}
             order=order,
             sources=sources,
             approved=not self.config.require_section_approval,
+            metadata=section_metadata if section_metadata else None,
         )
 
     async def _regenerate_section_with_feedback(
@@ -1637,16 +2171,58 @@ Position guidance: {position_context}
         job: GenerationJob,
         section: Section,
     ) -> Section:
-        """Regenerate a section based on feedback."""
-        prompt = f"""Revise the following section based on the feedback provided:
+        """Regenerate a section based on feedback with enhanced context."""
 
+        # Build cross-section context for consistency
+        other_sections_context = self._build_cross_section_context(job, section)
+
+        # Build source material context for accuracy
+        source_context = self._build_source_context(section)
+
+        # Determine format-specific guidelines
+        format_guidelines = self._get_format_guidelines(job.output_format)
+
+        # Build enhanced revision prompt
+        prompt = f"""You are revising a section of a {job.output_format.upper()} document.
+
+# DOCUMENT CONTEXT
+Title: {job.title}
+Description: {job.description}
+Target Audience: {job.outline.target_audience if job.outline else 'General professional audience'}
+Tone: {job.outline.tone if job.outline else 'Professional'}
+Output Format: {job.output_format.upper()}
+
+# CURRENT SECTION TO REVISE
 Section Title: {section.title}
+Section Order: {section.order + 1} of {len(job.sections)}
+
 Current Content:
+---
 {section.content}
+---
 
-Feedback: {section.feedback}
+# USER FEEDBACK
+{section.feedback}
 
-Please revise the content to address the feedback while maintaining quality and relevance."""
+{other_sections_context}
+
+{source_context}
+
+# FORMAT-SPECIFIC GUIDELINES
+{format_guidelines}
+
+# QUALITY REQUIREMENTS
+Please revise the content ensuring:
+1. **Address the feedback directly** - Make specific changes requested
+2. **Maintain consistency** - Use similar terminology and tone as other sections
+3. **Preserve accuracy** - Keep source-backed claims accurate
+4. **Improve clarity** - Ensure content is clear and well-structured
+5. **Keep appropriate length** - Match the original section length unless feedback requests changes
+6. **Smooth transitions** - Ensure logical flow from previous section
+
+# OUTPUT
+Provide ONLY the revised section content. Do not include the section title or any meta-commentary.
+Write the content ready for direct use in the document."""
 
         try:
             from backend.services.llm import EnhancedLLMFactory
@@ -1669,6 +2245,253 @@ Please revise the content to address the feedback while maintaining quality and 
         except Exception as e:
             logger.error("Failed to revise section", error=str(e))
             return section
+
+    def _build_cross_section_context(
+        self,
+        job: GenerationJob,
+        current_section: Section,
+    ) -> str:
+        """Build context from other sections for consistency."""
+        context_parts = []
+
+        # Get previous section for flow
+        prev_section = None
+        next_section = None
+        for i, s in enumerate(job.sections):
+            if s.id == current_section.id:
+                if i > 0:
+                    prev_section = job.sections[i - 1]
+                if i < len(job.sections) - 1:
+                    next_section = job.sections[i + 1]
+                break
+
+        if prev_section or next_section:
+            context_parts.append("# ADJACENT SECTIONS (for context and consistency)")
+
+            if prev_section:
+                prev_content = prev_section.revised_content or prev_section.content
+                # Truncate to last 300 chars for context
+                preview = prev_content[-300:] if len(prev_content) > 300 else prev_content
+                context_parts.append(f"Previous Section ({prev_section.title}) ends with:")
+                context_parts.append(f"...{preview}")
+
+            if next_section:
+                next_content = next_section.revised_content or next_section.content
+                # Truncate to first 300 chars for context
+                preview = next_content[:300] if len(next_content) > 300 else next_content
+                context_parts.append(f"\nNext Section ({next_section.title}) begins with:")
+                context_parts.append(f"{preview}...")
+
+        # Extract key terminology from other sections for consistency
+        all_content = []
+        for s in job.sections:
+            if s.id != current_section.id:
+                content = s.revised_content or s.content
+                all_content.append(content)
+
+        if all_content:
+            combined = " ".join(all_content)
+            # Simple term extraction - just note length
+            context_parts.append(f"\n# Document has {len(job.sections)} total sections with ~{len(combined.split())} words overall.")
+
+        return "\n".join(context_parts) if context_parts else ""
+
+    def _build_source_context(self, section: Section) -> str:
+        """Build source material context for accuracy checking."""
+        if not section.sources:
+            return ""
+
+        context_parts = ["# SOURCE MATERIAL (maintain accuracy with these)"]
+
+        for i, source in enumerate(section.sources[:5], 1):  # Top 5 sources
+            snippet = source.snippet[:200] if len(source.snippet) > 200 else source.snippet
+            context_parts.append(f"[{i}] {source.document_name}: {snippet}")
+
+        return "\n".join(context_parts)
+
+    async def _review_with_critic(
+        self,
+        content: str,
+        section_title: str,
+        job: GenerationJob,
+        format_instructions: str,
+    ) -> tuple[str, dict]:
+        """
+        Use CriticAgent to review and auto-fix content issues.
+
+        Args:
+            content: The generated content to review
+            section_title: Title of the section being reviewed
+            job: The generation job (for settings and context)
+            format_instructions: Format-specific instructions for regeneration
+
+        Returns:
+            Tuple of (possibly improved content, metadata dict with review info)
+        """
+        import uuid as uuid_module
+        from backend.services.agents.worker_agents import CriticAgent
+        from backend.services.agents.agent_base import AgentConfig, AgentTask
+
+        metadata = {
+            "critic_reviewed": True,
+            "critic_score": None,
+            "critic_feedback": None,
+            "was_revised_by_critic": False,
+        }
+
+        # Get settings from job metadata
+        quality_threshold = job.metadata.get("quality_threshold", 0.7)
+        fix_styling = job.metadata.get("fix_styling", True)
+        fix_incomplete = job.metadata.get("fix_incomplete", True)
+
+        try:
+            # Create CriticAgent
+            critic_config = AgentConfig(
+                agent_id=str(uuid_module.uuid4()),
+                name="Document Critic",
+                description="Reviews generated content for quality, styling, and completeness",
+            )
+            critic = CriticAgent(critic_config)
+
+            # Build evaluation criteria based on settings
+            criteria = ["accuracy", "clarity", "relevance"]
+            if fix_styling:
+                criteria.append("formatting")
+            if fix_incomplete:
+                criteria.append("completeness")
+
+            # Use the evaluate convenience method
+            evaluation = await critic.evaluate(
+                content=content,
+                original_request=f"Section '{section_title}' for document '{job.title}': {job.description}",
+                criteria=criteria,
+            )
+
+            # Normalize score to 0-1 range (critic returns 1-5)
+            normalized_score = evaluation.overall_score / 5.0
+            metadata["critic_score"] = normalized_score
+            metadata["critic_feedback"] = evaluation.feedback
+
+            logger.info(
+                "CriticAgent reviewed section",
+                section_title=section_title,
+                score=normalized_score,
+                passed=evaluation.passed,
+                threshold=quality_threshold,
+            )
+
+            # Auto-fix if below threshold
+            if normalized_score < quality_threshold and evaluation.improvements_needed:
+                logger.info(
+                    "CriticAgent auto-fixing low quality section",
+                    section_title=section_title,
+                    score=normalized_score,
+                    improvements=evaluation.improvements_needed[:3],
+                )
+
+                # Build fix prompt with critic feedback
+                feedback_text = "\n".join(f"- {item}" for item in evaluation.improvements_needed[:5])
+
+                fix_prompt = f"""Improve this content based on the following feedback:
+
+ORIGINAL CONTENT:
+{content}
+
+QUALITY ISSUES TO ADDRESS:
+{feedback_text}
+
+{f"FORMATTING ISSUES: Fix any styling or formatting problems" if fix_styling else ""}
+{f"COMPLETENESS ISSUES: Complete any incomplete sentences or bullet points" if fix_incomplete else ""}
+
+REQUIREMENTS:
+- Address all the quality issues listed above
+- Maintain the same topic and key information
+- Follow format requirements: {format_instructions[:300]}
+
+Write the improved content:"""
+
+                try:
+                    from backend.services.llm import EnhancedLLMFactory
+
+                    llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                        operation="content_generation",
+                        user_id=None,
+                    )
+                    response = await llm.ainvoke(fix_prompt)
+                    improved_content = response.content
+
+                    # Re-evaluate to confirm improvement
+                    new_evaluation = await critic.evaluate(
+                        content=improved_content,
+                        original_request=f"Section '{section_title}' for document '{job.title}'",
+                        criteria=criteria,
+                    )
+                    new_score = new_evaluation.overall_score / 5.0
+
+                    if new_score > normalized_score:
+                        content = improved_content
+                        metadata["critic_score"] = new_score
+                        metadata["was_revised_by_critic"] = True
+                        logger.info(
+                            "CriticAgent improved section quality",
+                            section_title=section_title,
+                            old_score=normalized_score,
+                            new_score=new_score,
+                        )
+
+                except Exception as e:
+                    logger.warning("CriticAgent failed to fix content", error=str(e))
+
+        except Exception as e:
+            logger.warning("CriticAgent review failed", error=str(e))
+            metadata["critic_reviewed"] = False
+
+        return content, metadata
+
+    def _get_format_guidelines(self, output_format: OutputFormat) -> str:
+        """Get format-specific writing guidelines."""
+        guidelines = {
+            OutputFormat.PPTX: """For PowerPoint slides:
+- Keep bullet points concise (max 8-10 words each)
+- Use 3-6 bullet points per slide typically
+- Avoid long paragraphs
+- Use action-oriented language
+- Include speaker notes context if appropriate""",
+
+            OutputFormat.DOCX: """For Word documents:
+- Use clear paragraph structure
+- Include smooth transitions between ideas
+- Maintain consistent heading hierarchy
+- Balance detail with readability""",
+
+            OutputFormat.PDF: """For PDF reports:
+- Structure content clearly with logical flow
+- Use professional language
+- Include appropriate detail for formal documents
+- Consider visual hierarchy in text structure""",
+
+            OutputFormat.MARKDOWN: """For Markdown:
+- Use proper markdown formatting (headers, lists, code blocks)
+- Keep structure clean and readable
+- Use bullet points and numbered lists appropriately""",
+
+            OutputFormat.HTML: """For HTML:
+- Structure content semantically
+- Use appropriate heading levels
+- Keep paragraphs well-organized""",
+
+            OutputFormat.XLSX: """For Excel:
+- Structure data clearly in rows/columns
+- Include headers and labels
+- Keep text concise for cell content""",
+
+            OutputFormat.TXT: """For plain text:
+- Use clear structure and spacing
+- Avoid relying on formatting
+- Keep content well-organized without markup""",
+        }
+
+        return guidelines.get(output_format, "Write clear, professional content.")
 
     async def _generate_output_file(self, job: GenerationJob) -> str:
         """Generate the output file in the requested format."""
@@ -1706,9 +2529,129 @@ Please revise the content to address the feedback while maintaining quality and 
             prs.slide_width = Inches(13.333)  # 16:9 aspect ratio
             prs.slide_height = Inches(7.5)
 
-            # Get theme colors from job metadata or use default
+            # Get theme colors from job metadata or use default (with custom color overrides)
             theme_key = job.metadata.get("theme", "business")
-            theme = get_theme_colors(theme_key)
+            custom_colors = job.metadata.get("custom_colors")
+            theme = get_theme_colors(theme_key, custom_colors)
+
+            # Get font family from job metadata or use default
+            font_family_key = job.metadata.get("font_family", "modern")
+            font_config = FONT_FAMILIES.get(font_family_key, FONT_FAMILIES["modern"])
+            heading_font = font_config["heading"]
+            body_font = font_config["body"]
+
+            # Get layout from job metadata (for future use)
+            layout_key = job.metadata.get("layout", "standard")
+            layout_config = LAYOUT_TEMPLATES.get(layout_key, LAYOUT_TEMPLATES["standard"])
+
+            # Check if animations are enabled and get speed
+            enable_animations = job.metadata.get("animations", False)
+            animation_speed = job.metadata.get("animation_speed", "med")  # very_slow, slow, med, fast, very_fast, custom
+            animation_duration_ms = job.metadata.get("animation_duration_ms")  # Custom duration in ms
+
+            # Duration mapping for preset speeds (in milliseconds)
+            TRANSITION_DURATIONS = {
+                "very_slow": 2000,  # 2 seconds
+                "slow": 1500,       # 1.5 seconds
+                "med": 750,         # 0.75 seconds
+                "fast": 400,        # 0.4 seconds
+                "very_fast": 200,   # 0.2 seconds
+            }
+
+            # Calculate the actual transition duration to use
+            def get_transition_duration():
+                """Get transition duration based on settings."""
+                if animation_speed == "custom" and animation_duration_ms:
+                    return animation_duration_ms
+                return TRANSITION_DURATIONS.get(animation_speed, 750)
+
+            transition_duration = get_transition_duration()
+
+            def add_slide_transition(slide, transition_type="fade", duration=500, speed="med"):
+                """
+                Add slide transition using XML manipulation.
+
+                Transition types:
+                - fade: Smooth fade transition
+                - push: Push from right
+                - wipe: Wipe from left
+                - dissolve: Dissolve effect
+                - blinds: Vertical blinds effect
+                """
+                try:
+                    from lxml import etree
+
+                    # PowerPoint XML namespaces
+                    nsmap = {
+                        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+                        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+                        'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
+                    }
+
+                    # Get the slide's XML element
+                    slide_elem = slide._element
+
+                    # Remove existing transition if any
+                    for trans in slide_elem.findall('.//{http://schemas.openxmlformats.org/presentationml/2006/main}transition'):
+                        slide_elem.remove(trans)
+
+                    # Create transition element
+                    # Duration in milliseconds (e.g., 500 = 0.5 seconds)
+                    trans_elem = etree.Element(
+                        '{http://schemas.openxmlformats.org/presentationml/2006/main}transition',
+                        nsmap={'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
+                    )
+
+                    # Map extended speed names to PowerPoint's native values for compatibility
+                    ppt_speed = "slow" if speed in ("very_slow", "slow") else ("fast" if speed in ("fast", "very_fast") else "med")
+                    trans_elem.set('spd', ppt_speed)  # Speed: slow, med, fast (native PowerPoint values)
+
+                    # Use p14:dur for custom transition duration (PowerPoint 2010+)
+                    # This provides more precise control than the native spd attribute
+                    trans_elem.set('{http://schemas.microsoft.com/office/powerpoint/2010/main}dur', str(duration))
+
+                    # Also set advTm for auto-advance (optional)
+                    trans_elem.set('advTm', str(duration * 3))  # Auto-advance after 3x transition duration
+
+                    # Add transition type element
+                    if transition_type == "fade":
+                        effect = etree.SubElement(trans_elem, '{http://schemas.openxmlformats.org/presentationml/2006/main}fade')
+                        effect.set('thruBlk', 'true')  # Fade through black
+                    elif transition_type == "push":
+                        effect = etree.SubElement(trans_elem, '{http://schemas.openxmlformats.org/presentationml/2006/main}push')
+                        effect.set('dir', 'r')  # From right
+                    elif transition_type == "wipe":
+                        effect = etree.SubElement(trans_elem, '{http://schemas.openxmlformats.org/presentationml/2006/main}wipe')
+                        effect.set('dir', 'r')  # From right
+                    elif transition_type == "dissolve":
+                        etree.SubElement(trans_elem, '{http://schemas.openxmlformats.org/presentationml/2006/main}dissolve')
+                    elif transition_type == "blinds":
+                        effect = etree.SubElement(trans_elem, '{http://schemas.openxmlformats.org/presentationml/2006/main}blinds')
+                        effect.set('dir', 'vert')  # Vertical blinds
+                    else:
+                        # Default to fade
+                        effect = etree.SubElement(trans_elem, '{http://schemas.openxmlformats.org/presentationml/2006/main}fade')
+
+                    # Insert transition as first child of slide element (after cSld)
+                    cSld = slide_elem.find('.//{http://schemas.openxmlformats.org/presentationml/2006/main}cSld')
+                    if cSld is not None:
+                        cSld_index = list(slide_elem).index(cSld)
+                        slide_elem.insert(cSld_index + 1, trans_elem)
+                    else:
+                        slide_elem.append(trans_elem)
+
+                except Exception as e:
+                    logger.warning(f"Failed to add slide transition: {e}")
+
+            logger.info(
+                "PPTX generation settings",
+                theme=theme_key,
+                font_family=font_family_key,
+                heading_font=heading_font,
+                body_font=body_font,
+                layout=layout_key,
+                animations=enable_animations,
+            )
 
             # Apply theme color scheme
             primary_rgb = hex_to_rgb(theme["primary"])
@@ -1725,18 +2668,18 @@ Please revise the content to address the feedback while maintaining quality and 
             WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 
             def apply_title_style(shape, font_size=44, bold=True, color=WHITE):
-                """Apply consistent title styling."""
+                """Apply consistent title styling using configured heading font."""
                 for paragraph in shape.text_frame.paragraphs:
-                    paragraph.font.name = "Calibri"
+                    paragraph.font.name = heading_font
                     paragraph.font.size = Pt(font_size)
                     paragraph.font.bold = bold
                     paragraph.font.color.rgb = color
                     paragraph.alignment = PP_ALIGN.LEFT
 
             def apply_body_style(shape, font_size=18, color=TEXT_COLOR):
-                """Apply consistent body text styling."""
+                """Apply consistent body text styling using configured body font."""
                 for paragraph in shape.text_frame.paragraphs:
-                    paragraph.font.name = "Calibri"
+                    paragraph.font.name = body_font
                     paragraph.font.size = Pt(font_size)
                     paragraph.font.color.rgb = color
                     paragraph.line_spacing = 1.5
@@ -1840,6 +2783,10 @@ Please revise the content to address the feedback while maintaining quality and 
             current_slide += 1
             slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
 
+            # Add transition if animations are enabled
+            if enable_animations:
+                add_slide_transition(slide, "fade", duration=transition_duration, speed=animation_speed)
+
             # Full background gradient effect
             bg_shape = slide.shapes.add_shape(
                 MSO_SHAPE.RECTANGLE,
@@ -1869,7 +2816,7 @@ Please revise the content to address the feedback while maintaining quality and 
             tf.word_wrap = True
             p = tf.paragraphs[0]
             p.text = sanitize_text(job.title) or "Untitled"
-            p.font.name = "Calibri"
+            p.font.name = heading_font
             p.font.size = Pt(48)
             p.font.bold = True
             p.font.color.rgb = WHITE
@@ -1884,7 +2831,7 @@ Please revise the content to address the feedback while maintaining quality and 
             p = tf.paragraphs[0]
             desc_text = job.outline.description if job.outline else job.description
             p.text = sanitize_text(desc_text) or ""
-            p.font.name = "Calibri"
+            p.font.name = body_font
             p.font.size = Pt(20)
             p.font.color.rgb = ACCENT_COLOR
 
@@ -1897,7 +2844,7 @@ Please revise the content to address the feedback while maintaining quality and 
             tf = date_box.text_frame
             p = tf.paragraphs[0]
             p.text = datetime.now().strftime("%B %d, %Y")
-            p.font.name = "Calibri"
+            p.font.name = body_font
             p.font.size = Pt(14)
             p.font.color.rgb = WHITE
 
@@ -1905,6 +2852,11 @@ Please revise the content to address the feedback while maintaining quality and 
             if self.config.include_toc:
                 current_slide += 1
                 slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+                # Add transition if animations are enabled
+                if enable_animations:
+                    add_slide_transition(slide, "push", duration=transition_duration, speed=animation_speed)
+
                 add_header_bar(slide)
 
                 # TOC Title
@@ -1915,7 +2867,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 tf = toc_title.text_frame
                 p = tf.paragraphs[0]
                 p.text = "Contents"
-                p.font.name = "Calibri"
+                p.font.name = heading_font
                 p.font.size = Pt(36)
                 p.font.bold = True
                 p.font.color.rgb = WHITE
@@ -1937,7 +2889,7 @@ Please revise the content to address the feedback while maintaining quality and 
                         first_toc_used = True
                     section_title = sanitize_text(section.title) or f"Section {idx + 1}"
                     p.text = f"{idx + 1}.  {section_title}"
-                    p.font.name = "Calibri"
+                    p.font.name = body_font
                     p.font.size = Pt(20)
                     p.font.color.rgb = TEXT_COLOR
                     p.space_after = Pt(12)
@@ -1946,15 +2898,24 @@ Please revise the content to address the feedback while maintaining quality and 
                 if not first_toc_used:
                     p = tf.paragraphs[0]
                     p.text = "No sections"
-                    p.font.name = "Calibri"
+                    p.font.name = body_font
                     p.font.size = Pt(20)
 
                 add_footer(slide, current_slide, total_slides)
 
             # ========== CONTENT SLIDES ==========
+            # Transition types to cycle through for variety
+            content_transitions = ["wipe", "fade", "push", "dissolve"]
+
             for section_idx, section in enumerate(job.sections):
                 current_slide += 1
                 slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+                # Add transition if animations are enabled (cycle through types)
+                if enable_animations:
+                    trans_type = content_transitions[section_idx % len(content_transitions)]
+                    add_slide_transition(slide, trans_type, duration=transition_duration, speed=animation_speed)
+
                 add_header_bar(slide)
 
                 # Check if we have an image for this section
@@ -1968,34 +2929,96 @@ Please revise the content to address the feedback while maintaining quality and 
                 tf = section_title.text_frame
                 p = tf.paragraphs[0]
                 p.text = sanitize_text(section.title) or f"Section {section_idx + 1}"
-                p.font.name = "Calibri"
+                p.font.name = heading_font
                 p.font.size = Pt(32)
                 p.font.bold = True
                 p.font.color.rgb = WHITE
 
-                # Adjust content area based on whether we have an image
+                # Adjust content area based on whether we have an image and layout
                 content = sanitize_text(section.revised_content or section.content) or ""
                 # Strip markdown formatting for clean slide content
                 content = strip_markdown(content)
 
-                # Limit content for presentation readability with sentence awareness
-                # ~450 words = ~3000 chars, but truncate at sentence boundaries
+                # Limit content for presentation readability
+                # ~450 words = ~3000 chars - use LLM to condense if needed
                 if len(content) > 3000:
-                    content = sentence_truncate(content, 3000)
-                    if not content.endswith(('.', '!', '?')):
-                        content += '...'
+                    content = await llm_condense_text(content, 3000)
+
+                # Store the processed content for review/preview consistency
+                section.rendered_content = content
+
+                # Calculate content dimensions based on layout template
+                slide_content_width = prs.slide_width.inches - 1.6  # Total usable width
+                content_width_ratio = layout_config.get("content_width", 0.85)
+
+                # Initialize image positioning variables (used later if has_image)
+                image_left = Inches(8.5)  # Default
+                image_width = Inches(4.3)  # Default
 
                 if has_image:
-                    # Content on left, image on right
+                    # Layout-aware image positioning
+                    image_pos = layout_config.get("image_position", "right")
+
+                    # Default content height - will be reduced for some layouts
+                    content_height = Inches(5.2)
+                    content_top = Inches(1.6)
+
+                    if layout_key == "two_column":
+                        # Split screen: content left, image right (side by side)
+                        content_width = Inches(slide_content_width * 0.48)
+                        content_left = Inches(0.8)
+                        image_left = Inches(7.2)
+                        image_width = Inches(5.5)
+                        # Side-by-side layout can use full height
+                        content_height = Inches(5.0)
+                    elif layout_key == "image_focused":
+                        # Large image BELOW text - reduce content height to prevent overlap
+                        content_width = Inches(slide_content_width)
+                        content_left = Inches(0.8)
+                        # Content area limited to top portion (image starts at Y=4.2")
+                        content_height = Inches(2.4)  # Reduced from 5.2" to prevent overlap
+                        content_top = Inches(1.6)
+                        # Image positioned below content
+                        image_left = Inches(2.5)
+                        image_width = Inches(8.0)
+                    elif layout_key == "minimal":
+                        # Clean layout with image on the side
+                        content_width = Inches(slide_content_width * 0.6)
+                        content_left = Inches(0.8)
+                        image_left = Inches(8.5)
+                        image_width = Inches(4.0)
+                        # Side-by-side can use more height
+                        content_height = Inches(5.0)
+                    else:  # standard layout
+                        content_width = Inches(7.5)
+                        content_left = Inches(0.8)
+                        image_left = Inches(8.5)
+                        image_width = Inches(4.3)
+                        # Side-by-side can use more height
+                        content_height = Inches(5.0)
+
                     content_box = slide.shapes.add_textbox(
-                        Inches(0.8), Inches(1.6),
-                        Inches(7.5), Inches(5.2)
+                        content_left, content_top,
+                        content_width, content_height
                     )
                 else:
-                    # Full width content
+                    # Full width content (no image)
+                    if layout_key == "minimal":
+                        # Centered narrow content for minimal layout
+                        content_width = Inches(slide_content_width * 0.7)
+                        content_left = Inches((prs.slide_width.inches - content_width.inches) / 2)
+                    elif layout_key == "two_column":
+                        # Use full width for two-column without image
+                        content_width = Inches(slide_content_width)
+                        content_left = Inches(0.8)
+                    else:
+                        # Standard full width
+                        content_width = Inches(11.5)
+                        content_left = Inches(0.8)
+
                     content_box = slide.shapes.add_textbox(
-                        Inches(0.8), Inches(1.6),
-                        Inches(11.5), Inches(5.2)
+                        content_left, Inches(1.6),
+                        content_width, Inches(5.2)
                     )
 
                 tf = content_box.text_frame
@@ -2004,41 +3027,68 @@ Please revise the content to address the feedback while maintaining quality and 
                 # Split content into bullet points for cleaner slides
                 paragraphs = content.split('\n')
                 first_para_used = False
-                max_paras = 10 if has_image else 12  # Reasonable limits for readability
+                # Adjust max paragraphs based on layout and image presence
+                if has_image and layout_key == "image_focused":
+                    max_paras = 5  # Very limited space above image
+                elif has_image:
+                    max_paras = 10  # Side-by-side layouts have more room
+                else:
+                    max_paras = 12  # Full content area
                 para_count = 0
 
-                # Collect valid paragraphs first to calculate dynamic sizing
-                valid_paragraphs = []
-                for para_text in paragraphs:
-                    para_text = para_text.strip()
-                    if para_text:
-                        # Format as bullet point for cleaner slides
-                        if para_text.startswith(('- ', '• ', '* ', '1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.')):
-                            bullet_text = para_text.lstrip('-•* 0123456789.').strip()
+                # Parse bullet hierarchy - collect (text, level) tuples
+                def parse_bullet_hierarchy(lines: list) -> list:
+                    """Parse content lines into (text, level) tuples preserving hierarchy."""
+                    result = []
+                    for line in lines:
+                        if not line:
+                            continue
+                        # Count leading whitespace for indentation level
+                        stripped = line.lstrip()
+                        if not stripped:
+                            continue
+                        indent = len(line) - len(stripped)
+
+                        # Detect markdown nested lists (  - item,    - item)
+                        # Each 2 spaces = 1 level of nesting
+                        level = min(indent // 2, 3)  # Max 3 levels deep (0-3)
+
+                        # Strip bullet markers
+                        if stripped.startswith(('- ', '• ', '* ')):
+                            text = stripped[2:].strip()
+                        elif stripped.startswith(tuple(f'{i}.' for i in range(1, 10))):
+                            # Numbered list: "1. text" -> "text"
+                            text = stripped.split('.', 1)[1].strip() if '.' in stripped else stripped
                         else:
-                            bullet_text = para_text
-                        if bullet_text:
-                            valid_paragraphs.append(bullet_text)
+                            text = stripped
+
+                        if text:
+                            result.append((text, level))
+                    return result
+
+                # Collect valid paragraphs with hierarchy info
+                valid_paragraphs = parse_bullet_hierarchy(paragraphs)
 
                 # Dynamic font sizing based on content volume
+                # valid_paragraphs is now list of (text, level) tuples
                 # Increased max_chars limits to reduce truncation
                 total_bullets = min(len(valid_paragraphs), max_paras)
-                total_chars = sum(len(p) for p in valid_paragraphs[:max_paras])
+                total_chars = sum(len(text) for text, _ in valid_paragraphs[:max_paras])
 
                 if total_bullets <= 5 and total_chars < 500:
-                    font_size = Pt(20)
+                    base_font_size = Pt(20)
                     max_chars = 180  # Was 120
                     line_spacing = Pt(10)
                 elif total_bullets <= 8 and total_chars < 900:
-                    font_size = Pt(18)
+                    base_font_size = Pt(18)
                     max_chars = 150  # Was 100
                     line_spacing = Pt(8)
                 elif total_bullets <= 10 and total_chars < 1200:
-                    font_size = Pt(16)
+                    base_font_size = Pt(16)
                     max_chars = 130  # Was 90
                     line_spacing = Pt(6)
                 else:
-                    font_size = Pt(14)
+                    base_font_size = Pt(14)
                     max_chars = 110  # Was 80
                     line_spacing = Pt(4)
 
@@ -2046,7 +3096,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 if has_image:
                     max_chars = int(max_chars * 0.75)  # Was 0.7
 
-                for bullet_text in valid_paragraphs:
+                for bullet_text, bullet_level in valid_paragraphs:
                     if para_count >= max_paras:
                         break
 
@@ -2057,16 +3107,22 @@ Please revise the content to address the feedback while maintaining quality and 
                         first_para_used = True
                     para_count += 1
 
-                    # Use sentence-aware truncation to avoid mid-sentence cuts
+                    # Use LLM to condense text intelligently instead of truncating with '...'
                     if len(bullet_text) > max_chars:
-                        bullet_text = sentence_truncate(bullet_text, max_chars)
-                        # Ensure truncated content shows it was cut
-                        if not bullet_text.endswith(('.', '!', '?', '...')):
-                            bullet_text += '...'
+                        bullet_text = await llm_condense_text(bullet_text, max_chars)
 
-                    p.text = '• ' + bullet_text
-                    p.font.name = "Calibri"
-                    p.font.size = font_size
+                    # Set paragraph level for hierarchy (0=main, 1=sub, 2=sub-sub, etc)
+                    p.level = bullet_level
+
+                    # Explicitly add bullet characters since slide master may not have them configured
+                    # Different bullet styles per level for visual hierarchy
+                    bullet_chars = ['•', '◦', '▪', '‣']
+                    bullet_char = bullet_chars[min(bullet_level, len(bullet_chars) - 1)]
+                    p.text = f"{bullet_char} {bullet_text}"
+                    p.font.name = body_font
+                    # Decrease font size slightly for nested levels
+                    level_font_size = Pt(max(base_font_size.pt - (bullet_level * 2), 10))
+                    p.font.size = level_font_size
                     p.font.color.rgb = TEXT_COLOR
                     p.space_after = line_spacing
 
@@ -2074,24 +3130,45 @@ Please revise the content to address the feedback while maintaining quality and 
                 if not first_para_used:
                     p = tf.paragraphs[0]
                     p.text = ""  # Empty but properly initialized
-                    p.font.name = "Calibri"
+                    p.font.name = body_font
                     p.font.size = Pt(16)
 
-                # Add image if available
+                # Add image if available (use layout-based positioning)
                 if has_image:
                     try:
                         image_path = section_images[section_idx]
-                        # Position image on right side of slide
-                        slide.shapes.add_picture(
-                            image_path,
-                            Inches(8.5), Inches(1.8),
-                            width=Inches(4.3),
-                            height=Inches(3.2),
-                        )
+
+                        # Position image based on layout template
+                        if layout_key == "image_focused":
+                            # Large centered image BELOW content (content ends at ~4.0")
+                            slide.shapes.add_picture(
+                                image_path,
+                                image_left, Inches(4.2),  # Start below content area
+                                width=image_width,
+                                height=Inches(3.0),  # Slightly smaller to fit
+                            )
+                        elif layout_key == "two_column":
+                            # Image on right side, vertically centered
+                            slide.shapes.add_picture(
+                                image_path,
+                                image_left, Inches(2.0),
+                                width=image_width,
+                                height=Inches(4.0),
+                            )
+                        else:
+                            # Standard/minimal: image on right (side-by-side, no vertical overlap)
+                            slide.shapes.add_picture(
+                                image_path,
+                                image_left, Inches(1.8),
+                                width=image_width,
+                                height=Inches(4.5),  # Can be taller since side-by-side
+                            )
+
                         logger.debug(
                             "Added image to PPTX slide",
                             section=section.title,
                             image_path=image_path,
+                            layout=layout_key,
                         )
                     except Exception as e:
                         logger.warning(f"Failed to add image to slide: {e}")
@@ -2106,6 +3183,11 @@ Please revise the content to address the feedback while maintaining quality and 
             if include_sources and job.sources_used:
                 current_slide += 1
                 slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+                # Add transition if animations are enabled
+                if enable_animations:
+                    add_slide_transition(slide, "blinds", duration=transition_duration, speed=animation_speed)
+
                 add_header_bar(slide)
 
                 # Sources title
@@ -2116,7 +3198,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 tf = sources_title.text_frame
                 p = tf.paragraphs[0]
                 p.text = "Sources & References"
-                p.font.name = "Calibri"
+                p.font.name = heading_font
                 p.font.size = Pt(32)
                 p.font.bold = True
                 p.font.color.rgb = WHITE
@@ -2138,7 +3220,7 @@ Please revise the content to address the feedback while maintaining quality and 
                         first_source_used = True
                     doc_name = sanitize_text(source.document_name or source.document_id[:20])
                     p.text = f"•  {doc_name}"
-                    p.font.name = "Calibri"
+                    p.font.name = body_font
                     p.font.size = Pt(14)
                     p.font.color.rgb = TEXT_COLOR
                     p.space_after = Pt(6)
@@ -2147,7 +3229,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 if not first_source_used:
                     p = tf.paragraphs[0]
                     p.text = "No sources available"
-                    p.font.name = "Calibri"
+                    p.font.name = body_font
                     p.font.size = Pt(14)
 
                 add_footer(slide, current_slide, total_slides)
@@ -2173,9 +3255,24 @@ Please revise the content to address the feedback while maintaining quality and 
 
             doc = Document()
 
-            # Get theme colors from job metadata or use default
+            # Get theme colors from job metadata or use default (with custom color overrides)
             theme_key = job.metadata.get("theme", "business")
-            theme = get_theme_colors(theme_key)
+            custom_colors = job.metadata.get("custom_colors")
+            theme = get_theme_colors(theme_key, custom_colors)
+
+            # Get font family from job metadata or use default
+            font_family_key = job.metadata.get("font_family", "modern")
+            font_config = FONT_FAMILIES.get(font_family_key, FONT_FAMILIES["modern"])
+            heading_font = font_config["heading"]
+            body_font = font_config["body"]
+
+            logger.info(
+                "DOCX generation settings",
+                theme=theme_key,
+                font_family=font_family_key,
+                heading_font=heading_font,
+                body_font=body_font,
+            )
 
             # Apply theme color scheme
             primary_rgb = hex_to_rgb(theme["primary"])
@@ -2243,7 +3340,7 @@ Please revise the content to address the feedback while maintaining quality and 
             title_para = doc.add_paragraph()
             title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
             title_run = title_para.add_run(job.title)
-            title_run.font.name = "Calibri"
+            title_run.font.name = heading_font
             title_run.font.size = Pt(36)
             title_run.font.bold = True
             title_run.font.color.rgb = PRIMARY_COLOR
@@ -2254,7 +3351,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 desc_para = doc.add_paragraph()
                 desc_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 desc_run = desc_para.add_run(job.outline.description)
-                desc_run.font.name = "Calibri"
+                desc_run.font.name = body_font
                 desc_run.font.size = Pt(14)
                 desc_run.font.color.rgb = SECONDARY_COLOR
                 desc_run.font.italic = True
@@ -2275,7 +3372,7 @@ Please revise the content to address the feedback while maintaining quality and 
             date_para = doc.add_paragraph()
             date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
             date_run = date_para.add_run(datetime.now().strftime("%B %d, %Y"))
-            date_run.font.name = "Calibri"
+            date_run.font.name = body_font
             date_run.font.size = Pt(12)
             date_run.font.color.rgb = LIGHT_GRAY
 
@@ -2297,14 +3394,14 @@ Please revise the content to address the feedback while maintaining quality and 
 
                     # Section number
                     num_run = toc_entry.add_run(f"{idx + 1}.  ")
-                    num_run.font.name = "Calibri"
+                    num_run.font.name = body_font
                     num_run.font.size = Pt(12)
                     num_run.font.bold = True
                     num_run.font.color.rgb = SECONDARY_COLOR
 
                     # Section title
                     title_run = toc_entry.add_run(section.title)
-                    title_run.font.name = "Calibri"
+                    title_run.font.name = body_font
                     title_run.font.size = Pt(12)
                     title_run.font.color.rgb = TEXT_COLOR
 
@@ -2338,15 +3435,29 @@ Please revise the content to address the feedback while maintaining quality and 
                         sub.runs[0].font.color.rgb = SECONDARY_COLOR
                         sub.runs[0].font.size = Pt(15)
                     # Check if it's a bullet list
-                    elif para_text.startswith(('- ', '• ', '* ')):
+                    elif para_text.startswith(('- ', '• ', '* ')) or '  -' in para_text:
                         lines = para_text.split('\n')
                         for line in lines:
-                            line = line.strip()
-                            if line.startswith(('- ', '• ', '* ')):
-                                bullet_para = doc.add_paragraph(style='List Bullet')
-                                bullet_run = bullet_para.add_run(line.lstrip('-•* ').strip())
-                                bullet_run.font.name = "Calibri"
-                                bullet_run.font.size = Pt(11)
+                            # Detect indentation level
+                            stripped_line = line.lstrip()
+                            indent_spaces = len(line) - len(stripped_line)
+                            indent_level = min(indent_spaces // 2, 2)  # Max 2 levels (List Bullet 3)
+
+                            if stripped_line.startswith(('- ', '• ', '* ')):
+                                # Use List Bullet, List Bullet 2, or List Bullet 3 based on indent
+                                bullet_style = 'List Bullet' if indent_level == 0 else f'List Bullet {indent_level + 1}'
+                                try:
+                                    bullet_para = doc.add_paragraph(style=bullet_style)
+                                except KeyError:
+                                    # Fallback to regular bullet if style doesn't exist
+                                    bullet_para = doc.add_paragraph(style='List Bullet')
+                                    # Manually indent for deeper levels
+                                    bullet_para.paragraph_format.left_indent = Inches(0.25 * indent_level)
+
+                                bullet_run = bullet_para.add_run(stripped_line.lstrip('-•* ').strip())
+                                bullet_run.font.name = body_font
+                                # Slightly smaller font for nested bullets
+                                bullet_run.font.size = Pt(11 - indent_level)
                                 bullet_run.font.color.rgb = TEXT_COLOR
                     # Regular paragraph with inline formatting support
                     else:
@@ -2373,7 +3484,7 @@ Please revise the content to address the feedback while maintaining quality and 
                                 # Plain text
                                 run = para.add_run(part)
 
-                            run.font.name = "Calibri"
+                            run.font.name = body_font
                             run.font.size = Pt(11)
                             run.font.color.rgb = TEXT_COLOR
 
@@ -2400,7 +3511,7 @@ Please revise the content to address the feedback while maintaining quality and 
                     doc.add_paragraph()
                     source_label = doc.add_paragraph()
                     label_run = source_label.add_run("Sources for this section:")
-                    label_run.font.name = "Calibri"
+                    label_run.font.name = body_font
                     label_run.font.size = Pt(9)
                     label_run.font.italic = True
                     label_run.font.color.rgb = LIGHT_GRAY
@@ -2409,7 +3520,7 @@ Please revise the content to address the feedback while maintaining quality and 
                         src_para = doc.add_paragraph()
                         src_para.paragraph_format.left_indent = Inches(0.25)
                         src_run = src_para.add_run(f"• {source.document_name or source.document_id}")
-                        src_run.font.name = "Calibri"
+                        src_run.font.name = body_font
                         src_run.font.size = Pt(9)
                         src_run.font.color.rgb = LIGHT_GRAY
 
@@ -2431,7 +3542,7 @@ Please revise the content to address the feedback while maintaining quality and 
                     ref_para = doc.add_paragraph()
                     ref_para.paragraph_format.space_after = Pt(4)
                     ref_run = ref_para.add_run(f"• {source.document_name or source.document_id}")
-                    ref_run.font.name = "Calibri"
+                    ref_run.font.name = body_font
                     ref_run.font.size = Pt(10)
                     ref_run.font.color.rgb = TEXT_COLOR
 
@@ -2497,9 +3608,59 @@ Please revise the content to address the feedback while maintaining quality and 
                 except Exception as e:
                     logger.warning(f"Image generation failed, continuing without images: {e}")
 
-            # Get theme colors from job metadata or use default
+            # Get theme colors from job metadata or use default (with custom color overrides)
             theme_key = job.metadata.get("theme", "business")
-            theme = get_theme_colors(theme_key)
+            custom_colors = job.metadata.get("custom_colors")
+            theme = get_theme_colors(theme_key, custom_colors)
+
+            # Get font family from job metadata or use default
+            # ReportLab built-in fonts mapping
+            PDF_FONT_MAP = {
+                "modern": {
+                    "heading": "Helvetica-Bold",
+                    "heading_oblique": "Helvetica-BoldOblique",
+                    "body": "Helvetica",
+                    "body_bold": "Helvetica-Bold",
+                    "body_italic": "Helvetica-Oblique",
+                },
+                "classic": {
+                    "heading": "Times-Bold",
+                    "heading_oblique": "Times-BoldItalic",
+                    "body": "Times-Roman",
+                    "body_bold": "Times-Bold",
+                    "body_italic": "Times-Italic",
+                },
+                "professional": {
+                    "heading": "Helvetica-Bold",
+                    "heading_oblique": "Helvetica-BoldOblique",
+                    "body": "Helvetica",
+                    "body_bold": "Helvetica-Bold",
+                    "body_italic": "Helvetica-Oblique",
+                },
+                "technical": {
+                    "heading": "Courier-Bold",
+                    "heading_oblique": "Courier-BoldOblique",
+                    "body": "Courier",
+                    "body_bold": "Courier-Bold",
+                    "body_italic": "Courier-Oblique",
+                },
+            }
+
+            font_family_key = job.metadata.get("font_family", "modern")
+            pdf_fonts = PDF_FONT_MAP.get(font_family_key, PDF_FONT_MAP["modern"])
+            heading_font = pdf_fonts["heading"]
+            heading_oblique = pdf_fonts["heading_oblique"]
+            body_font = pdf_fonts["body"]
+            body_bold = pdf_fonts["body_bold"]
+            body_italic = pdf_fonts["body_italic"]
+
+            logger.info(
+                "PDF generation settings",
+                theme=theme_key,
+                font_family=font_family_key,
+                heading_font=heading_font,
+                body_font=body_font,
+            )
 
             # Apply theme color scheme
             PRIMARY_COLOR = HexColor(theme["primary"])
@@ -2511,10 +3672,10 @@ Please revise the content to address the feedback while maintaining quality and 
             output_path = os.path.join(self.config.output_dir, f"{filename}.pdf")
 
             # Custom page template for headers/footers
-            def add_page_number(canvas, doc):
+            def add_page_number(canvas, doc, font=body_font):
                 """Add page number to footer."""
                 canvas.saveState()
-                canvas.setFont('Helvetica', 9)
+                canvas.setFont(font, 9)
                 canvas.setFillColor(LIGHT_GRAY)
                 page_num = canvas.getPageNumber()
                 text = f"Page {page_num}"
@@ -2541,7 +3702,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 textColor=PRIMARY_COLOR,
                 alignment=TA_CENTER,
                 spaceAfter=20,
-                fontName='Helvetica-Bold',
+                fontName=heading_font,
             )
 
             # Cover subtitle style
@@ -2551,7 +3712,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 fontSize=14,
                 textColor=SECONDARY_COLOR,
                 alignment=TA_CENTER,
-                fontName='Helvetica-Oblique',
+                fontName=body_italic,
                 spaceAfter=12,
             )
 
@@ -2563,7 +3724,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 textColor=PRIMARY_COLOR,
                 spaceBefore=16,
                 spaceAfter=12,
-                fontName='Helvetica-Bold',
+                fontName=heading_font,
             )
 
             # Subheading style
@@ -2574,7 +3735,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 textColor=SECONDARY_COLOR,
                 spaceBefore=12,
                 spaceAfter=8,
-                fontName='Helvetica-Bold',
+                fontName=body_bold,
             )
 
             # Body text style
@@ -2587,7 +3748,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 spaceBefore=4,
                 spaceAfter=8,
                 leading=16,
-                fontName='Helvetica',
+                fontName=body_font,
             )
 
             # TOC style
@@ -2599,7 +3760,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 spaceBefore=6,
                 spaceAfter=6,
                 leftIndent=20,
-                fontName='Helvetica',
+                fontName=body_font,
             )
 
             # Source/reference style
@@ -2608,7 +3769,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 parent=styles['Normal'],
                 fontSize=9,
                 textColor=LIGHT_GRAY,
-                fontName='Helvetica-Oblique',
+                fontName=body_italic,
                 spaceBefore=4,
                 spaceAfter=2,
             )
@@ -2646,7 +3807,7 @@ Please revise the content to address the feedback while maintaining quality and 
                 fontSize=12,
                 textColor=LIGHT_GRAY,
                 alignment=TA_CENTER,
-                fontName='Helvetica',
+                fontName=body_font,
             )
             story.append(Paragraph(datetime.now().strftime("%B %d, %Y"), date_style))
 
@@ -2660,7 +3821,7 @@ Please revise the content to address the feedback while maintaining quality and 
                     fontSize=24,
                     textColor=PRIMARY_COLOR,
                     spaceAfter=20,
-                    fontName='Helvetica-Bold',
+                    fontName=heading_font,
                 )
                 story.append(Paragraph("Table of Contents", toc_title_style))
                 story.append(Spacer(1, 0.3*inch))
@@ -2682,40 +3843,59 @@ Please revise the content to address the feedback while maintaining quality and 
                 # Split content and format
                 paragraphs = content.split('\n')
                 current_list = []
+                current_level = 0  # Track bullet nesting level
+
+                def flush_list(lst):
+                    """Flush list items to story with proper nesting."""
+                    if lst:
+                        story.append(ListFlowable(
+                            lst,
+                            bulletType='bullet',
+                            leftIndent=20,
+                        ))
+                    return []
 
                 for para_text in paragraphs:
+                    original_text = para_text  # Keep original for indentation detection
                     para_text = para_text.strip()
                     if not para_text:
                         # Flush any pending list
-                        if current_list:
-                            story.append(ListFlowable(
-                                current_list,
-                                bulletType='bullet',
-                                leftIndent=20,
-                            ))
-                            current_list = []
+                        current_list = flush_list(current_list)
+                        current_level = 0
                         continue
 
                     # Handle markdown-style headers
                     if para_text.startswith('###'):
-                        if current_list:
-                            story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
-                            current_list = []
+                        current_list = flush_list(current_list)
+                        current_level = 0
                         story.append(Paragraph(para_text.lstrip('#').strip(), subheading_style))
                     elif para_text.startswith('##'):
-                        if current_list:
-                            story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
-                            current_list = []
+                        current_list = flush_list(current_list)
+                        current_level = 0
                         story.append(Paragraph(para_text.lstrip('#').strip(), subheading_style))
-                    # Handle bullet points
+                    # Handle bullet points with hierarchy
                     elif para_text.startswith(('- ', '• ', '* ')):
                         bullet_text = para_text.lstrip('-•* ').strip()
-                        current_list.append(ListItem(Paragraph(bullet_text, body_style)))
+                        # Detect indentation level from original text
+                        indent = len(original_text) - len(original_text.lstrip())
+                        level = min(indent // 2, 3)  # Max 3 levels (0-3)
+
+                        # Calculate left indent based on nesting level
+                        # Base indent is 20, add 15 for each level
+                        left_indent = 20 + (level * 15)
+
+                        # Create a style with appropriate indent for this level
+                        indented_style = ParagraphStyle(
+                            f'BulletLevel{level}',
+                            parent=body_style,
+                            leftIndent=left_indent,
+                            bulletIndent=left_indent - 10,
+                        )
+                        current_list.append(ListItem(Paragraph(bullet_text, indented_style), leftIndent=left_indent))
                     # Handle numbered lists
                     elif para_text[:2].replace('.', '').isdigit():
-                        if current_list:
-                            story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
-                            current_list = []
+                        current_list = flush_list(current_list)
+                        current_level = 0
                         import re
                         num_match = re.match(r'^(\d+\.)\s*(.+)', para_text)
                         if num_match:
@@ -2724,9 +3904,8 @@ Please revise the content to address the feedback while maintaining quality and 
                             story.append(Paragraph(para_text, body_style))
                     # Regular paragraph
                     else:
-                        if current_list:
-                            story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
-                            current_list = []
+                        current_list = flush_list(current_list)
+                        current_level = 0
                         # Escape XML special characters first
                         formatted = para_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
                         # Convert markdown bold (**text**) to HTML bold for ReportLab
@@ -2737,8 +3916,7 @@ Please revise the content to address the feedback while maintaining quality and 
                         story.append(Paragraph(formatted, body_style))
 
                 # Flush remaining list items
-                if current_list:
-                    story.append(ListFlowable(current_list, bulletType='bullet', leftIndent=20))
+                current_list = flush_list(current_list)
 
                 # Add image for this section if available
                 if idx in section_images:
@@ -2765,7 +3943,11 @@ Please revise the content to address the feedback while maintaining quality and 
                         doc_name = source.document_name or source.document_id
                         story.append(Paragraph(f"• {doc_name}", source_style))
 
-                story.append(Spacer(1, 0.3*inch))
+                # Add page break after each section (except the last one)
+                if idx < len(job.sections) - 1:
+                    story.append(PageBreak())
+                else:
+                    story.append(Spacer(1, 0.3*inch))
 
             # ========== REFERENCES ==========
             if include_sources and job.sources_used:
@@ -2783,7 +3965,7 @@ Please revise the content to address the feedback while maintaining quality and 
                         spaceBefore=4,
                         spaceAfter=4,
                         leftIndent=15,
-                        fontName='Helvetica',
+                        fontName=body_font,
                     )
                     story.append(Paragraph(f"• {doc_name}", ref_style))
 
@@ -2856,16 +4038,36 @@ Please revise the content to address the feedback while maintaining quality and 
         # Determine include_sources from job metadata or fall back to config
         include_sources = job.metadata.get("include_sources", self.config.include_sources)
 
+        # Get theme colors (with custom color overrides)
+        theme_key = job.metadata.get("theme", "business")
+        custom_colors = job.metadata.get("custom_colors")
+        theme = get_theme_colors(theme_key, custom_colors)
+
+        # HTML font family mapping
+        HTML_FONT_MAP = {
+            "modern": "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+            "classic": "Georgia, 'Times New Roman', Times, serif",
+            "professional": "Arial, Helvetica, sans-serif",
+            "technical": "'Courier New', Consolas, monospace",
+        }
+        font_family_key = job.metadata.get("font_family", "modern")
+        font_family = HTML_FONT_MAP.get(font_family_key, HTML_FONT_MAP["modern"])
+
         html = f"""<!DOCTYPE html>
 <html>
 <head>
     <title>{job.title}</title>
     <style>
-        body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }}
-        h1 {{ color: #333; }}
-        h2 {{ color: #666; border-bottom: 1px solid #ccc; }}
+        body {{ font-family: {font_family}; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; }}
+        h1 {{ color: {theme["primary"]}; margin-bottom: 0.5em; }}
+        h2 {{ color: {theme["secondary"]}; border-bottom: 2px solid {theme["secondary"]}; padding-bottom: 0.3em; }}
         .section {{ margin-bottom: 30px; }}
-        .sources {{ font-size: 0.9em; color: #888; }}
+        .description {{ color: {theme["secondary"]}; font-style: italic; margin-bottom: 2em; }}
+        .sources {{ font-size: 0.9em; color: {theme["light_gray"]}; margin-top: 1em; padding-top: 0.5em; border-top: 1px dashed {theme["light_gray"]}; }}
+        .references {{ margin-top: 3em; padding-top: 1em; border-top: 2px solid {theme["primary"]}; }}
+        .references h2 {{ border-bottom: none; }}
+        .references ul {{ list-style-type: disc; padding-left: 1.5em; }}
+        .references li {{ color: {theme["text"]}; margin-bottom: 0.5em; }}
     </style>
 </head>
 <body>
@@ -2873,7 +4075,7 @@ Please revise the content to address the feedback while maintaining quality and 
 """
 
         if job.outline:
-            html += f"    <p><em>{job.outline.description}</em></p>\n"
+            html += f'    <p class="description">{job.outline.description}</p>\n'
 
         for section in job.sections:
             content = section.revised_content or section.content
@@ -2886,6 +4088,20 @@ Please revise the content to address the feedback while maintaining quality and 
                 html += ", ".join(s.document_name or s.document_id for s in section.sources[:3])
                 html += "</div>\n"
 
+            html += "    </div>\n"
+
+        # Add references section if sources are available
+        if include_sources and job.sources_used:
+            html += '    <div class="references">\n'
+            html += "        <h2>References</h2>\n"
+            html += "        <ul>\n"
+            seen_docs = set()
+            for source in job.sources_used:
+                doc_name = source.document_name or source.document_id
+                if doc_name and doc_name not in seen_docs:
+                    seen_docs.add(doc_name)
+                    html += f"            <li>{doc_name}</li>\n"
+            html += "        </ul>\n"
             html += "    </div>\n"
 
         html += """</body>
@@ -2917,15 +4133,26 @@ Please revise the content to address the feedback while maintaining quality and 
 
             wb = Workbook()
 
-            # Get theme colors from job metadata or use default
+            # Get theme colors from job metadata or use default (with custom color overrides)
             theme_key = job.metadata.get("theme", "business")
-            theme = get_theme_colors(theme_key)
+            custom_colors = job.metadata.get("custom_colors")
+            theme = get_theme_colors(theme_key, custom_colors)
 
             # Convert theme color to Excel format (without #)
             primary_hex = theme["primary"].lstrip('#')
 
-            # Define styles with theme colors
-            header_font = Font(bold=True, size=12, color="FFFFFF")
+            # Excel font family mapping
+            XLSX_FONT_MAP = {
+                "modern": "Calibri",
+                "classic": "Times New Roman",
+                "professional": "Arial",
+                "technical": "Consolas",
+            }
+            font_family_key = job.metadata.get("font_family", "modern")
+            excel_font_name = XLSX_FONT_MAP.get(font_family_key, XLSX_FONT_MAP["modern"])
+
+            # Define styles with theme colors and selected font
+            header_font = Font(name=excel_font_name, bold=True, size=12, color="FFFFFF")
             header_fill = PatternFill(start_color=primary_hex, end_color=primary_hex, fill_type="solid")
             header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell_alignment = Alignment(vertical="top", wrap_text=True)
@@ -2943,7 +4170,7 @@ Please revise the content to address the feedback while maintaining quality and 
             # Title row
             ws_summary.merge_cells('A1:B1')
             ws_summary['A1'] = job.title
-            ws_summary['A1'].font = Font(bold=True, size=16)
+            ws_summary['A1'].font = Font(name=excel_font_name, bold=True, size=16)
             ws_summary['A1'].alignment = Alignment(horizontal="center")
 
             # Summary data
@@ -2958,7 +4185,7 @@ Please revise the content to address the feedback while maintaining quality and 
 
             for i, (label, value) in enumerate(summary_data, start=3):
                 ws_summary[f'A{i}'] = label
-                ws_summary[f'A{i}'].font = Font(bold=True)
+                ws_summary[f'A{i}'].font = Font(name=excel_font_name, bold=True)
                 ws_summary[f'B{i}'] = value
                 ws_summary[f'A{i}'].border = thin_border
                 ws_summary[f'B{i}'].border = thin_border

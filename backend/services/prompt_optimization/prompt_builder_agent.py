@@ -520,6 +520,117 @@ class PromptBuilderAgent(BaseAgent):
 
         return variants
 
+    async def generate_mutation(
+        self,
+        agent_id: str,
+        strategy: MutationStrategy,
+        custom_context: Optional[str] = None,
+    ) -> Optional[PromptMutation]:
+        """
+        Generate a single enhanced prompt mutation for the enhance-prompt API.
+
+        This method generates a single improved prompt based on the specified
+        strategy, without requiring failure analysis (for manual enhancement).
+
+        Args:
+            agent_id: Agent UUID
+            strategy: Mutation strategy to apply
+            custom_context: Optional custom instructions for enhancement
+
+        Returns:
+            PromptMutation or None if generation fails
+        """
+        # Get current prompt
+        current_prompt = await self._get_agent_prompt_by_id(agent_id)
+        if not current_prompt:
+            logger.error("No prompt found for agent", agent_id=agent_id)
+            return None
+
+        # Build mutation prompt
+        mutation_template = PromptTemplate(
+            id="mutation",
+            version=1,
+            system_prompt=MUTATION_SYSTEM_PROMPT,
+            task_prompt_template=MUTATION_TASK_PROMPT,
+        )
+
+        # Create minimal failure analysis for context
+        context_info = custom_context or "No specific issues identified. Enhance the prompt for general quality improvement."
+        fake_analysis = {
+            "patterns": [{"description": context_info}],
+            "recommendations": [f"Apply {strategy.value} mutation"],
+            "summary": context_info,
+        }
+
+        messages = mutation_template.build_messages(
+            task="",
+            strategy=strategy.value,
+            system_prompt=current_prompt.get("system_prompt", ""),
+            task_template=current_prompt.get("task_prompt_template", ""),
+            failure_analysis=json.dumps(fake_analysis, indent=2),
+            strategy_description=self.STRATEGY_DESCRIPTIONS.get(strategy, ""),
+        )
+
+        try:
+            response, _, _ = await self.invoke_llm(messages, record=True)
+            logger.info(
+                "LLM response for mutation",
+                strategy=strategy.value,
+                response_length=len(response) if response else 0,
+                response_preview=response[:500] if response else "None",
+            )
+            mutation_data = self._parse_mutation_response(response)
+            logger.info(
+                "Parsed mutation data",
+                has_system_prompt=bool(mutation_data.get("system_prompt")),
+                has_task_template=bool(mutation_data.get("task_prompt_template")),
+                keys=list(mutation_data.keys()) if mutation_data else [],
+            )
+
+            return PromptMutation(
+                id=str(uuid.uuid4()),
+                strategy=strategy,
+                original_version_id=current_prompt.get("version_id", ""),
+                system_prompt=mutation_data.get("system_prompt", ""),
+                task_prompt_template=mutation_data.get("task_prompt_template", ""),
+                few_shot_examples=mutation_data.get("few_shot_examples", []),
+                change_description=mutation_data.get("change_description", "Enhanced prompt"),
+                expected_improvement=mutation_data.get("expected_improvement", "Improved clarity and effectiveness"),
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to generate mutation with {strategy}: {e}", exc_info=True)
+            return None
+
+    async def _get_agent_prompt_by_id(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get current active prompt for agent by ID.
+
+        Args:
+            agent_id: Agent UUID string
+
+        Returns:
+            Dict with prompt details or None
+        """
+        result = await self.db.execute(
+            select(AgentPromptVersion).where(
+                and_(
+                    AgentPromptVersion.agent_id == uuid.UUID(agent_id),
+                    AgentPromptVersion.is_active == True,
+                )
+            )
+        )
+        version = result.scalar_one_or_none()
+
+        if not version:
+            return None
+
+        return {
+            "version_id": str(version.id),
+            "system_prompt": version.system_prompt or "",
+            "task_prompt_template": version.task_prompt_template or "",
+        }
+
     async def create_prompt_versions(
         self,
         agent_id: str,

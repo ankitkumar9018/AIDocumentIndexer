@@ -257,9 +257,11 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.metrics import router as metrics_router
     from backend.api.routes.folders import router as folders_router
     from backend.api.routes.preferences import router as preferences_router
+    from backend.api.routes.generation_templates import router as generation_templates_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
+    app.include_router(generation_templates_router, prefix="/api/v1", tags=["Generation Templates"])
     app.include_router(agent_router, prefix="/api/v1/agent", tags=["Agent Orchestration"])
     app.include_router(temp_upload_router, prefix="/api/v1/temp", tags=["Temporary Uploads"])
     app.include_router(metrics_router, prefix="/api/v1/metrics", tags=["Metrics & Monitoring"])

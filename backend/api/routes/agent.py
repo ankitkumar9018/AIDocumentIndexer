@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from backend.api.middleware.auth import AuthenticatedUser
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_, func
 import structlog
 
 from backend.db.database import get_async_session as get_db
@@ -110,6 +111,9 @@ class UpdateAgentRequest(BaseModel):
     default_provider_id: Optional[str] = None
     default_model: Optional[str] = None
     is_active: Optional[bool] = None
+    # Prompt fields - when provided, creates a new prompt version
+    system_prompt: Optional[str] = Field(None, description="System prompt - creates new prompt version if provided")
+    task_prompt_template: Optional[str] = Field(None, description="Task template - creates new prompt version if provided")
 
 
 class CreatePromptVersionRequest(BaseModel):
@@ -457,11 +461,43 @@ async def get_system_status(
 ):
     """Get status of all agents from database."""
     from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
 
     result = await db.execute(
         select(AgentDefinition).order_by(AgentDefinition.agent_type)
     )
     agents = result.scalars().all()
+
+    # Get active prompt versions for all agents
+    agent_prompts = {}
+    for agent in agents:
+        prompt_version = None
+        # First try the explicitly set active_prompt_version_id
+        if agent.active_prompt_version_id:
+            prompt_result = await db.execute(
+                select(AgentPromptVersion).where(
+                    AgentPromptVersion.id == agent.active_prompt_version_id
+                )
+            )
+            prompt_version = prompt_result.scalar_one_or_none()
+
+        # Fallback: look for prompt version with is_active=True
+        if not prompt_version:
+            prompt_result = await db.execute(
+                select(AgentPromptVersion).where(
+                    and_(
+                        AgentPromptVersion.agent_id == agent.id,
+                        AgentPromptVersion.is_active == True
+                    )
+                )
+            )
+            prompt_version = prompt_result.scalar_one_or_none()
+
+        if prompt_version:
+            agent_prompts[str(agent.id)] = {
+                "system_prompt": prompt_version.system_prompt,
+                "task_prompt_template": prompt_version.task_prompt_template,
+            }
 
     return {
         "agents": [
@@ -477,6 +513,9 @@ async def get_system_status(
                 "avg_tokens_per_execution": a.avg_tokens_per_execution or 0,
                 "default_model": a.default_model,
                 "default_temperature": a.default_temperature,
+                # Include active prompt if available
+                "system_prompt": agent_prompts.get(str(a.id), {}).get("system_prompt"),
+                "task_prompt_template": agent_prompts.get(str(a.id), {}).get("task_prompt_template"),
             }
             for a in agents
         ],
@@ -626,6 +665,7 @@ async def update_agent(
     Update an agent definition (full update).
 
     Updates agent name, description, settings, and LLM configuration.
+    If system_prompt or task_prompt_template are provided, creates a new prompt version.
     """
     from sqlalchemy import select
 
@@ -655,15 +695,65 @@ async def update_agent(
     if request.is_active is not None:
         agent.is_active = request.is_active
 
+    # Handle prompt updates - create a new prompt version if prompts are provided
+    prompt_version_created = False
+    if request.system_prompt is not None or request.task_prompt_template is not None:
+        # Get the current active prompt version to inherit values
+        current_prompt_result = await db.execute(
+            select(AgentPromptVersion).where(
+                and_(
+                    AgentPromptVersion.agent_id == agent.id,
+                    AgentPromptVersion.is_active == True
+                )
+            )
+        )
+        current_prompt = current_prompt_result.scalar_one_or_none()
+
+        # Get next version number
+        version_count_result = await db.execute(
+            select(func.count(AgentPromptVersion.id)).where(
+                AgentPromptVersion.agent_id == agent.id
+            )
+        )
+        version_number = (version_count_result.scalar() or 0) + 1
+
+        # Deactivate current prompt version if exists
+        if current_prompt:
+            current_prompt.is_active = False
+
+        # Create new prompt version
+        new_prompt = AgentPromptVersion(
+            id=uuid.uuid4(),
+            agent_id=agent.id,
+            version_number=version_number,
+            system_prompt=request.system_prompt if request.system_prompt is not None else (current_prompt.system_prompt if current_prompt else ""),
+            task_prompt_template=request.task_prompt_template if request.task_prompt_template is not None else (current_prompt.task_prompt_template if current_prompt else ""),
+            few_shot_examples=current_prompt.few_shot_examples if current_prompt else None,
+            output_schema=current_prompt.output_schema if current_prompt else None,
+            change_reason="Updated via agent edit (enhanced prompt)",
+            is_active=True,
+        )
+        db.add(new_prompt)
+
+        # Update agent's active prompt version reference
+        agent.active_prompt_version_id = new_prompt.id
+        prompt_version_created = True
+
+        logger.info("Created new prompt version for agent", agent_id=agent_id, version=version_number)
+
     await db.commit()
 
     logger.info("Updated agent", agent_id=agent_id)
+
+    message = f"Agent '{agent.name}' updated successfully"
+    if prompt_version_created:
+        message += " with new prompt version"
 
     return {
         "success": True,
         "id": str(agent.id),
         "name": agent.name,
-        "message": f"Agent '{agent.name}' updated successfully",
+        "message": message,
     }
 
 
@@ -1103,3 +1193,379 @@ async def add_trajectory_feedback(
         raise HTTPException(status_code=404, detail="Trajectory not found")
 
     return {"success": True, "trajectory_id": trajectory_id}
+
+
+# =============================================================================
+# Agent Enhancement Endpoints
+# =============================================================================
+
+class EnhancePromptRequest(BaseModel):
+    """Request to enhance an agent's prompt."""
+    strategy: Optional[str] = Field(
+        None,
+        description="Mutation strategy: rephrase_instructions, add_examples, add_guardrails, restructure_format, add_chain_of_thought, simplify, add_constraints"
+    )
+    custom_instructions: Optional[str] = Field(
+        None,
+        description="Custom instructions for the enhancement"
+    )
+    enhance_description: bool = Field(
+        False,
+        description="Whether to also enhance the agent description"
+    )
+
+
+class UpdateAgentSettingsRequest(BaseModel):
+    """Request to update agent settings including tools and external config."""
+    tools_config: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Tools configuration: {web_search: bool, code_execution: bool, file_access: bool, mcp_server_url: str}"
+    )
+    external_agent: Optional[Dict[str, Any]] = Field(
+        None,
+        description="External agent configuration: {api_url: str, api_key: str, enabled: bool}"
+    )
+    custom_settings: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Additional custom settings"
+    )
+
+
+@router.post("/agents/{agent_id}/enhance-prompt")
+async def enhance_agent_prompt(
+    agent_id: str,
+    request: EnhancePromptRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Enhance an agent's prompt using AI-powered optimization.
+
+    Uses the PromptBuilderAgent to analyze the agent's current prompt
+    and generate an improved version using GEPA-style mutations.
+    """
+    from backend.services.prompt_optimization.prompt_builder_agent import (
+        PromptBuilderAgent,
+        MutationStrategy,
+    )
+    from backend.services.agents.agent_base import AgentConfig
+
+    # Get the agent
+    result = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.id == uuid.UUID(agent_id))
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Get current active prompt version
+    result = await db.execute(
+        select(AgentPromptVersion).where(
+            and_(
+                AgentPromptVersion.agent_id == agent.id,
+                AgentPromptVersion.is_active == True
+            )
+        )
+    )
+    prompt_version = result.scalar_one_or_none()
+
+    if not prompt_version:
+        raise HTTPException(
+            status_code=400,
+            detail="No active prompt version found for this agent"
+        )
+
+    # Validate that prompts are not empty - cannot enhance empty prompts
+    system_empty = not prompt_version.system_prompt or not prompt_version.system_prompt.strip()
+    task_empty = not prompt_version.task_prompt_template or not prompt_version.task_prompt_template.strip()
+
+    if system_empty and task_empty:
+        raise HTTPException(
+            status_code=400,
+            detail="Agent has empty prompts. Please set prompts before enhancing. "
+                   "Both system_prompt and task_prompt_template are empty or whitespace-only."
+        )
+
+    try:
+        # Create prompt builder agent
+        config = AgentConfig(
+            agent_id=str(uuid.uuid4()),
+            name="Prompt Builder",
+            description="Prompt optimization agent",
+        )
+        builder = PromptBuilderAgent(config, db)
+
+        # Determine strategy
+        strategy = None
+        if request.strategy:
+            try:
+                strategy = MutationStrategy(request.strategy)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid strategy. Valid options: {[s.value for s in MutationStrategy]}"
+                )
+
+        # If no strategy specified, analyze and suggest the best one
+        if not strategy:
+            # Analyze recent failures to determine best strategy
+            analysis = await builder.analyze_failures(agent, hours=168)  # Last week
+
+            if analysis and analysis.recommendations:
+                # Map recommendations to strategies
+                strategy_map = {
+                    "rephrase": MutationStrategy.REPHRASE_INSTRUCTIONS,
+                    "example": MutationStrategy.ADD_EXAMPLES,
+                    "guardrail": MutationStrategy.ADD_GUARDRAILS,
+                    "format": MutationStrategy.RESTRUCTURE_FORMAT,
+                    "chain": MutationStrategy.ADD_CHAIN_OF_THOUGHT,
+                    "simplif": MutationStrategy.SIMPLIFY,
+                    "constraint": MutationStrategy.ADD_CONSTRAINTS,
+                }
+
+                for rec in analysis.recommendations:
+                    rec_lower = rec.lower()
+                    for key, strat in strategy_map.items():
+                        if key in rec_lower:
+                            strategy = strat
+                            break
+                    if strategy:
+                        break
+
+            # Default to chain of thought if no strategy determined
+            if not strategy:
+                strategy = MutationStrategy.ADD_CHAIN_OF_THOUGHT
+
+        # Generate enhanced prompt
+        mutation = await builder.generate_mutation(
+            agent_id=str(agent.id),
+            strategy=strategy,
+            custom_context=request.custom_instructions,
+        )
+
+        if not mutation:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate enhanced prompt"
+            )
+
+        # Optionally enhance description
+        enhanced_description = None
+        if request.enhance_description and agent.description:
+            try:
+                # Use the LLM to enhance the description
+                from backend.services.llm_router import LLMRouter
+                llm_router = LLMRouter(db)
+
+                description_prompt = f"""Improve this agent description to be clearer and more informative.
+Keep it concise (1-3 sentences) but make it more specific about what the agent does.
+
+Current description: {agent.description}
+
+Agent type: {agent.agent_type}
+Agent name: {agent.name}
+
+{f"Additional context: {request.custom_instructions}" if request.custom_instructions else ""}
+
+Respond with ONLY the improved description, nothing else."""
+
+                response = await llm_router.chat(
+                    messages=[{"role": "user", "content": description_prompt}],
+                    operation_type="agent_enhancement",
+                )
+                enhanced_description = response.content.strip()
+            except Exception as e:
+                logger.warning("Failed to enhance description", error=str(e))
+                # Continue without enhanced description
+
+        return {
+            "success": True,
+            "enhanced_prompt": {
+                "system_prompt": mutation.system_prompt,
+                "task_prompt_template": mutation.task_prompt_template,
+                "few_shot_examples": mutation.few_shot_examples,
+            },
+            "enhanced_description": enhanced_description,
+            "strategy_used": mutation.strategy.value,
+            "change_description": mutation.change_description,
+            "expected_improvement": mutation.expected_improvement,
+            "original_version_id": str(prompt_version.id),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        logger.error(
+            "Failed to enhance prompt",
+            agent_id=agent_id,
+            error=str(e),
+            traceback=traceback.format_exc(),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to enhance prompt: {str(e)}"
+        )
+
+
+@router.patch("/agents/{agent_id}/settings")
+async def update_agent_settings(
+    agent_id: str,
+    request: UpdateAgentSettingsRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update agent settings including tools configuration and external agent connection.
+
+    Tools config example:
+    {
+        "web_search": true,
+        "code_execution": false,
+        "file_access": true,
+        "mcp_server_url": "http://localhost:3000/mcp"
+    }
+
+    External agent example:
+    {
+        "api_url": "https://external-agent.example.com/v1/chat",
+        "api_key": "sk-xxx",
+        "enabled": true
+    }
+    """
+    # Get the agent
+    result = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.id == uuid.UUID(agent_id))
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Update settings
+    current_settings = agent.settings or {}
+
+    if request.tools_config is not None:
+        current_settings["tools_config"] = request.tools_config
+
+    if request.external_agent is not None:
+        # Validate external agent config
+        ext = request.external_agent
+        if ext.get("enabled") and not ext.get("api_url"):
+            raise HTTPException(
+                status_code=400,
+                detail="api_url is required when external agent is enabled"
+            )
+        current_settings["external_agent"] = ext
+
+    if request.custom_settings is not None:
+        current_settings.update(request.custom_settings)
+
+    agent.settings = current_settings
+    await db.commit()
+    await db.refresh(agent)
+
+    return {
+        "success": True,
+        "agent_id": str(agent.id),
+        "settings": agent.settings,
+    }
+
+
+@router.get("/agents/{agent_id}/settings")
+async def get_agent_settings(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get agent settings including tools configuration and external agent connection."""
+    result = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.id == uuid.UUID(agent_id))
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    settings = agent.settings or {}
+
+    return {
+        "agent_id": str(agent.id),
+        "tools_config": settings.get("tools_config", {
+            "web_search": False,
+            "code_execution": False,
+            "file_access": False,
+            "mcp_server_url": None,
+        }),
+        "external_agent": settings.get("external_agent", {
+            "api_url": None,
+            "api_key": None,
+            "enabled": False,
+        }),
+        "custom_settings": {
+            k: v for k, v in settings.items()
+            if k not in ["tools_config", "external_agent"]
+        },
+    }
+
+
+@router.post("/agents/{agent_id}/test-external")
+async def test_external_agent(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Test connection to an external agent."""
+    import httpx
+
+    result = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.id == uuid.UUID(agent_id))
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    settings = agent.settings or {}
+    external_config = settings.get("external_agent", {})
+
+    if not external_config.get("api_url"):
+        raise HTTPException(
+            status_code=400,
+            detail="No external agent URL configured"
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            headers = {}
+            if external_config.get("api_key"):
+                headers["Authorization"] = f"Bearer {external_config['api_key']}"
+
+            # Try a simple health check or options request
+            response = await client.options(
+                external_config["api_url"],
+                headers=headers,
+            )
+
+            if response.status_code < 400:
+                return {
+                    "success": True,
+                    "message": "Connection successful",
+                    "status_code": response.status_code,
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Server returned status {response.status_code}",
+                    "status_code": response.status_code,
+                }
+
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "message": "Connection timed out",
+        }
+    except httpx.RequestError as e:
+        return {
+            "success": False,
+            "message": f"Connection failed: {str(e)}",
+        }

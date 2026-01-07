@@ -114,6 +114,7 @@ aiofiles>=23.2.0
 tenacity>=8.2.0  # Retry logic
 structlog>=24.1.0  # Structured logging
 orjson>=3.9.0  # Fast JSON
+langdetect>=1.0.9  # Language detection for content quality
 numpy>=1.26.0
 pandas>=2.1.0
 
