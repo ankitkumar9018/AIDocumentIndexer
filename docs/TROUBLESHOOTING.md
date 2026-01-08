@@ -758,6 +758,72 @@ docker compose config | grep networks
 
 ---
 
+## Document Generation Issues
+
+### Outline Generates Generic Section Titles
+
+**Problem:** PPTX/DOCX outline has generic titles like "Key Findings and Insights for {topic}" instead of specific section names.
+
+**Causes & Solutions:**
+
+1. **LLM not available:**
+   ```bash
+   # Check if Ollama is running (if using local LLM)
+   curl http://localhost:11434/api/tags
+
+   # Check LLM provider health
+   curl http://localhost:8000/health | jq '.llm_health'
+   ```
+
+2. **No documents uploaded:**
+   The outline generator needs source documents to create relevant sections.
+   ```bash
+   sqlite3 aidocindexer.db "SELECT COUNT(*) FROM documents WHERE processing_status='completed'"
+   ```
+
+3. **Collection filter not matching:**
+   If you selected a specific collection but no documents match, the outline will be generic.
+
+### Per-Slide Sources Missing in Notes
+
+**Problem:** The Sources & References slide shows documents, but individual slide notes say "No specific sources for this section."
+
+**Explanation:** This happens because the system uses two different search strategies:
+
+1. **Outline search (broad):** Uses `{document_title}: {document_description}` to find general sources for the whole document. These appear on the Sources & References slide.
+
+2. **Section search (specific):** Uses `{document_title} - {section_title}: {section_description}` to find sources relevant to each specific section. These appear in slide notes.
+
+**Solutions:**
+
+1. **Ensure documents match section topics:**
+   Section-specific searches need documents that match the section's subject matter.
+
+2. **Check the backend logs:**
+   ```bash
+   # Look for "Section sources search completed" messages
+   grep "Section sources" /tmp/backend.log
+   # Shows: section_title, sources_found, source_names
+   ```
+
+3. **Lower relevance threshold (admin setting):**
+   In Settings → RAG, reduce the minimum relevance score to allow more results.
+
+### LLM Generation Fails
+
+**Problem:** Error "Cannot connect to host localhost:11434" or similar.
+
+**Solution:**
+```bash
+# Start Ollama if using local LLM
+ollama serve
+
+# Or configure a cloud provider in Settings → LLM Providers
+# Add OpenAI or Anthropic as fallback
+```
+
+---
+
 ## Getting Help
 
 ### Collect Debug Information

@@ -81,6 +81,17 @@ from backend.services.retrieval_strategies import (
     TwoStageRetriever,
     TwoStageConfig,
 )
+from backend.services.smart_filter import (
+    SmartDocumentFilter,
+    SmartFilterConfig,
+    get_smart_filter,
+    FilterResult,
+)
+from backend.services.self_rag import (
+    SelfRAG,
+    SelfRAGResult,
+    get_self_rag,
+)
 # Note: KnowledgeGraphService is imported lazily inside _enhance_with_knowledge_graph
 # to avoid circular imports (knowledge_graph -> llm -> services.__init__ -> rag)
 
@@ -198,6 +209,16 @@ class RAGConfig:
         # Knowledge graph integration - entity-aware retrieval
         enable_knowledge_graph: bool = None,  # Read from settings if not set
         knowledge_graph_max_hops: int = 2,  # Graph traversal depth
+
+        # Smart pre-filtering for large collections (10k+ docs)
+        enable_smart_filter: bool = None,  # Read from settings if not set
+        smart_filter_min_docs: int = 500,  # Minimum docs to trigger pre-filtering
+        smart_filter_max_candidates: int = 1000,  # Max docs after pre-filtering
+
+        # Self-RAG (response verification and hallucination detection)
+        enable_self_rag: bool = None,  # Read from settings if not set
+        self_rag_min_supported_ratio: float = 0.7,  # Min ratio of supported claims
+        self_rag_enable_regeneration: bool = True,  # Auto-regenerate on issues
     ):
         import os
         from backend.services.settings import get_settings_service
@@ -304,6 +325,30 @@ class RAGConfig:
             if stored_value is not None:
                 knowledge_graph_max_hops = stored_value
 
+        # Read smart filter settings
+        if enable_smart_filter is None:
+            enable_smart_filter = settings.get_default_value("rag.smart_filter_enabled")
+            if enable_smart_filter is None:
+                enable_smart_filter = os.getenv("ENABLE_SMART_FILTER", "true").lower() == "true"
+        if smart_filter_min_docs == 500:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.smart_filter_min_docs")
+            if stored_value is not None:
+                smart_filter_min_docs = stored_value
+        if smart_filter_max_candidates == 1000:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.smart_filter_max_candidates")
+            if stored_value is not None:
+                smart_filter_max_candidates = stored_value
+
+        # Read Self-RAG settings
+        if enable_self_rag is None:
+            enable_self_rag = settings.get_default_value("rag.self_rag_enabled")
+            if enable_self_rag is None:
+                enable_self_rag = os.getenv("ENABLE_SELF_RAG", "false").lower() == "true"
+        if self_rag_min_supported_ratio == 0.7:  # Default value, might be overridden
+            stored_value = settings.get_default_value("rag.self_rag_min_supported_ratio")
+            if stored_value is not None:
+                self_rag_min_supported_ratio = stored_value
+
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
         self.use_hybrid_search = use_hybrid_search
@@ -345,6 +390,14 @@ class RAGConfig:
         # Knowledge graph
         self.enable_knowledge_graph = enable_knowledge_graph
         self.knowledge_graph_max_hops = knowledge_graph_max_hops
+        # Smart pre-filtering
+        self.enable_smart_filter = enable_smart_filter
+        self.smart_filter_min_docs = smart_filter_min_docs
+        self.smart_filter_max_candidates = smart_filter_max_candidates
+        # Self-RAG
+        self.enable_self_rag = enable_self_rag
+        self.self_rag_min_supported_ratio = self_rag_min_supported_ratio
+        self.self_rag_enable_regeneration = self_rag_enable_regeneration
 
 
 # =============================================================================
@@ -387,6 +440,74 @@ If the context doesn't contain relevant information, acknowledge that and provid
 
 At the end of your response, on a new line, suggest 2-3 related follow-up questions the user might want to ask, prefixed with "SUGGESTED_QUESTIONS:" and separated by "|". Example:
 SUGGESTED_QUESTIONS: What are the key benefits?|How does this compare to alternatives?|When was this implemented?"""
+
+# Language code to name mapping for multilingual support
+LANGUAGE_NAMES = {
+    "en": "English",
+    "de": "German",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ru": "Russian",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ar": "Arabic",
+    "hi": "Hindi",
+}
+
+
+def _get_language_instruction(language: str, auto_detect: bool = False) -> str:
+    """
+    Get language instruction for the LLM prompt.
+
+    The system supports:
+    - Documents in ANY language (German, French, Chinese, etc.)
+    - Queries in ANY language
+    - Responses in the user's selected output language OR the query language (auto_detect)
+
+    Args:
+        language: Language code for OUTPUT (en, de, es, etc.)
+        auto_detect: If True and language is "en", respond in the same language as the question
+
+    Returns:
+        Language instruction string
+    """
+    if language == "en" and auto_detect:
+        # Auto-detect mode: respond in the same language as the question
+        # Make it VERY explicit for smaller models that don't follow instructions well
+        return """
+CRITICAL LANGUAGE AND SCRIPT REQUIREMENT (MUST FOLLOW):
+1. FIRST, identify the language AND SCRIPT of the USER'S QUESTION (not the documents!)
+2. THEN, respond ONLY in that SAME language AND SAME SCRIPT as the user's question
+3. IMPORTANT about Indian languages:
+   - Hinglish = Hindi written in LATIN/ROMAN script (like "kya hai", "accha hai") - respond in Latin script
+   - If user writes in Devanagari (Hindi script like क्या), respond in Devanagari
+   - NEVER respond in Gujarati, Bengali, Tamil, or other scripts unless user used them!
+4. If the user asks in English, respond in English
+5. If the user asks in German, respond in German
+6. IGNORE the language of source documents - they may be in any language
+7. TRANSLATE all information FROM documents INTO the user's question language AND script
+
+Example: "kya marketing ke baare mea hai?" - Hinglish (Latin script), respond like: "Haan, marketing ke baare mein..."
+"""
+
+    if language == "en":
+        return ""
+
+    language_name = LANGUAGE_NAMES.get(language, "English")
+    return f"""
+LANGUAGE REQUIREMENT:
+- Your response must be ENTIRELY in {language_name}
+- The source documents may be in ANY language (German, English, French, Chinese, etc.)
+- Translate and synthesize information from ALL source documents into {language_name}
+- The user's question may also be in any language - understand it and respond in {language_name}
+- Do NOT mix languages in your response - use only {language_name}
+- Technical terms and proper nouns may remain in their original form if commonly used that way
+"""
 
 
 def _parse_suggested_questions(content: str) -> Tuple[str, List[str]]:
@@ -653,6 +774,25 @@ class RAGService:
         self._enable_knowledge_graph = self.config.enable_knowledge_graph
         self._knowledge_graph_max_hops = self.config.knowledge_graph_max_hops
 
+        # Initialize smart document pre-filter for large collections
+        self._smart_filter: Optional[SmartDocumentFilter] = None
+        if self.config.enable_smart_filter:
+            smart_filter_config = SmartFilterConfig(
+                min_docs_for_filter=self.config.smart_filter_min_docs,
+                max_docs_for_full_search=self.config.smart_filter_min_docs * 10,  # 10x threshold
+                metadata_max_candidates=self.config.smart_filter_max_candidates,
+                summary_top_k=self.config.smart_filter_max_candidates // 2,
+            )
+            self._smart_filter = get_smart_filter(config=smart_filter_config)
+
+        # Initialize Self-RAG for response verification (hallucination detection)
+        self._self_rag: Optional[SelfRAG] = None
+        if self.config.enable_self_rag:
+            self._self_rag = get_self_rag(
+                min_supported_ratio=self.config.self_rag_min_supported_ratio,
+                enable_regeneration=self.config.self_rag_enable_regeneration,
+            )
+
         logger.info(
             "Initialized RAG service",
             chat_provider=self.config.chat_provider,
@@ -671,6 +811,8 @@ class RAGService:
             hierarchical_retrieval=self.config.enable_hierarchical_retrieval,
             semantic_dedup=self.config.enable_semantic_dedup,
             knowledge_graph=self.config.enable_knowledge_graph,
+            smart_filter=self.config.enable_smart_filter,
+            self_rag=self.config.enable_self_rag,
         )
 
     async def get_runtime_settings(self) -> Dict[str, Any]:
@@ -925,6 +1067,8 @@ class RAGService:
         top_k: Optional[int] = None,  # Override documents to retrieve per query
         folder_id: Optional[str] = None,  # Folder-scoped query
         include_subfolders: bool = True,  # Include subfolders in folder query
+        language: str = "en",  # Language for response
+        enhance_query: Optional[bool] = None,  # Per-query override for query enhancement (expansion + HyDE)
     ) -> RAGResponse:
         """
         Query the RAG system.
@@ -940,6 +1084,9 @@ class RAGService:
             top_k: Optional override for number of documents to retrieve
             folder_id: Optional folder ID to scope query to specific folder
             include_subfolders: Whether to include documents from subfolders
+            language: Language code for response (en, de, es, fr, etc.)
+            enhance_query: Per-query override for query enhancement (expansion + HyDE).
+                           None = use admin default, True = enable, False = disable.
 
         Returns:
             RAGResponse with answer and sources
@@ -947,9 +1094,9 @@ class RAGService:
         import time
         start_time = time.time()
 
-        # Load runtime settings from database if top_k not specified
+        # Load runtime settings from database
+        runtime_settings = await self.get_runtime_settings()
         if top_k is None:
-            runtime_settings = await self.get_runtime_settings()
             top_k = runtime_settings.get("top_k", self.config.top_k)
 
         logger.info(
@@ -958,6 +1105,7 @@ class RAGService:
             session_id=session_id,
             collection_filter=collection_filter,
             top_k=top_k,
+            language=language,
         )
 
         # Check if query decomposition is enabled
@@ -1025,6 +1173,7 @@ class RAGService:
                     access_tier=access_tier,
                     top_k=max(top_k // len(decomposed_query.sub_queries), 3),
                     document_ids=folder_document_ids,
+                    enhance_query=enhance_query,
                 )
                 # Deduplicate by chunk_id
                 for doc in sub_docs:
@@ -1046,6 +1195,7 @@ class RAGService:
                 access_tier=access_tier,
                 top_k=top_k,
                 document_ids=folder_document_ids,  # Filter to folder documents
+                enhance_query=enhance_query,
             )
             logger.debug("Retrieved documents from vectorstore", count=len(retrieved_docs))
 
@@ -1081,21 +1231,29 @@ class RAGService:
             context = f"--- Uploaded Documents ---\n{additional_context}\n\n--- Library Documents ---\n{context}"
             logger.debug("Added additional context", additional_context_length=len(additional_context))
 
-        # Build prompt
+        # Build prompt with language instruction
+        # Support "auto" mode: respond in the same language as the question
+        auto_detect = (language == "auto")
+        effective_language = "en" if auto_detect else language
+        language_instruction = _get_language_instruction(effective_language, auto_detect=auto_detect)
+        system_prompt = RAG_SYSTEM_PROMPT
+        if language_instruction:
+            system_prompt = f"{RAG_SYSTEM_PROMPT}\n{language_instruction}"
+
         if session_id:
             # Use conversational prompt with history
             memory = self._get_memory(session_id)
             chat_history = memory.load_memory_variables({}).get("chat_history", [])
 
             messages = [
-                SystemMessage(content=RAG_SYSTEM_PROMPT),
+                SystemMessage(content=system_prompt),
                 *chat_history,
                 HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
             ]
         else:
             # Single-turn query
             messages = [
-                SystemMessage(content=RAG_SYSTEM_PROMPT),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=RAG_PROMPT_TEMPLATE.format(context=context, question=question)),
             ]
 
@@ -1243,6 +1401,56 @@ class RAGService:
             except Exception as e:
                 logger.warning("CRAG processing failed", error=str(e))
 
+        # Self-RAG: Verify response against sources to detect hallucinations
+        self_rag_result: Optional[SelfRAGResult] = None
+        if self._self_rag and content and sources:
+            try:
+                # Convert sources to SearchResult format for Self-RAG
+                search_results_for_selfrag = [
+                    SearchResult(
+                        chunk_id=s.chunk_id,
+                        document_id=s.document_id,
+                        content=s.full_content,
+                        score=s.relevance_score,
+                        similarity_score=s.similarity_score,
+                        document_title=s.document_name,
+                        document_filename=s.document_name,
+                        collection=s.collection,
+                        page_number=s.page_number,
+                        metadata=s.metadata,
+                    )
+                    for s in sources
+                ]
+
+                self_rag_result = await self._self_rag.verify_response(
+                    response=content,
+                    sources=search_results_for_selfrag,
+                    query=question,
+                    llm=llm,
+                )
+
+                logger.info(
+                    "Self-RAG verification complete",
+                    overall_confidence=self_rag_result.overall_confidence,
+                    supported_ratio=self_rag_result.supported_claim_ratio,
+                    hallucinations=self_rag_result.hallucination_count,
+                    needs_regeneration=self_rag_result.needs_regeneration,
+                )
+
+                # Update confidence based on Self-RAG verification
+                if self_rag_result.overall_confidence < confidence_score:
+                    confidence_score = self_rag_result.overall_confidence
+                    if confidence_score < 0.5:
+                        confidence_level = "low"
+                        confidence_warning = f"Response may contain unverified claims. {self_rag_result.hallucination_count} potential hallucination(s) detected."
+                    elif confidence_score < 0.7:
+                        confidence_level = "medium"
+                        if self_rag_result.hallucination_count > 0:
+                            confidence_warning = f"Some claims could not be fully verified against sources."
+
+            except Exception as e:
+                logger.warning("Self-RAG verification failed", error=str(e))
+
         return RAGResponse(
             content=content,
             sources=sources if self.config.include_sources else [],
@@ -1274,6 +1482,8 @@ class RAGService:
         top_k: Optional[int] = None,  # Override documents to retrieve per query
         folder_id: Optional[str] = None,  # Folder to scope query to
         include_subfolders: bool = True,  # Include subfolders in folder-scoped query
+        language: str = "en",  # Language for response
+        enhance_query: Optional[bool] = None,  # Per-query override for query enhancement (expansion + HyDE)
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Query RAG with streaming response.
@@ -1288,6 +1498,9 @@ class RAGService:
             top_k: Optional override for number of documents to retrieve
             folder_id: Optional folder ID to restrict search to
             include_subfolders: When folder_id is set, include documents in subfolders
+            language: Language code for response (en, de, es, fr, etc.)
+            enhance_query: Per-query override for query enhancement (expansion + HyDE).
+                           None = use config default, True = enable, False = disable.
 
         Yields:
             StreamChunk objects with response parts
@@ -1342,23 +1555,32 @@ class RAGService:
             access_tier=access_tier,
             top_k=top_k,
             document_ids=document_ids,
+            enhance_query=enhance_query,
         )
 
         context, sources = self._format_context(retrieved_docs, include_collection_context)
 
-        # Build prompt
+        # Build prompt with language instruction
+        # Support "auto" mode: respond in the same language as the question
+        auto_detect = (language == "auto")
+        effective_language = "en" if auto_detect else language
+        language_instruction = _get_language_instruction(effective_language, auto_detect=auto_detect)
+        system_prompt = RAG_SYSTEM_PROMPT
+        if language_instruction:
+            system_prompt = f"{RAG_SYSTEM_PROMPT}\n{language_instruction}"
+
         if session_id:
             memory = self._get_memory(session_id)
             chat_history = memory.load_memory_variables({}).get("chat_history", [])
 
             messages = [
-                SystemMessage(content=RAG_SYSTEM_PROMPT),
+                SystemMessage(content=system_prompt),
                 *chat_history,
                 HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
             ]
         else:
             messages = [
-                SystemMessage(content=RAG_SYSTEM_PROMPT),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=RAG_PROMPT_TEMPLATE.format(context=context, question=question)),
             ]
 
@@ -1453,6 +1675,7 @@ class RAGService:
         access_tier: int = 100,
         top_k: Optional[int] = None,
         document_ids: Optional[List[str]] = None,
+        enhance_query: Optional[bool] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve relevant documents for query.
@@ -1463,6 +1686,8 @@ class RAGService:
             access_tier: User's access tier
             top_k: Number of results to return
             document_ids: Optional list of document IDs to filter to (for folder-scoped queries)
+            enhance_query: Per-query override for query enhancement (expansion + HyDE).
+                           None = use config default, True = enable, False = disable.
 
         Returns:
             List of (document, score) tuples
@@ -1484,7 +1709,13 @@ class RAGService:
             query_length=len(query),
             top_k=top_k,
             has_custom_vectorstore=self._custom_vectorstore is not None,
+            enhance_query=enhance_query,
         )
+
+        # Determine if query enhancement is enabled
+        # Per-query override takes precedence, otherwise use config defaults
+        use_hyde = enhance_query if enhance_query is not None else (self._hyde_expander is not None)
+        use_expansion = enhance_query if enhance_query is not None else (self._query_expander is not None)
 
         # Build list of queries to search
         queries_to_search = [query]
@@ -1494,7 +1725,8 @@ class RAGService:
         # HyDE generates a hypothetical document that might contain the answer
         hyde_query = None
         if (
-            self._hyde_expander is not None
+            use_hyde
+            and self._hyde_expander is not None
             and query_word_count < self.config.hyde_min_query_words
             and query_word_count >= 2  # Skip very short queries
         ):
@@ -1513,7 +1745,7 @@ class RAGService:
                 logger.warning("HyDE expansion failed, using original query", error=str(e))
 
         # Expand query if enabled (generates paraphrased versions for better recall)
-        if self._query_expander is not None and self._query_expander.should_expand(query):
+        if use_expansion and self._query_expander is not None and self._query_expander.should_expand(query):
             try:
                 expansion_result = await self._query_expander.expand_query(query)
                 if expansion_result.expanded_queries:
@@ -1758,8 +1990,43 @@ class RAGService:
                 # Only collection filter
                 document_ids = collection_document_ids
             else:
-                # No filters
+                # No filters - this is "All Documents" mode
                 document_ids = None
+
+            # Apply smart pre-filtering for large collections (when no filter = "All Documents")
+            # This reduces search space from potentially 10k-100k docs to a manageable subset
+            if document_ids is None and self._smart_filter is not None:
+                should_filter, total_docs = await self._smart_filter.should_prefilter(
+                    collection_filter=collection_filter,
+                    document_ids=document_ids,
+                )
+                if should_filter:
+                    logger.info(
+                        "Applying smart pre-filtering for large collection",
+                        total_docs=total_docs,
+                        query_preview=query[:50],
+                    )
+                    filter_result = await self._smart_filter.filter_documents(
+                        query=query,
+                        max_candidates=self.config.smart_filter_max_candidates,
+                        collection_filter=collection_filter,
+                        access_tier=access_tier,
+                        document_ids=document_ids,
+                        query_embedding=query_embedding,
+                    )
+                    if filter_result.document_ids:
+                        document_ids = filter_result.document_ids
+                        logger.info(
+                            "Smart pre-filter reduced search space",
+                            original_docs=total_docs,
+                            filtered_docs=len(document_ids),
+                            filter_time_ms=filter_result.filter_time_ms,
+                            strategy=filter_result.strategy_used.value,
+                        )
+                    else:
+                        logger.warning(
+                            "Smart pre-filter returned no candidates, using full search"
+                        )
 
             # Perform search - use two-stage (ColBERT) or hierarchical retrieval if enabled
             # Two-stage takes priority as it includes reranking for better precision

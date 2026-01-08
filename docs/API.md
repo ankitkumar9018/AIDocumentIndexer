@@ -244,10 +244,11 @@ Delete a chat session.
 
 ### POST /chat/completions
 
-Send a chat message and get a response. Supports three modes:
-- `chat` (default): RAG mode with document search
+Send a chat message and get a response. Supports four modes:
+- `chat` (default): RAG mode with document search and citations
 - `general`: Pure LLM mode without document search
 - `agent`: Multi-agent orchestration for complex tasks
+- `vision`: Multimodal image analysis using vision-capable LLMs
 
 **Request:**
 ```json
@@ -272,7 +273,7 @@ Send a chat message and get a response. Supports three modes:
 |-----------|------|---------|-------------|
 | `message` | string | required | The user's question or request |
 | `session_id` | string | null | Session ID for conversation history |
-| `mode` | string | "chat" | Execution mode: `chat`, `general`, or `agent` |
+| `mode` | string | "chat" | Execution mode: `chat`, `general`, `agent`, or `vision` |
 | `stream` | boolean | false | Enable Server-Sent Events streaming |
 | `document_ids` | array | null | Limit search to specific documents |
 | `collection_filter` | string | null | Limit search to a single collection (backward compatible) |
@@ -283,6 +284,15 @@ Send a chat message and get a response. Supports three modes:
 | `temp_session_id` | string | null | Temporary document session ID for quick chat |
 | `use_graph` | boolean | true | Enable GraphRAG for knowledge graph retrieval |
 | `use_agentic` | boolean | false | Enable Agentic RAG for complex multi-step queries |
+| `images` | array | null | Image attachments for vision mode (see below) |
+
+**Image Attachment Object (for vision mode):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `data` | string | Base64-encoded image data |
+| `url` | string | URL to image (alternative to data) |
+| `mime_type` | string | MIME type: `image/jpeg`, `image/png`, `image/webp`, `image/gif` |
 
 **Per-Query Retrieval Override:**
 
@@ -309,6 +319,34 @@ This is useful when:
 {
   "message": "Create a summary of all German lessons in my documents",
   "mode": "agent"
+}
+```
+
+**Vision Mode Example:**
+```json
+{
+  "message": "What does this chart show? Summarize the key findings.",
+  "mode": "vision",
+  "images": [
+    {
+      "data": "iVBORw0KGgoAAAANSUhEUgAA...",
+      "mime_type": "image/png"
+    }
+  ]
+}
+```
+
+Or using a URL:
+```json
+{
+  "message": "Describe this diagram",
+  "mode": "vision",
+  "images": [
+    {
+      "url": "https://example.com/diagram.png",
+      "mime_type": "image/png"
+    }
+  ]
 }
 ```
 

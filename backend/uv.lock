@@ -96,6 +96,7 @@ dependencies = [
     { name = "structlog" },
     { name = "tenacity" },
     { name = "tiktoken" },
+    { name = "unidecode" },
     { name = "unstructured", extra = ["docx", "pdf", "pptx", "xlsx"] },
     { name = "uvicorn", extra = ["standard"] },
     { name = "watchdog" },
@@ -187,6 +188,7 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.1.0" },
     { name = "tenacity", specifier = ">=8.2.0" },
     { name = "tiktoken", specifier = ">=0.5.2" },
+    { name = "unidecode", specifier = ">=1.4.0" },
     { name = "unstructured", extras = ["pdf", "docx", "pptx", "xlsx"], specifier = ">=0.12.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27.0" },
     { name = "watchdog", specifier = ">=3.0.0" },
@@ -7246,6 +7248,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/74/cf/209d90506b7d6c5873f82c5a226d7aad1a1da153364e9ebf61eff0740c33/ujson-5.11.0-pp311-pypy311_pp73-manylinux_2_24_i686.manylinux_2_28_i686.whl", hash = "sha256:86baf341d90b566d61a394869ce77188cc8668f76d7bb2c311d77a00f4bdf844", size = 56584, upload_time = "2025-08-20T11:56:52.89Z" },
     { url = "https://files.pythonhosted.org/packages/e9/97/bd939bb76943cb0e1d2b692d7e68629f51c711ef60425fa5bb6968037ecd/ujson-5.11.0-pp311-pypy311_pp73-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4598bf3965fc1a936bd84034312bcbe00ba87880ef1ee33e33c1e88f2c398b49", size = 51588, upload_time = "2025-08-20T11:56:54.054Z" },
     { url = "https://files.pythonhosted.org/packages/52/5b/8c5e33228f7f83f05719964db59f3f9f276d272dc43752fa3bbf0df53e7b/ujson-5.11.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:416389ec19ef5f2013592f791486bef712ebce0cd59299bf9df1ba40bb2f6e04", size = 43835, upload_time = "2025-08-20T11:56:55.237Z" },
+]
+
+[[package]]
+name = "unidecode"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/7d/a8a765761bbc0c836e397a2e48d498305a865b70a8600fd7a942e85dcf63/Unidecode-1.4.0.tar.gz", hash = "sha256:ce35985008338b676573023acc382d62c264f307c8f7963733405add37ea2b23", size = 200149, upload_time = "2025-04-24T08:45:03.798Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8f/b7/559f59d57d18b44c6d1250d2eeaa676e028b9c527431f5d0736478a73ba1/Unidecode-1.4.0-py3-none-any.whl", hash = "sha256:c3c7606c27503ad8d501270406e345ddb480a7b5f38827eafe4fa82a137f0021", size = 235837, upload_time = "2025-04-24T08:45:01.609Z" },
 ]
 
 [[package]]

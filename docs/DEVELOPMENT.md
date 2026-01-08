@@ -2,6 +2,8 @@
 
 Guide for setting up and contributing to AIDocumentIndexer.
 
+> **New to the codebase?** Start with [DEVELOPER_ONBOARDING.md](./DEVELOPER_ONBOARDING.md) for a comprehensive guide to the architecture, key classes, and project flow.
+
 ## Prerequisites
 
 - Python 3.11+
@@ -347,6 +349,15 @@ OLLAMA_HOST=http://localhost:11434
 # Feature Flags
 ENABLE_OCR=true
 ENABLE_WEB_SCRAPER=true
+
+# RAG Features
+ENABLE_QUERY_EXPANSION=true
+QUERY_EXPANSION_COUNT=3
+ENABLE_HYDE=true
+ENABLE_CRAG=true
+ENABLE_SELF_RAG=false
+ENABLE_SMART_FILTER=true
+ENABLE_KNOWLEDGE_GRAPH=false
 ```
 
 ---

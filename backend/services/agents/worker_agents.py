@@ -180,16 +180,18 @@ class GeneratorAgent(BaseAgent):
 
         context_str = "\n".join(context_parts) if context_parts else "No additional context provided."
 
-        # Build messages
+        # Build messages with language support
         # expected_outputs might be a dict or str, handle both
         default_format = "text"
         if isinstance(task.expected_outputs, dict):
             default_format = task.expected_outputs.get("format", "text")
         output_format = context.get("output_format", default_format)
+        language = context.get("language", "en")
         messages = self.prompt_template.build_messages(
             task=task.description,
             context=context_str,
-            format=output_format,
+            format_spec=output_format,
+            language=language,
         )
 
         try:
@@ -421,11 +423,13 @@ class CriticAgent(BaseAgent):
             )
 
         original_request = context.get("original_request", task.description)
+        language = context.get("language", "en")
 
-        # Build messages
+        # Build messages with language support
         messages = self.prompt_template.build_messages(
             task="",  # Not used, template uses specific variables
             context="",
+            language=language,
             request=original_request,
             content=content_to_evaluate if isinstance(content_to_evaluate, str) else json.dumps(content_to_evaluate),
         )
@@ -691,9 +695,11 @@ class ResearchAgent(BaseAgent):
         else:
             sources_text = "No search results available. Use your knowledge to provide relevant information."
 
+        language = context.get("language", "en")
         messages = self.prompt_template.build_messages(
             task=task.description,
             context=context.get("additional_context", ""),
+            language=language,
             sources=sources_text,
         )
 
@@ -840,22 +846,30 @@ Please provide instructions for document generation:"""
 
 class ToolExecutionAgent(BaseAgent):
     """
-    Tool execution agent for file operations.
+    Tool execution agent for file operations and extensible tools.
 
     Handles document generation (PPTX, DOCX, PDF) by preparing
     content and delegating to GeneratorService.
+
+    Also supports executing tools from the ToolRegistry via ToolExecutor,
+    enabling extensible tool calling for agents (web search, calculator,
+    document search, etc.).
     """
 
     # Override default prompts for automatic fallback if empty prompts provided
     DEFAULT_SYSTEM_PROMPT = TOOL_SYSTEM_PROMPT
     DEFAULT_TASK_PROMPT = TOOL_TASK_PROMPT
 
-    AVAILABLE_TOOLS = [
+    # Built-in document generation tools
+    BUILTIN_TOOLS = [
         "generate_pptx",
         "generate_docx",
         "generate_pdf",
         "export_markdown",
     ]
+
+    # For backwards compatibility
+    AVAILABLE_TOOLS = BUILTIN_TOOLS
 
     def __init__(
         self,
@@ -864,6 +878,7 @@ class ToolExecutionAgent(BaseAgent):
         prompt_template: Optional[PromptTemplate] = None,
         trajectory_collector=None,
         generator_service=None,
+        tool_executor=None,
     ):
         # BaseAgent._validate_and_get_prompt will use DEFAULT_SYSTEM_PROMPT/DEFAULT_TASK_PROMPT
         # if prompt_template is None or empty
@@ -875,11 +890,14 @@ class ToolExecutionAgent(BaseAgent):
         )
 
         self.generator_service = generator_service
+        self.tool_executor = tool_executor
 
-    def set_services(self, generator_service=None) -> None:
+    def set_services(self, generator_service=None, tool_executor=None) -> None:
         """Set service instances."""
         if generator_service:
             self.generator_service = generator_service
+        if tool_executor:
+            self.tool_executor = tool_executor
 
     async def execute(
         self,
@@ -888,6 +906,9 @@ class ToolExecutionAgent(BaseAgent):
     ) -> AgentResult:
         """
         Execute tool operation.
+
+        First checks if the tool is registered in ToolRegistry (extensible tools).
+        Falls back to built-in document generation tools if not found.
 
         Args:
             task: Tool task
@@ -924,7 +945,36 @@ class ToolExecutionAgent(BaseAgent):
         )
 
         try:
-            if tool in ("generate_pptx", "generate_docx", "generate_pdf"):
+            # First, check if tool is registered in ToolRegistry (extensible tools)
+            if self.tool_executor and self.tool_executor.registry.has_tool(tool):
+                # Build parameters from context
+                tool_params = {
+                    "query": content if content else task.description,
+                    **{k: v for k, v in context.items() if k not in ("dependency_results", "content")},
+                }
+
+                tool_result = await self.tool_executor.execute(
+                    tool_name=tool,
+                    parameters=tool_params,
+                    agent_id=self.agent_id,
+                    session_id=context.get("session_id"),
+                )
+
+                if tool_result.success:
+                    result = tool_result.output
+                else:
+                    return AgentResult(
+                        task_id=task.id,
+                        agent_id=self.agent_id,
+                        status=TaskStatus.FAILED,
+                        output=None,
+                        error_message=tool_result.error or "Tool execution failed",
+                        duration_ms=int((time.time() - start_time) * 1000),
+                        trajectory_steps=self._current_trajectory,
+                    )
+
+            # Fall back to built-in document generation tools
+            elif tool in ("generate_pptx", "generate_docx", "generate_pdf"):
                 result = await self._generate_document(
                     content=content,
                     output_format=output_format,
@@ -933,7 +983,8 @@ class ToolExecutionAgent(BaseAgent):
             elif tool == "export_markdown":
                 result = await self._export_markdown(content, context)
             else:
-                result = {"content": content, "format": "text"}
+                # Unknown tool - return content as-is
+                result = {"content": content, "format": "text", "tool": tool}
 
             duration_ms = int((time.time() - start_time) * 1000)
 
@@ -1040,6 +1091,8 @@ def create_worker_agents(
     scraper_service=None,
     generator_service=None,
     trajectory_collector=None,
+    tool_executor=None,
+    enable_validation: bool = True,
 ) -> Dict[str, BaseAgent]:
     """
     Factory function to create all worker agents.
@@ -1049,6 +1102,8 @@ def create_worker_agents(
         scraper_service: ScraperService instance
         generator_service: GeneratorService instance
         trajectory_collector: TrajectoryCollector instance
+        tool_executor: ToolExecutor instance for extensible tool calling
+        enable_validation: Whether to include the validator agent (default: True)
 
     Returns:
         Dict mapping agent_type to agent instance
@@ -1101,15 +1156,25 @@ def create_worker_agents(
     tool_config = AgentConfig(
         agent_id=str(uuid.uuid4()),
         name="Tool Execution Agent",
-        description="File operations and document generation",
+        description="File operations, document generation, and extensible tool calling",
     )
     tool_agent = ToolExecutionAgent(
         config=tool_config,
         trajectory_collector=trajectory_collector,
+        tool_executor=tool_executor,
     )
     if generator_service:
         tool_agent.set_services(generator_service=generator_service)
+    if tool_executor:
+        tool_agent.set_services(tool_executor=tool_executor)
     workers["tool"] = tool_agent
+
+    # Validator Agent (for cross-validation and hallucination detection)
+    if enable_validation:
+        from backend.services.agents.validator_agent import create_validator_agent
+        workers["validator"] = create_validator_agent(
+            trajectory_collector=trajectory_collector,
+        )
 
     logger.info(f"Created {len(workers)} worker agents")
 

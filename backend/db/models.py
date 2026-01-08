@@ -1916,6 +1916,16 @@ class Entity(Base, UUIDMixin):
         nullable=True,
     )
 
+    # Language support for cross-language entity linking
+    entity_language: Mapped[Optional[str]] = mapped_column(
+        String(10), nullable=True, index=True
+    )  # Primary language: "en", "de", "ru", etc.
+    canonical_name: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True, index=True
+    )  # English canonical name for cross-language linking
+    language_variants: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Format: {"en": "Germany", "de": "Deutschland", "fr": "Allemagne"}
+
     # Metadata
     properties: Mapped[Optional[dict]] = mapped_column(JSONType())
     mention_count: Mapped[int] = mapped_column(Integer, default=1)
@@ -1991,6 +2001,12 @@ class EntityMention(Base, UUIDMixin):
     # Position in document
     page_number: Mapped[Optional[int]] = mapped_column(Integer)
     char_offset: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Language context for the mention
+    mention_language: Mapped[Optional[str]] = mapped_column(String(10))
+    # Language of the source document/chunk: "en", "de", "fr", etc.
+    mention_script: Mapped[Optional[str]] = mapped_column(String(20))
+    # Script type: "latin", "cyrillic", "cjk", "arabic", "devanagari", etc.
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

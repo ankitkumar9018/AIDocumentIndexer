@@ -258,6 +258,7 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.folders import router as folders_router
     from backend.api.routes.preferences import router as preferences_router
     from backend.api.routes.generation_templates import router as generation_templates_router
+    from backend.api.routes.knowledge_graph import router as knowledge_graph_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
@@ -267,6 +268,7 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(metrics_router, prefix="/api/v1/metrics", tags=["Metrics & Monitoring"])
     app.include_router(folders_router, prefix="/api/v1/folders", tags=["Folders"])
     app.include_router(preferences_router, prefix="/api/v1/preferences", tags=["User Preferences"])
+    app.include_router(knowledge_graph_router, prefix="/api/v1/knowledge-graph", tags=["Knowledge Graph"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

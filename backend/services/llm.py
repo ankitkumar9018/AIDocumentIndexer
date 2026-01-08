@@ -662,7 +662,7 @@ class LLMConfigManager:
 
             async with async_session_context() as db:
                 health_checker = get_provider_health_checker()
-                is_available = await health_checker.is_provider_available(db, config.provider_id)
+                is_available = await health_checker.is_provider_available(config.provider_id)
 
                 if is_available:
                     logger.debug(
@@ -683,7 +683,7 @@ class LLMConfigManager:
                 fallback_config = await cls._get_operation_fallback(operation, db)
                 if fallback_config:
                     fallback_available = await health_checker.is_provider_available(
-                        db, fallback_config.provider_id
+                        fallback_config.provider_id
                     )
                     if fallback_available:
                         logger.info(

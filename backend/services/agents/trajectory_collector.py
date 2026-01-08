@@ -17,11 +17,13 @@ Trajectories capture:
 """
 
 import uuid
+from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import structlog
-from sqlalchemy import select, func, and_, desc, Integer, case
+from sqlalchemy import select, func, and_, desc, or_, Integer, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import AgentTrajectory, AgentDefinition, AgentPromptVersion
@@ -790,3 +792,370 @@ class TrajectoryContext:
         """Mark the trajectory as failed."""
         self.success = False
         self.error_message = error
+
+
+# =============================================================================
+# Adaptive Planning from Trajectory History
+# =============================================================================
+
+@dataclass
+class PlanningHints:
+    """Hints for planning based on historical trajectory analysis."""
+    recommended_steps: List[str] = field(default_factory=list)
+    common_patterns: List[str] = field(default_factory=list)
+    avg_tokens: int = 0
+    avg_duration_ms: int = 0
+    success_rate: float = 0.0
+    common_failures: List[str] = field(default_factory=list)
+    optimization_tips: List[str] = field(default_factory=list)
+    similar_task_count: int = 0
+
+
+@dataclass
+class TaskPattern:
+    """Pattern extracted from successful trajectories."""
+    task_type: str
+    common_steps: List[str]
+    avg_step_count: float
+    success_rate: float
+    sample_count: int
+
+
+class AdaptivePlanner:
+    """
+    Learns from past trajectories to improve future planning.
+
+    Analyzes successful executions to:
+    - Identify common patterns and steps
+    - Estimate resource requirements
+    - Avoid common failure modes
+    - Provide optimization suggestions
+    """
+
+    def __init__(self, collector: TrajectoryCollector):
+        """
+        Initialize adaptive planner.
+
+        Args:
+            collector: Trajectory collector for database access
+        """
+        self.collector = collector
+        self._pattern_cache: Dict[str, TaskPattern] = {}
+        self._cache_ttl_minutes = 30
+        self._cache_updated_at: Optional[datetime] = None
+
+    async def get_planning_hints(
+        self,
+        task_type: str,
+        input_summary: Optional[str] = None,
+        agent_type: Optional[str] = None,
+    ) -> PlanningHints:
+        """
+        Get planning hints based on historical trajectories.
+
+        Args:
+            task_type: Type of task being planned
+            input_summary: Optional task description for similarity matching
+            agent_type: Optional agent type filter
+
+        Returns:
+            PlanningHints with recommendations
+        """
+        if not self.collector.db:
+            return PlanningHints()
+
+        hints = PlanningHints()
+
+        # Get successful trajectories of similar type
+        similar_trajectories = await self._get_similar_trajectories(
+            task_type=task_type,
+            agent_type=agent_type,
+            min_quality_score=0.7,
+            limit=50,
+        )
+
+        if not similar_trajectories:
+            return hints
+
+        hints.similar_task_count = len(similar_trajectories)
+
+        # Extract patterns from successful trajectories
+        hints.recommended_steps = await self._extract_common_steps(similar_trajectories)
+        hints.common_patterns = await self._extract_patterns(similar_trajectories)
+
+        # Calculate averages
+        total_tokens = sum(t.total_tokens or 0 for t in similar_trajectories)
+        total_duration = sum(t.total_duration_ms or 0 for t in similar_trajectories)
+        success_count = sum(1 for t in similar_trajectories if t.success)
+
+        hints.avg_tokens = total_tokens // len(similar_trajectories) if similar_trajectories else 0
+        hints.avg_duration_ms = total_duration // len(similar_trajectories) if similar_trajectories else 0
+        hints.success_rate = success_count / len(similar_trajectories) if similar_trajectories else 0.0
+
+        # Get failure patterns
+        hints.common_failures = await self._extract_failure_patterns(
+            task_type=task_type,
+            agent_type=agent_type,
+        )
+
+        # Generate optimization tips
+        hints.optimization_tips = self._generate_optimization_tips(hints)
+
+        logger.info(
+            "Generated planning hints",
+            task_type=task_type,
+            similar_tasks=hints.similar_task_count,
+            success_rate=hints.success_rate,
+            recommended_steps=len(hints.recommended_steps),
+        )
+
+        return hints
+
+    async def _get_similar_trajectories(
+        self,
+        task_type: str,
+        agent_type: Optional[str] = None,
+        min_quality_score: float = 0.5,
+        limit: int = 50,
+    ) -> List[AgentTrajectory]:
+        """Get trajectories similar to the given task."""
+        if not self.collector.db:
+            return []
+
+        conditions = [
+            AgentTrajectory.task_type == task_type,
+            AgentTrajectory.success == True,
+        ]
+
+        if min_quality_score > 0:
+            conditions.append(
+                or_(
+                    AgentTrajectory.quality_score >= min_quality_score,
+                    AgentTrajectory.quality_score.is_(None),
+                )
+            )
+
+        # Filter by agent type if provided
+        if agent_type:
+            # Join with AgentDefinition to filter by type
+            result = await self.collector.db.execute(
+                select(AgentTrajectory)
+                .join(AgentDefinition, AgentTrajectory.agent_id == AgentDefinition.id)
+                .where(
+                    and_(
+                        *conditions,
+                        AgentDefinition.agent_type == agent_type,
+                    )
+                )
+                .order_by(desc(AgentTrajectory.created_at))
+                .limit(limit)
+            )
+        else:
+            result = await self.collector.db.execute(
+                select(AgentTrajectory)
+                .where(and_(*conditions))
+                .order_by(desc(AgentTrajectory.created_at))
+                .limit(limit)
+            )
+
+        return list(result.scalars().all())
+
+    async def _extract_common_steps(
+        self,
+        trajectories: List[AgentTrajectory],
+    ) -> List[str]:
+        """Extract common step patterns from trajectories."""
+        step_counts: Dict[str, int] = defaultdict(int)
+
+        for trajectory in trajectories:
+            if not trajectory.trajectory_steps:
+                continue
+
+            # Extract action types from steps
+            seen_actions = set()
+            for step in trajectory.trajectory_steps:
+                action = step.get("action_type", "unknown")
+                if action not in seen_actions:
+                    step_counts[action] += 1
+                    seen_actions.add(action)
+
+        # Return steps that appear in >50% of trajectories
+        threshold = len(trajectories) * 0.5
+        common_steps = [
+            action for action, count in step_counts.items()
+            if count >= threshold
+        ]
+
+        # Sort by frequency
+        common_steps.sort(key=lambda x: step_counts[x], reverse=True)
+
+        return common_steps[:10]
+
+    async def _extract_patterns(
+        self,
+        trajectories: List[AgentTrajectory],
+    ) -> List[str]:
+        """Extract high-level patterns from trajectories."""
+        patterns = []
+
+        if not trajectories:
+            return patterns
+
+        # Analyze step sequences
+        step_sequences: List[List[str]] = []
+        for trajectory in trajectories:
+            if trajectory.trajectory_steps:
+                sequence = [
+                    step.get("action_type", "unknown")
+                    for step in trajectory.trajectory_steps
+                ]
+                step_sequences.append(sequence)
+
+        if step_sequences:
+            # Find common starting patterns
+            start_patterns: Dict[str, int] = defaultdict(int)
+            for seq in step_sequences:
+                if len(seq) >= 2:
+                    pattern = f"{seq[0]} → {seq[1]}"
+                    start_patterns[pattern] += 1
+
+            # Add common start patterns
+            for pattern, count in start_patterns.items():
+                if count >= len(step_sequences) * 0.3:
+                    patterns.append(f"Common start: {pattern}")
+
+            # Analyze step counts
+            avg_steps = sum(len(s) for s in step_sequences) / len(step_sequences)
+            patterns.append(f"Average {avg_steps:.1f} steps per execution")
+
+        return patterns
+
+    async def _extract_failure_patterns(
+        self,
+        task_type: str,
+        agent_type: Optional[str] = None,
+    ) -> List[str]:
+        """Extract common failure patterns."""
+        if not self.collector.db:
+            return []
+
+        conditions = [
+            AgentTrajectory.task_type == task_type,
+            AgentTrajectory.success == False,
+            AgentTrajectory.error_message.isnot(None),
+        ]
+
+        result = await self.collector.db.execute(
+            select(AgentTrajectory.error_message)
+            .where(and_(*conditions))
+            .limit(20)
+        )
+        errors = [row[0] for row in result.all() if row[0]]
+
+        # Count error patterns
+        error_counts: Dict[str, int] = defaultdict(int)
+        for error in errors:
+            # Normalize error message
+            error_key = error[:100].lower()
+            error_counts[error_key] += 1
+
+        # Return most common errors
+        common_errors = sorted(
+            error_counts.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )[:5]
+
+        return [f"({count}x) {error}" for error, count in common_errors]
+
+    def _generate_optimization_tips(self, hints: PlanningHints) -> List[str]:
+        """Generate optimization tips based on analysis."""
+        tips = []
+
+        if hints.success_rate < 0.7:
+            tips.append("Success rate below 70% - consider adding validation steps")
+
+        if hints.avg_tokens > 10000:
+            tips.append("High token usage - consider chunking or summarization")
+
+        if hints.avg_duration_ms > 30000:
+            tips.append("Long execution time - consider parallel processing")
+
+        if hints.common_failures:
+            tips.append(f"Watch for common failures: {hints.common_failures[0][:50]}")
+
+        if "research" in hints.recommended_steps and "generator" in hints.recommended_steps:
+            tips.append("Pattern suggests research before generation works well")
+
+        return tips
+
+    async def get_task_patterns(
+        self,
+        hours: int = 168,  # 1 week
+    ) -> Dict[str, TaskPattern]:
+        """
+        Get patterns for all task types.
+
+        Args:
+            hours: Time window in hours
+
+        Returns:
+            Dict mapping task_type to TaskPattern
+        """
+        # Check cache
+        if (
+            self._cache_updated_at and
+            datetime.utcnow() - self._cache_updated_at < timedelta(minutes=self._cache_ttl_minutes) and
+            self._pattern_cache
+        ):
+            return self._pattern_cache
+
+        if not self.collector.db:
+            return {}
+
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+        # Get all task types with stats
+        result = await self.collector.db.execute(
+            select(
+                AgentTrajectory.task_type,
+                func.count(AgentTrajectory.id).label("total"),
+                func.sum(case((AgentTrajectory.success == True, 1), else_=0)).label("successes"),
+            )
+            .where(AgentTrajectory.created_at >= cutoff)
+            .group_by(AgentTrajectory.task_type)
+        )
+
+        patterns = {}
+        for row in result.all():
+            task_type = row[0]
+            total = row[1] or 0
+            successes = row[2] or 0
+
+            if total > 0:
+                # Get common steps for this task type
+                trajectories = await self._get_similar_trajectories(
+                    task_type=task_type,
+                    limit=20,
+                )
+                common_steps = await self._extract_common_steps(trajectories)
+
+                patterns[task_type] = TaskPattern(
+                    task_type=task_type,
+                    common_steps=common_steps,
+                    avg_step_count=sum(
+                        len(t.trajectory_steps or []) for t in trajectories
+                    ) / len(trajectories) if trajectories else 0,
+                    success_rate=successes / total,
+                    sample_count=total,
+                )
+
+        self._pattern_cache = patterns
+        self._cache_updated_at = datetime.utcnow()
+
+        return patterns
+
+
+def get_adaptive_planner(collector: TrajectoryCollector) -> AdaptivePlanner:
+    """Create an adaptive planner instance."""
+    return AdaptivePlanner(collector)

@@ -53,6 +53,10 @@ class CreateJobRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     description: str = Field(..., min_length=10)
     output_format: str = Field(default="docx")
+    output_language: str = Field(
+        default="en",
+        description="Language code for generated content (en, de, es, fr, it, pt, nl, pl, ru, zh, ja, ko, ar, hi)"
+    )
     collection_filter: Optional[str] = None  # Single collection filter (legacy)
     collection_filters: Optional[List[str]] = None  # Multiple collection filters
     folder_id: Optional[str] = Field(default=None, description="Folder ID to scope query to")
@@ -143,6 +147,16 @@ class CreateJobRequest(BaseModel):
     fix_incomplete: bool = Field(
         default=True,
         description="Complete incomplete bullet points and sentences"
+    )
+    # Notes/Comments options (for PPTX speaker notes, DOCX comments, etc.)
+    include_notes_explanation: bool = Field(
+        default=False,
+        description="Include AI explanation/reasoning in document notes (PPTX speaker notes)"
+    )
+    # Query Enhancement - controls query expansion and HyDE for source search
+    enhance_query: Optional[bool] = Field(
+        default=None,
+        description="Enable query enhancement (expansion + HyDE) for source search. None = use admin default."
     )
 
     @property
@@ -324,6 +338,17 @@ async def create_generation_job(
 
     # Build metadata with theme and page_count
     metadata = request.metadata or {}
+
+    # Output language - store in metadata
+    # "auto" means auto-detect from source documents
+    valid_languages = {"auto", "en", "de", "es", "fr", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko", "ar", "hi"}
+    if request.output_language and request.output_language not in valid_languages:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid output_language: {request.output_language}. Valid options: {valid_languages}",
+        )
+    metadata["output_language"] = request.output_language or "en"
+
     if request.theme:
         # Validate theme exists
         if request.theme not in THEMES:
@@ -418,6 +443,17 @@ async def create_generation_job(
         metadata["quality_threshold"] = request.quality_threshold
         metadata["fix_styling"] = request.fix_styling
         metadata["fix_incomplete"] = request.fix_incomplete
+
+    # Store notes/explanation settings
+    if request.include_notes_explanation:
+        metadata["include_notes_explanation"] = True
+
+    # Store query enhancement preference (None means use admin setting)
+    if request.enhance_query is not None:
+        metadata["enhance_query"] = request.enhance_query
+
+    # Store user email for notes/metadata display
+    metadata["user_email"] = user.email
 
     job = await service.create_job(
         user_id=user.user_id,

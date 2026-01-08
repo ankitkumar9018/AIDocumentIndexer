@@ -17,23 +17,25 @@ Features:
 import json
 import re
 import uuid
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Set
 from collections import defaultdict
 
 import structlog
-from sqlalchemy import select, func, and_, or_
+from sqlalchemy import select, func, and_, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from unidecode import unidecode  # Unicode to ASCII transliteration
 
-from db.models import (
+from backend.db.models import (
     Entity, EntityMention, EntityRelation,
     EntityType, RelationType,
     Document, Chunk,
 )
-from services.llm import get_llm_service
-from services.embeddings import get_embedding_service
+from backend.services.llm import EnhancedLLMFactory
+from backend.services.embeddings import get_embedding_service
 
 logger = structlog.get_logger(__name__)
 
@@ -44,13 +46,17 @@ logger = structlog.get_logger(__name__)
 
 @dataclass
 class ExtractedEntity:
-    """Entity extracted from text."""
+    """Entity extracted from text with language awareness."""
     name: str
     entity_type: EntityType
     description: Optional[str] = None
     aliases: List[str] = field(default_factory=list)
     confidence: float = 1.0
     context: Optional[str] = None
+    # Language-aware fields for cross-language entity linking
+    language: Optional[str] = None  # Source document language: "en", "de", "ru", etc.
+    canonical_name: Optional[str] = None  # English canonical form for linking
+    language_variants: Dict[str, str] = field(default_factory=dict)  # {"en": "Germany", "de": "Deutschland"}
 
 
 @dataclass
@@ -88,7 +94,27 @@ class GraphRAGContext:
 # Entity Extraction Prompts
 # =============================================================================
 
+# Language name mapping for prompts
+LANGUAGE_NAMES = {
+    "en": "English",
+    "de": "German",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ru": "Russian",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ar": "Arabic",
+    "hi": "Hindi",
+}
+
 ENTITY_EXTRACTION_PROMPT = """Extract named entities and their relationships from the following text.
+
+SOURCE DOCUMENT LANGUAGE: {document_language}
 
 Text:
 {text}
@@ -106,10 +132,16 @@ Extract entities of these types:
 - OTHER: Any other notable entities
 
 For each entity, provide:
-1. name: The entity name as it appears
+1. name: The entity name AS IT APPEARS in the source text
 2. type: One of the types above
 3. description: Brief description if available from context
-4. aliases: Alternative names or abbreviations if any
+4. aliases: Alternative names, abbreviations, OR translations in other languages
+5. canonical_name: The ENGLISH name for this entity (for cross-language linking)
+   - For "Deutschland" → canonical_name: "Germany"
+   - For "Москва" → canonical_name: "Moscow"
+   - For "東京" → canonical_name: "Tokyo"
+   - For person names, keep original spelling: "François Hollande" → "François Hollande"
+   - For product/company names, keep original: "BMW" → "BMW"
 
 Also extract relationships between entities:
 - WORKS_FOR: Person works for organization
@@ -126,7 +158,13 @@ Also extract relationships between entities:
 Return JSON in this exact format:
 {{
   "entities": [
-    {{"name": "...", "type": "PERSON|ORGANIZATION|...", "description": "...", "aliases": []}}
+    {{
+      "name": "Deutschland",
+      "type": "LOCATION",
+      "description": "Country in central Europe",
+      "aliases": ["BRD", "Federal Republic of Germany", "Allemagne"],
+      "canonical_name": "Germany"
+    }}
   ],
   "relations": [
     {{"source": "entity_name", "target": "entity_name", "type": "WORKS_FOR|...", "label": "optional label"}}
@@ -176,7 +214,11 @@ class KnowledgeGraphService:
         Supports FREE (Ollama) and PAID (OpenAI, Anthropic) providers.
         """
         if not self.llm:
-            self.llm = await get_llm_service()
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="chat",  # Use chat operation for entity extraction
+                db_session=self.db,
+            )
+            self.llm = llm
         return self.llm
 
     async def _get_embeddings(self):
@@ -194,6 +236,7 @@ class KnowledgeGraphService:
         text: str,
         document_id: Optional[uuid.UUID] = None,
         chunk_id: Optional[uuid.UUID] = None,
+        document_language: str = "en",
     ) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
         """
         Extract entities and relationships from text using LLM.
@@ -202,16 +245,25 @@ class KnowledgeGraphService:
             text: Text to extract from
             document_id: Source document ID
             chunk_id: Source chunk ID
+            document_language: Language code of the source document (e.g., "en", "de", "ru")
 
         Returns:
             Tuple of (entities, relations)
         """
         llm = await self._get_llm()
 
-        prompt = ENTITY_EXTRACTION_PROMPT.format(text=text[:8000])  # Limit text size
+        # Get human-readable language name for the prompt
+        language_name = LANGUAGE_NAMES.get(document_language, "English")
+
+        prompt = ENTITY_EXTRACTION_PROMPT.format(
+            text=text[:8000],
+            document_language=language_name,
+        )
 
         try:
-            response = await llm.generate(prompt)
+            # Use langchain model interface
+            result = await llm.ainvoke(prompt)
+            response = result.content if hasattr(result, 'content') else str(result)
 
             # Parse JSON response
             json_match = re.search(r'\{[\s\S]*\}', response)
@@ -228,12 +280,18 @@ class KnowledgeGraphService:
                 except ValueError:
                     entity_type = EntityType.OTHER
 
+                # Get canonical name from LLM response, fallback to original name
+                canonical_name = e.get("canonical_name") or e.get("name", "")
+
                 entities.append(ExtractedEntity(
                     name=e.get("name", ""),
                     entity_type=entity_type,
                     description=e.get("description"),
                     aliases=e.get("aliases", []),
                     context=text[:500],
+                    language=document_language,
+                    canonical_name=canonical_name,
+                    language_variants={document_language: e.get("name", "")} if document_language else {},
                 ))
 
             relations = []
@@ -271,7 +329,10 @@ class KnowledgeGraphService:
         chunks: Optional[List[Chunk]] = None,
     ) -> Dict[str, int]:
         """
-        Process a document to extract entities and build graph.
+        Process a document to extract entities and build graph with language context.
+
+        Loads the document language and passes it to entity extraction for
+        cross-language entity linking support.
 
         Args:
             document_id: Document to process
@@ -281,6 +342,19 @@ class KnowledgeGraphService:
             Stats dict with counts
         """
         stats = {"entities": 0, "relations": 0, "mentions": 0}
+
+        # Load document to get language
+        doc_result = await self.db.execute(
+            select(Document).where(Document.id == document_id)
+        )
+        document = doc_result.scalar_one_or_none()
+
+        if not document:
+            logger.warning("Document not found", document_id=str(document_id))
+            return stats
+
+        # Get document language (default to English if not set)
+        document_language = document.language or "en"
 
         # Load chunks if not provided
         if not chunks:
@@ -296,12 +370,13 @@ class KnowledgeGraphService:
         all_entities: Dict[str, ExtractedEntity] = {}
         all_relations: List[ExtractedRelation] = []
 
-        # Extract from each chunk
+        # Extract from each chunk with document language context
         for chunk in chunks:
             entities, relations = await self.extract_entities_from_text(
                 chunk.content,
                 document_id=document_id,
                 chunk_id=chunk.id,
+                document_language=document_language,
             )
 
             # Merge entities (by normalized name)
@@ -322,10 +397,11 @@ class KnowledgeGraphService:
             entity = await self._upsert_entity(extracted)
             entity_map[norm_name] = entity
 
-            # Create mention
+            # Create mention with language context
             await self._create_mention(
                 entity_id=entity.id,
                 document_id=document_id,
+                mention_language=document_language,
             )
             stats["entities"] += 1
             stats["mentions"] += 1
@@ -355,15 +431,65 @@ class KnowledgeGraphService:
 
         return stats
 
-    def _normalize_entity_name(self, name: str) -> str:
-        """Normalize entity name for deduplication."""
-        return name.lower().strip()
+    def _normalize_entity_name(self, name: str, preserve_script: bool = False) -> str:
+        """
+        Normalize entity name with Unicode awareness for deduplication.
+
+        Steps:
+        1. Unicode NFC normalization
+        2. Case folding (better than lower() for Unicode)
+        3. Whitespace normalization
+        4. Optional: ASCII transliteration for cross-script matching
+
+        Args:
+            name: Entity name to normalize
+            preserve_script: If True, keep original script; if False, transliterate to ASCII
+
+        Returns:
+            Normalized entity name
+        """
+        if not name:
+            return ""
+
+        # Step 1: Unicode NFC normalization (composed form)
+        normalized = unicodedata.normalize('NFC', name)
+
+        # Step 2: Case fold (handles ß → ss, İ → i, etc.)
+        normalized = normalized.casefold()
+
+        # Step 3: Collapse whitespace
+        normalized = ' '.join(normalized.split())
+
+        # Step 4: Optionally transliterate to ASCII for matching
+        if not preserve_script:
+            # "Müller" → "muller", "東京" → "dong jing", "Москва" → "moskva"
+            ascii_version = unidecode(normalized)
+            return ascii_version.strip()
+
+        return normalized.strip()
+
+    def _get_ascii_normalized(self, name: str) -> str:
+        """Get ASCII-safe version for cross-script matching."""
+        if not name:
+            return ""
+        return unidecode(name.casefold()).strip()
 
     async def _upsert_entity(self, extracted: ExtractedEntity) -> Entity:
-        """Create or update entity in database."""
-        norm_name = self._normalize_entity_name(extracted.name)
+        """
+        Create or update entity in database with language-aware matching.
 
-        # Check if exists
+        Uses multi-strategy matching:
+        1. Exact normalized name match (same language)
+        2. Canonical name match (cross-language linking)
+        3. ASCII-normalized match (cross-script matching)
+        """
+        norm_name = self._normalize_entity_name(extracted.name)
+        canonical = extracted.canonical_name or extracted.name
+        canonical_norm = self._normalize_entity_name(canonical)
+
+        entity = None
+
+        # Strategy 1: Try exact normalized match (most precise)
         result = await self.db.execute(
             select(Entity).where(
                 Entity.name_normalized == norm_name,
@@ -372,22 +498,63 @@ class KnowledgeGraphService:
         )
         entity = result.scalar_one_or_none()
 
+        # Strategy 2: Try canonical name match (cross-language linking)
+        if not entity and canonical_norm != norm_name:
+            result = await self.db.execute(
+                select(Entity).where(
+                    or_(
+                        Entity.canonical_name == canonical,
+                        Entity.name_normalized == canonical_norm,
+                    ),
+                    Entity.entity_type == extracted.entity_type,
+                )
+            )
+            entity = result.scalar_one_or_none()
+
+        # Strategy 3: Try ASCII-normalized match (cross-script)
+        if not entity:
+            ascii_canonical = self._get_ascii_normalized(canonical)
+            result = await self.db.execute(
+                select(Entity).where(
+                    func.lower(Entity.canonical_name) == ascii_canonical,
+                    Entity.entity_type == extracted.entity_type,
+                )
+            )
+            entity = result.scalar_one_or_none()
+
         if entity:
-            # Update mention count
+            # Update existing entity
             entity.mention_count += 1
+
+            # Update description if not set
             if extracted.description and not entity.description:
                 entity.description = extracted.description
+
+            # Merge language variant
+            variants = entity.language_variants or {}
+            if extracted.language and extracted.name:
+                variants[extracted.language] = extracted.name
+            entity.language_variants = variants
+
+            # Merge aliases
             if extracted.aliases:
                 existing_aliases = entity.aliases or []
                 entity.aliases = list(set(existing_aliases + extracted.aliases))
+
+            # Update canonical name if not set
+            if extracted.canonical_name and not entity.canonical_name:
+                entity.canonical_name = extracted.canonical_name
         else:
-            # Create new entity
+            # Create new entity with language support
             entity = Entity(
                 name=extracted.name,
                 name_normalized=norm_name,
                 entity_type=extracted.entity_type,
                 description=extracted.description,
                 aliases=extracted.aliases if extracted.aliases else None,
+                entity_language=extracted.language,
+                canonical_name=canonical,
+                language_variants={extracted.language: extracted.name} if extracted.language else None,
                 mention_count=1,
             )
             self.db.add(entity)
@@ -401,13 +568,17 @@ class KnowledgeGraphService:
         document_id: uuid.UUID,
         chunk_id: Optional[uuid.UUID] = None,
         context_snippet: Optional[str] = None,
+        mention_language: Optional[str] = None,
+        mention_script: Optional[str] = None,
     ) -> EntityMention:
-        """Create entity mention record."""
+        """Create entity mention record with language context."""
         mention = EntityMention(
             entity_id=entity_id,
             document_id=document_id,
             chunk_id=chunk_id,
             context_snippet=context_snippet,
+            mention_language=mention_language,
+            mention_script=mention_script,
         )
         self.db.add(mention)
         return mention
@@ -453,29 +624,71 @@ class KnowledgeGraphService:
     async def find_entities_by_query(
         self,
         query: str,
+        entity_types: Optional[List[EntityType]] = None,
         limit: int = 10,
+        query_language: Optional[str] = None,
     ) -> List[Entity]:
         """
-        Find entities relevant to a query using semantic search.
+        Find entities relevant to a query with language-aware matching.
+
+        Uses multi-strategy matching:
+        1. Exact normalized name match
+        2. Canonical name match (cross-language)
+        3. Name contains query (substring)
+        4. Alias match
+        5. Language variant match
 
         Args:
             query: Search query
+            entity_types: Optional filter by entity types
             limit: Max results
+            query_language: Optional language code for variant search
 
         Returns:
-            List of relevant entities
+            List of relevant entities, prioritized by match quality
         """
-        # First try exact/partial name match
-        result = await self.db.execute(
-            select(Entity)
-            .where(
-                or_(
-                    Entity.name.ilike(f"%{query}%"),
-                    Entity.name_normalized.ilike(f"%{query.lower()}%"),
-                )
+        query_norm = self._normalize_entity_name(query)
+        query_ascii = self._get_ascii_normalized(query)
+
+        # Build multi-strategy matching conditions
+        conditions = [
+            # Strategy 1: Exact normalized match
+            Entity.name_normalized == query_norm,
+            # Strategy 2: Canonical name match (cross-language)
+            func.lower(Entity.canonical_name) == query_norm,
+            # Strategy 3: ASCII-normalized canonical match
+            func.lower(Entity.canonical_name) == query_ascii,
+            # Strategy 4: Name contains query (substring)
+            Entity.name_normalized.ilike(f"%{query_norm}%"),
+            # Strategy 5: Query in aliases (if PostgreSQL array)
+            Entity.aliases.any(query),
+        ]
+
+        # Add language variant search if query_language specified
+        if query_language:
+            # Search in language_variants JSON field
+            conditions.append(
+                Entity.language_variants[query_language].astext.ilike(f"%{query}%")
             )
-            .order_by(Entity.mention_count.desc())
-            .limit(limit)
+
+        base_query = select(Entity).where(or_(*conditions))
+
+        # Optional entity type filter
+        if entity_types:
+            base_query = base_query.where(Entity.entity_type.in_(entity_types))
+
+        # Order by match quality and mention count
+        result = await self.db.execute(
+            base_query.order_by(
+                # Prioritize exact matches over partial matches
+                case(
+                    (Entity.name_normalized == query_norm, 1),
+                    (func.lower(Entity.canonical_name) == query_norm, 2),
+                    (func.lower(Entity.canonical_name) == query_ascii, 3),
+                    else_=4,
+                ),
+                Entity.mention_count.desc(),
+            ).limit(limit)
         )
         entities = list(result.scalars().all())
 
@@ -483,6 +696,13 @@ class KnowledgeGraphService:
         if len(entities) < limit:
             # TODO: Implement embedding-based entity search
             pass
+
+        logger.debug(
+            "Entity search completed",
+            query=query,
+            query_language=query_language,
+            results_count=len(entities),
+        )
 
         return entities
 

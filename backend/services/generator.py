@@ -34,6 +34,28 @@ logger = structlog.get_logger(__name__)
 
 
 # =============================================================================
+# Language Configuration
+# =============================================================================
+
+LANGUAGE_NAMES = {
+    "en": "English",
+    "de": "German",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ru": "Russian",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ar": "Arabic",
+    "hi": "Hindi",
+}
+
+
+# =============================================================================
 # Theme Configuration
 # =============================================================================
 
@@ -323,6 +345,13 @@ def filter_llm_metatext(text: str) -> str:
         r'^\s*[-•*▪◦▸]?\s*[Uu]sing medium-length sentences.*$',   # "Using medium-length sentences..."
         r'^\s*[-•*▪◦▸]?\s*[Ii]ncorporating action verbs.*$',      # "Incorporating action verbs..."
         r'^\s*[-•*▪◦▸]?\s*[Bb]y following these style requirements.*$',  # "By following these style requirements..."
+        # Preamble "To [action]..." patterns that describe what will be done
+        r'^\s*[-•*▪◦▸]?\s*[Tt]o (?:create|establish|build|develop|implement|ensure|achieve) (?:a |the )?(?:buzz|strong|solid|effective|successful).*?,\s*we\s+.*$',  # "To create buzz..., we..."
+        r'^\s*[-•*▪◦▸]?\s*[Tt]o (?:create|establish|build|develop|implement|ensure|achieve).*?:\s*$',  # "To create buzz:" followed by colon
+        # In order to patterns
+        r'^\s*[-•*▪◦▸]?\s*[Ii]n order to (?:create|establish|build|develop|implement|ensure|achieve).*?:\s*$',  # "In order to..."
+        # For the purpose patterns
+        r'^\s*[-•*▪◦▸]?\s*[Ff]or the purpose of (?:creating|establishing|building|developing).*?:\s*$',  # "For the purpose of..."
     ]
 
     result = text
@@ -717,7 +746,7 @@ class GenerationConfig:
     # RAG settings
     use_rag: bool = True
     max_sources: int = 10
-    min_relevance_score: float = 0.5
+    min_relevance_score: float = 0.01  # RRF scores are typically 0-0.1, not 0-1
 
     # Output settings - loaded from database settings or environment
     output_dir: str = "/tmp/generated_docs"
@@ -1043,6 +1072,14 @@ Return ONLY a JSON object with this exact structure:
         job.metadata["image_backend"] = self.config.image_backend
         job.metadata["default_tone"] = self.config.default_tone
         job.metadata["default_style"] = self.config.default_style
+        # Store LLM model for notes/metadata - fetch actual model from LLM config
+        try:
+            from backend.services.llm import LLMConfigManager
+            llm_config = await LLMConfigManager.get_config_for_operation("generation")
+            job.metadata["llm_model"] = f"{llm_config.provider_type}/{llm_config.model}"
+        except Exception as e:
+            logger.warning(f"Could not fetch LLM config for notes: {e}")
+            job.metadata["llm_model"] = self.config.model
 
         self._jobs[job_id] = job
 
@@ -1143,8 +1180,30 @@ Return ONLY a JSON object with this exact structure:
                 query=f"{job.title}: {job.description}",
                 collection_filter=job.metadata.get("collection_filter"),
                 max_results=self.config.max_sources,
+                enhance_query=job.metadata.get("enhance_query"),
             )
             sources.extend(rag_sources)  # Add RAG sources to style sources
+            logger.info(
+                "RAG sources found for outline generation",
+                job_id=job_id,
+                rag_sources_count=len(rag_sources),
+                total_sources=len(sources),
+                query=f"{job.title}: {job.description}"[:100],
+                enhance_query=job.metadata.get("enhance_query"),
+            )
+        else:
+            logger.warning(
+                "RAG disabled for outline generation - no document sources",
+                job_id=job_id,
+                use_rag=self.config.use_rag,
+            )
+
+        if not sources:
+            logger.warning(
+                "No sources found for outline generation - outline may be generic",
+                job_id=job_id,
+                title=job.title,
+            )
 
         # Generate outline using LLM
         outline = await self._generate_outline_with_llm(
@@ -1154,6 +1213,7 @@ Return ONLY a JSON object with this exact structure:
             num_sections=num_sections,
             output_format=job.output_format.value,
             style_guide=style_guide,
+            output_language=job.metadata.get("output_language", "en"),
         )
 
         job.outline = outline
@@ -1468,25 +1528,131 @@ Return ONLY a JSON object with this exact structure:
         query: str,
         collection_filter: Optional[str] = None,
         max_results: int = 10,
+        enhance_query: Optional[bool] = None,
     ) -> List[SourceReference]:
-        """Search for relevant sources using RAG."""
+        """Search for relevant sources using RAG with semantic search.
+
+        Args:
+            query: The search query
+            collection_filter: Optional collection filter
+            max_results: Maximum number of results to return
+            enhance_query: Enable query enhancement (expansion + HyDE).
+                          None = use admin setting, True/False = override.
+        """
         try:
             from backend.services.vectorstore import get_vector_store, SearchType
+            from backend.services.llm import generate_embedding
+            from backend.services.settings import SettingsService
 
             vector_store = get_vector_store()
+
+            # Determine if query enhancement is enabled
+            settings = SettingsService()
+            use_enhancement = enhance_query
+            if use_enhancement is None:
+                # Check admin settings
+                use_enhancement = settings.get_default_value("rag.query_expansion_enabled")
+                if use_enhancement is None:
+                    use_enhancement = True  # Default to enabled
+
+            # Apply query enhancement if enabled
+            enhanced_query = query
+            all_queries = [query]
+
+            if use_enhancement:
+                try:
+                    from backend.services.query_expander import get_query_expander, QueryExpansionConfig
+                    from backend.services.hyde import get_hyde_expander
+
+                    # Query expansion - generate variations
+                    expander_config = QueryExpansionConfig(expansion_count=3)
+                    expander = get_query_expander(expander_config)
+                    if expander:
+                        expanded = await expander.expand(query)
+                        if expanded and expanded.expanded_queries:
+                            all_queries.extend(expanded.expanded_queries[:2])  # Add top 2 variations
+                            logger.debug(
+                                "Query expanded for source search",
+                                original=query[:50],
+                                variations=len(expanded.expanded_queries),
+                            )
+
+                    # HyDE - Hypothetical Document Embedding (optional, can be expensive)
+                    hyde_enabled = settings.get_default_value("rag.hyde_enabled")
+                    if hyde_enabled:
+                        hyde_expander = get_hyde_expander()
+                        if hyde_expander:
+                            from backend.services.llm import LLMService
+                            llm_service = LLMService()
+                            hyde_result = await hyde_expander.expand(query, llm_service)
+                            if hyde_result and hyde_result.hypothetical_doc:
+                                # Use HyDE doc for embedding instead of original query
+                                enhanced_query = hyde_result.hypothetical_doc[:1000]
+                                logger.debug(
+                                    "HyDE applied for source search",
+                                    original=query[:50],
+                                )
+                except Exception as enhance_err:
+                    logger.warning(
+                        "Query enhancement failed, using original query",
+                        error=str(enhance_err),
+                        query=query[:50],
+                    )
+
+            # Generate embedding for semantic search (much better than keyword-only)
+            query_embedding = None
+            try:
+                query_embedding = await generate_embedding(enhanced_query)
+                logger.debug(
+                    "Generated query embedding for source search",
+                    query=query[:50],
+                    enhanced=enhanced_query != query,
+                    embedding_dims=len(query_embedding) if query_embedding else 0,
+                )
+            except Exception as embed_err:
+                logger.warning(
+                    "Failed to generate query embedding, falling back to keyword search",
+                    error=str(embed_err),
+                    query=query[:50],
+                )
+
+            logger.info(
+                "Executing vector store search",
+                query=query[:100],
+                has_embedding=query_embedding is not None,
+                search_type="hybrid" if query_embedding else "keyword",
+                max_results=max_results,
+            )
+
             results = await vector_store.search(
                 query=query,
-                search_type=SearchType.HYBRID,
+                query_embedding=query_embedding,
+                search_type=SearchType.HYBRID if query_embedding else SearchType.KEYWORD,
                 top_k=max_results,
+            )
+
+            logger.info(
+                "Vector store search completed",
+                query=query[:50],
+                results_count=len(results) if results else 0,
+                min_score=self.config.min_relevance_score,
+                search_type="hybrid" if query_embedding else "keyword",
+                top_scores=[r.score for r in (results or [])[:3]],
             )
 
             sources = []
             for result in results:
                 if result.score >= self.config.min_relevance_score:
+                    # Get document name from multiple possible fields
+                    doc_name = (
+                        getattr(result, 'document_title', '') or
+                        getattr(result, 'document_filename', '') or
+                        str(result.document_id)
+                    )
                     sources.append(
                         SourceReference(
                             document_id=str(result.document_id),
-                            document_name="",  # Would need to look up
+                            document_name=doc_name,
                             chunk_id=str(result.chunk_id),
                             page_number=result.page_number,
                             relevance_score=result.score,
@@ -1494,10 +1660,16 @@ Return ONLY a JSON object with this exact structure:
                         )
                     )
 
+            logger.debug(
+                "Section sources filtered",
+                query=query[:50],
+                sources_after_filter=len(sources),
+            )
+
             return sources
 
         except Exception as e:
-            logger.warning("Failed to search sources", error=str(e))
+            logger.warning("Failed to search sources", error=str(e), query=query[:50])
             return []
 
     async def _analyze_document_styles(
@@ -1764,6 +1936,7 @@ Return ONLY valid JSON, no other text."""
         num_sections: Optional[int] = None,
         output_format: str = "docx",
         style_guide: Optional[Dict[str, Any]] = None,
+        output_language: str = "en",
     ) -> DocumentOutline:
         """Generate outline using LLM.
 
@@ -1774,6 +1947,7 @@ Return ONLY valid JSON, no other text."""
             num_sections: Number of sections. None = auto mode (LLM decides)
             output_format: Target output format (affects section count guidance)
             style_guide: Optional style analysis from existing documents
+            output_language: Language code for generated content (default: en)
         """
         # Build context from sources
         context = ""
@@ -1781,22 +1955,52 @@ Return ONLY valid JSON, no other text."""
             context = "Relevant information from the knowledge base:\n\n"
             for source in sources[:5]:
                 context += f"- {source.snippet}...\n\n"
+            logger.debug(
+                "Outline context built from sources",
+                sources_used=len(sources[:5]),
+                context_length=len(context),
+                first_snippet=sources[0].snippet[:100] if sources else "none",
+            )
+        else:
+            logger.warning(
+                "No sources available for outline context - LLM will generate without document knowledge"
+            )
 
         # Build style instructions if available
         style_instructions = ""
         if style_guide:
             style_instructions = f"""
-STYLE GUIDE (based on existing documents in your collection):
+---INTERNAL STYLE GUIDANCE (DO NOT OUTPUT THIS AS CONTENT)---
+Use these style hints when writing, but DO NOT include them as sections:
 - Tone: {style_guide.get('tone', 'professional')}
-- Vocabulary Level: {style_guide.get('vocabulary_level', 'moderate')}
-- Structure Pattern: {style_guide.get('structure_pattern', 'mixed')}
-- Sentence Style: {style_guide.get('sentence_style', 'medium')}
-{f"- Formatting Notes: {style_guide.get('formatting_notes')}" if style_guide.get('formatting_notes') else ""}
-{f"- Key Phrases: {', '.join(style_guide.get('key_phrases', []))}" if style_guide.get('key_phrases') else ""}
+- Vocabulary: {style_guide.get('vocabulary_level', 'moderate')}
+Match the style of existing documents. This is internal guidance only.
+---END INTERNAL GUIDANCE---
+"""
 
-IMPORTANT: Match the style, tone, and structure of the existing documents.
-The new document should feel like it belongs to the same collection.
-Use similar vocabulary and phrasing patterns as found in the source documents.
+        # Build language instruction
+        language_instruction = ""
+        if output_language == "auto":
+            # Auto-detect: prioritize the TOPIC/TITLE language, then source documents
+            language_instruction = """
+LANGUAGE REQUIREMENT:
+1. FIRST, detect the language of the document TITLE/TOPIC provided by the user.
+2. Generate ALL section titles and descriptions in the SAME LANGUAGE as the title/topic.
+3. If the title is in Hinglish (Hindi+English mix), respond in Hinglish/Hindi.
+4. If the title is in German, respond in German.
+5. If the title is in English, respond in English.
+6. Source documents may be in ANY language - translate relevant information to match the title language.
+7. Do NOT default to English just because source documents are in English.
+
+Example: If title is "maketing startegy gaadi ke bare mean" - this is Hinglish, so ALL sections should be in Hinglish/Hindi.
+"""
+        elif output_language != "en":
+            language_name = LANGUAGE_NAMES.get(output_language, "English")
+            language_instruction = f"""
+LANGUAGE REQUIREMENT:
+- Generate ALL section titles and descriptions in {language_name}.
+- If source material is in a different language, translate concepts to {language_name}.
+- Technical terms may remain in English if commonly used that way.
 """
 
         # Build section instruction based on mode
@@ -1822,7 +2026,7 @@ Then generate exactly N sections with specific, descriptive titles."""
         # Create prompt for outline generation
         prompt = f"""Create a professional document outline for the following:
 {style_instructions}
-
+{language_instruction}
 Title: {title}
 Description: {description}
 
@@ -1830,26 +2034,47 @@ Description: {description}
 
 {section_instruction}
 
-IMPORTANT RULES:
-- Each section title MUST be specific and descriptive (e.g., "Market Analysis and Trends", "Implementation Strategy")
-- DO NOT use generic titles like "Section 1", "Introduction", "Overview", "Conclusion"
-- Titles should clearly indicate what the section covers
-- Each title should be 3-7 words long
+CRITICAL RULES:
+1. Each section title MUST contain specific keywords from the topic "{title}"
+2. NEVER use generic template titles - every title must be unique to THIS specific topic
+3. Include specific nouns, brands, products, or concepts from the topic in each title
+4. Descriptions must explain WHAT SPECIFIC CONTENT will be in that section
+
+ABSOLUTELY FORBIDDEN GENERIC TITLES (never use these or similar):
+- "Background and Context", "Key Analysis", "Strategic Recommendations"
+- "Implementation Details", "Conclusion and Next Steps", "Overview"
+- "Introduction", "Summary", "Key Findings", "Analysis and Findings"
+- "Action Items", "Next Steps", "Recommendations"
+- Any title that could apply to ANY document topic
 
 Format each section EXACTLY like this:
-## [Specific Descriptive Title]
-Description: [2-3 sentences explaining what this section covers]
+## [Title with specific topic keywords]
+Description: [Specific content about THIS topic, not generic filler]
 
-Example of good titles:
-- "Strategic Growth Opportunities"
-- "Technical Architecture Overview"
-- "Cost-Benefit Analysis"
-- "Implementation Timeline and Milestones"
+GOOD EXAMPLE for "marketing strategy for upcoming shoe launch":
+## Target Demographics for Athletic Footwear
+Description: Analysis of key customer segments including runners, casual athletes, and fashion-conscious buyers aged 18-35.
 
-Example of bad titles (DO NOT USE):
-- "Section 1", "Introduction", "Overview", "Summary", "Conclusion"
+## Social Media Campaign for Shoe Release
+Description: Instagram, TikTok, and influencer partnership strategies to build pre-launch excitement.
 
-Generate the outline now:"""
+## Retail and E-commerce Distribution Plan
+Description: Store placement strategy, online launch timing, and inventory allocation across channels.
+
+## Competitive Pricing Analysis vs Nike and Adidas
+Description: Price point positioning relative to competitors, value proposition, and promotional pricing strategy.
+
+## Launch Event and PR Timeline
+Description: Press release schedule, influencer seeding dates, and launch day activation plans.
+
+BAD EXAMPLE (NEVER DO THIS):
+## Background and Context ❌
+## Key Analysis and Findings ❌
+## Strategic Recommendations ❌
+## Implementation Details ❌
+## Conclusion and Next Steps ❌
+
+Generate the outline for "{title}" with SPECIFIC, NON-GENERIC titles now:"""
 
         # Use LLM to generate (database-driven configuration)
         try:
@@ -1860,6 +2085,13 @@ Generate the outline now:"""
                 user_id=None,  # System-level operation
             )
             response = await llm.ainvoke(prompt)
+
+            # Log the raw LLM response for debugging
+            logger.info(
+                "LLM outline response received",
+                response_length=len(response.content) if response.content else 0,
+                response_preview=response.content[:500] if response.content else "empty",
+            )
 
             # Parse response into sections with improved parsing
             import re
@@ -1890,6 +2122,8 @@ Generate the outline now:"""
                 r'^summary$',
                 r'^conclusion$',
                 r'^part\s*\d+$',
+                r'^section_count',  # Metadata line, not a section
+                r'^content\s+covering',  # Description of metadata, not a section
             ]
 
             for line in lines:
@@ -1898,21 +2132,37 @@ Generate the outline now:"""
                     continue
 
                 # Skip SECTION_COUNT metadata line (already extracted above)
-                if re.match(r'^#*\s*SECTION_COUNT:', line, re.IGNORECASE):
+                # Check for SECTION_COUNT anywhere in the line (LLM might format it differently)
+                if re.search(r'SECTION_COUNT\s*:', line, re.IGNORECASE):
                     continue
 
                 # Skip conversational LLM artifacts (User:, Assistant:, Human:, etc.)
                 if re.match(r'^#*\s*(User|Assistant|Human|AI|System|Here is|Below is|I\'ll|Let me|Sure|Certainly)[:.]?\s', line, re.IGNORECASE):
                     continue
 
-                # Check for section header (## Title or numbered)
-                if line.startswith("##") or (line[0].isdigit() and "." in line[:3]):
+                # Check for section header - multiple formats supported:
+                # - ## Title (markdown)
+                # - 1. Title (numbered)
+                # - **Title** (bold markdown)
+                # - - Title (bullet)
+                # - Title: (colon-ending titles)
+                is_section_header = (
+                    line.startswith("##") or
+                    line.startswith("**") or
+                    line.startswith("- ") or
+                    (len(line) > 0 and line[0].isdigit() and ("." in line[:4] or ")" in line[:4])) or
+                    (line.endswith(":") and len(line) < 100 and not line.lower().startswith("description"))
+                )
+
+                if is_section_header:
                     if current_section and current_section["title"]:
                         sections.append(current_section)
 
-                    # Extract section title, removing markdown and numbering
+                    # Extract section title, removing markdown formatting and numbering
                     # Use section_title to avoid shadowing the document title parameter
-                    section_title = re.sub(r'^[#\d.\s]+', '', line).strip()
+                    section_title = re.sub(r'^[#\d.\s\-\*\)]+', '', line).strip()
+                    section_title = section_title.rstrip(':').strip()  # Remove trailing colon
+                    section_title = re.sub(r'\*+', '', section_title).strip()  # Remove bold markers
 
                     # Check if title is generic
                     is_generic = any(
@@ -1941,6 +2191,14 @@ Generate the outline now:"""
 
             if current_section and current_section["title"]:
                 sections.append(current_section)
+
+            # Log parsed sections count
+            logger.info(
+                "Outline sections parsed from LLM response",
+                parsed_sections=len(sections),
+                target_sections=target_sections,
+                section_titles=[s.get("title", "")[:50] for s in sections[:5]],
+            )
 
             # Ensure all sections have non-empty descriptions
             for section in sections:
@@ -2011,10 +2269,24 @@ Generate the outline now:"""
         section_id = str(uuid.uuid4())
 
         # Search for relevant sources for this section
+        # Include job title/description for better context - section titles alone are often too generic
+        section_query = f"{job.title} - {section_title}"
+        if section_description:
+            section_query += f": {section_description}"
+
         sources = await self._search_sources(
-            query=f"{section_title}: {section_description}",
+            query=section_query,
             collection_filter=job.metadata.get("collection_filter"),
             max_results=5,
+            enhance_query=job.metadata.get("enhance_query"),
+        )
+
+        # Log sources found for debugging
+        logger.info(
+            "Section sources search completed",
+            section_title=section_title[:50],
+            sources_found=len(sources),
+            source_names=[s.document_name for s in sources[:3]] if sources else [],
         )
 
         # Build context
@@ -2102,6 +2374,77 @@ Match the style and tone of existing documents. Do NOT output these instructions
 ---END INTERNAL GUIDANCE---
 """
 
+        # Build language instruction
+        output_language = job.metadata.get("output_language", "en")
+        language_instruction = ""
+        if output_language == "auto":
+            # Auto-detect: programmatically detect title language
+            detected_lang = "en"  # default
+            detected_lang_name = "English"
+            try:
+                from langdetect import detect, DetectorFactory
+                DetectorFactory.seed = 0  # Make deterministic
+                # Combine title and description for better detection
+                text_to_detect = f"{job.title} {job.description or ''}"
+                detected_lang = detect(text_to_detect)
+                # Map detected language to name
+                lang_map = {
+                    "en": "English", "de": "German", "es": "Spanish", "fr": "French",
+                    "it": "Italian", "pt": "Portuguese", "zh-cn": "Chinese", "zh-tw": "Chinese",
+                    "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "hi": "Hindi",
+                    "ru": "Russian", "nl": "Dutch", "pl": "Polish", "tr": "Turkish"
+                }
+                detected_lang_name = lang_map.get(detected_lang, detected_lang.upper())
+                logger.info(f"Auto-detected language from title: {detected_lang} ({detected_lang_name})")
+            except Exception as e:
+                logger.warning(f"Language detection failed, using English: {e}")
+
+            # Check for Hinglish (Hindi mixed with English) - common pattern
+            title_lower = job.title.lower()
+            hinglish_markers = ["ke", "ka", "ki", "hai", "ko", "se", "mein", "par", "aur", "liye", "kaise"]
+            has_hinglish = any(marker in title_lower.split() for marker in hinglish_markers)
+
+            if has_hinglish or detected_lang == "hi":
+                detected_lang_name = "Hinglish (Hindi mixed with English)"
+                language_instruction = f"""
+---CRITICAL LANGUAGE REQUIREMENT---
+DETECTED LANGUAGE: Hinglish (Hindi/English mix)
+The document title "{job.title}" is in Hinglish.
+
+YOU MUST:
+1. Write ALL content in Hinglish (Hindi words written in Roman script mixed with English)
+2. Example: "Marketing strategy ko implement karna" not "Implementing marketing strategy"
+3. DO NOT write in pure English!
+4. DO NOT write in Devanagari script - use Roman letters only
+5. If source documents are in German/English/other, TRANSLATE to Hinglish
+6. Every slide/section MUST be in Hinglish - no exceptions!
+---END LANGUAGE REQUIREMENT---
+"""
+            else:
+                language_instruction = f"""
+---CRITICAL LANGUAGE REQUIREMENT---
+DETECTED LANGUAGE: {detected_lang_name}
+The document title "{job.title}" is in {detected_lang_name}.
+
+YOU MUST:
+1. Generate ALL content in {detected_lang_name}
+2. If source documents are in a different language (e.g., German), TRANSLATE them to {detected_lang_name}
+3. Every slide/section must be in {detected_lang_name}
+4. DO NOT mix languages within a section
+5. DO NOT default to English unless the detected language is English!
+---END LANGUAGE REQUIREMENT---
+"""
+        elif output_language != "en":
+            language_name = LANGUAGE_NAMES.get(output_language, "English")
+            language_instruction = f"""
+---LANGUAGE REQUIREMENT---
+Generate ALL content in {language_name}.
+If source material is in a different language, translate it to {language_name}.
+Do NOT mix languages - all text must be in {language_name}.
+Technical terms may remain in English if commonly used that way.
+---END LANGUAGE REQUIREMENT---
+"""
+
         # Generate content
         prompt = f"""Write content for the following section:
 
@@ -2114,7 +2457,8 @@ Description: {section_description}
 {context}
 
 {format_instructions}
-{style_context}"""
+{style_context}
+{language_instruction}"""
 
         try:
             from backend.services.llm import EnhancedLLMFactory
@@ -2194,8 +2538,9 @@ Description: {section_description}
                 feedback_items = quality_report.critical_issues + quality_report.improvements[:3]
                 quality_feedback = "Quality issues to address:\n" + "\n".join(f"- {item}" for item in feedback_items)
 
-                # Build regeneration prompt
+                # Build regeneration prompt (include language instruction!)
                 regen_prompt = f"""Revise this content to improve quality:
+{language_instruction}
 
 ORIGINAL CONTENT:
 {content}
@@ -2207,6 +2552,7 @@ REQUIREMENTS:
 - Address all the quality issues listed above
 - Keep the same topic and key information
 - Maintain the required format ({format_instructions[:200]}...)
+- CRITICAL: Keep the content in the SAME LANGUAGE as the original!
 
 Write the improved content:"""
 
@@ -2247,6 +2593,7 @@ Write the improved content:"""
                 section_title=section_title,
                 job=job,
                 format_instructions=format_instructions,
+                output_language=output_language,  # Pass language to prevent English reversion
             )
             # Merge critic metadata
             if critic_metadata:
@@ -2417,6 +2764,7 @@ Write the content ready for direct use in the document."""
         section_title: str,
         job: GenerationJob,
         format_instructions: str,
+        output_language: str = "en",
     ) -> tuple[str, dict]:
         """
         Use CriticAgent to review and auto-fix content issues.
@@ -2426,6 +2774,7 @@ Write the content ready for direct use in the document."""
             section_title: Title of the section being reviewed
             job: The generation job (for settings and context)
             format_instructions: Format-specific instructions for regeneration
+            output_language: Language code for output (en, de, es, auto, etc.)
 
         Returns:
             Tuple of (possibly improved content, metadata dict with review info)
@@ -2494,7 +2843,44 @@ Write the content ready for direct use in the document."""
                 # Build fix prompt with critic feedback
                 feedback_text = "\n".join(f"- {item}" for item in evaluation.improvements_needed[:5])
 
+                # Build language instruction for critic fix - use same strong instruction as main generation
+                critic_language_instruction = ""
+                if output_language == "auto":
+                    # Check for Hinglish markers in title
+                    title_lower = job.title.lower()
+                    hinglish_markers = ["ke", "ka", "ki", "hai", "ko", "se", "mein", "par", "aur", "liye", "kaise"]
+                    has_hinglish = any(marker in title_lower.split() for marker in hinglish_markers)
+
+                    if has_hinglish:
+                        critic_language_instruction = f"""
+---CRITICAL LANGUAGE REQUIREMENT---
+The document title "{job.title}" is in Hinglish.
+YOU MUST keep the improved content in Hinglish (Hindi+English mix, Roman script).
+DO NOT translate to pure English or German!
+Every sentence must be in Hinglish - no exceptions!
+---END LANGUAGE REQUIREMENT---
+"""
+                    else:
+                        critic_language_instruction = f"""
+---CRITICAL LANGUAGE REQUIREMENT---
+The document title is: "{job.title}"
+Keep the improved content in the EXACT SAME LANGUAGE as the original content.
+DO NOT translate to English or any other language!
+Maintain language consistency throughout.
+---END LANGUAGE REQUIREMENT---
+"""
+                elif output_language != "en":
+                    language_name = LANGUAGE_NAMES.get(output_language, "English")
+                    critic_language_instruction = f"""
+---CRITICAL LANGUAGE REQUIREMENT---
+Keep ALL content in {language_name}.
+DO NOT translate to English - maintain {language_name} throughout.
+Every sentence must be in {language_name} - no exceptions!
+---END LANGUAGE REQUIREMENT---
+"""
+
                 fix_prompt = f"""Improve this content based on the following feedback:
+{critic_language_instruction}
 
 ORIGINAL CONTENT:
 {content}
@@ -2509,6 +2895,7 @@ REQUIREMENTS:
 - Address all the quality issues listed above
 - Maintain the same topic and key information
 - Follow format requirements: {format_instructions[:300]}
+- CRITICAL: Keep the content in the SAME LANGUAGE as the original!
 
 Write the improved content:"""
 
@@ -2669,6 +3056,21 @@ Write the improved content:"""
 
             transition_duration = get_transition_duration()
 
+            def add_slide_notes(slide, notes_text: str):
+                """
+                Add speaker notes to a slide.
+
+                Args:
+                    slide: The slide to add notes to
+                    notes_text: The text to add as notes
+                """
+                try:
+                    notes_slide = slide.notes_slide
+                    notes_frame = notes_slide.notes_text_frame
+                    notes_frame.text = notes_text
+                except Exception as e:
+                    logger.warning(f"Failed to add slide notes: {e}")
+
             def add_slide_transition(slide, transition_type="fade", duration=500, speed="med"):
                 """
                 Add slide transition using XML manipulation.
@@ -2825,6 +3227,382 @@ Write the improved content:"""
                 tf.paragraphs[0].font.color.rgb = LIGHT_GRAY
                 tf.paragraphs[0].alignment = PP_ALIGN.RIGHT
 
+            # ========== THEME-AWARE STYLING FUNCTIONS ==========
+            # Get theme visual properties
+            slide_background_style = theme.get("slide_background", "solid")
+            header_style = theme.get("header_style", "none")
+            bullet_style = theme.get("bullet_style", "circle")
+            accent_position = theme.get("accent_position", "top")
+
+            # Bullet character mapping based on theme
+            BULLET_CHARS = {
+                "circle": ["•", "◦", "▪"],
+                "circle-filled": ["●", "○", "▪"],
+                "arrow": ["▸", "▹", "▫"],
+                "chevron": ["»", "›", "·"],
+                "dash": ["—", "-", "·"],
+                "square": ["■", "□", "▪"],
+                "number": None,  # Use numbering instead
+                "leaf": ["❧", "✿", "·"],
+            }
+
+            def get_bullet_chars():
+                """Get bullet characters based on theme."""
+                return BULLET_CHARS.get(bullet_style, BULLET_CHARS["circle"])
+
+            def apply_slide_background(slide, is_title_slide=False):
+                """Apply theme-specific background styling to slide."""
+                bg_style = slide_background_style
+
+                if bg_style == "solid" or bg_style == "white":
+                    # Solid color background (or white for minimalist)
+                    bg_shape = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, prs.slide_height
+                    )
+                    if bg_style == "white":
+                        bg_shape.fill.solid()
+                        bg_shape.fill.fore_color.rgb = RGBColor(255, 255, 255)
+                    else:
+                        bg_shape.fill.solid()
+                        if is_title_slide:
+                            bg_shape.fill.fore_color.rgb = PRIMARY_COLOR
+                        else:
+                            bg_shape.fill.fore_color.rgb = RGBColor(255, 255, 255)
+                    bg_shape.line.fill.background()
+                    return bg_shape
+
+                elif bg_style == "gradient" or bg_style == "warm-gradient":
+                    # Create gradient effect with two shapes
+                    # Top portion with primary color
+                    top_shape = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, Inches(3.75) if not is_title_slide else prs.slide_height
+                    )
+                    top_shape.fill.solid()
+                    top_shape.fill.fore_color.rgb = PRIMARY_COLOR if is_title_slide else SECONDARY_COLOR
+                    top_shape.line.fill.background()
+
+                    if not is_title_slide:
+                        # Bottom portion lighter
+                        bottom_shape = slide.shapes.add_shape(
+                            MSO_SHAPE.RECTANGLE,
+                            Inches(0), Inches(3.75),
+                            prs.slide_width, Inches(3.75)
+                        )
+                        bottom_shape.fill.solid()
+                        bottom_shape.fill.fore_color.rgb = RGBColor(250, 250, 250)
+                        bottom_shape.line.fill.background()
+                    return top_shape
+
+                elif bg_style == "gradient-multi":
+                    # Multi-color gradient for colorful theme
+                    top_shape = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, Inches(1.5) if not is_title_slide else Inches(3)
+                    )
+                    top_shape.fill.solid()
+                    top_shape.fill.fore_color.rgb = PRIMARY_COLOR
+                    top_shape.line.fill.background()
+
+                    if not is_title_slide:
+                        # Main content area white
+                        main_shape = slide.shapes.add_shape(
+                            MSO_SHAPE.RECTANGLE,
+                            Inches(0), Inches(1.5),
+                            prs.slide_width, Inches(6)
+                        )
+                        main_shape.fill.solid()
+                        main_shape.fill.fore_color.rgb = RGBColor(255, 255, 255)
+                        main_shape.line.fill.background()
+                    return top_shape
+
+                elif bg_style == "dark":
+                    # Dark mode background
+                    bg_shape = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, prs.slide_height
+                    )
+                    bg_shape.fill.solid()
+                    # Use a very dark color
+                    bg_shape.fill.fore_color.rgb = RGBColor(26, 26, 46)
+                    bg_shape.line.fill.background()
+                    return bg_shape
+
+                elif bg_style == "textured":
+                    # Textured look with subtle pattern
+                    bg_shape = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, prs.slide_height
+                    )
+                    bg_shape.fill.solid()
+                    bg_shape.fill.fore_color.rgb = ACCENT_COLOR if not is_title_slide else PRIMARY_COLOR
+                    bg_shape.line.fill.background()
+                    return bg_shape
+
+                else:
+                    # Default solid
+                    bg_shape = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, prs.slide_height
+                    )
+                    bg_shape.fill.solid()
+                    bg_shape.fill.fore_color.rgb = PRIMARY_COLOR if is_title_slide else RGBColor(255, 255, 255)
+                    bg_shape.line.fill.background()
+                    return bg_shape
+
+            def add_header_accent(slide, title_text=""):
+                """Add theme-specific header accent based on header_style."""
+                h_style = header_style
+
+                if h_style == "bar" or h_style == "colorblock":
+                    # Full-width colored bar at top
+                    bar = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, Inches(1.2)
+                    )
+                    bar.fill.solid()
+                    bar.fill.fore_color.rgb = PRIMARY_COLOR
+                    bar.line.fill.background()
+                    return bar
+
+                elif h_style == "underline":
+                    # Header bar + underline accent
+                    bar = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, Inches(1.2)
+                    )
+                    bar.fill.solid()
+                    bar.fill.fore_color.rgb = PRIMARY_COLOR
+                    bar.line.fill.background()
+
+                    # Add underline accent
+                    underline = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0.8), Inches(1.15),
+                        Inches(3), Inches(0.05)
+                    )
+                    underline.fill.solid()
+                    underline.fill.fore_color.rgb = SECONDARY_COLOR
+                    underline.line.fill.background()
+                    return bar
+
+                elif h_style == "glow":
+                    # Header with glow effect (gradient bar)
+                    bar = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, Inches(1.3)
+                    )
+                    bar.fill.solid()
+                    bar.fill.fore_color.rgb = PRIMARY_COLOR
+                    bar.line.fill.background()
+
+                    # Add subtle accent line
+                    glow_line = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(1.25),
+                        prs.slide_width, Inches(0.08)
+                    )
+                    glow_line.fill.solid()
+                    glow_line.fill.fore_color.rgb = ACCENT_COLOR
+                    glow_line.line.fill.background()
+                    return bar
+
+                elif h_style == "rounded":
+                    # Rounded header bar
+                    bar = slide.shapes.add_shape(
+                        MSO_SHAPE.ROUNDED_RECTANGLE,
+                        Inches(0.3), Inches(0.2),
+                        Inches(12.7), Inches(1.0)
+                    )
+                    bar.fill.solid()
+                    bar.fill.fore_color.rgb = PRIMARY_COLOR
+                    bar.line.fill.background()
+                    return bar
+
+                elif h_style == "serif" or h_style == "leaf":
+                    # Elegant header with accent
+                    bar = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, Inches(1.2)
+                    )
+                    bar.fill.solid()
+                    bar.fill.fore_color.rgb = PRIMARY_COLOR
+                    bar.line.fill.background()
+                    return bar
+
+                elif h_style == "none":
+                    # No header bar - just return None
+                    return None
+
+                else:
+                    # Default header bar
+                    bar = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, Inches(1.2)
+                    )
+                    bar.fill.solid()
+                    bar.fill.fore_color.rgb = PRIMARY_COLOR
+                    bar.line.fill.background()
+                    return bar
+
+            def add_accent_elements(slide, position="top"):
+                """Add decorative accent elements based on theme."""
+                pos = accent_position
+
+                if pos == "top":
+                    # Accent line at top
+                    accent = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, Inches(0.08)
+                    )
+                    accent.fill.solid()
+                    accent.fill.fore_color.rgb = SECONDARY_COLOR
+                    accent.line.fill.background()
+
+                elif pos == "bottom":
+                    # Accent line at bottom
+                    accent = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(7.42),
+                        prs.slide_width, Inches(0.08)
+                    )
+                    accent.fill.solid()
+                    accent.fill.fore_color.rgb = SECONDARY_COLOR
+                    accent.line.fill.background()
+
+                elif pos == "side":
+                    # Accent bar on left side
+                    accent = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        Inches(0.15), prs.slide_height
+                    )
+                    accent.fill.solid()
+                    accent.fill.fore_color.rgb = SECONDARY_COLOR
+                    accent.line.fill.background()
+
+                elif pos == "corner" or pos == "corners":
+                    # Corner accents
+                    # Top-left corner
+                    corner1 = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        Inches(0.5), Inches(0.08)
+                    )
+                    corner1.fill.solid()
+                    corner1.fill.fore_color.rgb = SECONDARY_COLOR
+                    corner1.line.fill.background()
+
+                    corner2 = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        Inches(0.08), Inches(0.5)
+                    )
+                    corner2.fill.solid()
+                    corner2.fill.fore_color.rgb = SECONDARY_COLOR
+                    corner2.line.fill.background()
+
+                elif pos == "diagonal":
+                    # Diagonal accent in corner
+                    accent = slide.shapes.add_shape(
+                        MSO_SHAPE.RIGHT_TRIANGLE,
+                        Inches(12), Inches(6),
+                        Inches(1.333), Inches(1.5)
+                    )
+                    accent.fill.solid()
+                    accent.fill.fore_color.rgb = SECONDARY_COLOR
+                    accent.line.fill.background()
+
+                elif pos == "border":
+                    # Full border accent
+                    # Top
+                    slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(0),
+                        prs.slide_width, Inches(0.05)
+                    ).fill.solid()
+                    # Bottom
+                    slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(7.45),
+                        prs.slide_width, Inches(0.05)
+                    ).fill.solid()
+
+                elif pos == "footer":
+                    # Footer accent bar
+                    accent = slide.shapes.add_shape(
+                        MSO_SHAPE.RECTANGLE,
+                        Inches(0), Inches(7.2),
+                        prs.slide_width, Inches(0.3)
+                    )
+                    accent.fill.solid()
+                    accent.fill.fore_color.rgb = PRIMARY_COLOR
+                    accent.line.fill.background()
+
+                # "none" position - no accent
+
+            def calculate_luminance(color: RGBColor) -> float:
+                """Calculate relative luminance of a color (0-1 scale)."""
+                # Convert to linear values
+                r = color[0] / 255.0
+                g = color[1] / 255.0
+                b = color[2] / 255.0
+
+                # Apply gamma correction
+                r = r / 12.92 if r <= 0.03928 else ((r + 0.055) / 1.055) ** 2.4
+                g = g / 12.92 if g <= 0.03928 else ((g + 0.055) / 1.055) ** 2.4
+                b = b / 12.92 if b <= 0.03928 else ((b + 0.055) / 1.055) ** 2.4
+
+                return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+            def get_contrast_ratio(color1: RGBColor, color2: RGBColor) -> float:
+                """Calculate WCAG contrast ratio between two colors."""
+                lum1 = calculate_luminance(color1)
+                lum2 = calculate_luminance(color2)
+                lighter = max(lum1, lum2)
+                darker = min(lum1, lum2)
+                return (lighter + 0.05) / (darker + 0.05)
+
+            def get_best_text_color(bg_color: RGBColor) -> RGBColor:
+                """Get text color with best contrast against background."""
+                white_contrast = get_contrast_ratio(bg_color, WHITE)
+                black_contrast = get_contrast_ratio(bg_color, RGBColor(0, 0, 0))
+
+                # WCAG AA requires 4.5:1 for normal text, 3:1 for large text
+                # Title text is large, so we use 3:1 minimum
+                if white_contrast >= black_contrast:
+                    return WHITE
+                else:
+                    return RGBColor(0, 0, 0)
+
+            def get_text_color_for_background(is_header=False, is_dark_bg=False, bg_color=None):
+                """Get appropriate text color based on background."""
+                if slide_background_style == "dark":
+                    return RGBColor(228, 228, 228)  # Light text for dark mode
+
+                # If background color provided, calculate best contrast
+                if bg_color is not None:
+                    return get_best_text_color(bg_color)
+
+                if is_header or is_dark_bg:
+                    # For title slide, check actual primary color luminance
+                    return get_best_text_color(PRIMARY_COLOR)
+                else:
+                    return TEXT_COLOR
+
             # Determine include_sources from job metadata or fall back to config
             include_sources_override = job.metadata.get("include_sources")
             if include_sources_override is not None:
@@ -2889,17 +3667,10 @@ Write the improved content:"""
             if enable_animations:
                 add_slide_transition(slide, "fade", duration=transition_duration, speed=animation_speed)
 
-            # Full background gradient effect
-            bg_shape = slide.shapes.add_shape(
-                MSO_SHAPE.RECTANGLE,
-                Inches(0), Inches(0),
-                prs.slide_width, prs.slide_height
-            )
-            bg_shape.fill.solid()
-            bg_shape.fill.fore_color.rgb = PRIMARY_COLOR
-            bg_shape.line.fill.background()
+            # Apply theme-specific background
+            apply_slide_background(slide, is_title_slide=True)
 
-            # Accent bar at bottom
+            # Accent bar at bottom (theme-aware)
             accent_bar = slide.shapes.add_shape(
                 MSO_SHAPE.RECTANGLE,
                 Inches(0), Inches(6.5),
@@ -2908,6 +3679,9 @@ Write the improved content:"""
             accent_bar.fill.solid()
             accent_bar.fill.fore_color.rgb = SECONDARY_COLOR
             accent_bar.line.fill.background()
+
+            # Title text color adapts to background
+            title_text_color = get_text_color_for_background(is_dark_bg=True)
 
             # Title text
             title_box = slide.shapes.add_textbox(
@@ -2921,7 +3695,7 @@ Write the improved content:"""
             p.font.name = heading_font
             p.font.size = Pt(48)
             p.font.bold = True
-            p.font.color.rgb = WHITE
+            p.font.color.rgb = title_text_color
 
             # Subtitle/description
             desc_box = slide.shapes.add_textbox(
@@ -2939,16 +3713,35 @@ Write the improved content:"""
 
             # Date
             from datetime import datetime
+            generation_date = datetime.now()
             date_box = slide.shapes.add_textbox(
                 Inches(0.8), Inches(6.7),
                 Inches(4), Inches(0.4)
             )
             tf = date_box.text_frame
             p = tf.paragraphs[0]
-            p.text = datetime.now().strftime("%B %d, %Y")
+            p.text = generation_date.strftime("%B %d, %Y")
             p.font.name = body_font
             p.font.size = Pt(14)
-            p.font.color.rgb = WHITE
+            p.font.color.rgb = title_text_color
+
+            # Add notes to title slide (always - contains generation info)
+            output_language = job.metadata.get("output_language", "en")
+            # Get user info - prefer email from metadata, fallback to job.user_id
+            user_info = job.metadata.get("user_email") or job.user_id
+            # Get LLM model - prefer from metadata (set during generation), fallback to config
+            llm_model = job.metadata.get("llm_model") or self.config.model
+            title_notes = f"""Generated by AIDocumentIndexer
+
+Model: {llm_model}
+User: {user_info}
+Date: {generation_date.strftime('%Y-%m-%d %H:%M')}
+Language: {output_language}
+Theme: {theme_key}
+Font: {font_family_key}
+Total sections: {len(job.sections)}
+"""
+            add_slide_notes(slide, title_notes)
 
             # ========== TABLE OF CONTENTS SLIDE ==========
             if self.config.include_toc:
@@ -2959,11 +3752,14 @@ Write the improved content:"""
                 if enable_animations:
                     add_slide_transition(slide, "push", duration=transition_duration, speed=animation_speed)
 
-                add_header_bar(slide)
+                # Apply theme-specific header accent
+                add_header_accent(slide, "Contents")
 
-                # TOC Title
+                # TOC Title - position depends on header style
+                title_y = Inches(0.3) if header_style != "none" else Inches(0.5)
+                title_color = WHITE if header_style != "none" else TEXT_COLOR
                 toc_title = slide.shapes.add_textbox(
-                    Inches(0.8), Inches(0.3),
+                    Inches(0.8), title_y,
                     Inches(8), Inches(0.8)
                 )
                 tf = toc_title.text_frame
@@ -2972,15 +3768,23 @@ Write the improved content:"""
                 p.font.name = heading_font
                 p.font.size = Pt(36)
                 p.font.bold = True
-                p.font.color.rgb = WHITE
+                p.font.color.rgb = title_color
 
-                # TOC items
+                # Add accent elements based on theme
+                if header_style == "none":
+                    add_accent_elements(slide)
+
+                # TOC items - get theme-specific bullet characters
+                toc_bullets = get_bullet_chars()
                 toc_box = slide.shapes.add_textbox(
                     Inches(0.8), Inches(1.8),
                     Inches(11), Inches(5)
                 )
                 tf = toc_box.text_frame
                 tf.word_wrap = True
+
+                # Determine text color based on background
+                content_text_color = get_text_color_for_background()
 
                 first_toc_used = False
                 for idx, section in enumerate(job.sections):
@@ -3000,7 +3804,7 @@ Write the improved content:"""
                         p.text = f"{idx + 1}.  {section_title}"
                     p.font.name = body_font
                     p.font.size = Pt(20)
-                    p.font.color.rgb = TEXT_COLOR
+                    p.font.color.rgb = content_text_color
                     p.space_after = Pt(12)
 
                 # Ensure first paragraph is initialized even if no sections
@@ -3016,6 +3820,9 @@ Write the improved content:"""
             # Transition types to cycle through for variety
             content_transitions = ["wipe", "fade", "push", "dissolve"]
 
+            # Get theme-specific bullet characters for content
+            content_bullets = get_bullet_chars()
+
             for section_idx, section in enumerate(job.sections):
                 current_slide += 1
                 slide = prs.slides.add_slide(prs.slide_layouts[6])
@@ -3025,14 +3832,17 @@ Write the improved content:"""
                     trans_type = content_transitions[section_idx % len(content_transitions)]
                     add_slide_transition(slide, trans_type, duration=transition_duration, speed=animation_speed)
 
-                add_header_bar(slide)
+                # Apply theme-specific header accent
+                add_header_accent(slide, section.title)
 
                 # Check if we have an image for this section
                 has_image = section_idx in section_images
 
-                # Section title
+                # Section title - position depends on header style
+                title_y = Inches(0.3) if header_style != "none" else Inches(0.5)
+                title_color = WHITE if header_style != "none" else TEXT_COLOR
                 section_title = slide.shapes.add_textbox(
-                    Inches(0.8), Inches(0.3),
+                    Inches(0.8), title_y,
                     Inches(11), Inches(0.8)
                 )
                 tf = section_title.text_frame
@@ -3041,7 +3851,11 @@ Write the improved content:"""
                 p.font.name = heading_font
                 p.font.size = Pt(32)
                 p.font.bold = True
-                p.font.color.rgb = WHITE
+                p.font.color.rgb = title_color
+
+                # Add accent elements for themes without header bar
+                if header_style == "none":
+                    add_accent_elements(slide)
 
                 # Adjust content area based on whether we have an image and layout
                 content = sanitize_text(section.revised_content or section.content) or ""
@@ -3246,16 +4060,19 @@ Write the improved content:"""
                     # Set paragraph level for hierarchy (0=main, 1=sub, 2=sub-sub, etc)
                     p.level = bullet_level
 
-                    # Explicitly add bullet characters since slide master may not have them configured
-                    # Different bullet styles per level for visual hierarchy
-                    bullet_chars = ['•', '◦', '▪', '‣']
-                    bullet_char = bullet_chars[min(bullet_level, len(bullet_chars) - 1)]
+                    # Use theme-specific bullet characters
+                    # content_bullets is from get_bullet_chars() which returns theme-appropriate chars
+                    theme_bullets = content_bullets if content_bullets else ['•', '◦', '▪']
+                    # Add fallback for deep nesting
+                    bullet_char = theme_bullets[min(bullet_level, len(theme_bullets) - 1)]
                     p.text = f"{bullet_char} {bullet_text}"
                     p.font.name = body_font
                     # Decrease font size slightly for nested levels
                     level_font_size = Pt(max(base_font_size.pt - (bullet_level * 2), 10))
                     p.font.size = level_font_size
-                    p.font.color.rgb = TEXT_COLOR
+                    # Use theme-aware text color
+                    content_text_color = get_text_color_for_background()
+                    p.font.color.rgb = content_text_color
                     p.space_after = line_spacing
 
                 # Ensure first paragraph is initialized even if content was empty
@@ -3307,6 +4124,94 @@ Write the improved content:"""
 
                 add_footer(slide, current_slide, total_slides)
 
+                # Add notes with optional summary and per-section sources
+                # Check if user enabled notes explanation (which includes summary/chain of thought)
+                include_notes_explanation = job.metadata.get("include_notes_explanation", False)
+
+                # Build notes - always include section title and sources
+                notes_parts = []
+                section_title = section.title or f"Section {section_idx + 1}"
+                notes_parts.append(f"SECTION: {section_title}")
+                notes_parts.append("")
+
+                logger.debug(
+                    "Building notes for section",
+                    section_idx=section_idx,
+                    section_title=section_title,
+                    include_notes_explanation=include_notes_explanation,
+                )
+
+                # Only add summary if include_notes_explanation is enabled
+                if include_notes_explanation:
+                    section_content_text = section.revised_content or section.content or ""
+
+                    # Extract first 2-3 sentences or first 300 chars for summary
+                    def extract_summary(text: str, max_chars: int = 300) -> str:
+                        """Extract a brief summary from content."""
+                        if not text:
+                            return ""
+                        # Remove bullet points and clean up
+                        clean_text = re.sub(r'^[•●○◆-]\s*', '', text, flags=re.MULTILINE)
+                        clean_text = clean_text.replace('\n', ' ').strip()
+                        # Get first few sentences
+                        sentences = re.split(r'(?<=[.!?])\s+', clean_text)
+                        summary = ""
+                        for sent in sentences[:3]:
+                            if len(summary) + len(sent) < max_chars:
+                                summary += sent + " "
+                            else:
+                                break
+                        return summary.strip() or clean_text[:max_chars] + "..."
+
+                    content_summary = extract_summary(section_content_text)
+                    if content_summary:
+                        notes_parts.append("SUMMARY:")
+                        notes_parts.append(content_summary)
+                        notes_parts.append("")
+
+                # Add sources
+                section_sources = section.sources or []
+                if section_sources:
+                    source_lines = []
+                    for s in section_sources[:5]:
+                        source_name = s.document_name or s.document_id
+                        if s.page_number:
+                            # Detect if source was a PPTX (slide) or other doc (page)
+                            if source_name.lower().endswith('.pptx'):
+                                source_lines.append(f"• {source_name} (Slide {s.page_number})")
+                            else:
+                                source_lines.append(f"• {source_name} (Page {s.page_number})")
+                        else:
+                            source_lines.append(f"• {source_name}")
+                    notes_parts.append("SOURCES:")
+                    notes_parts.extend(source_lines)
+                else:
+                    notes_parts.append("SOURCES: No specific sources for this section.")
+
+                section_notes = "\n".join(notes_parts)
+
+                # Add LLM explanation if enabled and available (reuse flag from above)
+                if include_notes_explanation:
+                    llm_reasoning = section.metadata.get("llm_reasoning") if section.metadata else None
+                    if llm_reasoning:
+                        section_notes += f"\n\nAI Explanation:\n{llm_reasoning}"
+
+                # Add metadata footer (user, model, date)
+                section_notes += "\n\n---"
+                if job.metadata.get("user_email"):
+                    section_notes += f"\nUser: {job.metadata.get('user_email')}"
+                section_notes += f"\nModel: {job.metadata.get('llm_model', 'N/A')}"
+                section_notes += f"\nGenerated: {job.created_at.strftime('%Y-%m-%d %H:%M') if job.created_at else 'N/A'}"
+                section_notes += f"\nSlide: {current_slide} / {total_slides}"
+
+                add_slide_notes(slide, section_notes)
+                logger.debug(
+                    "Added notes to slide",
+                    slide_number=current_slide,
+                    notes_length=len(section_notes),
+                    notes_preview=section_notes[:100] if section_notes else "EMPTY",
+                )
+
             # ========== SOURCES SLIDE ==========
             if not include_sources:
                 logger.warning(f"Sources slide SKIPPED - include_sources is False")
@@ -3320,11 +4225,14 @@ Write the improved content:"""
                 if enable_animations:
                     add_slide_transition(slide, "blinds", duration=transition_duration, speed=animation_speed)
 
-                add_header_bar(slide)
+                # Apply theme-specific header accent
+                add_header_accent(slide, "Sources & References")
 
-                # Sources title
+                # Sources title - position depends on header style
+                title_y = Inches(0.3) if header_style != "none" else Inches(0.5)
+                title_color = WHITE if header_style != "none" else TEXT_COLOR
                 sources_title = slide.shapes.add_textbox(
-                    Inches(0.8), Inches(0.3),
+                    Inches(0.8), title_y,
                     Inches(8), Inches(0.8)
                 )
                 tf = sources_title.text_frame
@@ -3333,7 +4241,11 @@ Write the improved content:"""
                 p.font.name = heading_font
                 p.font.size = Pt(32)
                 p.font.bold = True
-                p.font.color.rgb = WHITE
+                p.font.color.rgb = title_color
+
+                # Add accent elements for themes without header bar
+                if header_style == "none":
+                    add_accent_elements(slide)
 
                 # Sources list
                 sources_box = slide.shapes.add_textbox(
@@ -3343,6 +4255,11 @@ Write the improved content:"""
                 tf = sources_box.text_frame
                 tf.word_wrap = True
 
+                # Get theme-aware text color
+                sources_text_color = get_text_color_for_background()
+                # Get theme-specific bullet character
+                source_bullet = content_bullets[0] if content_bullets else "•"
+
                 first_source_used = False
                 for source in job.sources_used[:10]:
                     if first_source_used:
@@ -3351,10 +4268,17 @@ Write the improved content:"""
                         p = tf.paragraphs[0]
                         first_source_used = True
                     doc_name = sanitize_text(source.document_name or source.document_id[:20])
-                    p.text = f"•  {doc_name}"
+                    # Add page/slide number if available
+                    location_info = ""
+                    if source.page_number:
+                        if doc_name.lower().endswith('.pptx'):
+                            location_info = f" (Slide {source.page_number})"
+                        else:
+                            location_info = f" (Page {source.page_number})"
+                    p.text = f"{source_bullet}  {doc_name}{location_info}"
                     p.font.name = body_font
                     p.font.size = Pt(14)
-                    p.font.color.rgb = TEXT_COLOR
+                    p.font.color.rgb = sources_text_color
                     p.space_after = Pt(6)
 
                 # Ensure first paragraph is initialized even if no sources
@@ -3365,6 +4289,27 @@ Write the improved content:"""
                     p.font.size = Pt(14)
 
                 add_footer(slide, current_slide, total_slides)
+
+                # Add notes to sources slide with metadata
+                sources_notes_lines = [
+                    "Sources & References",
+                    "",
+                    f"Generated: {job.created_at.strftime('%Y-%m-%d %H:%M') if job.created_at else 'N/A'}",
+                    f"Model: {job.metadata.get('llm_model', 'N/A')}",
+                ]
+                if job.metadata.get("user_email"):
+                    sources_notes_lines.insert(2, f"User: {job.metadata.get('user_email')}")
+                sources_notes_lines.append("")
+                sources_notes_lines.append(f"Total sources referenced: {len(job.sources_used)}")
+                if job.sources_used:
+                    sources_notes_lines.append("")
+                    sources_notes_lines.append("Documents used:")
+                    for source in job.sources_used[:10]:
+                        doc_name = source.document_name or source.document_id[:20]
+                        sources_notes_lines.append(f"  - {doc_name}")
+                    if len(job.sources_used) > 10:
+                        sources_notes_lines.append(f"  ... and {len(job.sources_used) - 10} more")
+                add_slide_notes(slide, "\n".join(sources_notes_lines))
 
             output_path = os.path.join(self.config.output_dir, f"{filename}.pptx")
             prs.save(output_path)
@@ -3531,8 +4476,13 @@ Write the improved content:"""
                     num_run.font.bold = True
                     num_run.font.color.rgb = SECONDARY_COLOR
 
-                    # Section title
-                    title_run = toc_entry.add_run(section.title)
+                    # Section title - strip Roman numeral prefix to avoid double numbering
+                    section_title = section.title
+                    roman_pattern = r'^[IVXLCDM]+\.\s+'
+                    if re.match(roman_pattern, section_title):
+                        section_title = re.sub(roman_pattern, '', section_title)
+
+                    title_run = toc_entry.add_run(section_title)
                     title_run.font.name = body_font
                     title_run.font.size = Pt(12)
                     title_run.font.color.rgb = TEXT_COLOR
@@ -3651,7 +4601,15 @@ Write the improved content:"""
                     for source in section.sources[:3]:
                         src_para = doc.add_paragraph()
                         src_para.paragraph_format.left_indent = Inches(0.25)
-                        src_run = src_para.add_run(f"• {source.document_name or source.document_id}")
+                        # Add page/slide number if available
+                        doc_name = source.document_name or source.document_id
+                        location_info = ""
+                        if source.page_number:
+                            if doc_name.lower().endswith('.pptx'):
+                                location_info = f" (Slide {source.page_number})"
+                            else:
+                                location_info = f" (Page {source.page_number})"
+                        src_run = src_para.add_run(f"• {doc_name}{location_info}")
                         src_run.font.name = body_font
                         src_run.font.size = Pt(9)
                         src_run.font.color.rgb = LIGHT_GRAY
@@ -3673,7 +4631,15 @@ Write the improved content:"""
                 for source in job.sources_used:
                     ref_para = doc.add_paragraph()
                     ref_para.paragraph_format.space_after = Pt(4)
-                    ref_run = ref_para.add_run(f"• {source.document_name or source.document_id}")
+                    # Add page/slide number if available
+                    doc_name = source.document_name or source.document_id
+                    location_info = ""
+                    if source.page_number:
+                        if doc_name.lower().endswith('.pptx'):
+                            location_info = f" (Slide {source.page_number})"
+                        else:
+                            location_info = f" (Page {source.page_number})"
+                    ref_run = ref_para.add_run(f"• {doc_name}{location_info}")
                     ref_run.font.name = body_font
                     ref_run.font.size = Pt(10)
                     ref_run.font.color.rgb = TEXT_COLOR
@@ -3959,7 +4925,13 @@ Write the improved content:"""
                 story.append(Spacer(1, 0.3*inch))
 
                 for idx, section in enumerate(job.sections):
-                    toc_entry = f"<b><font color='#3D5A80'>{idx + 1}.</font></b>  {section.title}"
+                    # Strip Roman numeral prefix to avoid double numbering
+                    section_title = section.title
+                    roman_pattern = r'^[IVXLCDM]+\.\s+'
+                    if re.match(roman_pattern, section_title):
+                        section_title = re.sub(roman_pattern, '', section_title)
+
+                    toc_entry = f"<b><font color='#3D5A80'>{idx + 1}.</font></b>  {section_title}"
                     story.append(Paragraph(toc_entry, toc_style))
 
                 story.append(PageBreak())
@@ -4073,7 +5045,14 @@ Write the improved content:"""
                     story.append(Paragraph("Sources for this section:", source_style))
                     for source in section.sources[:3]:
                         doc_name = source.document_name or source.document_id
-                        story.append(Paragraph(f"• {doc_name}", source_style))
+                        # Add page/slide number if available
+                        location_info = ""
+                        if source.page_number:
+                            if doc_name.lower().endswith('.pptx'):
+                                location_info = f" (Slide {source.page_number})"
+                            else:
+                                location_info = f" (Page {source.page_number})"
+                        story.append(Paragraph(f"• {doc_name}{location_info}", source_style))
 
                 # Add page break after each section (except the last one)
                 if idx < len(job.sections) - 1:
@@ -4089,6 +5068,13 @@ Write the improved content:"""
 
                 for source in job.sources_used:
                     doc_name = source.document_name or source.document_id
+                    # Add page/slide number if available
+                    location_info = ""
+                    if source.page_number:
+                        if doc_name.lower().endswith('.pptx'):
+                            location_info = f" (Slide {source.page_number})"
+                        else:
+                            location_info = f" (Page {source.page_number})"
                     ref_style = ParagraphStyle(
                         'RefStyle',
                         parent=styles['Normal'],
@@ -4099,7 +5085,7 @@ Write the improved content:"""
                         leftIndent=15,
                         fontName=body_font,
                     )
-                    story.append(Paragraph(f"• {doc_name}", ref_style))
+                    story.append(Paragraph(f"• {doc_name}{location_info}", ref_style))
 
             # Build PDF with page numbers
             doc.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
@@ -4148,7 +5134,15 @@ Write the improved content:"""
             if include_sources and section.sources:
                 lines.append("**Sources:**")
                 for source in section.sources[:3]:
-                    lines.append(f"- {source.document_name or source.document_id}")
+                    doc_name = source.document_name or source.document_id
+                    # Add page/slide number if available
+                    location_info = ""
+                    if source.page_number:
+                        if doc_name.lower().endswith('.pptx'):
+                            location_info = f" (Slide {source.page_number})"
+                        else:
+                            location_info = f" (Page {source.page_number})"
+                    lines.append(f"- {doc_name}{location_info}")
                 lines.append("")
 
         # References
@@ -4156,7 +5150,15 @@ Write the improved content:"""
             lines.append("## References")
             lines.append("")
             for source in job.sources_used:
-                lines.append(f"- {source.document_name or source.document_id}")
+                doc_name = source.document_name or source.document_id
+                # Add page/slide number if available
+                location_info = ""
+                if source.page_number:
+                    if doc_name.lower().endswith('.pptx'):
+                        location_info = f" (Slide {source.page_number})"
+                    else:
+                        location_info = f" (Page {source.page_number})"
+                lines.append(f"- {doc_name}{location_info}")
 
         output_path = os.path.join(self.config.output_dir, f"{filename}.md")
         with open(output_path, "w") as f:
@@ -4217,7 +5219,18 @@ Write the improved content:"""
 """
             if include_sources and section.sources:
                 html += '        <div class="sources">Sources: '
-                html += ", ".join(s.document_name or s.document_id for s in section.sources[:3])
+                source_items = []
+                for s in section.sources[:3]:
+                    doc_name = s.document_name or s.document_id
+                    # Add page/slide number if available
+                    if s.page_number:
+                        if doc_name.lower().endswith('.pptx'):
+                            source_items.append(f"{doc_name} (Slide {s.page_number})")
+                        else:
+                            source_items.append(f"{doc_name} (Page {s.page_number})")
+                    else:
+                        source_items.append(doc_name)
+                html += ", ".join(source_items)
                 html += "</div>\n"
 
             html += "    </div>\n"
@@ -4232,7 +5245,14 @@ Write the improved content:"""
                 doc_name = source.document_name or source.document_id
                 if doc_name and doc_name not in seen_docs:
                     seen_docs.add(doc_name)
-                    html += f"            <li>{doc_name}</li>\n"
+                    # Add page/slide number if available
+                    location_info = ""
+                    if source.page_number:
+                        if doc_name.lower().endswith('.pptx'):
+                            location_info = f" (Slide {source.page_number})"
+                        else:
+                            location_info = f" (Page {source.page_number})"
+                    html += f"            <li>{doc_name}{location_info}</li>\n"
             html += "        </ul>\n"
             html += "    </div>\n"
 
@@ -4363,7 +5383,7 @@ Write the improved content:"""
                 ws_sources = wb.create_sheet("Sources")
 
                 # Headers
-                source_headers = ["#", "Document Name", "Page", "Relevance", "Snippet"]
+                source_headers = ["#", "Document Name", "Location", "Relevance", "Snippet"]
                 for col, header in enumerate(source_headers, start=1):
                     cell = ws_sources.cell(row=1, column=col, value=header)
                     cell.font = header_font
@@ -4375,7 +5395,13 @@ Write the improved content:"""
                 for i, source in enumerate(job.sources_used, start=2):
                     ws_sources.cell(row=i, column=1, value=i-1).border = thin_border
                     ws_sources.cell(row=i, column=2, value=source.document_name).border = thin_border
-                    ws_sources.cell(row=i, column=3, value=source.page_number or "N/A").border = thin_border
+                    # Show Page or Slide based on document type
+                    doc_name = source.document_name or ""
+                    if source.page_number:
+                        location_label = f"Slide {source.page_number}" if doc_name.lower().endswith('.pptx') else f"Page {source.page_number}"
+                    else:
+                        location_label = "N/A"
+                    ws_sources.cell(row=i, column=3, value=location_label).border = thin_border
                     ws_sources.cell(row=i, column=4, value=f"{source.relevance_score:.2f}").border = thin_border
                     ws_sources.cell(row=i, column=5, value=source.snippet[:200] + "..." if len(source.snippet) > 200 else source.snippet).border = thin_border
                     ws_sources.cell(row=i, column=5).alignment = cell_alignment

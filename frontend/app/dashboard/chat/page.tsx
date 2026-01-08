@@ -35,6 +35,7 @@ import {
   Filter,
   Mic,
   Upload,
+  Globe,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -76,6 +77,13 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CostApprovalDialog } from "@/components/cost-approval-dialog";
@@ -89,6 +97,7 @@ import { VoiceConversationIndicator, type VoiceState } from "@/components/chat/v
 import { TempDocumentPanel } from "@/components/chat/temp-document-panel";
 import { ImageUploadCompact, ImagePreviewBar } from "@/components/chat/image-upload";
 import { FolderSelector } from "@/components/folder-selector";
+import { QueryEnhancementToggle } from "@/components/chat/query-enhancement-toggle";
 import { api, type PlanStep, type ExecutionMode } from "@/lib/api/client";
 
 /**
@@ -162,6 +171,25 @@ function highlightQueryTerms(text: string, query?: string): React.ReactNode {
     return text;
   }
 }
+
+// Language options for chat output
+const CHAT_LANGUAGES = [
+  { code: "auto", name: "Auto (match question)" },
+  { code: "en", name: "English" },
+  { code: "de", name: "German" },
+  { code: "es", name: "Spanish" },
+  { code: "fr", name: "French" },
+  { code: "it", name: "Italian" },
+  { code: "pt", name: "Portuguese" },
+  { code: "nl", name: "Dutch" },
+  { code: "pl", name: "Polish" },
+  { code: "ru", name: "Russian" },
+  { code: "zh", name: "Chinese" },
+  { code: "ja", name: "Japanese" },
+  { code: "ko", name: "Korean" },
+  { code: "ar", name: "Arabic" },
+  { code: "hi", name: "Hindi" },
+];
 
 // Temp document interface matching backend response
 interface TempDocument {
@@ -280,6 +308,10 @@ export default function ChatPage() {
   const [isTempUploading, setIsTempUploading] = useState(false);
   // Documents to search (per-query override, null = use admin setting)
   const [topK, setTopK] = useState<number | null>(null);
+  // Output language for chat responses
+  const [outputLanguage, setOutputLanguage] = useState<string>("auto");
+  // Query enhancement toggle (expansion + HyDE)
+  const [enhanceQuery, setEnhanceQuery] = useState<boolean | null>(null);
   // Image attachments for vision mode
   const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -378,6 +410,20 @@ export default function ChatPage() {
       setTemperature(sessionLLMConfig.temperature);
     }
   }, [sessionLLMConfig?.temperature]);
+
+  // Load query enhancement preference from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem("chat_enhance_query");
+    if (saved !== null) {
+      setEnhanceQuery(JSON.parse(saved));
+    }
+  }, []);
+
+  // Handler for query enhancement toggle
+  const handleEnhanceQueryChange = (enabled: boolean) => {
+    setEnhanceQuery(enabled);
+    localStorage.setItem("chat_enhance_query", JSON.stringify(enabled));
+  };
 
   // Helper to get temperature description
   const getTemperatureLabel = (temp: number) => {
@@ -635,6 +681,8 @@ export default function ChatPage() {
           folder_id: selectedFolderId || undefined,
           include_subfolders: includeSubfolders,
           top_k: topK || undefined,
+          language: outputLanguage, // Output language for response
+          enhance_query: enhanceQuery ?? undefined, // Per-query enhancement override
         })) {
           switch (chunk.type) {
             case "session":
@@ -895,6 +943,8 @@ export default function ChatPage() {
           include_subfolders: includeSubfolders,
           temp_session_id: tempSessionId || undefined,
           top_k: topK || undefined,
+          language: outputLanguage, // Output language for response
+          enhance_query: enhanceQuery ?? undefined, // Per-query enhancement override
         };
 
         // Add images if present
@@ -1188,6 +1238,31 @@ export default function ChatPage() {
                 </div>
               </PopoverContent>
             </Popover>
+
+            {/* Query Enhancement Toggle (popover variant) */}
+            {sourceMode === "documents" && (
+              <QueryEnhancementToggle
+                enabled={enhanceQuery ?? true}
+                onChange={handleEnhanceQueryChange}
+                variant="popover"
+                disabled={isLoading}
+              />
+            )}
+
+            {/* Output Language Selector - BEFORE Voice for visibility */}
+            <Select value={outputLanguage} onValueChange={setOutputLanguage}>
+              <SelectTrigger className="w-[100px] h-8 text-xs">
+                <Globe className="h-3 w-3 mr-1 flex-shrink-0" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CHAT_LANGUAGES.map((lang) => (
+                  <SelectItem key={lang.code} value={lang.code}>
+                    {lang.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
 
             {/* Voice Mode Toggle */}
             <Button
@@ -1941,6 +2016,16 @@ export default function ChatPage() {
                   </Badge>
                 )}
               </Button>
+
+              {/* Query Enhancement Toggle - Only for documents mode */}
+              {sourceMode === "documents" && (
+                <QueryEnhancementToggle
+                  enabled={enhanceQuery ?? true}
+                  onChange={handleEnhanceQueryChange}
+                  variant="inline"
+                  disabled={isLoading}
+                />
+              )}
             </div>
 
             {/* Voice Conversation Indicator */}

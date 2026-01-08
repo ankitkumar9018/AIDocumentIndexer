@@ -200,6 +200,7 @@ Available worker agents:
 - critic: Evaluates quality and provides feedback
 - research: Searches user's uploaded documents and retrieves information (HAS document access via RAG)
 - tool: Executes file operations (generate PPTX, DOCX, PDF)
+- validator: Cross-validates generated content against source documents to detect hallucinations
 
 Guidelines:
 - ALWAYS use "research" first when user mentions: documents, docs, files, list, find, search, uploaded, "in my", "from my"
@@ -255,18 +256,21 @@ class ManagerAgent(BaseAgent):
             ("research", "Gather relevant information"),
             ("generator", "Create outline"),
             ("generator", "Draft content"),
+            ("validator", "Validate content against sources"),
             ("critic", "Review and score"),
             ("generator", "Revise based on feedback"),
         ],
         "qa_with_citations": [
             ("research", "Retrieve relevant context"),
             ("generator", "Synthesize answer"),
+            ("validator", "Verify answer against sources"),
             ("research", "Find supporting citations"),
             ("critic", "Verify accuracy"),
         ],
         "analysis": [
             ("research", "Gather data"),
             ("generator", "Analyze findings"),
+            ("validator", "Validate analysis against sources"),
             ("critic", "Evaluate analysis"),
             ("generator", "Summarize conclusions"),
         ],
@@ -274,6 +278,7 @@ class ManagerAgent(BaseAgent):
             ("research", "Research item A"),
             ("research", "Research item B"),
             ("generator", "Compare and contrast"),
+            ("validator", "Validate comparison against sources"),
             ("critic", "Verify accuracy of comparison"),
         ],
         "research": [
@@ -362,10 +367,14 @@ class ManagerAgent(BaseAgent):
             context_parts.append(f"Prior conversation context available")
         context_str = "\n".join(context_parts) if context_parts else ""
 
-        # Build messages for LLM
+        # Get language from context (defaults to English)
+        language = context.get("language", "en")
+
+        # Build messages for LLM with language support
         messages = self.prompt_template.build_messages(
             task=user_request,
             context=context_str,
+            language=language,
         )
 
         # Invoke LLM to create plan
@@ -633,127 +642,266 @@ class ManagerAgent(BaseAgent):
                     plan.error_message = "Plan execution stuck"
                     break
 
-            # Execute ready steps (could parallelize non-dependent steps)
-            for step in ready_steps:
-                yield {
-                    "type": "step_started",
-                    "step_id": step.id,
-                    "step_name": step.task.name,
-                    "agent_type": step.agent_type,
-                    "progress": plan.progress_percentage,
-                }
+            # Execute ready steps in PARALLEL if multiple are ready
+            # This improves performance when steps don't depend on each other
+            if len(ready_steps) > 1:
+                logger.info(
+                    "Executing steps in parallel",
+                    parallel_steps=len(ready_steps),
+                    step_names=[s.task.name for s in ready_steps],
+                )
 
-                step.status = TaskStatus.IN_PROGRESS
-                step.started_at = datetime.utcnow()
-
-                try:
-                    # Build step context from dependencies
-                    step_context = dict(context)
-                    step_context["dependency_results"] = {
-                        dep_id: step_results[dep_id].output
-                        for dep_id in step.dependencies
-                        if dep_id in step_results
-                    }
-
-                    # Execute step
-                    step_start_time = time.time()
-                    result = await self._execute_step(step, step_context)
-                    step.result = result
-                    step_results[step.id] = result
-
-                    # Record trajectory for this step
-                    step_trajectory = getattr(result, 'trajectory_steps', None) or []
-                    if step_trajectory and self.trajectory_collector:
-                        try:
-                            await self.trajectory_collector.record_trajectory_by_type(
-                                session_id=context.get("session_id", plan.session_id),
-                                agent_type=step.agent_type,
-                                task_type=step.task.type.value,
-                                input_summary=step.task.description[:500] if step.task.description else step.task.name,
-                                steps=step_trajectory,
-                                success=result.status == TaskStatus.COMPLETED,
-                                quality_score=result.confidence_score,
-                                error_message=result.error_message,
-                                total_tokens=result.tokens_used or 0,
-                                total_duration_ms=int((time.time() - step_start_time) * 1000),
-                                total_cost_usd=getattr(result, 'cost_usd', 0.0) or 0.0,
-                            )
-                        except Exception as traj_err:
-                            logger.warning(f"Failed to record step trajectory: {traj_err}")
-
-                    if result.is_success:
-                        step.status = TaskStatus.COMPLETED
-                        step.actual_cost_usd = self._estimate_step_cost(result)
-                        plan.total_actual_cost_usd += step.actual_cost_usd
-
-                        # Prepare full output for step display
-                        full_output = None
-                        if result.output:
-                            if isinstance(result.output, dict):
-                                # Research agent returns {"findings": ..., "sources": ...}
-                                full_output = result.output.get("findings", str(result.output))
-                            else:
-                                full_output = str(result.output)
-
-                        yield {
-                            "type": "step_completed",
-                            "step_id": step.id,
-                            "step_index": plan.current_step_index,
-                            "step_name": step.task.name,
-                            "agent_type": step.agent_type,
-                            "status": "success",
-                            "output_preview": full_output[:200] if full_output else None,
-                            "full_output": full_output,  # Full output for detailed view
-                            "progress": plan.progress_percentage,
-                        }
-
-                        # Stream step output as content for real-time display
-                        if result.output:
-                            output_text = result.output
-                            if isinstance(result.output, dict):
-                                # Research agent returns {"findings": ..., "sources": ...}
-                                output_text = result.output.get("findings", str(result.output))
-
-                                # Emit sources if this was a research step with document sources
-                                sources = result.output.get("sources", [])
-                                if sources and isinstance(sources, list) and len(sources) > 0:
-                                    # Only emit if sources have actual document data (not just strings)
-                                    if isinstance(sources[0], dict) and "content" in sources[0]:
-                                        yield {
-                                            "type": "sources",
-                                            "data": sources
-                                        }
-                            yield {
-                                "type": "content",
-                                "data": f"**{step.task.name}**\n\n{output_text}\n\n---\n\n"
-                            }
-                    else:
-                        # Handle failure based on strategy
-                        recovery = await self._handle_step_failure(
-                            step, result, plan, context
-                        )
-                        yield recovery
-
-                except Exception as e:
-                    logger.error(f"Step execution error: {e}", exc_info=True)
-                    step.status = TaskStatus.FAILED
-                    step.result = AgentResult(
-                        task_id=step.task.id,
-                        agent_id=self.agent_id,
-                        status=TaskStatus.FAILED,
-                        output=None,
-                        error_message=str(e),
-                    )
-
+                # Emit step_started for all parallel steps
+                for step in ready_steps:
                     yield {
-                        "type": "step_failed",
+                        "type": "step_started",
                         "step_id": step.id,
                         "step_name": step.task.name,
-                        "error": str(e),
+                        "agent_type": step.agent_type,
+                        "progress": plan.progress_percentage,
+                        "parallel": True,
+                    }
+                    step.status = TaskStatus.IN_PROGRESS
+                    step.started_at = datetime.utcnow()
+
+                # Execute all ready steps in parallel
+                import asyncio
+
+                async def execute_step_parallel(step: PlanStep) -> tuple:
+                    """Execute a single step and return (step, result, error)."""
+                    step_start_time = time.time()
+                    try:
+                        step_context = dict(context)
+                        step_context["dependency_results"] = {
+                            dep_id: step_results[dep_id].output
+                            for dep_id in step.dependencies
+                            if dep_id in step_results
+                        }
+                        result = await self._execute_step(step, step_context)
+                        return (step, result, None, step_start_time)
+                    except Exception as e:
+                        return (step, None, e, step_start_time)
+
+                # Run all steps in parallel
+                parallel_results = await asyncio.gather(
+                    *[execute_step_parallel(step) for step in ready_steps],
+                    return_exceptions=True,
+                )
+
+                # Process results from parallel execution
+                for parallel_result in parallel_results:
+                    if isinstance(parallel_result, Exception):
+                        logger.error(f"Parallel step failed with exception: {parallel_result}")
+                        continue
+
+                    step, result, error, step_start_time = parallel_result
+
+                    if error:
+                        logger.error(f"Step execution error: {error}", exc_info=True)
+                        step.status = TaskStatus.FAILED
+                        step.result = AgentResult(
+                            task_id=step.task.id,
+                            agent_id=self.agent_id,
+                            status=TaskStatus.FAILED,
+                            output=None,
+                            error_message=str(error),
+                        )
+                        yield {
+                            "type": "step_failed",
+                            "step_id": step.id,
+                            "step_name": step.task.name,
+                            "error": str(error),
+                        }
+                    else:
+                        step.result = result
+                        step_results[step.id] = result
+
+                        # Record trajectory
+                        step_trajectory = getattr(result, 'trajectory_steps', None) or []
+                        if step_trajectory and self.trajectory_collector:
+                            try:
+                                await self.trajectory_collector.record_trajectory_by_type(
+                                    session_id=context.get("session_id", plan.session_id),
+                                    agent_type=step.agent_type,
+                                    task_type=step.task.type.value,
+                                    input_summary=step.task.description[:500] if step.task.description else step.task.name,
+                                    steps=step_trajectory,
+                                    success=result.status == TaskStatus.COMPLETED,
+                                    quality_score=result.confidence_score,
+                                    error_message=result.error_message,
+                                    total_tokens=result.tokens_used or 0,
+                                    total_duration_ms=int((time.time() - step_start_time) * 1000),
+                                    total_cost_usd=getattr(result, 'cost_usd', 0.0) or 0.0,
+                                )
+                            except Exception as traj_err:
+                                logger.warning(f"Failed to record step trajectory: {traj_err}")
+
+                        if result.is_success:
+                            step.status = TaskStatus.COMPLETED
+                            step.actual_cost_usd = self._estimate_step_cost(result)
+                            plan.total_actual_cost_usd += step.actual_cost_usd
+
+                            full_output = None
+                            if result.output:
+                                if isinstance(result.output, dict):
+                                    full_output = result.output.get("findings", str(result.output))
+                                else:
+                                    full_output = str(result.output)
+
+                            yield {
+                                "type": "step_completed",
+                                "step_id": step.id,
+                                "step_index": plan.current_step_index,
+                                "step_name": step.task.name,
+                                "agent_type": step.agent_type,
+                                "status": "success",
+                                "output_preview": full_output[:200] if full_output else None,
+                                "full_output": full_output,
+                                "progress": plan.progress_percentage,
+                                "parallel": True,
+                            }
+
+                            if result.output:
+                                output_text = result.output
+                                if isinstance(result.output, dict):
+                                    output_text = result.output.get("findings", str(result.output))
+                                    sources = result.output.get("sources", [])
+                                    if sources and isinstance(sources, list) and len(sources) > 0:
+                                        if isinstance(sources[0], dict) and "content" in sources[0]:
+                                            yield {"type": "sources", "data": sources}
+                                yield {
+                                    "type": "content",
+                                    "data": f"**{step.task.name}**\n\n{output_text}\n\n---\n\n"
+                                }
+                        else:
+                            recovery = await self._handle_step_failure(step, result, plan, context)
+                            yield recovery
+
+                    step.completed_at = datetime.utcnow()
+                    plan.current_step_index += 1
+
+            else:
+                # Single step - execute sequentially (original behavior)
+                for step in ready_steps:
+                    yield {
+                        "type": "step_started",
+                        "step_id": step.id,
+                        "step_name": step.task.name,
+                        "agent_type": step.agent_type,
+                        "progress": plan.progress_percentage,
                     }
 
-                step.completed_at = datetime.utcnow()
-                plan.current_step_index += 1
+                    step.status = TaskStatus.IN_PROGRESS
+                    step.started_at = datetime.utcnow()
+
+                    try:
+                        # Build step context from dependencies
+                        step_context = dict(context)
+                        step_context["dependency_results"] = {
+                            dep_id: step_results[dep_id].output
+                            for dep_id in step.dependencies
+                            if dep_id in step_results
+                        }
+
+                        # Execute step
+                        step_start_time = time.time()
+                        result = await self._execute_step(step, step_context)
+                        step.result = result
+                        step_results[step.id] = result
+
+                        # Record trajectory for this step
+                        step_trajectory = getattr(result, 'trajectory_steps', None) or []
+                        if step_trajectory and self.trajectory_collector:
+                            try:
+                                await self.trajectory_collector.record_trajectory_by_type(
+                                    session_id=context.get("session_id", plan.session_id),
+                                    agent_type=step.agent_type,
+                                    task_type=step.task.type.value,
+                                    input_summary=step.task.description[:500] if step.task.description else step.task.name,
+                                    steps=step_trajectory,
+                                    success=result.status == TaskStatus.COMPLETED,
+                                    quality_score=result.confidence_score,
+                                    error_message=result.error_message,
+                                    total_tokens=result.tokens_used or 0,
+                                    total_duration_ms=int((time.time() - step_start_time) * 1000),
+                                    total_cost_usd=getattr(result, 'cost_usd', 0.0) or 0.0,
+                                )
+                            except Exception as traj_err:
+                                logger.warning(f"Failed to record step trajectory: {traj_err}")
+
+                        if result.is_success:
+                            step.status = TaskStatus.COMPLETED
+                            step.actual_cost_usd = self._estimate_step_cost(result)
+                            plan.total_actual_cost_usd += step.actual_cost_usd
+
+                            # Prepare full output for step display
+                            full_output = None
+                            if result.output:
+                                if isinstance(result.output, dict):
+                                    # Research agent returns {"findings": ..., "sources": ...}
+                                    full_output = result.output.get("findings", str(result.output))
+                                else:
+                                    full_output = str(result.output)
+
+                            yield {
+                                "type": "step_completed",
+                                "step_id": step.id,
+                                "step_index": plan.current_step_index,
+                                "step_name": step.task.name,
+                                "agent_type": step.agent_type,
+                                "status": "success",
+                                "output_preview": full_output[:200] if full_output else None,
+                                "full_output": full_output,  # Full output for detailed view
+                                "progress": plan.progress_percentage,
+                            }
+
+                            # Stream step output as content for real-time display
+                            if result.output:
+                                output_text = result.output
+                                if isinstance(result.output, dict):
+                                    # Research agent returns {"findings": ..., "sources": ...}
+                                    output_text = result.output.get("findings", str(result.output))
+
+                                    # Emit sources if this was a research step with document sources
+                                    sources = result.output.get("sources", [])
+                                    if sources and isinstance(sources, list) and len(sources) > 0:
+                                        # Only emit if sources have actual document data (not just strings)
+                                        if isinstance(sources[0], dict) and "content" in sources[0]:
+                                            yield {
+                                                "type": "sources",
+                                                "data": sources
+                                            }
+                                yield {
+                                    "type": "content",
+                                    "data": f"**{step.task.name}**\n\n{output_text}\n\n---\n\n"
+                                }
+                        else:
+                            # Handle failure based on strategy
+                            recovery = await self._handle_step_failure(
+                                step, result, plan, context
+                            )
+                            yield recovery
+
+                    except Exception as e:
+                        logger.error(f"Step execution error: {e}", exc_info=True)
+                        step.status = TaskStatus.FAILED
+                        step.result = AgentResult(
+                            task_id=step.task.id,
+                            agent_id=self.agent_id,
+                            status=TaskStatus.FAILED,
+                            output=None,
+                            error_message=str(e),
+                        )
+
+                        yield {
+                            "type": "step_failed",
+                            "step_id": step.id,
+                            "step_name": step.task.name,
+                            "error": str(e),
+                        }
+
+                    step.completed_at = datetime.utcnow()
+                    plan.current_step_index += 1
 
         # Plan completed
         plan.completed_at = datetime.utcnow()
@@ -1007,3 +1155,172 @@ Do not just summarize the research - provide the requested deliverable."""
             error_message=plan.error_message,
             trajectory_steps=self._current_trajectory,
         )
+
+    async def execute_with_streaming(
+        self,
+        user_request: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Execute a user request with enhanced streaming support.
+
+        Provides real-time progress updates including:
+        - Plan creation progress
+        - Step execution status
+        - Content chunks as they're generated
+        - Source references
+        - Final synthesis
+
+        This is ideal for frontend integrations that need real-time feedback.
+
+        Args:
+            user_request: The user's request to process
+            session_id: Optional session ID
+            user_id: Optional user ID
+            context: Additional context
+
+        Yields:
+            Streaming events with types:
+            - "planning": Plan is being created
+            - "plan_ready": Plan created with step overview
+            - "step_started": Step execution began
+            - "step_progress": Intermediate progress (0-100%)
+            - "content_chunk": Partial content as it's generated
+            - "step_completed": Step finished successfully
+            - "step_failed": Step failed with error
+            - "sources": Document sources used
+            - "synthesis_started": Final synthesis in progress
+            - "complete": Final result ready
+            - "error": Execution error
+        """
+        context = context or {}
+        session_id = session_id or str(uuid.uuid4())
+        user_id = user_id or str(uuid.uuid4())
+
+        try:
+            # Emit planning start
+            yield {
+                "type": "planning",
+                "message": "Analyzing request and creating execution plan...",
+            }
+
+            # Create plan
+            plan = await self.plan_execution(
+                user_request=user_request,
+                session_id=session_id,
+                user_id=user_id,
+                context=context,
+            )
+
+            # Emit plan ready with overview
+            yield {
+                "type": "plan_ready",
+                "plan_id": plan.id,
+                "total_steps": len(plan.steps),
+                "steps": [
+                    {
+                        "id": step.id,
+                        "name": step.task.name,
+                        "agent_type": step.agent_type,
+                        "dependencies": step.dependencies,
+                    }
+                    for step in plan.steps
+                ],
+                "estimated_cost_usd": plan.total_estimated_cost_usd,
+            }
+
+            # Execute plan with streaming updates
+            async for update in self.execute_plan(plan, context):
+                event_type = update.get("type", "unknown")
+
+                # Transform standard events to enhanced streaming format
+                if event_type == "step_started":
+                    yield {
+                        "type": "step_started",
+                        "step_id": update.get("step_id"),
+                        "step_name": update.get("step_name"),
+                        "agent_type": update.get("agent_type"),
+                        "progress_percent": update.get("progress", 0),
+                        "parallel": update.get("parallel", False),
+                    }
+
+                elif event_type == "step_completed":
+                    # Emit step progress before completion
+                    yield {
+                        "type": "step_progress",
+                        "step_id": update.get("step_id"),
+                        "progress_percent": 100,
+                    }
+
+                    # Emit content if available
+                    full_output = update.get("full_output")
+                    if full_output:
+                        yield {
+                            "type": "content_chunk",
+                            "step_id": update.get("step_id"),
+                            "step_name": update.get("step_name"),
+                            "content": full_output,
+                            "is_final": True,
+                        }
+
+                    yield {
+                        "type": "step_completed",
+                        "step_id": update.get("step_id"),
+                        "step_name": update.get("step_name"),
+                        "agent_type": update.get("agent_type"),
+                        "progress_percent": update.get("progress", 0),
+                    }
+
+                elif event_type == "step_failed":
+                    yield {
+                        "type": "step_failed",
+                        "step_id": update.get("step_id"),
+                        "step_name": update.get("step_name"),
+                        "error": update.get("error"),
+                    }
+
+                elif event_type == "sources":
+                    yield {
+                        "type": "sources",
+                        "sources": update.get("data", []),
+                    }
+
+                elif event_type == "content":
+                    yield {
+                        "type": "content_chunk",
+                        "content": update.get("data", ""),
+                        "is_final": False,
+                    }
+
+                elif event_type == "plan_completed":
+                    # Emit synthesis started
+                    yield {
+                        "type": "synthesis_started",
+                        "message": "Combining results into final response...",
+                    }
+
+                    # Emit final result
+                    if update.get("status") == "success":
+                        yield {
+                            "type": "complete",
+                            "plan_id": update.get("plan_id"),
+                            "output": update.get("output"),
+                            "total_cost_usd": update.get("total_cost_usd", 0),
+                        }
+                    else:
+                        yield {
+                            "type": "error",
+                            "plan_id": update.get("plan_id"),
+                            "error": update.get("error"),
+                            "completed_steps": update.get("completed_steps", 0),
+                            "failed_steps": update.get("failed_steps", 0),
+                        }
+
+        except Exception as e:
+            logger.error(f"Streaming execution error: {e}", exc_info=True)
+            yield {
+                "type": "error",
+                "error": str(e),
+            }

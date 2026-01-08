@@ -59,6 +59,7 @@ class TaskType(str, Enum):
     TOOL_EXECUTION = "tool_execution"  # File ops, exports
     DECOMPOSITION = "decomposition"  # Task breakdown
     SYNTHESIS = "synthesis"         # Combining results
+    VALIDATION = "validation"       # Cross-validation and hallucination detection
 
 
 # =============================================================================
@@ -86,6 +87,7 @@ class AgentConfig:
     timeout_seconds: int = 120
     max_retries: int = 3
     tools: List[str] = field(default_factory=list)
+    language: str = "en"  # Language code for agent responses (en, de, es, fr, etc.)
 
     def __post_init__(self):
         """Validate configuration."""
@@ -243,6 +245,78 @@ class AgentResult:
 
 
 # =============================================================================
+# Language Support
+# =============================================================================
+
+# Language code to name mapping for multilingual support
+LANGUAGE_NAMES = {
+    "en": "English",
+    "de": "German",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ru": "Russian",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ar": "Arabic",
+    "hi": "Hindi",
+}
+
+
+def _get_language_instruction(language: str, auto_detect: bool = False) -> str:
+    """
+    Get language instruction for the agent prompt.
+
+    Supports:
+    - Queries/tasks in ANY language
+    - Responses in the user's selected output language OR auto-detected from request
+
+    Args:
+        language: Language code for OUTPUT (en, de, es, etc.)
+        auto_detect: If True and language is "en", respond in the same language as the request
+
+    Returns:
+        Language instruction string
+    """
+    if language == "en" and auto_detect:
+        # Auto-detect mode: respond in the same language as the request
+        # Make it VERY explicit for models that may default to document language
+        return """
+CRITICAL LANGUAGE AND SCRIPT REQUIREMENT (MUST FOLLOW):
+1. FIRST, identify the language AND SCRIPT of the USER'S QUESTION (not the documents!)
+2. THEN, respond ONLY in that SAME language AND SAME SCRIPT as the user's question
+3. IMPORTANT about Indian languages:
+   - Hinglish = Hindi written in LATIN/ROMAN script (like "kya hai", "accha hai") - respond in Latin script
+   - If user writes in Devanagari (Hindi script like क्या), respond in Devanagari
+   - NEVER respond in Gujarati, Bengali, Tamil, or other scripts unless user used them!
+4. If the user asks in English, respond in English
+5. If the user asks in German, respond in German
+6. IGNORE the language of source documents - they may be in any language
+7. TRANSLATE all information FROM documents INTO the user's question language AND script
+
+Example: "kya koi marketing campaign hai?" - Hinglish (Latin script), respond like: "Haan, yeh marketing campaigns hain..."
+Example: "what marketing campaigns exist?" - English, respond in English.
+"""
+
+    if language == "en":
+        return ""
+
+    language_name = LANGUAGE_NAMES.get(language, "English")
+    return f"""
+LANGUAGE REQUIREMENT:
+- Your response must be ENTIRELY in {language_name}
+- The user's request and any source documents may be in any language
+- Translate and synthesize all information into {language_name}
+- Do NOT mix languages in your response - use only {language_name}
+- Technical terms and proper nouns may remain in their original form if commonly used that way
+"""
+
+
+# =============================================================================
 # Prompt Template
 # =============================================================================
 
@@ -335,10 +409,18 @@ class PromptTemplate:
         task: str,
         context: str = "",
         format_spec: str = "text",
+        language: str = "en",
         **kwargs
     ) -> List[Any]:
         """
         Build LangChain messages from template.
+
+        Args:
+            task: The specific task description
+            context: Additional context
+            format_spec: Output format specification
+            language: Language code for response (en, de, es, fr, etc.)
+            **kwargs: Additional template variables
 
         Returns:
             List of SystemMessage and HumanMessage
@@ -352,6 +434,15 @@ class PromptTemplate:
                 f"- {g}" for g in self.constitutional_guidelines
             )
             system_content += guidelines
+
+        # Add language instruction if not English or if auto-detect mode
+        auto_detect = (language == "auto")
+        effective_language = "en" if auto_detect else language
+        if auto_detect or effective_language != "en":
+            language_instruction = _get_language_instruction(effective_language, auto_detect=auto_detect)
+            if language_instruction:
+                system_content += f"\n{language_instruction}"
+
         messages.append(SystemMessage(content=system_content))
 
         # User message with rendered task
@@ -787,6 +878,129 @@ class BaseAgent(ABC):
                 self.record_step(
                     action_type="llm_invoke",
                     input_data={"messages": [str(m) for m in messages]},
+                    output_data={},
+                    duration_ms=duration_ms,
+                    success=False,
+                    error_message=str(e),
+                )
+
+            raise
+
+    async def invoke_llm_with_tools(
+        self,
+        messages: List[Any],
+        tools: List[Dict[str, Any]],
+        record: bool = True,
+        tool_choice: str = "auto",
+    ) -> tuple[str, Optional[List[Dict[str, Any]]], int, int]:
+        """
+        Invoke LLM with tool/function calling support.
+
+        Enables agents to dynamically select and call tools using LLM function calling.
+        Compatible with OpenAI, Anthropic, and other providers that support tool calling.
+
+        Args:
+            messages: LangChain messages to send
+            tools: List of tool schemas (OpenAI function calling format)
+            record: Whether to record in trajectory
+            tool_choice: How to select tools - "auto", "none", or specific tool name
+
+        Returns:
+            Tuple of (response_text, tool_calls, input_tokens, output_tokens)
+            - response_text: Text response from LLM (may be empty if tool called)
+            - tool_calls: List of tool calls if any, each with {name, arguments}
+            - input_tokens: Input token count
+            - output_tokens: Output token count
+        """
+        start_time = time.time()
+
+        try:
+            # Get LLM using admin-configured provider
+            llm = await self.get_llm()
+
+            # Bind tools to LLM if supported
+            if tools and hasattr(llm, "bind_tools"):
+                llm_with_tools = llm.bind_tools(tools, tool_choice=tool_choice)
+            elif tools and hasattr(llm, "bind_functions"):
+                # Fallback for older LangChain versions
+                llm_with_tools = llm.bind_functions(tools)
+            else:
+                llm_with_tools = llm
+
+            response = await llm_with_tools.ainvoke(messages)
+
+            # Extract response text
+            response_text = ""
+            if hasattr(response, "content") and response.content:
+                response_text = response.content
+
+            # Extract tool calls
+            tool_calls = None
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                tool_calls = [
+                    {
+                        "id": getattr(tc, "id", str(uuid.uuid4())),
+                        "name": tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", ""),
+                        "arguments": tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {}),
+                    }
+                    for tc in response.tool_calls
+                ]
+            elif hasattr(response, "additional_kwargs"):
+                # Handle OpenAI-style tool calls in additional_kwargs
+                additional = response.additional_kwargs
+                if "tool_calls" in additional:
+                    tool_calls = [
+                        {
+                            "id": tc.get("id", str(uuid.uuid4())),
+                            "name": tc.get("function", {}).get("name", ""),
+                            "arguments": tc.get("function", {}).get("arguments", {}),
+                        }
+                        for tc in additional["tool_calls"]
+                    ]
+
+            # Extract token usage if available
+            input_tokens = 0
+            output_tokens = 0
+            if hasattr(response, "usage_metadata"):
+                usage = response.usage_metadata
+                input_tokens = getattr(usage, "input_tokens", 0)
+                output_tokens = getattr(usage, "output_tokens", 0)
+            elif hasattr(response, "response_metadata"):
+                meta = response.response_metadata
+                if "token_usage" in meta:
+                    input_tokens = meta["token_usage"].get("prompt_tokens", 0)
+                    output_tokens = meta["token_usage"].get("completion_tokens", 0)
+
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            if record:
+                self.record_step(
+                    action_type="llm_invoke_with_tools",
+                    input_data={
+                        "messages": [str(m) for m in messages],
+                        "tools": [t.get("name", "unknown") for t in tools] if tools else [],
+                    },
+                    output_data={
+                        "response": response_text[:500] if response_text else "",
+                        "tool_calls": tool_calls,
+                    },
+                    tokens_used=input_tokens + output_tokens,
+                    duration_ms=duration_ms,
+                    success=True,
+                )
+
+            return response_text, tool_calls, input_tokens, output_tokens
+
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            if record:
+                self.record_step(
+                    action_type="llm_invoke_with_tools",
+                    input_data={
+                        "messages": [str(m) for m in messages],
+                        "tools": [t.get("name", "unknown") for t in tools] if tools else [],
+                    },
                     output_data={},
                     duration_ms=duration_ms,
                     success=False,

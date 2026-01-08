@@ -206,6 +206,7 @@ class AgentOptions(BaseModel):
     require_approval: bool = Field(default=False, description="Show plan and require approval before execution")
     max_steps: int = Field(default=5, ge=1, le=10, description="Maximum number of steps in execution plan")
     collection: Optional[str] = Field(default=None, description="Target specific collection (None = all)")
+    language: Optional[str] = Field(default=None, description="Language for agent responses (en, de, es, fr, etc.). If None, uses request.language.")
 
 
 class ImageAttachment(BaseModel):
@@ -233,6 +234,10 @@ class ChatRequest(BaseModel):
     # Folder-scoped queries
     folder_id: Optional[str] = Field(default=None, description="Folder ID to scope query to. Only documents in this folder (and subfolders) will be searched.")
     include_subfolders: bool = Field(default=True, description="When folder_id is set, include documents in subfolders")
+    # Language for responses
+    language: Optional[str] = Field(default="auto", description="Language code for response. Use 'auto' to respond in the same language as the question, or specify: en, de, es, fr, it, pt, nl, pl, ru, zh, ja, ko, ar, hi")
+    # Query enhancement toggle
+    enhance_query: Optional[bool] = Field(default=None, description="Enable query enhancement (expansion + HyDE). None = use admin default setting.")
 
     @property
     def effective_collection_filters(self) -> Optional[List[str]]:
@@ -341,6 +346,12 @@ async def create_chat_completion(
 
                 # Build context with agent options
                 agent_context = {"collection_filter": request.first_collection_filter}
+                # Pass language through agent context
+                # Prioritize: explicit agent_options.language > request.language > "auto"
+                agent_language = request.language or "auto"
+                if request.agent_options and request.agent_options.language:
+                    agent_language = request.agent_options.language
+                agent_context["language"] = agent_language
                 if request.agent_options:
                     agent_context["options"] = request.agent_options.model_dump()
 
@@ -402,6 +413,7 @@ async def create_chat_completion(
             response = await general_service.query(
                 question=request.message,
                 session_id=str(session_id) if not request.query_only else None,
+                language=request.language or "en",
             )
 
             # Cache the response for query_only requests
@@ -551,6 +563,8 @@ async def create_chat_completion(
                 top_k=request.top_k,  # Per-query document count override
                 folder_id=request.folder_id,  # Folder-scoped query
                 include_subfolders=request.include_subfolders,
+                language=request.language or "en",  # Language for response
+                enhance_query=request.enhance_query,  # Per-query enhancement override
             )
 
             # Convert sources to API format
@@ -681,6 +695,12 @@ async def create_streaming_completion(
 
                 # Build context with agent options
                 agent_context = {"collection_filter": request.first_collection_filter}
+                # Pass language through agent context
+                # Prioritize: explicit agent_options.language > request.language > "auto"
+                agent_language = request.language or "auto"
+                if request.agent_options and request.agent_options.language:
+                    agent_language = request.agent_options.language
+                agent_context["language"] = agent_language
                 if request.agent_options:
                     agent_context["options"] = request.agent_options.model_dump()
 
@@ -789,6 +809,7 @@ async def create_streaming_completion(
             response = await general_service.query(
                 question=request.message,
                 session_id=str(session_id) if not request.query_only else None,
+                language=request.language or "en",
             )
             # Send entire response as single content chunk
             yield f"data: {json.dumps({'type': 'content', 'data': response.content})}\n\n"
@@ -846,6 +867,8 @@ async def create_streaming_completion(
                 top_k=request.top_k,  # Per-query document count override
                 folder_id=request.folder_id,  # Folder-scoped query
                 include_subfolders=request.include_subfolders,
+                language=request.language or "en",  # Language for response
+                enhance_query=request.enhance_query,  # Per-query enhancement override
             ):
                 if chunk.type == "content":
                     accumulated_content.append(chunk.data)

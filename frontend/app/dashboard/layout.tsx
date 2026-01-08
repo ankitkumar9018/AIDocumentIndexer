@@ -22,6 +22,8 @@ import {
   Search,
   User,
   Bot,
+  Network,
+  Shield,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -47,6 +49,7 @@ const navigation = [
   { name: "Documents", href: "/dashboard/documents", icon: FolderOpen },
   { name: "Create", href: "/dashboard/create", icon: PenTool },
   { name: "Collaboration", href: "/dashboard/collaboration", icon: Sparkles },
+  { name: "Knowledge Graph", href: "/dashboard/knowledge-graph", icon: Network },
   { name: "Web Scraper", href: "/dashboard/scraper", icon: Globe },
   { name: "Costs", href: "/dashboard/costs", icon: DollarSign },
 ];
@@ -54,6 +57,7 @@ const navigation = [
 const adminNavigation = [
   { name: "Users", href: "/dashboard/admin/users", icon: Users },
   { name: "Agents", href: "/dashboard/admin/agents", icon: Bot },
+  { name: "Audit Logs", href: "/dashboard/admin/audit-logs", icon: Shield },
   { name: "Settings", href: "/dashboard/admin/settings", icon: Settings },
 ];
 
@@ -64,10 +68,12 @@ const pageTitles: Record<string, string> = {
   "/dashboard/documents": "Documents",
   "/dashboard/create": "Create",
   "/dashboard/collaboration": "Collaboration",
+  "/dashboard/knowledge-graph": "Knowledge Graph",
   "/dashboard/scraper": "Web Scraper",
   "/dashboard/costs": "Costs",
   "/dashboard/admin/users": "Users",
   "/dashboard/admin/agents": "Agent Management",
+  "/dashboard/admin/audit-logs": "Audit Logs",
   "/dashboard/admin/settings": "Settings",
 };
 

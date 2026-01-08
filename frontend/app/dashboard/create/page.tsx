@@ -58,6 +58,7 @@ import { toast } from "sonner";
 import { DocumentFilterPanel } from "@/components/chat/document-filter-panel";
 import { FolderSelector } from "@/components/folder-selector";
 import { SectionFeedbackDialog } from "@/components/generation";
+import { QueryEnhancementToggle } from "@/components/chat/query-enhancement-toggle";
 
 type Step = "format" | "topic" | "outline" | "content" | "download";
 type OutputFormat = "docx" | "pptx" | "pdf" | "markdown" | "html" | "txt" | "xlsx";
@@ -70,6 +71,25 @@ const formatOptions: { id: OutputFormat; name: string; icon: React.ElementType; 
   { id: "markdown", name: "Markdown", icon: FileText, description: "Plain text with formatting (.md)" },
   { id: "html", name: "HTML", icon: FileText, description: "Web page format (.html)" },
   { id: "txt", name: "Plain Text", icon: FileText, description: "Simple text file (.txt)" },
+];
+
+// Language options for document generation
+const LANGUAGES = [
+  { code: "auto", name: "Auto-detect (match source language)" },
+  { code: "en", name: "English" },
+  { code: "de", name: "German (Deutsch)" },
+  { code: "es", name: "Spanish (Español)" },
+  { code: "fr", name: "French (Français)" },
+  { code: "it", name: "Italian (Italiano)" },
+  { code: "pt", name: "Portuguese (Português)" },
+  { code: "nl", name: "Dutch (Nederlands)" },
+  { code: "pl", name: "Polish (Polski)" },
+  { code: "ru", name: "Russian (Русский)" },
+  { code: "zh", name: "Chinese (中文)" },
+  { code: "ja", name: "Japanese (日本語)" },
+  { code: "ko", name: "Korean (한국어)" },
+  { code: "ar", name: "Arabic (العربية)" },
+  { code: "hi", name: "Hindi (हिन्दी)" },
 ];
 
 const steps: { id: Step; name: string; description: string }[] = [
@@ -95,6 +115,7 @@ export default function CreatePage() {
   const [topic, setTopic] = useState("");
   const [context, setContext] = useState("");
   const [tone, setTone] = useState("professional");
+  const [outputLanguage, setOutputLanguage] = useState("auto");
   const [includeImages, setIncludeImages] = useState(false); // Disabled by default
   const [selectedCollections, setSelectedCollections] = useState<string[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -125,6 +146,10 @@ export default function CreatePage() {
   const [qualityThreshold, setQualityThreshold] = useState<number>(0.7);
   const [fixStyling, setFixStyling] = useState<boolean>(true);
   const [fixIncomplete, setFixIncomplete] = useState<boolean>(true);
+  // Include AI explanations in notes (PPTX speaker notes)
+  const [includeNotesExplanation, setIncludeNotesExplanation] = useState<boolean>(false);
+  // Query Enhancement - controls query expansion + HyDE for source search
+  const [enhanceQuery, setEnhanceQuery] = useState<boolean | null>(null);
 
   const [availableFonts, setAvailableFonts] = useState<Record<string, any>>({});
   const [availableLayouts, setAvailableLayouts] = useState<Record<string, any>>({});
@@ -170,6 +195,17 @@ export default function CreatePage() {
   const cancelJob = useCancelGenerationJob();
 
   const currentStepIndex = steps.findIndex((s) => s.id === currentStep);
+
+  // Load Query Enhancement preference from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem("create_enhance_query");
+    if (saved !== null) setEnhanceQuery(JSON.parse(saved));
+  }, []);
+
+  const handleEnhanceQueryChange = (enabled: boolean) => {
+    setEnhanceQuery(enabled);
+    localStorage.setItem("create_enhance_query", JSON.stringify(enabled));
+  };
 
   // Auto-suggest theme when topic and context are provided (debounced)
   useEffect(() => {
@@ -243,6 +279,7 @@ export default function CreatePage() {
               title: topic,
               description: context || topic,
               output_format: selectedFormat!,
+              output_language: outputLanguage,
               include_images: includeImages,
               collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
               folder_id: selectedFolderId || undefined,
@@ -262,6 +299,8 @@ export default function CreatePage() {
               quality_threshold: enableCriticReview ? qualityThreshold : undefined,
               fix_styling: enableCriticReview ? fixStyling : undefined,
               fix_incomplete: enableCriticReview ? fixIncomplete : undefined,
+              // Include AI explanations in speaker notes
+              include_notes_explanation: includeNotesExplanation,
               // Custom colors override theme
               custom_colors: useCustomColors ? {
                 primary: customPrimaryColor,
@@ -273,6 +312,8 @@ export default function CreatePage() {
               style_collection_filters: useExistingDocs && styleCollections.length > 0 ? styleCollections : undefined,
               style_folder_id: useExistingDocs && styleFolderId ? styleFolderId : undefined,
               include_style_subfolders: useExistingDocs ? includeStyleSubfolders : undefined,
+              // Query Enhancement for source search
+              enhance_query: enhanceQuery ?? undefined,
             });
             setCurrentJobId(newJob.id);
             await generateOutline.mutateAsync({
@@ -402,6 +443,7 @@ export default function CreatePage() {
     setSelectedFormat(null);
     setTopic("");
     setContext("");
+    setOutputLanguage("en");
     setOutline([]);
     setDocumentTitle("");
     setCurrentJobId(null);
@@ -647,6 +689,25 @@ export default function CreatePage() {
                   </select>
                 </div>
 
+                {/* Output Language Selector */}
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Output Language</label>
+                  <select
+                    value={outputLanguage}
+                    onChange={(e) => setOutputLanguage(e.target.value)}
+                    className="w-full h-10 px-3 rounded-md border bg-background"
+                  >
+                    {LANGUAGES.map((lang) => (
+                      <option key={lang.code} value={lang.code}>
+                        {lang.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    All generated content will be in this language
+                  </p>
+                </div>
+
                 {/* Page/Slide Count Selector */}
                 <div className="space-y-2">
                   <label className="text-sm font-medium">
@@ -777,6 +838,27 @@ export default function CreatePage() {
                       </div>
                     </div>
                   )}
+
+                  {/* Query Enhancement Toggle - inline within filters */}
+                  <div className="flex items-center justify-between p-3 rounded-lg border bg-card mt-3">
+                    <div className="flex items-center gap-3">
+                      <Sparkles className={`h-4 w-4 ${(enhanceQuery ?? true) ? "text-yellow-500" : "text-muted-foreground"}`} />
+                      <div>
+                        <p className="text-sm font-medium">Query Enhancement</p>
+                        <p className="text-xs text-muted-foreground">
+                          Improve source search with query expansion and HyDE
+                        </p>
+                      </div>
+                    </div>
+                    <div
+                      onClick={() => handleEnhanceQueryChange(!(enhanceQuery ?? true))}
+                      className={`w-10 h-5 rounded-full transition-colors flex items-center cursor-pointer ${
+                        (enhanceQuery ?? true) ? "bg-primary justify-end" : "bg-muted-foreground/30 justify-start"
+                      }`}
+                    >
+                      <div className="w-4 h-4 bg-white rounded-full shadow-sm mx-0.5" />
+                    </div>
+                  </div>
                 </div>
 
                 {/* Image Generation Toggle */}
@@ -1159,7 +1241,7 @@ export default function CreatePage() {
                   </div>
                 )}
 
-                {/* Animations Toggle (PPTX only) */}
+                {/* Slide Transitions Toggle (PPTX only) */}
                 {selectedFormat === "pptx" && (
                   <div className="mt-4 space-y-2">
                     <div className="flex items-center gap-2">
@@ -1174,14 +1256,14 @@ export default function CreatePage() {
                         className="h-4 w-4 rounded border-border"
                       />
                       <label htmlFor="enableAnimations" className="text-sm font-medium">
-                        Enable slide animations
+                        Enable slide transitions
                       </label>
-                      <span className="text-xs text-muted-foreground">(transitions between slides)</span>
+                      <span className="text-xs text-muted-foreground">(fade, wipe, push effects between slides)</span>
                     </div>
                     {enableAnimations && (
                       <div className="ml-6 space-y-3">
                         <div className="flex items-center gap-4">
-                          <label className="text-sm">Speed:</label>
+                          <label className="text-sm">Transition speed:</label>
                           <select
                             value={animationSpeed}
                             onChange={(e) => setAnimationSpeed(e.target.value as 'very_slow' | 'slow' | 'med' | 'fast' | 'very_fast')}
@@ -1203,7 +1285,7 @@ export default function CreatePage() {
                             onChange={(e) => setUseCustomDuration(e.target.checked)}
                             className="h-4 w-4 rounded border-border"
                           />
-                          <label htmlFor="useCustomDuration" className="text-sm">Custom duration</label>
+                          <label htmlFor="useCustomDuration" className="text-sm">Custom transition duration</label>
                         </div>
                         {useCustomDuration && (
                           <div className="space-y-2">
@@ -1313,6 +1395,28 @@ export default function CreatePage() {
                     </div>
                   )}
                 </div>
+
+                {/* Speaker Notes Options (PPTX only) */}
+                {selectedFormat === "pptx" && (
+                  <div className="mt-4 pt-4 border-t space-y-2">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="includeNotesExplanation"
+                        checked={includeNotesExplanation}
+                        onChange={(e) => setIncludeNotesExplanation(e.target.checked)}
+                        className="h-4 w-4 rounded border-border"
+                      />
+                      <label htmlFor="includeNotesExplanation" className="text-sm font-medium">
+                        Include AI explanations in speaker notes
+                      </label>
+                    </div>
+                    <p className="text-xs text-muted-foreground ml-6">
+                      Adds detailed AI reasoning and source references to each slide&apos;s speaker notes.
+                      Title slide always includes generation info (model, date, theme).
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           )}

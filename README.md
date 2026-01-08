@@ -403,6 +403,8 @@ AIDocumentIndexer/
 
 See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed development guide.
 
+**New developers**: Start with [DEVELOPER_ONBOARDING.md](docs/DEVELOPER_ONBOARDING.md) for a comprehensive guide to the codebase architecture, key classes, and project flow.
+
 ---
 
 ## Troubleshooting

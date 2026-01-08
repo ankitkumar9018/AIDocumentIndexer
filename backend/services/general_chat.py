@@ -38,6 +38,72 @@ might be better answered by searching their documents, you can suggest they
 switch to document search mode.
 """
 
+# Language code to name mapping for multilingual support
+LANGUAGE_NAMES = {
+    "en": "English",
+    "de": "German",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ru": "Russian",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ar": "Arabic",
+    "hi": "Hindi",
+}
+
+
+def _get_language_instruction(language: str, auto_detect: bool = False) -> str:
+    """
+    Get language instruction for the LLM prompt.
+
+    Supports:
+    - Queries in ANY language
+    - Responses in the user's selected output language OR auto-detected from question
+
+    Args:
+        language: Language code for OUTPUT (en, de, es, etc.)
+        auto_detect: If True and language is "en", respond in the same language as the question
+
+    Returns:
+        Language instruction string
+    """
+    if language == "en" and auto_detect:
+        # Auto-detect mode: respond in the same language as the question
+        # Make it VERY explicit for models that may default to document language
+        return """
+CRITICAL LANGUAGE AND SCRIPT REQUIREMENT (MUST FOLLOW):
+1. FIRST, identify the language AND SCRIPT of the USER'S QUESTION (not any documents!)
+2. THEN, respond ONLY in that SAME language AND SAME SCRIPT as the user's question
+3. IMPORTANT about Indian languages:
+   - Hinglish = Hindi written in LATIN/ROMAN script (like "kya hai", "accha hai") - respond in Latin script
+   - If user writes in Devanagari (Hindi script like क्या), respond in Devanagari
+   - NEVER respond in Gujarati, Bengali, Tamil, or other scripts unless user used them!
+4. If the user asks in English, respond in English
+5. If the user asks in German, respond in German
+6. IGNORE the language of any source documents - they may be in any language
+7. TRANSLATE all relevant information INTO the user's question language AND script
+
+Example: "kya koi marketing campaign hai?" - Hinglish (Latin script), respond like: "Haan, yeh marketing campaigns hain..."
+Example: "what marketing campaigns exist?" - English, respond in English.
+"""
+
+    if language == "en":
+        return ""
+
+    language_name = LANGUAGE_NAMES.get(language, "English")
+    return f"""
+LANGUAGE REQUIREMENT:
+- Your response must be ENTIRELY in {language_name}
+- The user's question may be in any language - understand it and respond in {language_name}
+- Do NOT mix languages in your response - use only {language_name}
+- Technical terms and proper nouns may remain in their original form if commonly used that way
+"""
+
 
 @dataclass
 class GeneralChatResponse:
@@ -118,6 +184,7 @@ class GeneralChatService:
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        language: str = "en",
     ) -> GeneralChatResponse:
         """
         Query the general chat service.
@@ -127,6 +194,7 @@ class GeneralChatService:
             session_id: Session ID for conversation memory
             user_id: User ID for usage tracking
             system_prompt: Optional custom system prompt
+            language: Language code for response (en, de, es, fr, etc.)
 
         Returns:
             GeneralChatResponse with answer
@@ -137,6 +205,7 @@ class GeneralChatService:
             "Processing general chat query",
             question_length=len(question),
             session_id=session_id,
+            language=language,
         )
 
         # Get LLM for this session
@@ -145,8 +214,13 @@ class GeneralChatService:
             user_id=user_id,
         )
 
-        # Use custom system prompt or default
-        prompt = system_prompt or GENERAL_CHAT_SYSTEM_PROMPT
+        # Use custom system prompt or default, with language instruction
+        # Support "auto" mode: respond in the same language as the question
+        auto_detect = (language == "auto")
+        effective_language = "en" if auto_detect else language
+        base_prompt = system_prompt or GENERAL_CHAT_SYSTEM_PROMPT
+        language_instruction = _get_language_instruction(effective_language, auto_detect=auto_detect)
+        prompt = f"{base_prompt}\n{language_instruction}" if language_instruction else base_prompt
 
         # Build messages
         if session_id:
