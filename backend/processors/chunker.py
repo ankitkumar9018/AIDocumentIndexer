@@ -137,6 +137,123 @@ class ChunkingConfig:
     sections_per_document: int = 10  # Target number of section summaries
 
 
+@dataclass
+class QueryAdaptiveSettings:
+    """
+    Settings for query-adaptive chunk retrieval.
+
+    Different query intents benefit from different chunk sizes:
+    - Factual queries: Short, precise chunks for specific answers
+    - Conceptual queries: Longer chunks for context and explanation
+    - Comparative queries: Medium chunks for balanced comparison
+
+    This doesn't affect chunking at index time, but rather guides
+    retrieval-time chunk filtering and context building.
+    """
+    # Chunk size targets by query intent (in characters)
+    factual_chunk_size: int = 500        # Short, precise chunks
+    conceptual_chunk_size: int = 1500    # Longer context chunks
+    comparative_chunk_size: int = 1000   # Medium balanced chunks
+    procedural_chunk_size: int = 1200    # Steps need context
+    navigational_chunk_size: int = 500   # Specific targets
+    exploratory_chunk_size: int = 1200   # Broad exploration
+    aggregation_chunk_size: int = 800    # Numerical data extraction
+    default_chunk_size: int = 1000       # Fallback
+
+    # Whether to enable query-adaptive chunk selection
+    enable_adaptive_retrieval: bool = True
+
+    # Tolerance for chunk size matching (chunks within this % of target are accepted)
+    size_tolerance_percent: float = 30.0
+
+
+def get_optimal_chunk_size_for_intent(
+    query_intent: str,
+    settings: Optional[QueryAdaptiveSettings] = None,
+) -> int:
+    """
+    Get the optimal chunk size based on query intent.
+
+    Args:
+        query_intent: Query intent from QueryClassifier (e.g., "factual", "conceptual")
+        settings: Optional adaptive settings, uses defaults if not provided
+
+    Returns:
+        Optimal chunk size in characters for this intent
+    """
+    settings = settings or QueryAdaptiveSettings()
+
+    intent_sizes = {
+        "factual": settings.factual_chunk_size,
+        "conceptual": settings.conceptual_chunk_size,
+        "comparative": settings.comparative_chunk_size,
+        "navigational": settings.navigational_chunk_size,
+        "procedural": settings.procedural_chunk_size,
+        "exploratory": settings.exploratory_chunk_size,
+        "aggregation": settings.aggregation_chunk_size,
+        "unknown": settings.default_chunk_size,
+    }
+
+    return intent_sizes.get(query_intent.lower(), settings.default_chunk_size)
+
+
+def filter_chunks_by_intent(
+    chunks: List[Chunk],
+    query_intent: str,
+    target_count: int = 10,
+    settings: Optional[QueryAdaptiveSettings] = None,
+) -> List[Chunk]:
+    """
+    Filter and select chunks based on query intent.
+
+    Selects chunks that best match the optimal size for the query intent,
+    while maintaining relevance order (assumes chunks are pre-sorted by relevance).
+
+    Args:
+        chunks: List of chunks sorted by relevance
+        query_intent: Query intent from classifier
+        target_count: Number of chunks to return
+        settings: Optional adaptive settings
+
+    Returns:
+        Filtered list of chunks optimized for the query intent
+    """
+    if not chunks:
+        return []
+
+    settings = settings or QueryAdaptiveSettings()
+
+    if not settings.enable_adaptive_retrieval:
+        return chunks[:target_count]
+
+    optimal_size = get_optimal_chunk_size_for_intent(query_intent, settings)
+    tolerance = settings.size_tolerance_percent / 100.0
+
+    min_size = int(optimal_size * (1 - tolerance))
+    max_size = int(optimal_size * (1 + tolerance))
+
+    # Score chunks by how well they match the optimal size
+    scored_chunks = []
+    for i, chunk in enumerate(chunks):
+        relevance_weight = 1.0 - (i / len(chunks))  # Higher relevance = higher weight
+
+        # Size score: 1.0 if within tolerance, decreasing outside
+        if min_size <= chunk.char_count <= max_size:
+            size_score = 1.0
+        else:
+            distance = min(abs(chunk.char_count - min_size), abs(chunk.char_count - max_size))
+            size_score = max(0.0, 1.0 - (distance / optimal_size))
+
+        # Combined score (relevance is more important)
+        combined_score = 0.7 * relevance_weight + 0.3 * size_score
+        scored_chunks.append((chunk, combined_score))
+
+    # Sort by combined score and take top results
+    scored_chunks.sort(key=lambda x: x[1], reverse=True)
+
+    return [chunk for chunk, score in scored_chunks[:target_count]]
+
+
 class DocumentChunker:
     """
     Document chunker using LangChain text splitters.

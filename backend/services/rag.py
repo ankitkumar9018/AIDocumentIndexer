@@ -1108,6 +1108,28 @@ class RAGService:
             language=language,
         )
 
+        # Check if this is an aggregation query (e.g., "total spending by Company A")
+        # Route to specialized handler for numerical extraction and calculation
+        aggregation_enabled = runtime_settings.get("aggregation_query_enabled", True)
+        if aggregation_enabled:
+            from backend.services.structured_extraction import get_structured_extractor
+            extractor = get_structured_extractor()
+            if extractor.is_aggregation_query(question):
+                logger.info(
+                    "Detected aggregation query - routing to specialized handler",
+                    question=question[:50],
+                )
+                return await self.handle_aggregation_query(
+                    question=question,
+                    session_id=session_id,
+                    collection_filter=collection_filter,
+                    access_tier=access_tier,
+                    user_id=user_id,
+                    folder_id=folder_id,
+                    include_subfolders=include_subfolders,
+                    language=language,
+                )
+
         # Check if query decomposition is enabled
         decomposition_enabled = runtime_settings.get("query_decomposition_enabled", False)
         decomposed_query = None
@@ -1667,6 +1689,205 @@ class RAGService:
                     error_message=str(e),
                 )
             yield StreamChunk(type="error", data=str(e))
+
+    async def handle_aggregation_query(
+        self,
+        question: str,
+        session_id: Optional[str] = None,
+        collection_filter: Optional[str] = None,
+        access_tier: int = 100,
+        user_id: Optional[str] = None,
+        folder_id: Optional[str] = None,
+        include_subfolders: bool = True,
+        language: str = "en",
+    ) -> RAGResponse:
+        """
+        Handle queries requiring numerical aggregation (e.g., "What is the total spending by Company A in last 4 months?").
+
+        Uses structured extraction to accurately extract and aggregate numerical values across documents.
+
+        Args:
+            question: User's aggregation query
+            session_id: Session ID for conversation memory
+            collection_filter: Filter by document collection
+            access_tier: User's access tier for RLS
+            user_id: User ID for usage tracking
+            folder_id: Optional folder ID to scope query to
+            include_subfolders: Whether to include documents from subfolders
+            language: Language code for response
+
+        Returns:
+            RAGResponse with aggregated answer and sources
+        """
+        import time
+        start_time = time.time()
+
+        from backend.services.structured_extraction import (
+            get_structured_extractor,
+            AggregationResult,
+        )
+
+        logger.info(
+            "Processing aggregation query",
+            question_length=len(question),
+            session_id=session_id,
+            collection_filter=collection_filter,
+        )
+
+        # Get LLM for this session
+        llm, llm_config = await self.get_llm_for_session(
+            session_id=session_id,
+            user_id=user_id,
+        )
+
+        # Get folder-scoped document IDs if specified
+        folder_document_ids = None
+        if folder_id:
+            from backend.services.folder_service import get_folder_service
+            folder_service = get_folder_service()
+            folder_document_ids = await folder_service.get_folder_document_ids(
+                folder_id=folder_id,
+                include_subfolders=include_subfolders,
+                user_tier_level=access_tier,
+            )
+            if not folder_document_ids:
+                return RAGResponse(
+                    content="No documents found in the specified folder.",
+                    sources=[],
+                    query=question,
+                    model=llm_config.model if llm_config else "default",
+                    confidence_score=0.0,
+                    confidence_level="low",
+                )
+
+        # Retrieve MORE documents for aggregation (need comprehensive data)
+        # Use top_k of 20-30 for aggregation queries to gather more data points
+        aggregation_top_k = 25
+        retrieved_docs = await self._retrieve(
+            question,
+            collection_filter=collection_filter,
+            access_tier=access_tier,
+            top_k=aggregation_top_k,
+            document_ids=folder_document_ids,
+            enhance_query=True,  # Always enhance for aggregation
+        )
+
+        if not retrieved_docs:
+            return RAGResponse(
+                content="No relevant documents found to answer your aggregation query.",
+                sources=[],
+                query=question,
+                model=llm_config.model if llm_config else "default",
+                confidence_score=0.0,
+                confidence_level="low",
+            )
+
+        # Convert retrieved docs to format expected by structured extractor
+        chunks = []
+        for doc, score in retrieved_docs:
+            chunks.append({
+                "content": doc.page_content,
+                "chunk_id": doc.metadata.get("chunk_id"),
+                "metadata": {
+                    "document_name": doc.metadata.get("document_name", "Unknown"),
+                    "document_id": doc.metadata.get("document_id"),
+                    "page_number": doc.metadata.get("page_number"),
+                    "similarity_score": score,
+                },
+            })
+
+        # Use structured extractor for numerical extraction and aggregation
+        extractor = get_structured_extractor()
+        extractor._llm = llm  # Use the session's LLM
+
+        try:
+            # Extract and aggregate numerical values
+            aggregation_result = await extractor.extract_and_aggregate(
+                query=question,
+                chunks=chunks,
+            )
+
+            # Generate natural language response
+            response_text = await extractor.generate_aggregation_response(
+                query=question,
+                result=aggregation_result,
+            )
+
+            # Format sources from retrieved docs
+            _, sources = self._format_context(retrieved_docs, include_collection_context=True)
+
+            processing_time_ms = (time.time() - start_time) * 1000
+
+            # Calculate confidence from aggregation result
+            confidence_score = aggregation_result.confidence_score
+            confidence_level = "high" if confidence_score >= 0.7 else "medium" if confidence_score >= 0.4 else "low"
+
+            # Generate confidence warning
+            confidence_warning = ""
+            if aggregation_result.warnings:
+                confidence_warning = " ".join(aggregation_result.warnings)
+
+            # Track usage
+            if self.track_usage and llm_config:
+                input_tokens = self._count_tokens(question + str(chunks), llm_config.model)
+                output_tokens = self._count_tokens(response_text, llm_config.model)
+
+                await LLMUsageTracker.log_usage(
+                    provider_type=llm_config.provider_type,
+                    model=llm_config.model,
+                    operation_type="aggregation_rag",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    provider_id=llm_config.provider_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    duration_ms=int(processing_time_ms),
+                    success=True,
+                )
+
+            # Update session memory
+            if session_id:
+                memory = self._get_memory(session_id)
+                memory.save_context(
+                    {"input": question},
+                    {"output": response_text}
+                )
+
+            return RAGResponse(
+                content=response_text,
+                sources=sources if self.config.include_sources else [],
+                query=question,
+                model=llm_config.model if llm_config else "default",
+                processing_time_ms=processing_time_ms,
+                metadata={
+                    "aggregation_type": aggregation_result.calculation_method,
+                    "data_points": aggregation_result.count,
+                    "total_value": aggregation_result.total,
+                    "unit": aggregation_result.unit,
+                    "breakdown_by_category": aggregation_result.breakdown_by_category,
+                    "breakdown_by_period": aggregation_result.breakdown_by_period,
+                    "breakdown_by_entity": aggregation_result.breakdown_by_entity,
+                    "is_aggregation_query": True,
+                },
+                confidence_score=confidence_score,
+                confidence_level=confidence_level,
+                confidence_warning=confidence_warning,
+            )
+
+        except Exception as e:
+            logger.error("Aggregation query failed", error=str(e))
+            # Fallback to standard RAG query
+            logger.info("Falling back to standard RAG for aggregation query")
+            return await self.query(
+                question=question,
+                session_id=session_id,
+                collection_filter=collection_filter,
+                access_tier=access_tier,
+                user_id=user_id,
+                folder_id=folder_id,
+                include_subfolders=include_subfolders,
+                language=language,
+            )
 
     async def _retrieve(
         self,

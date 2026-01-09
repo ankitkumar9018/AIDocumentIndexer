@@ -208,6 +208,11 @@ class VectorStoreConfig:
     use_enhanced_search: bool = True  # Search summaries, keywords, hypothetical questions
     enhanced_weight: float = 0.3  # Weight for enhanced metadata matches in RRF
 
+    # MMR (Maximal Marginal Relevance) diversity settings
+    enable_mmr: bool = True  # Enable diversity in results
+    mmr_lambda: float = 0.5  # Balance: 0=max diversity, 1=max relevance
+    mmr_fetch_k: int = 20  # Fetch more candidates for MMR selection
+
 
 # =============================================================================
 # Vector Store Service
@@ -1042,6 +1047,125 @@ class VectorStore:
         except Exception as e:
             logger.warning("Reranking failed, returning original results", error=str(e))
             return results[:top_k]
+
+    def _apply_mmr(
+        self,
+        results: List[SearchResult],
+        query_embedding: List[float],
+        lambda_param: Optional[float] = None,
+        k: Optional[int] = None,
+    ) -> List[SearchResult]:
+        """
+        Apply Maximal Marginal Relevance for diversity in results.
+
+        MMR balances relevance to the query with diversity among results.
+        It iteratively selects results that are both relevant and different
+        from already-selected results.
+
+        Formula: MMR = λ * Sim(doc, query) - (1-λ) * max(Sim(doc, selected_docs))
+
+        Args:
+            results: List of search results (should have more than k items)
+            query_embedding: Query embedding vector
+            lambda_param: Balance parameter (0=diversity, 1=relevance). Default from config.
+            k: Number of results to return. Default from config.
+
+        Returns:
+            Diversified list of SearchResult objects
+        """
+        if not results or not query_embedding:
+            return results
+
+        lambda_param = lambda_param if lambda_param is not None else self.config.mmr_lambda
+        k = k if k is not None else self.config.default_top_k
+
+        if len(results) <= k:
+            return results
+
+        # Helper function for cosine similarity
+        def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+            if not vec1 or not vec2:
+                return 0.0
+            dot_product = sum(a * b for a, b in zip(vec1, vec2))
+            norm1 = sum(a * a for a in vec1) ** 0.5
+            norm2 = sum(b * b for b in vec2) ** 0.5
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            return dot_product / (norm1 * norm2)
+
+        # Get embeddings from results (if available)
+        result_embeddings = []
+        for r in results:
+            emb = r.metadata.get("embedding") or r.embedding if hasattr(r, 'embedding') else None
+            result_embeddings.append(emb)
+
+        # If embeddings not available, return original results
+        if all(e is None for e in result_embeddings):
+            logger.debug("No embeddings available for MMR, returning original results")
+            return results[:k]
+
+        # Calculate relevance scores for all results
+        relevance_scores = []
+        for i, result in enumerate(results):
+            if result_embeddings[i]:
+                rel_score = cosine_similarity(query_embedding, result_embeddings[i])
+            else:
+                # Fall back to existing score
+                rel_score = result.similarity_score or result.score or 0.0
+            relevance_scores.append(rel_score)
+
+        # MMR selection
+        selected_indices = []
+        candidate_indices = list(range(len(results)))
+
+        while len(selected_indices) < k and candidate_indices:
+            best_score = -float('inf')
+            best_idx = None
+
+            for idx in candidate_indices:
+                # Relevance to query
+                relevance = relevance_scores[idx]
+
+                # Maximum similarity to already selected
+                max_sim_to_selected = 0.0
+                if selected_indices and result_embeddings[idx]:
+                    for sel_idx in selected_indices:
+                        if result_embeddings[sel_idx]:
+                            sim = cosine_similarity(
+                                result_embeddings[idx],
+                                result_embeddings[sel_idx]
+                            )
+                            max_sim_to_selected = max(max_sim_to_selected, sim)
+
+                # MMR score
+                mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim_to_selected
+
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = idx
+
+            if best_idx is not None:
+                selected_indices.append(best_idx)
+                candidate_indices.remove(best_idx)
+            else:
+                break
+
+        # Build diversified results
+        diversified = []
+        for idx in selected_indices:
+            result = results[idx]
+            result.metadata["mmr_applied"] = True
+            result.metadata["mmr_lambda"] = lambda_param
+            diversified.append(result)
+
+        logger.debug(
+            "Applied MMR diversity",
+            original_count=len(results),
+            diversified_count=len(diversified),
+            lambda_param=lambda_param,
+        )
+
+        return diversified
 
     async def search(
         self,

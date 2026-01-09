@@ -347,6 +347,219 @@ class RealTimeIndexerService:
 
         return stats
 
+    async def handle_content_diff_update(
+        self,
+        document_id: uuid.UUID,
+        old_content: str,
+        new_content: str,
+        access_tier_id: uuid.UUID,
+    ) -> IndexingStats:
+        """
+        Update chunks incrementally based on content diff.
+
+        Uses difflib to identify changed sections and only re-chunks/re-embeds
+        the affected portions. This is more efficient than full re-indexing
+        for documents with small edits.
+
+        Args:
+            document_id: Document being updated
+            old_content: Previous document content
+            new_content: New document content
+            access_tier_id: Access tier for new chunks
+
+        Returns:
+            IndexingStats with update details
+        """
+        import time
+        from difflib import SequenceMatcher
+
+        start_time = time.time()
+        stats = IndexingStats()
+
+        try:
+            # Get existing chunks
+            result = await self.db.execute(
+                select(Chunk)
+                .where(Chunk.document_id == document_id)
+                .order_by(Chunk.chunk_index)
+            )
+            existing_chunks = list(result.scalars().all())
+
+            if not existing_chunks:
+                # No existing chunks - do full indexing
+                logger.info("No existing chunks for diff update, using full indexing")
+                # The full indexing would be handled by the caller
+                return stats
+
+            # Use SequenceMatcher to find differences
+            matcher = SequenceMatcher(None, old_content, new_content)
+            opcodes = matcher.get_opcodes()
+
+            # Track affected character ranges
+            affected_ranges: List[Tuple[int, int]] = []  # (start, end) in new content
+
+            for tag, i1, i2, j1, j2 in opcodes:
+                if tag == 'replace':
+                    # Content replaced - need to re-process this section
+                    affected_ranges.append((j1, j2))
+                elif tag == 'insert':
+                    # New content inserted - need to process insertion
+                    affected_ranges.append((j1, j2))
+                elif tag == 'delete':
+                    # Content deleted - chunks in this range should be removed
+                    # Mark the position where deletion occurred
+                    affected_ranges.append((j1, j1))
+                # 'equal' sections don't need processing
+
+            if not affected_ranges:
+                logger.info("No differences found in content diff update")
+                stats.processing_time_ms = (time.time() - start_time) * 1000
+                return stats
+
+            # Build position map for existing chunks (approximate character positions)
+            chunk_positions = self._estimate_chunk_positions(existing_chunks, old_content)
+
+            # Find chunks affected by the changes
+            affected_chunk_indices = set()
+            for start, end in affected_ranges:
+                for idx, (chunk_start, chunk_end) in enumerate(chunk_positions):
+                    # Check if ranges overlap
+                    if self._ranges_overlap(start, end, chunk_start, chunk_end):
+                        affected_chunk_indices.add(idx)
+
+            logger.info(
+                "Diff analysis complete",
+                document_id=str(document_id),
+                change_regions=len(affected_ranges),
+                affected_chunks=len(affected_chunk_indices),
+                total_chunks=len(existing_chunks),
+            )
+
+            # Delete affected chunks
+            for idx in sorted(affected_chunk_indices, reverse=True):
+                if idx < len(existing_chunks):
+                    chunk = existing_chunks[idx]
+                    await self.db.delete(chunk)
+                    stats.chunks_deleted += 1
+
+            # Re-chunk the affected sections of new content
+            # Merge overlapping/adjacent affected ranges
+            merged_ranges = self._merge_ranges(sorted(affected_ranges))
+
+            for start, end in merged_ranges:
+                if start >= end:
+                    continue
+
+                # Extract affected section with some context
+                context_chars = 200  # Characters of context on each side
+                section_start = max(0, start - context_chars)
+                section_end = min(len(new_content), end + context_chars)
+                section_content = new_content[section_start:section_end]
+
+                # Create new chunk for this section
+                chunk_hash = self.compute_chunk_hash(section_content, {})
+
+                # Generate embedding if service available
+                embedding = None
+                if self.embeddings:
+                    try:
+                        embedding = await self.embeddings.embed_query(section_content)
+                    except Exception as e:
+                        logger.warning("Embedding generation failed for diff chunk", error=str(e))
+
+                # Create new chunk
+                new_chunk = Chunk(
+                    content=section_content,
+                    content_hash=chunk_hash,
+                    embedding=embedding,
+                    chunk_index=len(existing_chunks) - len(affected_chunk_indices) + stats.chunks_added,
+                    document_id=document_id,
+                    access_tier_id=access_tier_id,
+                    token_count=len(section_content.split()),
+                    char_count=len(section_content),
+                )
+                self.db.add(new_chunk)
+                stats.chunks_added += 1
+
+            await self.db.commit()
+            stats.documents_updated = 1
+            stats.processing_time_ms = (time.time() - start_time) * 1000
+
+            logger.info(
+                "Diff-based chunk update complete",
+                document_id=str(document_id),
+                added=stats.chunks_added,
+                deleted=stats.chunks_deleted,
+                time_ms=stats.processing_time_ms,
+            )
+
+        except Exception as e:
+            logger.error("Diff-based update failed", error=str(e))
+            stats.errors.append(str(e))
+            await self.db.rollback()
+
+        return stats
+
+    def _estimate_chunk_positions(
+        self,
+        chunks: List[Chunk],
+        content: str,
+    ) -> List[Tuple[int, int]]:
+        """
+        Estimate character positions for each chunk in content.
+
+        Since chunks may overlap or have gaps, this finds approximate
+        positions by searching for chunk content in the document.
+        """
+        positions = []
+        search_start = 0
+
+        for chunk in chunks:
+            chunk_text = chunk.content[:200]  # Use first 200 chars for matching
+            pos = content.find(chunk_text, search_start)
+
+            if pos >= 0:
+                chunk_start = pos
+                chunk_end = pos + len(chunk.content)
+                search_start = chunk_end  # Continue search after this chunk
+            else:
+                # Chunk not found - estimate based on index
+                avg_chunk_size = len(content) // max(len(chunks), 1)
+                chunk_start = chunk.chunk_index * avg_chunk_size
+                chunk_end = chunk_start + len(chunk.content)
+
+            positions.append((chunk_start, chunk_end))
+
+        return positions
+
+    def _ranges_overlap(
+        self,
+        start1: int, end1: int,
+        start2: int, end2: int,
+    ) -> bool:
+        """Check if two ranges overlap."""
+        return start1 < end2 and start2 < end1
+
+    def _merge_ranges(
+        self,
+        ranges: List[Tuple[int, int]],
+    ) -> List[Tuple[int, int]]:
+        """Merge overlapping or adjacent ranges."""
+        if not ranges:
+            return []
+
+        merged = [ranges[0]]
+
+        for start, end in ranges[1:]:
+            last_start, last_end = merged[-1]
+
+            if start <= last_end + 100:  # Merge if within 100 chars
+                merged[-1] = (last_start, max(last_end, end))
+            else:
+                merged.append((start, end))
+
+        return merged
+
     # -------------------------------------------------------------------------
     # Freshness Tracking
     # -------------------------------------------------------------------------

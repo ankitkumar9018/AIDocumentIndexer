@@ -88,8 +88,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Initialize Ray connection for parallel document processing
         try:
             from backend.ray_workers.config import init_ray
-            init_ray()
-            logger.info("Ray cluster connected")
+            ray_initialized = init_ray(cleanup_stale=True, init_timeout=30.0)
+            if ray_initialized:
+                logger.info("Ray cluster connected")
+            else:
+                logger.warning("Ray initialization failed, falling back to local processing")
         except Exception as ray_error:
             logger.warning("Ray initialization failed, falling back to local processing", error=str(ray_error))
 
@@ -148,10 +151,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # from backend.db.database import close_db
         # await close_db()
 
-        # Disconnect from Ray
+        # Disconnect from Ray with timeout
         try:
             from backend.ray_workers.config import shutdown_ray
-            shutdown_ray()
+            shutdown_ray(timeout=10.0)
             logger.info("Ray cluster disconnected")
         except Exception as ray_error:
             logger.warning("Ray shutdown failed", error=str(ray_error))

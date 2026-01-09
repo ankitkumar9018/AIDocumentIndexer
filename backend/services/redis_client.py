@@ -193,16 +193,115 @@ async def close_redis_client():
 
 
 class RedisCache:
-    """Generic Redis cache wrapper with fallback to in-memory."""
+    """
+    Generic Redis cache wrapper with TTL-aware in-memory fallback.
 
-    def __init__(self, prefix: str = "cache", default_ttl: int = 3600):
+    Features:
+    - Automatic fallback to in-memory when Redis unavailable
+    - TTL support in both Redis and memory fallback
+    - LRU eviction when memory cache exceeds max size
+    - Statistics tracking for monitoring
+    """
+
+    def __init__(
+        self,
+        prefix: str = "cache",
+        default_ttl: int = 3600,
+        max_memory_items: int = 10000,
+    ):
         self.prefix = prefix
         self.default_ttl = default_ttl
-        self._fallback_cache: dict = {}  # In-memory fallback
+        self.max_memory_items = max_memory_items
+
+        # In-memory fallback with TTL support
+        self._fallback_cache: dict = {}  # key -> value
+        self._fallback_timestamps: dict = {}  # key -> (created_at, ttl)
+        self._fallback_order: list = []  # LRU tracking
+
+        # Statistics
+        self._stats = {
+            "redis_hits": 0,
+            "redis_misses": 0,
+            "memory_hits": 0,
+            "memory_misses": 0,
+            "redis_errors": 0,
+        }
 
     def _make_key(self, key: str) -> str:
         """Create a prefixed cache key."""
         return f"{self.prefix}:{key}"
+
+    def _is_expired(self, cache_key: str) -> bool:
+        """Check if an in-memory cache entry has expired."""
+        if cache_key not in self._fallback_timestamps:
+            return False
+
+        import time
+        created_at, ttl = self._fallback_timestamps[cache_key]
+        return (time.time() - created_at) > ttl
+
+    def _evict_expired(self):
+        """Remove expired entries from memory cache."""
+        import time
+        current_time = time.time()
+        expired_keys = []
+
+        for key, (created_at, ttl) in list(self._fallback_timestamps.items()):
+            if (current_time - created_at) > ttl:
+                expired_keys.append(key)
+
+        for key in expired_keys:
+            self._fallback_cache.pop(key, None)
+            self._fallback_timestamps.pop(key, None)
+            if key in self._fallback_order:
+                self._fallback_order.remove(key)
+
+    def _evict_lru(self):
+        """Evict oldest items if cache exceeds max size."""
+        while len(self._fallback_cache) >= self.max_memory_items and self._fallback_order:
+            oldest_key = self._fallback_order.pop(0)
+            self._fallback_cache.pop(oldest_key, None)
+            self._fallback_timestamps.pop(oldest_key, None)
+
+    def _memory_set(self, cache_key: str, value: Any, ttl: int):
+        """Set a value in memory cache with TTL."""
+        import time
+
+        # Evict expired entries periodically
+        if len(self._fallback_cache) % 100 == 0:
+            self._evict_expired()
+
+        # Evict LRU if needed
+        self._evict_lru()
+
+        # Store value with timestamp
+        self._fallback_cache[cache_key] = value
+        self._fallback_timestamps[cache_key] = (time.time(), ttl)
+
+        # Update LRU order
+        if cache_key in self._fallback_order:
+            self._fallback_order.remove(cache_key)
+        self._fallback_order.append(cache_key)
+
+    def _memory_get(self, cache_key: str) -> Optional[Any]:
+        """Get a value from memory cache, respecting TTL."""
+        if cache_key not in self._fallback_cache:
+            return None
+
+        if self._is_expired(cache_key):
+            # Remove expired entry
+            self._fallback_cache.pop(cache_key, None)
+            self._fallback_timestamps.pop(cache_key, None)
+            if cache_key in self._fallback_order:
+                self._fallback_order.remove(cache_key)
+            return None
+
+        # Update LRU order
+        if cache_key in self._fallback_order:
+            self._fallback_order.remove(cache_key)
+        self._fallback_order.append(cache_key)
+
+        return self._fallback_cache[cache_key]
 
     async def get(self, key: str) -> Optional[Any]:
         """Get a value from cache."""
@@ -212,13 +311,26 @@ class RedisCache:
             client = await get_redis_client()
             if client is None:
                 # Redis disabled, use in-memory
-                return self._fallback_cache.get(cache_key)
+                value = self._memory_get(cache_key)
+                if value is not None:
+                    self._stats["memory_hits"] += 1
+                else:
+                    self._stats["memory_misses"] += 1
+                return value
+
             value = await client.get(cache_key)
             if value:
+                self._stats["redis_hits"] += 1
                 return json.loads(value)
-        except Exception:
+            self._stats["redis_misses"] += 1
+        except Exception as e:
+            self._stats["redis_errors"] += 1
+            logger.debug(f"Redis get failed, using memory fallback: {e}")
             # Fallback to in-memory
-            return self._fallback_cache.get(cache_key)
+            value = self._memory_get(cache_key)
+            if value is not None:
+                self._stats["memory_hits"] += 1
+            return value
 
         return None
 
@@ -231,13 +343,15 @@ class RedisCache:
             client = await get_redis_client()
             if client is None:
                 # Redis disabled, use in-memory
-                self._fallback_cache[cache_key] = value
+                self._memory_set(cache_key, value, ttl)
                 return True
             await client.setex(cache_key, ttl, json.dumps(value))
             return True
-        except Exception:
+        except Exception as e:
+            self._stats["redis_errors"] += 1
+            logger.debug(f"Redis set failed, using memory fallback: {e}")
             # Fallback to in-memory
-            self._fallback_cache[cache_key] = value
+            self._memory_set(cache_key, value, ttl)
             return True
 
     async def delete(self, key: str) -> bool:
@@ -248,10 +362,18 @@ class RedisCache:
             client = await get_redis_client()
             if client is None:
                 self._fallback_cache.pop(cache_key, None)
+                self._fallback_timestamps.pop(cache_key, None)
+                if cache_key in self._fallback_order:
+                    self._fallback_order.remove(cache_key)
                 return True
             await client.delete(cache_key)
-        except Exception:
+        except Exception as e:
+            self._stats["redis_errors"] += 1
+            logger.debug(f"Redis delete failed: {e}")
             self._fallback_cache.pop(cache_key, None)
+            self._fallback_timestamps.pop(cache_key, None)
+            if cache_key in self._fallback_order:
+                self._fallback_order.remove(cache_key)
 
         return True
 
@@ -262,10 +384,24 @@ class RedisCache:
         try:
             client = await get_redis_client()
             if client is None:
-                return cache_key in self._fallback_cache
+                return self._memory_get(cache_key) is not None
             return await client.exists(cache_key) > 0
         except Exception:
-            return cache_key in self._fallback_cache
+            return self._memory_get(cache_key) is not None
+
+    def get_stats(self) -> dict:
+        """Get cache statistics."""
+        return {
+            **self._stats,
+            "memory_size": len(self._fallback_cache),
+            "max_memory_items": self.max_memory_items,
+        }
+
+    def clear_memory_cache(self):
+        """Clear the in-memory fallback cache."""
+        self._fallback_cache.clear()
+        self._fallback_timestamps.clear()
+        self._fallback_order.clear()
 
 
 # Pre-configured cache instances

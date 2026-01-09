@@ -37,6 +37,7 @@ class SettingCategory(str, Enum):
     RAG = "rag"  # Advanced RAG features
     OCR = "ocr"  # OCR configuration
     GENERATION = "generation"  # Document generation settings
+    SCRAPING = "scraping"  # Web scraping configuration
 
 
 class ValueType(str, Enum):
@@ -216,6 +217,13 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Auto-detect complex queries for agentic mode"
+    ),
+    SettingDefinition(
+        key="rag.agentic_timeout_seconds",
+        category=SettingCategory.RAG,
+        default_value=300,
+        value_type=ValueType.NUMBER,
+        description="Timeout for agentic RAG operations in seconds. Agent mode performs multi-step reasoning which takes longer than simple queries. Increase for complex research tasks, decrease if you want faster responses with potentially incomplete answers (60-600 seconds)"
     ),
 
     # Multimodal RAG Settings
@@ -689,6 +697,67 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=150,
         value_type=ValueType.NUMBER,
         description="Chart image resolution (DPI) - higher = larger file size (100-300)"
+    ),
+
+    # ==========================================================================
+    # Web Scraping Configuration
+    # ==========================================================================
+
+    SettingDefinition(
+        key="scraping.use_crawl4ai",
+        category=SettingCategory.SCRAPING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Use Crawl4AI for web scraping (recommended). When enabled: supports JavaScript-rendered pages (React, Vue, Angular), handles bot protection, produces LLM-optimized markdown. When disabled: uses basic HTTP scraping which is faster but only works for static HTML pages."
+    ),
+    SettingDefinition(
+        key="scraping.headless_browser",
+        category=SettingCategory.SCRAPING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Run browser in headless mode (no visible window). Disable for debugging scraping issues."
+    ),
+    SettingDefinition(
+        key="scraping.timeout_seconds",
+        category=SettingCategory.SCRAPING,
+        default_value=30,
+        value_type=ValueType.NUMBER,
+        description="Maximum time to wait for page load (10-120 seconds)"
+    ),
+    SettingDefinition(
+        key="scraping.extract_links",
+        category=SettingCategory.SCRAPING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Extract and index links found on scraped pages"
+    ),
+    SettingDefinition(
+        key="scraping.extract_images",
+        category=SettingCategory.SCRAPING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Extract image URLs from scraped pages"
+    ),
+    SettingDefinition(
+        key="scraping.max_depth",
+        category=SettingCategory.SCRAPING,
+        default_value=2,
+        value_type=ValueType.NUMBER,
+        description="Maximum crawl depth when following links (0=single page, 1-5 for multi-page)"
+    ),
+    SettingDefinition(
+        key="scraping.respect_robots_txt",
+        category=SettingCategory.SCRAPING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Respect robots.txt rules when scraping websites"
+    ),
+    SettingDefinition(
+        key="scraping.rate_limit_ms",
+        category=SettingCategory.SCRAPING,
+        default_value=1000,
+        value_type=ValueType.NUMBER,
+        description="Delay between requests in milliseconds to avoid overloading servers (500-5000)"
     ),
 ]
 

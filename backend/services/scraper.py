@@ -251,12 +251,27 @@ class WebScraperService:
 
     Uses Crawl4AI for robust scraping with JavaScript support,
     or falls back to basic scraping if not available.
+
+    Behavior controlled by settings:
+    - scraping.use_crawl4ai: Enable/disable Crawl4AI (browser-based scraping)
+    - scraping.headless_browser: Run browser in headless mode
+    - scraping.timeout_seconds: Page load timeout
     """
 
     def __init__(self):
         self._jobs: Dict[str, ScrapeJob] = {}
         self._scraped_urls: Dict[str, ScrapedPage] = {}  # URL -> page cache
         self._fallback_scraper = FallbackScraper()
+
+    async def _get_use_crawl4ai_setting(self) -> bool:
+        """Get the use_crawl4ai setting from database."""
+        try:
+            from backend.services.settings import get_settings_service
+            settings = get_settings_service()
+            return await settings.get_setting("scraping.use_crawl4ai")
+        except Exception:
+            # Default to True if settings unavailable
+            return True
 
     async def _scrape_with_crawl4ai(
         self,
@@ -352,8 +367,17 @@ class WebScraperService:
         self,
         url: str,
         config: ScrapeConfig,
+        use_crawl4ai: bool = True,
     ) -> ScrapedPage:
-        """Scrape a single URL."""
+        """Scrape a single URL.
+
+        Args:
+            url: URL to scrape
+            config: Scraping configuration
+            use_crawl4ai: Whether to use Crawl4AI (from settings). When True and available,
+                         uses browser-based scraping for JS-rendered pages. When False,
+                         uses basic HTTP scraping (faster but static HTML only).
+        """
         # Check cache
         if url in self._scraped_urls:
             cached = self._scraped_urls[url]
@@ -363,14 +387,16 @@ class WebScraperService:
                 logger.debug("Returning cached page", url=url)
                 return cached
 
-        # Try crawl4ai first
-        if CRAWL4AI_AVAILABLE:
+        # Use Crawl4AI if enabled in settings and available
+        if use_crawl4ai and CRAWL4AI_AVAILABLE:
             try:
                 page = await self._scrape_with_crawl4ai(url, config)
             except Exception as e:
                 logger.warning("Crawl4AI failed, falling back", url=url, error=str(e))
                 page = await self._fallback_scraper.scrape_url(url, config)
         else:
+            if not use_crawl4ai:
+                logger.debug("Crawl4AI disabled in settings, using basic scraper", url=url)
             page = await self._fallback_scraper.scrape_url(url, config)
 
         # Cache result
@@ -441,13 +467,16 @@ class WebScraperService:
 
         logger.info("Starting scrape job", job_id=job_id, urls=len(job.urls))
 
+        # Get scraping settings
+        use_crawl4ai = await self._get_use_crawl4ai_setting()
+
         job.status = ScrapeStatus.SCRAPING
         pages = []
         total_words = 0
 
         for url in job.urls:
             try:
-                page = await self._scrape_url(url, job.config)
+                page = await self._scrape_url(url, job.config, use_crawl4ai=use_crawl4ai)
                 pages.append(page)
                 job.pages_scraped += 1
                 total_words += page.word_count
@@ -493,7 +522,8 @@ class WebScraperService:
         if config is None:
             config = ScrapeConfig()
 
-        return await self._scrape_url(url, config)
+        use_crawl4ai = await self._get_use_crawl4ai_setting()
+        return await self._scrape_url(url, config, use_crawl4ai=use_crawl4ai)
 
     async def scrape_and_query(
         self,
@@ -643,6 +673,9 @@ Please answer the question based on the web page content above."""
         pages: List[ScrapedPage] = []
         base_domain = urlparse(start_url).netloc
 
+        # Get scraping settings
+        use_crawl4ai = await self._get_use_crawl4ai_setting()
+
         def normalize_url(url: str, base_url: str) -> Optional[str]:
             """Normalize a URL, handling relative paths."""
             if not url:
@@ -692,7 +725,7 @@ Please answer the question based on the web page content above."""
 
             try:
                 logger.debug("Crawling page", url=url, depth=depth, visited=len(visited))
-                page = await self._scrape_url(url, config)
+                page = await self._scrape_url(url, config, use_crawl4ai=use_crawl4ai)
                 pages.append(page)
 
                 # If we haven't reached max depth, crawl child links
@@ -770,6 +803,9 @@ Please answer the question based on the web page content above."""
         all_pages: List[ScrapedPage] = []
         total_words = 0
 
+        # Get scraping settings
+        use_crawl4ai = await self._get_use_crawl4ai_setting()
+
         for url in job.urls:
             try:
                 if crawl_subpages:
@@ -786,7 +822,7 @@ Please answer the question based on the web page content above."""
                         total_words += page.word_count
                 else:
                     # Single page scrape
-                    page = await self._scrape_url(url, job.config)
+                    page = await self._scrape_url(url, job.config, use_crawl4ai=use_crawl4ai)
                     all_pages.append(page)
                     job.pages_scraped += 1
                     total_words += page.word_count

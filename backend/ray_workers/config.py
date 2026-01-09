@@ -4,15 +4,26 @@ AIDocumentIndexer - Ray Cluster Configuration
 
 This module handles Ray cluster initialization and configuration
 for distributed document processing.
+
+Includes safeguards to prevent stuck processes:
+- Graceful shutdown with timeout
+- Worker cleanup on initialization
+- Signal handlers for clean termination
 """
 
+import atexit
 import os
+import signal
+import sys
 from typing import Optional
 
 import ray
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# Track if we've registered cleanup handlers
+_cleanup_registered = False
 
 
 class RayConfig:
@@ -41,22 +52,85 @@ class RayConfig:
 ray_config = RayConfig()
 
 
-def init_ray() -> None:
+def _cleanup_stale_ray() -> None:
     """
-    Initialize Ray cluster connection.
+    Clean up any stale Ray processes before initialization.
+
+    This helps prevent stuck workers from previous runs.
+    """
+    try:
+        # Check for stale Ray processes and clean up
+        if ray.is_initialized():
+            logger.info("Found existing Ray instance, shutting down first")
+            ray.shutdown()
+            import time
+            time.sleep(1)  # Give processes time to clean up
+    except Exception as e:
+        logger.debug("Stale Ray cleanup error (safe to ignore)", error=str(e))
+
+
+def _register_cleanup_handlers() -> None:
+    """Register signal handlers and atexit for graceful cleanup."""
+    global _cleanup_registered
+
+    if _cleanup_registered:
+        return
+
+    def signal_handler(signum, frame):
+        """Handle termination signals gracefully."""
+        logger.info(f"Received signal {signum}, initiating Ray shutdown")
+        shutdown_ray(timeout=5.0)
+        sys.exit(0)
+
+    # Register signal handlers (only in main process)
+    try:
+        if os.getpid() == os.getppid() or True:  # Always register for safety
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+    except (ValueError, OSError) as e:
+        # Signal handlers can't be set in some contexts (e.g., threads)
+        logger.debug("Could not register signal handlers", error=str(e))
+
+    # Register atexit handler for cleanup
+    atexit.register(lambda: shutdown_ray(timeout=5.0))
+
+    _cleanup_registered = True
+    logger.debug("Ray cleanup handlers registered")
+
+
+def init_ray(
+    cleanup_stale: bool = True,
+    init_timeout: float = 30.0,
+) -> bool:
+    """
+    Initialize Ray cluster connection with safety features.
 
     This connects to an existing Ray cluster or starts a local one
     based on the RAY_ADDRESS environment variable.
+
+    Args:
+        cleanup_stale: Clean up any stale Ray processes first
+        init_timeout: Timeout for initialization in seconds
+
+    Returns:
+        True if initialization succeeded, False otherwise
     """
     if ray.is_initialized():
         logger.info("Ray already initialized")
-        return
+        return True
 
     try:
+        # Clean up stale processes first
+        if cleanup_stale:
+            _cleanup_stale_ray()
+
         init_kwargs = {
             "address": ray_config.address if ray_config.address != "auto" else None,
             "ignore_reinit_error": True,
             "logging_level": "warning",
+            # Configure for better cleanup behavior
+            "configure_logging": False,  # Prevent Ray from messing with logging
+            "_temp_dir": os.path.join(os.path.expanduser("~"), ".ray_temp"),
         }
 
         # Add resource constraints if specified
@@ -69,7 +143,18 @@ def init_ray() -> None:
         if ray_config.object_store_memory is not None:
             init_kwargs["object_store_memory"] = ray_config.object_store_memory
 
-        ray.init(**init_kwargs)
+        # Initialize with timeout protection
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(ray.init, **init_kwargs)
+            try:
+                future.result(timeout=init_timeout)
+            except concurrent.futures.TimeoutError:
+                logger.error(f"Ray initialization timed out after {init_timeout}s")
+                return False
+
+        # Register cleanup handlers after successful init
+        _register_cleanup_handlers()
 
         logger.info(
             "Ray initialized",
@@ -78,17 +163,77 @@ def init_ray() -> None:
             num_gpus=ray_config.num_gpus,
             dashboard_port=ray_config.dashboard_port,
         )
+        return True
 
     except Exception as e:
         logger.error("Failed to initialize Ray", error=str(e))
-        raise
+        return False
 
 
-def shutdown_ray() -> None:
-    """Shutdown Ray cluster connection."""
-    if ray.is_initialized():
-        ray.shutdown()
-        logger.info("Ray shutdown complete")
+def shutdown_ray(timeout: float = 10.0) -> None:
+    """
+    Shutdown Ray cluster connection gracefully.
+
+    Args:
+        timeout: Maximum time to wait for shutdown in seconds
+    """
+    if not ray.is_initialized():
+        logger.debug("Ray not initialized, nothing to shutdown")
+        return
+
+    try:
+        logger.info("Initiating Ray shutdown...")
+
+        # Cancel any running tasks first
+        try:
+            # Get all running tasks and cancel them
+            pass  # Ray doesn't have a direct "cancel all" but shutdown handles it
+        except Exception:
+            pass
+
+        # Shutdown with timeout protection
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(ray.shutdown)
+            try:
+                future.result(timeout=timeout)
+                logger.info("Ray shutdown complete")
+            except concurrent.futures.TimeoutError:
+                logger.warning(f"Ray shutdown timed out after {timeout}s, forcing...")
+                # Force kill any remaining Ray processes
+                _force_kill_ray_processes()
+
+    except Exception as e:
+        logger.error("Ray shutdown error", error=str(e))
+        _force_kill_ray_processes()
+
+
+def _force_kill_ray_processes() -> None:
+    """Force kill any remaining Ray processes (last resort)."""
+    import subprocess
+
+    try:
+        # Kill Ray processes by name pattern
+        if sys.platform == "darwin":  # macOS
+            subprocess.run(
+                ["pkill", "-9", "-f", "ray::"],
+                capture_output=True,
+                timeout=5,
+            )
+            subprocess.run(
+                ["pkill", "-9", "-f", "raylet"],
+                capture_output=True,
+                timeout=5,
+            )
+        else:  # Linux
+            subprocess.run(
+                ["pkill", "-9", "-f", "ray::"],
+                capture_output=True,
+                timeout=5,
+            )
+        logger.warning("Force killed remaining Ray processes")
+    except Exception as e:
+        logger.debug("Force kill failed (may be nothing to kill)", error=str(e))
 
 
 def get_ray_resources() -> dict:

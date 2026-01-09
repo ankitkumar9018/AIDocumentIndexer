@@ -73,8 +73,8 @@ class ImageGeneratorConfig:
     # Picsum settings (fallback - always works, no setup needed, but no keyword search)
     picsum_base_url: str = "https://picsum.photos"
 
-    # Output settings
-    output_dir: str = "/tmp/generated_images"
+    # Output settings - use persistent storage instead of /tmp
+    output_dir: str = str(Path(__file__).resolve().parents[2] / "data" / "generated_images")
     default_width: int = 800
     default_height: int = 600
 
@@ -235,22 +235,299 @@ class ImageGeneratorService:
         section_title: str,
         section_content: str,
         document_title: Optional[str] = None,
+        theme: Optional[str] = None,
     ) -> str:
         """Create an image generation prompt from section content."""
         # Extract key terms from content
         words = section_content.split()[:50]  # First 50 words
         content_preview = " ".join(words)
 
+        # Get theme-specific modifiers
+        theme_modifiers = self._get_theme_modifiers(theme or "business")
+
         # Build professional prompt
         context = document_title or "business document"
         prompt = (
             f"Professional presentation image for: {section_title}. "
             f"Context: {context}. "
-            f"Style: clean, modern, corporate, high-quality illustration. "
+            f"Style: {theme_modifiers['style']}. "
             f"Theme: {content_preview[:100]}"
         )
 
+        # Add negative prompt for AI generation backends
+        self._current_negative_prompt = theme_modifiers.get("negative", "")
+
         return prompt
+
+    def _get_theme_modifiers(self, theme: str) -> Dict[str, str]:
+        """Get theme-specific style modifiers for image generation."""
+        theme_configs = {
+            "business": {
+                "style": "clean, modern, corporate, professional, high-quality illustration, business environment",
+                "negative": "text, words, letters, logos, watermarks, low quality, blurry, cartoonish",
+                "keywords": ["office", "professional", "meeting", "corporate"],
+            },
+            "tech": {
+                "style": "futuristic, digital, blue tones, technology, sleek, modern, circuit patterns",
+                "negative": "text, words, letters, logos, watermarks, low quality, blurry, old-fashioned",
+                "keywords": ["technology", "digital", "innovation", "future"],
+            },
+            "creative": {
+                "style": "vibrant, colorful, artistic, dynamic, creative design, bold colors",
+                "negative": "text, words, letters, logos, watermarks, low quality, blurry, dull, monochrome",
+                "keywords": ["creative", "art", "design", "colorful"],
+            },
+            "nature": {
+                "style": "organic, natural, green tones, sustainable, eco-friendly, earthy",
+                "negative": "text, words, letters, logos, watermarks, low quality, blurry, urban, industrial",
+                "keywords": ["nature", "green", "organic", "sustainable"],
+            },
+            "minimalist": {
+                "style": "ultra-clean design, maximum whitespace, simple, elegant, minimal",
+                "negative": "text, words, letters, logos, watermarks, low quality, blurry, cluttered, busy",
+                "keywords": ["minimal", "simple", "clean", "white"],
+            },
+            "dark": {
+                "style": "elegant dark theme, low-light, modern aesthetics, sophisticated, dramatic lighting",
+                "negative": "text, words, letters, logos, watermarks, low quality, blurry, bright, overexposed",
+                "keywords": ["dark", "elegant", "night", "sophisticated"],
+            },
+            "vibrant": {
+                "style": "bold colors, high-energy, dynamic, exciting, vivid, eye-catching",
+                "negative": "text, words, letters, logos, watermarks, low quality, blurry, dull, muted",
+                "keywords": ["vibrant", "energy", "dynamic", "bold"],
+            },
+            "elegant": {
+                "style": "sophisticated, refined, luxury, premium, high-end, tasteful",
+                "negative": "text, words, letters, logos, watermarks, low quality, blurry, cheap, tacky",
+                "keywords": ["elegant", "luxury", "premium", "refined"],
+            },
+            "warm": {
+                "style": "cozy colors, welcoming, community feel, warm tones, inviting atmosphere",
+                "negative": "text, words, letters, logos, watermarks, low quality, blurry, cold, sterile",
+                "keywords": ["warm", "cozy", "community", "friendly"],
+            },
+        }
+
+        return theme_configs.get(theme, theme_configs["business"])
+
+    async def generate_context_aware_prompt(
+        self,
+        section_title: str,
+        section_content: str,
+        theme: str = "business",
+        document_context: Optional[str] = None,
+    ) -> str:
+        """Generate a context-aware image prompt using LLM.
+
+        Uses LLM to analyze section content and generate a highly relevant
+        image prompt that captures the main visual concept.
+
+        Args:
+            section_title: Title of the section
+            section_content: Full content of the section
+            theme: Visual theme (business, tech, creative, nature, etc.)
+            document_context: Optional document-level context
+
+        Returns:
+            Optimized image generation prompt
+        """
+        try:
+            from backend.services.llm import EnhancedLLMFactory
+
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="content_generation",
+                user_id=None,
+            )
+
+            theme_modifiers = self._get_theme_modifiers(theme)
+
+            prompt = f"""Create a professional image generation prompt for a presentation slide.
+
+SECTION TITLE: {section_title}
+
+SECTION CONTENT (summarize the key visual concept):
+{section_content[:1000]}
+
+THEME: {theme}
+STYLE REQUIREMENTS: {theme_modifiers['style']}
+
+{f'DOCUMENT CONTEXT: {document_context}' if document_context else ''}
+
+Generate a concise image prompt (1-2 sentences) that:
+1. Captures the main concept visually
+2. Is appropriate for a {theme} themed presentation
+3. Uses professional, corporate-friendly imagery
+4. Avoids text, logos, or copyrighted elements
+5. Would work well as a background or supporting image
+
+Image prompt (ONE LINE ONLY - no explanations):"""
+
+            response = await llm.ainvoke(prompt)
+            base_prompt = response.content if hasattr(response, 'content') else str(response)
+            base_prompt = base_prompt.strip()
+
+            # Clean up any extra text the LLM might add
+            if '\n' in base_prompt:
+                base_prompt = base_prompt.split('\n')[0].strip()
+
+            # Remove any quotes
+            base_prompt = base_prompt.strip('"\'')
+
+            # Append theme modifiers for better results
+            full_prompt = f"{base_prompt}, {theme_modifiers['style']}"
+
+            # Store negative prompt for use in generation
+            self._current_negative_prompt = theme_modifiers["negative"]
+
+            logger.debug(
+                "Context-aware prompt generated",
+                section_title=section_title[:50],
+                prompt_preview=full_prompt[:100],
+            )
+
+            return full_prompt
+
+        except Exception as e:
+            logger.warning(f"LLM prompt generation failed, using basic prompt: {e}")
+            return self._create_prompt(section_title, section_content, document_context, theme)
+
+    async def generate_for_section_smart(
+        self,
+        section_title: str,
+        section_content: str,
+        document_title: Optional[str] = None,
+        theme: str = "business",
+        use_llm_prompt: bool = True,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> Optional[GeneratedImage]:
+        """
+        Generate an image for a document section with smart prompt engineering.
+
+        This enhanced version uses LLM to generate more contextually relevant
+        image prompts that better match the section content.
+
+        Args:
+            section_title: Title of the section
+            section_content: Content of the section
+            document_title: Optional document title for additional context
+            theme: Visual theme for the image
+            use_llm_prompt: Whether to use LLM for prompt generation
+            width: Image width (default from config)
+            height: Image height (default from config)
+
+        Returns:
+            GeneratedImage if successful, None if disabled or failed
+        """
+        if not self.config.enabled:
+            logger.debug("Image generation is disabled")
+            return None
+
+        width = width or self.config.default_width
+        height = height or self.config.default_height
+
+        # Generate prompt - use LLM if enabled, otherwise basic prompt
+        if use_llm_prompt:
+            prompt = await self.generate_context_aware_prompt(
+                section_title=section_title,
+                section_content=section_content,
+                theme=theme,
+                document_context=document_title,
+            )
+        else:
+            prompt = self._create_prompt(section_title, section_content, document_title, theme)
+
+        logger.info(
+            "Generating smart image",
+            section_title=section_title,
+            theme=theme,
+            prompt_preview=prompt[:100],
+            backend=self.config.backend.value,
+        )
+
+        # Try primary backend
+        result = await self._generate_with_backend(
+            prompt=prompt,
+            width=width,
+            height=height,
+            backend=self.config.backend,
+        )
+
+        # Fall back chain: Primary -> Unsplash -> Picsum
+        if not result or not result.success:
+            if self.config.backend != ImageBackend.UNSPLASH:
+                logger.warning(
+                    "Primary backend failed, falling back to Unsplash",
+                    primary_backend=self.config.backend.value,
+                )
+                result = await self._generate_with_backend(
+                    prompt=prompt,
+                    width=width,
+                    height=height,
+                    backend=ImageBackend.UNSPLASH,
+                )
+
+        # Final fallback to Picsum (always works, no API key needed)
+        if not result or not result.success:
+            if self.config.backend != ImageBackend.PICSUM:
+                logger.warning(
+                    "All backends failed, falling back to Picsum",
+                    primary_backend=self.config.backend.value,
+                )
+                result = await self._generate_with_backend(
+                    prompt=prompt,
+                    width=width,
+                    height=height,
+                    backend=ImageBackend.PICSUM,
+                )
+
+        return result
+
+    def extract_visual_keywords(self, content: str, max_keywords: int = 5) -> List[str]:
+        """Extract visual keywords from content for stock photo search.
+
+        Useful for backends like Unsplash/Pexels that search by keywords
+        rather than full prompts.
+
+        Args:
+            content: Text content to extract keywords from
+            max_keywords: Maximum number of keywords to return
+
+        Returns:
+            List of visual keywords suitable for image search
+        """
+        import re
+
+        # Visual/concrete noun patterns
+        visual_patterns = [
+            # Technology
+            r'\b(computer|laptop|phone|device|screen|software|data|cloud|network)\b',
+            # Business
+            r'\b(office|meeting|team|business|work|chart|graph|report|presentation)\b',
+            # Nature
+            r'\b(tree|forest|mountain|ocean|sky|nature|green|earth|plant)\b',
+            # People
+            r'\b(person|people|team|group|professional|worker|customer)\b',
+            # Abstract concepts (mapped to visuals)
+            r'\b(growth|success|innovation|strategy|future|solution)\b',
+        ]
+
+        keywords = []
+        content_lower = content.lower()
+
+        for pattern in visual_patterns:
+            matches = re.findall(pattern, content_lower)
+            keywords.extend(matches)
+
+        # Deduplicate and limit
+        unique_keywords = list(dict.fromkeys(keywords))[:max_keywords]
+
+        # Add a default keyword if none found
+        if not unique_keywords:
+            unique_keywords = ["professional", "business"]
+
+        return unique_keywords
 
     async def _generate_with_backend(
         self,

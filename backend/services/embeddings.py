@@ -736,6 +736,374 @@ def get_cache_stats() -> Dict[str, Any]:
     }
 
 
+# =============================================================================
+# Persistent Embedding Cache (Redis-backed)
+# =============================================================================
+
+
+class EmbeddingCachePersistence:
+    """
+    Persistent embedding cache backed by Redis.
+
+    Features:
+    - Persists embeddings to Redis for cross-session reuse
+    - Reduces API calls by caching expensive embedding operations
+    - Supports bulk save/load for efficient startup preloading
+    - Graceful fallback to in-memory when Redis unavailable
+
+    Usage:
+        cache = EmbeddingCachePersistence()
+
+        # Save embedding
+        await cache.save("hash123", [0.1, 0.2, ...])
+
+        # Load embedding
+        embedding = await cache.load("hash123")
+
+        # Bulk preload on startup
+        await cache.preload_to_memory()
+    """
+
+    def __init__(
+        self,
+        prefix: str = "emb_cache",
+        ttl_days: int = 30,
+        max_preload_items: int = 50000,
+    ):
+        """
+        Initialize the persistent embedding cache.
+
+        Args:
+            prefix: Redis key prefix for embeddings
+            ttl_days: Time-to-live for cached embeddings in days
+            max_preload_items: Maximum items to preload from Redis on startup
+        """
+        self.prefix = prefix
+        self.ttl_seconds = ttl_days * 24 * 60 * 60
+        self.max_preload_items = max_preload_items
+        self._redis_available = None  # Lazy check
+
+        logger.info(
+            "EmbeddingCachePersistence initialized",
+            prefix=prefix,
+            ttl_days=ttl_days,
+            max_preload_items=max_preload_items,
+        )
+
+    def _make_key(self, content_hash: str) -> str:
+        """Create a Redis key for an embedding hash."""
+        return f"{self.prefix}:{content_hash}"
+
+    async def _get_redis(self):
+        """Get Redis client (lazy initialization)."""
+        try:
+            from backend.services.redis_client import get_redis_client
+            return await get_redis_client()
+        except Exception as e:
+            logger.debug(f"Redis not available for embedding cache: {e}")
+            return None
+
+    async def is_redis_available(self) -> bool:
+        """Check if Redis is available for persistent caching."""
+        if self._redis_available is not None:
+            return self._redis_available
+
+        client = await self._get_redis()
+        self._redis_available = client is not None
+        return self._redis_available
+
+    async def save(self, content_hash: str, embedding: List[float]) -> bool:
+        """
+        Save an embedding to Redis.
+
+        Args:
+            content_hash: Hash of the content that was embedded
+            embedding: The embedding vector
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        try:
+            client = await self._get_redis()
+            if client is None:
+                return False
+
+            import json
+            key = self._make_key(content_hash)
+            await client.setex(key, self.ttl_seconds, json.dumps(embedding))
+            return True
+
+        except Exception as e:
+            logger.debug(f"Failed to save embedding to Redis: {e}")
+            return False
+
+    async def load(self, content_hash: str) -> Optional[List[float]]:
+        """
+        Load an embedding from Redis.
+
+        Args:
+            content_hash: Hash of the content
+
+        Returns:
+            The embedding vector if found, None otherwise
+        """
+        try:
+            client = await self._get_redis()
+            if client is None:
+                return None
+
+            import json
+            key = self._make_key(content_hash)
+            data = await client.get(key)
+
+            if data:
+                return json.loads(data)
+            return None
+
+        except Exception as e:
+            logger.debug(f"Failed to load embedding from Redis: {e}")
+            return None
+
+    async def load_batch(self, content_hashes: List[str]) -> Dict[str, List[float]]:
+        """
+        Load multiple embeddings from Redis in a single operation.
+
+        Args:
+            content_hashes: List of content hashes to load
+
+        Returns:
+            Dictionary mapping hashes to embeddings (only found entries)
+        """
+        if not content_hashes:
+            return {}
+
+        try:
+            client = await self._get_redis()
+            if client is None:
+                return {}
+
+            import json
+            keys = [self._make_key(h) for h in content_hashes]
+            results = {}
+
+            # Use pipeline for efficient batch loading
+            pipe = client.pipeline()
+            for key in keys:
+                pipe.get(key)
+
+            values = await pipe.execute()
+
+            for hash_val, value in zip(content_hashes, values):
+                if value:
+                    try:
+                        results[hash_val] = json.loads(value)
+                    except json.JSONDecodeError:
+                        pass
+
+            logger.debug(
+                "Batch loaded embeddings from Redis",
+                requested=len(content_hashes),
+                found=len(results),
+            )
+            return results
+
+        except Exception as e:
+            logger.debug(f"Failed to batch load embeddings from Redis: {e}")
+            return {}
+
+    async def save_batch(self, embeddings: Dict[str, List[float]]) -> int:
+        """
+        Save multiple embeddings to Redis in a single operation.
+
+        Args:
+            embeddings: Dictionary mapping content hashes to embeddings
+
+        Returns:
+            Number of embeddings successfully saved
+        """
+        if not embeddings:
+            return 0
+
+        try:
+            client = await self._get_redis()
+            if client is None:
+                return 0
+
+            import json
+            pipe = client.pipeline()
+
+            for content_hash, embedding in embeddings.items():
+                key = self._make_key(content_hash)
+                pipe.setex(key, self.ttl_seconds, json.dumps(embedding))
+
+            await pipe.execute()
+
+            logger.debug(f"Batch saved {len(embeddings)} embeddings to Redis")
+            return len(embeddings)
+
+        except Exception as e:
+            logger.debug(f"Failed to batch save embeddings to Redis: {e}")
+            return 0
+
+    async def preload_to_memory(self) -> int:
+        """
+        Preload embeddings from Redis into the in-memory cache.
+
+        Call this during application startup to warm the cache.
+
+        Returns:
+            Number of embeddings loaded into memory
+        """
+        global _embedding_cache
+
+        try:
+            client = await self._get_redis()
+            if client is None:
+                logger.info("Redis not available, skipping embedding cache preload")
+                return 0
+
+            import json
+            # Scan for embedding keys
+            pattern = f"{self.prefix}:*"
+            loaded = 0
+
+            async for key in client.scan_iter(match=pattern, count=1000):
+                if loaded >= self.max_preload_items:
+                    break
+
+                if len(_embedding_cache) >= _CACHE_MAX_SIZE:
+                    break
+
+                try:
+                    value = await client.get(key)
+                    if value:
+                        # Extract hash from key
+                        content_hash = key.replace(f"{self.prefix}:", "")
+                        embedding = json.loads(value)
+                        _embedding_cache[content_hash] = embedding
+                        loaded += 1
+                except Exception:
+                    continue
+
+            logger.info(
+                "Preloaded embeddings from Redis to memory",
+                loaded=loaded,
+                memory_cache_size=len(_embedding_cache),
+            )
+            return loaded
+
+        except Exception as e:
+            logger.warning(f"Failed to preload embeddings from Redis: {e}")
+            return 0
+
+    async def persist_memory_cache(self) -> int:
+        """
+        Persist the current in-memory cache to Redis.
+
+        Call this during application shutdown or periodically.
+
+        Returns:
+            Number of embeddings persisted
+        """
+        global _embedding_cache
+
+        if not _embedding_cache:
+            return 0
+
+        return await self.save_batch(_embedding_cache)
+
+    async def delete(self, content_hash: str) -> bool:
+        """
+        Delete an embedding from Redis.
+
+        Args:
+            content_hash: Hash of the content
+
+        Returns:
+            True if deleted, False otherwise
+        """
+        try:
+            client = await self._get_redis()
+            if client is None:
+                return False
+
+            key = self._make_key(content_hash)
+            await client.delete(key)
+            return True
+
+        except Exception as e:
+            logger.debug(f"Failed to delete embedding from Redis: {e}")
+            return False
+
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get statistics about the persistent cache."""
+        try:
+            client = await self._get_redis()
+            if client is None:
+                return {
+                    "redis_available": False,
+                    "persistent_count": 0,
+                    "memory_count": len(_embedding_cache),
+                }
+
+            # Count keys with our prefix
+            pattern = f"{self.prefix}:*"
+            count = 0
+            async for _ in client.scan_iter(match=pattern, count=1000):
+                count += 1
+                if count > 100000:  # Cap counting at 100k to avoid long scans
+                    break
+
+            return {
+                "redis_available": True,
+                "persistent_count": count,
+                "memory_count": len(_embedding_cache),
+                "prefix": self.prefix,
+                "ttl_days": self.ttl_seconds // (24 * 60 * 60),
+            }
+
+        except Exception as e:
+            return {
+                "redis_available": False,
+                "error": str(e),
+                "memory_count": len(_embedding_cache),
+            }
+
+
+# Singleton instance for persistent cache
+_embedding_cache_persistence: Optional[EmbeddingCachePersistence] = None
+
+
+def get_embedding_cache_persistence() -> EmbeddingCachePersistence:
+    """Get or create the persistent embedding cache singleton."""
+    global _embedding_cache_persistence
+    if _embedding_cache_persistence is None:
+        _embedding_cache_persistence = EmbeddingCachePersistence()
+    return _embedding_cache_persistence
+
+
+async def preload_embedding_cache():
+    """
+    Preload embeddings from Redis into memory cache on startup.
+
+    Call this from application lifespan to warm the cache.
+    """
+    if os.getenv("EMBEDDING_CACHE_PRELOAD", "false").lower() == "true":
+        cache = get_embedding_cache_persistence()
+        await cache.preload_to_memory()
+
+
+async def persist_embedding_cache():
+    """
+    Persist in-memory embedding cache to Redis on shutdown.
+
+    Call this from application lifespan to save the cache.
+    """
+    if os.getenv("EMBEDDING_CACHE_PERSIST", "true").lower() == "true":
+        cache = get_embedding_cache_persistence()
+        await cache.persist_memory_cache()
+
+
 # Provider-specific rate limits and optimal batch sizes
 PROVIDER_BATCH_CONFIG = {
     "openai": {

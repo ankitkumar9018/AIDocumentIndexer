@@ -174,6 +174,74 @@ Return JSON in this exact format:
 Only include entities and relations clearly supported by the text. Be precise and avoid speculation."""
 
 
+def _extract_json_from_response(response: str) -> Optional[dict]:
+    """
+    Extract JSON from LLM response with multiple fallback strategies.
+
+    Handles common LLM response formats:
+    - JSON wrapped in markdown code blocks
+    - JSON with explanatory text before/after
+    - Multiple JSON objects (takes first valid one)
+
+    Args:
+        response: Raw LLM response string
+
+    Returns:
+        Parsed JSON dict or None if extraction fails
+    """
+    if not response:
+        return None
+
+    # Strategy 1: Remove markdown code blocks
+    clean = re.sub(r'```(?:json)?\s*', '', response)
+    clean = re.sub(r'```', '', clean)
+    clean = clean.strip()
+
+    # Strategy 2: Find matching braces (handles nested JSON properly)
+    start = clean.find('{')
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i, char in enumerate(clean[start:], start):
+        if escape_next:
+            escape_next = False
+            continue
+
+        if char == '\\':
+            escape_next = True
+            continue
+
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                json_str = clean[start:i+1]
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    # Try with some cleanup
+                    try:
+                        # Remove trailing commas before ] or }
+                        cleaned = re.sub(r',(\s*[}\]])', r'\1', json_str)
+                        return json.loads(cleaned)
+                    except json.JSONDecodeError:
+                        return None
+
+    return None
+
+
 # =============================================================================
 # Knowledge Graph Service
 # =============================================================================
@@ -265,13 +333,14 @@ class KnowledgeGraphService:
             result = await llm.ainvoke(prompt)
             response = result.content if hasattr(result, 'content') else str(result)
 
-            # Parse JSON response
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if not json_match:
-                logger.warning("No JSON found in entity extraction response")
+            # Parse JSON response using robust extraction
+            data = _extract_json_from_response(response)
+            if not data:
+                logger.warning(
+                    "No valid JSON found in entity extraction response",
+                    response_preview=response[:200] if response else "empty"
+                )
                 return [], []
-
-            data = json.loads(json_match.group())
 
             entities = []
             for e in data.get("entities", []):
@@ -316,9 +385,6 @@ class KnowledgeGraphService:
 
             return entities, relations
 
-        except json.JSONDecodeError as e:
-            logger.error("Failed to parse entity extraction JSON", error=str(e))
-            return [], []
         except Exception as e:
             logger.error("Entity extraction failed", error=str(e))
             return [], []
@@ -705,6 +771,221 @@ class KnowledgeGraphService:
         )
 
         return entities
+
+    async def search_entities_semantic(
+        self,
+        query: str,
+        entity_types: Optional[List[EntityType]] = None,
+        top_k: int = 10,
+        similarity_threshold: float = 0.7,
+    ) -> List[Tuple[Entity, float]]:
+        """
+        Search entities using embedding similarity.
+
+        This enables semantic search over entities when text-based matching fails,
+        allowing the system to find conceptually related entities even when
+        names don't match exactly.
+
+        Args:
+            query: Search query
+            entity_types: Optional filter by entity types
+            top_k: Maximum results to return
+            similarity_threshold: Minimum similarity score (0-1)
+
+        Returns:
+            List of (entity, similarity_score) tuples sorted by similarity
+        """
+        from backend.services.embeddings import EmbeddingService, compute_similarity
+
+        # Generate query embedding
+        embedding_service = get_embedding_service(use_ray=False)
+        query_embedding = embedding_service.embed_text(query)
+
+        if not query_embedding or all(v == 0 for v in query_embedding):
+            logger.warning("Failed to generate query embedding for semantic search")
+            return []
+
+        # Build base query for entities with embeddings
+        base_query = select(Entity).where(Entity.embedding.isnot(None))
+
+        if entity_types:
+            base_query = base_query.where(Entity.entity_type.in_(entity_types))
+
+        result = await self.db.execute(base_query)
+        entities = list(result.scalars().all())
+
+        if not entities:
+            logger.debug("No entities with embeddings found for semantic search")
+            return []
+
+        # Calculate similarity scores
+        scored_entities = []
+        for entity in entities:
+            if entity.embedding:
+                # Handle both list and string (JSON) storage formats
+                entity_embedding = entity.embedding
+                if isinstance(entity_embedding, str):
+                    import json
+                    entity_embedding = json.loads(entity_embedding)
+
+                similarity = compute_similarity(query_embedding, entity_embedding)
+                if similarity >= similarity_threshold:
+                    scored_entities.append((entity, similarity))
+
+        # Sort by similarity (descending) and limit
+        scored_entities.sort(key=lambda x: x[1], reverse=True)
+        results = scored_entities[:top_k]
+
+        logger.debug(
+            "Semantic entity search completed",
+            query=query[:50],
+            candidates=len(entities),
+            matches=len(results),
+            threshold=similarity_threshold,
+        )
+
+        return results
+
+    async def find_entities_hybrid(
+        self,
+        query: str,
+        entity_types: Optional[List[EntityType]] = None,
+        limit: int = 10,
+        query_language: Optional[str] = None,
+        semantic_weight: float = 0.5,
+    ) -> List[Tuple[Entity, float]]:
+        """
+        Hybrid entity search combining text-based and semantic matching.
+
+        Combines:
+        1. Text-based matching (exact, normalized, alias)
+        2. Embedding-based semantic similarity
+
+        Args:
+            query: Search query
+            entity_types: Optional filter by entity types
+            limit: Maximum results
+            query_language: Optional language code
+            semantic_weight: Weight for semantic scores (0-1), text weight = 1 - semantic_weight
+
+        Returns:
+            List of (entity, combined_score) tuples
+        """
+        # Get text-based matches
+        text_entities = await self.find_entities_by_query(
+            query=query,
+            entity_types=entity_types,
+            limit=limit * 2,  # Get more candidates for merging
+            query_language=query_language,
+        )
+
+        # Get semantic matches
+        semantic_results = await self.search_entities_semantic(
+            query=query,
+            entity_types=entity_types,
+            top_k=limit * 2,
+            similarity_threshold=0.5,  # Lower threshold for hybrid
+        )
+
+        # Combine results with scoring
+        entity_scores: Dict[uuid.UUID, Tuple[Entity, float, float]] = {}
+
+        # Score text matches (position-based scoring)
+        for idx, entity in enumerate(text_entities):
+            text_score = 1.0 - (idx / len(text_entities)) if text_entities else 0
+            entity_scores[entity.id] = (entity, text_score, 0.0)
+
+        # Add/update with semantic scores
+        for entity, sem_score in semantic_results:
+            if entity.id in entity_scores:
+                # Entity found in both - combine scores
+                existing = entity_scores[entity.id]
+                entity_scores[entity.id] = (entity, existing[1], sem_score)
+            else:
+                # Only in semantic results
+                entity_scores[entity.id] = (entity, 0.0, sem_score)
+
+        # Calculate combined scores
+        combined_results = []
+        for entity_id, (entity, text_score, sem_score) in entity_scores.items():
+            combined_score = (
+                (1 - semantic_weight) * text_score +
+                semantic_weight * sem_score
+            )
+            combined_results.append((entity, combined_score))
+
+        # Sort by combined score and limit
+        combined_results.sort(key=lambda x: x[1], reverse=True)
+
+        logger.debug(
+            "Hybrid entity search completed",
+            query=query[:50],
+            text_matches=len(text_entities),
+            semantic_matches=len(semantic_results),
+            combined_results=len(combined_results[:limit]),
+        )
+
+        return combined_results[:limit]
+
+    async def ensure_entity_embeddings(
+        self,
+        batch_size: int = 100,
+    ) -> int:
+        """
+        Generate embeddings for entities that don't have them.
+
+        This should be called periodically or after bulk entity extraction
+        to ensure all entities have embeddings for semantic search.
+
+        Args:
+            batch_size: Number of entities to process per batch
+
+        Returns:
+            Number of entities updated with embeddings
+        """
+        from backend.services.embeddings import EmbeddingService
+
+        # Find entities without embeddings
+        result = await self.db.execute(
+            select(Entity).where(Entity.embedding.is_(None)).limit(batch_size)
+        )
+        entities = list(result.scalars().all())
+
+        if not entities:
+            logger.debug("All entities have embeddings")
+            return 0
+
+        embedding_service = EmbeddingService()
+
+        # Generate text for embedding (name + description + aliases)
+        texts = []
+        for entity in entities:
+            text_parts = [entity.name]
+            if entity.description:
+                text_parts.append(entity.description)
+            if entity.aliases:
+                text_parts.extend(entity.aliases[:3])  # Limit aliases
+            texts.append(" ".join(text_parts))
+
+        # Batch embed
+        embeddings = embedding_service.embed_texts(texts)
+
+        # Update entities
+        updated = 0
+        for entity, embedding in zip(entities, embeddings):
+            if embedding and not all(v == 0 for v in embedding):
+                entity.embedding = embedding
+                updated += 1
+
+        await self.db.commit()
+
+        logger.info(
+            "Generated entity embeddings",
+            total_entities=len(entities),
+            updated=updated,
+        )
+
+        return updated
 
     async def get_entity_neighborhood(
         self,

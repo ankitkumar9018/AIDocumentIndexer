@@ -453,16 +453,25 @@ def sentence_truncate(text: str, max_chars: int) -> str:
     return smart_truncate(text, max_chars)
 
 
-async def llm_condense_text(text: str, max_chars: int, fallback_truncate: bool = True) -> str:
-    """Use LLM to condense text while preserving meaning.
+async def llm_condense_text(
+    text: str,
+    max_chars: int,
+    fallback_truncate: bool = True,
+    preserve_numbers: bool = True,
+    context_type: str = "bullet_point",
+) -> str:
+    """Use LLM to condense text while preserving meaning and critical data.
 
     Instead of truncating with '...', this function uses LLM to intelligently
-    rephrase the text to fit within the character limit.
+    rephrase the text to fit within the character limit while preserving
+    numbers, percentages, statistics, and key facts.
 
     Args:
         text: The text to condense
         max_chars: Maximum allowed characters
         fallback_truncate: If True, fall back to sentence_truncate on LLM failure
+        preserve_numbers: If True, explicitly preserve numerical data
+        context_type: Type of content ("bullet_point", "paragraph", "title")
 
     Returns:
         Condensed text that fits within max_chars
@@ -478,18 +487,80 @@ async def llm_condense_text(text: str, max_chars: int, fallback_truncate: bool =
             user_id=None,
         )
 
-        prompt = f"""Rewrite this text in under {max_chars} characters while preserving the key meaning.
-Do not add any prefixes or explanations - just output the condensed text directly.
+        # Extract numerical data to preserve
+        numerical_data = []
+        if preserve_numbers:
+            # Find all numbers, percentages, currency values
+            number_patterns = [
+                r'\$[\d,]+(?:\.\d+)?(?:\s*(?:million|billion|trillion|M|B|K))?',  # Currency
+                r'[\d,]+(?:\.\d+)?%',  # Percentages
+                r'\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b',  # Large numbers with commas
+                r'\b\d+(?:\.\d+)?\s*(?:million|billion|trillion|M|B|K)\b',  # Numbers with magnitude
+                r'\b(?:Q[1-4]|FY)\s*\d{2,4}\b',  # Fiscal quarters/years
+                r'\b\d{4}\b',  # Years
+            ]
+            for pattern in number_patterns:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                numerical_data.extend(matches)
 
-Original text: {text}
+        # Build context-specific instructions
+        context_instructions = {
+            "bullet_point": "Keep it punchy and actionable. Start with a verb when possible.",
+            "paragraph": "Maintain readability and flow. Keep complete sentences.",
+            "title": "Be concise but descriptive. Capture the main theme.",
+        }
+        context_hint = context_instructions.get(context_type, context_instructions["bullet_point"])
 
-Condensed version:"""
+        # Build preservation instructions
+        preserve_instructions = ""
+        if numerical_data:
+            unique_numbers = list(set(numerical_data))[:10]  # Limit to first 10 unique
+            preserve_instructions = f"""
+CRITICAL: You MUST preserve these exact numerical values in your condensed version:
+{', '.join(unique_numbers)}
+
+Do not round, approximate, or omit any of these numbers."""
+
+        prompt = f"""Condense this text to under {max_chars} characters while preserving the key meaning.
+
+RULES:
+1. Preserve ALL numbers, percentages, and statistics exactly as written
+2. Keep the main point and most important facts
+3. Use concise, professional language
+4. {context_hint}
+5. Do NOT add any prefixes like "Here is..." or "The condensed version is..."
+6. Output ONLY the condensed text - nothing else
+{preserve_instructions}
+
+Original ({len(text)} chars): {text}
+
+Condensed version (under {max_chars} chars):"""
 
         response = await llm.ainvoke(prompt)
         condensed = response.content.strip() if hasattr(response, 'content') else str(response).strip()
 
+        # Clean up any accidental prefixes the LLM might add
+        prefixes_to_remove = [
+            "Here is the condensed version:",
+            "Condensed version:",
+            "Here's the condensed text:",
+            "The condensed text is:",
+        ]
+        for prefix in prefixes_to_remove:
+            if condensed.lower().startswith(prefix.lower()):
+                condensed = condensed[len(prefix):].strip()
+
         # Verify it fits
         if len(condensed) <= max_chars:
+            # Verify numerical data was preserved (warning only)
+            if preserve_numbers and numerical_data:
+                preserved_count = sum(1 for num in numerical_data if num in condensed)
+                if preserved_count < len(numerical_data) * 0.5:  # Less than 50% preserved
+                    logger.debug(
+                        "Smart condense: some numerical data may have been lost",
+                        original_numbers=len(numerical_data),
+                        preserved=preserved_count,
+                    )
             return condensed
 
         # If still too long, truncate the LLM output
@@ -500,6 +571,582 @@ Condensed version:"""
         if fallback_truncate:
             return sentence_truncate(text, max_chars)
         return text[:max_chars]
+
+
+async def smart_condense_content(
+    content: str,
+    max_length: int,
+    content_type: str = "bullet_point",
+    preserve_numbers: bool = True,
+) -> str:
+    """Smart content condensation for document generation.
+
+    High-level wrapper around llm_condense_text that provides
+    content-type-specific condensation with fallback strategies.
+
+    Args:
+        content: Content to condense
+        max_length: Maximum character length
+        content_type: Type of content (bullet_point, paragraph, title, subtitle)
+        preserve_numbers: Whether to preserve numerical data
+
+    Returns:
+        Condensed content fitting within max_length
+    """
+    if len(content) <= max_length:
+        return content
+
+    # Map content types to condensation strategies
+    type_mapping = {
+        "bullet_point": "bullet_point",
+        "paragraph": "paragraph",
+        "title": "title",
+        "subtitle": "title",
+        "heading": "title",
+        "body": "paragraph",
+    }
+    context_type = type_mapping.get(content_type, "bullet_point")
+
+    return await llm_condense_text(
+        text=content,
+        max_chars=max_length,
+        fallback_truncate=True,
+        preserve_numbers=preserve_numbers,
+        context_type=context_type,
+    )
+
+
+# =============================================================================
+# Inline Citation Support
+# =============================================================================
+
+@dataclass
+class CitationMapping:
+    """Maps citation markers to source references."""
+    marker: str  # e.g., "[1]"
+    source_document: str
+    source_page: Optional[int]
+    source_snippet: str
+    relevance_score: float = 0.0
+
+
+@dataclass
+class ContentWithCitations:
+    """Content with inline citations and mapping."""
+    content: str
+    citations: List[CitationMapping]
+    citation_style: str = "numbered"  # "numbered", "superscript", "author_year"
+
+
+async def generate_content_with_citations(
+    prompt: str,
+    sources: List["SourceReference"],
+    citation_style: str = "numbered",
+    max_citations: int = 10,
+) -> ContentWithCitations:
+    """Generate content with inline citation markers.
+
+    Uses LLM to generate content that includes citation markers [1], [2], etc.
+    for facts sourced from the provided documents.
+
+    Args:
+        prompt: The content generation prompt
+        sources: List of SourceReference objects to cite from
+        citation_style: Style of citations ("numbered", "superscript", "author_year")
+        max_citations: Maximum number of distinct citations to include
+
+    Returns:
+        ContentWithCitations with content and citation mapping
+    """
+    if not sources:
+        # No sources to cite - generate without citations
+        try:
+            from backend.services.llm import EnhancedLLMFactory
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="content_generation",
+                user_id=None,
+            )
+            response = await llm.ainvoke(prompt)
+            content = response.content if hasattr(response, 'content') else str(response)
+            return ContentWithCitations(
+                content=content.strip(),
+                citations=[],
+                citation_style=citation_style,
+            )
+        except Exception as e:
+            logger.error(f"Content generation failed: {e}")
+            return ContentWithCitations(content="", citations=[], citation_style=citation_style)
+
+    # Prepare sources for citation
+    source_context = _format_sources_for_citation(sources[:max_citations])
+
+    # Build citation-aware prompt
+    citation_prompt = f"""{prompt}
+
+---CITATION REQUIREMENTS---
+You have access to the following source documents. Include inline citations [1], [2], etc. after statements that use information from these sources.
+
+SOURCES:
+{source_context}
+
+CITATION RULES:
+1. Add citation markers [1], [2], etc. AFTER statements that use specific information from the sources
+2. Multiple citations can be combined: [1][2] or [1, 2]
+3. Only cite when using specific facts, statistics, or claims from the sources
+4. General knowledge does not need citations
+5. Each source number corresponds to the numbered sources above
+6. Do NOT cite information that isn't in the sources - only cite what you actually use
+7. Place citation markers at the end of the sentence, before the period
+
+Example: The company's revenue increased by 45% in Q3 [1]. This growth was driven by new product launches [2].
+
+Generate the content with appropriate citations:"""
+
+    try:
+        from backend.services.llm import EnhancedLLMFactory
+        llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+            operation="content_generation",
+            user_id=None,
+        )
+        response = await llm.ainvoke(citation_prompt)
+        content = response.content if hasattr(response, 'content') else str(response)
+        content = content.strip()
+
+        # Extract citation mappings
+        citations = _extract_citation_mappings(content, sources[:max_citations])
+
+        return ContentWithCitations(
+            content=content,
+            citations=citations,
+            citation_style=citation_style,
+        )
+
+    except Exception as e:
+        logger.error(f"Content with citations generation failed: {e}")
+        return ContentWithCitations(content="", citations=[], citation_style=citation_style)
+
+
+def _format_sources_for_citation(sources: List["SourceReference"]) -> str:
+    """Format sources for LLM prompt with numbered references."""
+    formatted = []
+    for i, source in enumerate(sources, 1):
+        page_info = f", page {source.page_number}" if source.page_number else ""
+        formatted.append(
+            f"[{i}] {source.document_name}{page_info}:\n"
+            f"    {source.snippet[:500]}..."
+        )
+    return "\n\n".join(formatted)
+
+
+def _extract_citation_mappings(
+    content: str,
+    sources: List["SourceReference"],
+) -> List[CitationMapping]:
+    """Extract citation markers from content and map to sources."""
+    citations = []
+
+    # Find all citation markers in the content
+    citation_pattern = r'\[(\d+(?:,\s*\d+)*)\]'
+    found_numbers = set()
+
+    for match in re.finditer(citation_pattern, content):
+        # Handle both [1] and [1, 2] formats
+        numbers_str = match.group(1)
+        numbers = [int(n.strip()) for n in numbers_str.split(',')]
+        found_numbers.update(numbers)
+
+    # Create mappings for found citations
+    for num in sorted(found_numbers):
+        if 1 <= num <= len(sources):
+            source = sources[num - 1]
+            citations.append(CitationMapping(
+                marker=f"[{num}]",
+                source_document=source.document_name,
+                source_page=source.page_number,
+                source_snippet=source.snippet[:200],
+                relevance_score=source.relevance_score,
+            ))
+
+    return citations
+
+
+def format_citations_for_footnotes(citations: List[CitationMapping]) -> str:
+    """Format citations as footnotes for DOCX documents."""
+    footnotes = []
+    for i, citation in enumerate(citations, 1):
+        page_ref = f", p. {citation.source_page}" if citation.source_page else ""
+        footnotes.append(f"{citation.marker} {citation.source_document}{page_ref}")
+    return "\n".join(footnotes)
+
+
+def format_citations_for_speaker_notes(citations: List[CitationMapping]) -> str:
+    """Format citations for PPTX speaker notes."""
+    if not citations:
+        return ""
+
+    notes = ["Sources referenced in this slide:"]
+    for citation in citations:
+        page_ref = f" (p. {citation.source_page})" if citation.source_page else ""
+        notes.append(f"  {citation.marker} {citation.source_document}{page_ref}")
+
+    return "\n".join(notes)
+
+
+def strip_citation_markers(content: str) -> str:
+    """Remove citation markers from content.
+
+    Useful when outputting to formats that don't support citations
+    or when citations should be handled separately.
+    """
+    return re.sub(r'\s*\[\d+(?:,\s*\d+)*\]\s*', ' ', content).strip()
+
+
+def convert_citations_to_superscript(content: str) -> str:
+    """Convert [1] style citations to superscript numbers.
+
+    Note: This returns Unicode superscript characters.
+    For actual superscript formatting, use the document library's
+    formatting capabilities.
+    """
+    superscript_map = {
+        '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+        '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+    }
+
+    def replace_citation(match):
+        numbers = match.group(1)
+        superscript = ''.join(superscript_map.get(c, c) for c in numbers if c.isdigit())
+        return superscript
+
+    return re.sub(r'\[(\d+(?:,\s*\d+)*)\]', replace_citation, content)
+
+
+async def add_citations_to_section(
+    section: "Section",
+    include_citations: bool = True,
+    citation_style: str = "numbered",
+) -> "Section":
+    """Add inline citations to a section's content.
+
+    Regenerates content with citation markers if include_citations is True.
+
+    Args:
+        section: Section to add citations to
+        include_citations: Whether to include inline citations
+        citation_style: Style of citations
+
+    Returns:
+        Updated section with citations
+    """
+    if not include_citations or not section.sources:
+        return section
+
+    # Generate content with citations
+    prompt = f"""Rewrite this content with inline citation markers [1], [2], etc. where appropriate.
+
+Original content:
+{section.content}
+
+Add citation markers after statements that use information from the sources.
+Keep the content largely the same - just add citation markers."""
+
+    result = await generate_content_with_citations(
+        prompt=prompt,
+        sources=section.sources,
+        citation_style=citation_style,
+    )
+
+    if result.content:
+        section.content = result.content
+        # Store citations in metadata for later use
+        if section.metadata is None:
+            section.metadata = {}
+        section.metadata["citations"] = [
+            {
+                "marker": c.marker,
+                "source_document": c.source_document,
+                "source_page": c.source_page,
+            }
+            for c in result.citations
+        ]
+
+    return section
+
+
+# =============================================================================
+# Style Learning from Existing Documents
+# =============================================================================
+
+@dataclass
+class StyleProfile:
+    """Learned writing style from user documents.
+
+    Captures detailed style characteristics that can be applied
+    to new document generation for consistency.
+    """
+    # Core style attributes
+    tone: str = "professional"  # formal, casual, technical, friendly, academic
+    vocabulary_level: str = "moderate"  # simple, moderate, advanced, technical
+    formality: str = "moderate"  # casual, moderate, formal, highly_formal
+
+    # Structural preferences
+    avg_sentence_length: float = 15.0  # Average words per sentence
+    avg_paragraph_length: float = 4.0  # Average sentences per paragraph
+    structure_pattern: str = "mixed"  # bullet-lists, paragraphs, mixed, headers-heavy
+    bullet_preference: bool = False  # Prefers bullet points over prose
+
+    # Language patterns
+    uses_passive_voice: float = 0.3  # 0-1 ratio of passive voice usage
+    uses_first_person: bool = False  # Uses "I", "we"
+    uses_contractions: bool = False  # Uses "don't", "can't", etc.
+    heading_style: str = "title_case"  # title_case, sentence_case, all_caps
+
+    # Key phrases and terminology
+    key_phrases: List[str] = field(default_factory=list)
+    domain_terms: List[str] = field(default_factory=list)
+
+    # Formatting preferences
+    uses_bold_emphasis: bool = True
+    uses_italic_emphasis: bool = True
+    uses_numbered_lists: bool = False
+
+    # Source information
+    source_documents: List[str] = field(default_factory=list)
+    confidence_score: float = 0.5  # 0-1, how confident we are in the analysis
+
+
+async def learn_style_from_documents(
+    document_contents: List[str],
+    document_names: Optional[List[str]] = None,
+    use_llm_analysis: bool = True,
+) -> StyleProfile:
+    """Learn writing style from a collection of documents.
+
+    Analyzes document content to extract comprehensive style patterns
+    that can be applied to generate consistently styled new documents.
+
+    Args:
+        document_contents: List of document text contents
+        document_names: Optional list of source document names
+        use_llm_analysis: Whether to use LLM for deeper style analysis
+
+    Returns:
+        StyleProfile with learned style characteristics
+    """
+    if not document_contents:
+        return StyleProfile()
+
+    # Statistical analysis of documents
+    all_sentences = []
+    all_paragraphs = []
+    word_counts = []
+    total_words = 0
+    uses_bullets = False
+    uses_numbered = False
+    uses_bold = False
+    uses_italic = False
+    first_person_count = 0
+    contraction_count = 0
+    passive_patterns = 0
+    total_sentences = 0
+
+    for content in document_contents:
+        # Split into sentences
+        sentences = re.split(r'[.!?]+', content)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        all_sentences.extend(sentences)
+
+        # Split into paragraphs
+        paragraphs = re.split(r'\n\s*\n', content)
+        paragraphs = [p.strip() for p in paragraphs if p.strip()]
+        all_paragraphs.extend(paragraphs)
+
+        # Word count per sentence
+        for sentence in sentences:
+            words = sentence.split()
+            word_counts.append(len(words))
+            total_words += len(words)
+            total_sentences += 1
+
+            # Check for first person
+            if re.search(r'\b(I|we|our|my)\b', sentence, re.IGNORECASE):
+                first_person_count += 1
+
+            # Check for contractions
+            if re.search(r"'(t|s|re|ll|ve|d)\b|n't\b", sentence, re.IGNORECASE):
+                contraction_count += 1
+
+            # Check for passive voice patterns
+            if re.search(r'\b(is|are|was|were|been|being)\s+\w+ed\b', sentence, re.IGNORECASE):
+                passive_patterns += 1
+
+        # Check for formatting patterns
+        if '•' in content or re.search(r'^[-*]\s', content, re.MULTILINE):
+            uses_bullets = True
+        if re.search(r'^\d+[.)]\s', content, re.MULTILINE):
+            uses_numbered = True
+        if '**' in content or '<b>' in content.lower():
+            uses_bold = True
+        if '_' in content or '*' in content or '<i>' in content.lower():
+            uses_italic = True
+
+    # Calculate averages
+    avg_sentence_length = sum(word_counts) / len(word_counts) if word_counts else 15.0
+    sentences_per_para = []
+    for para in all_paragraphs:
+        para_sentences = re.split(r'[.!?]+', para)
+        para_sentences = [s for s in para_sentences if s.strip()]
+        sentences_per_para.append(len(para_sentences))
+    avg_paragraph_length = sum(sentences_per_para) / len(sentences_per_para) if sentences_per_para else 4.0
+
+    # Calculate ratios
+    first_person_ratio = first_person_count / total_sentences if total_sentences > 0 else 0
+    contraction_ratio = contraction_count / total_sentences if total_sentences > 0 else 0
+    passive_ratio = passive_patterns / total_sentences if total_sentences > 0 else 0
+
+    # Determine vocabulary level based on average word length
+    all_words = ' '.join(document_contents).split()
+    avg_word_length = sum(len(w) for w in all_words) / len(all_words) if all_words else 5
+    if avg_word_length > 7:
+        vocabulary_level = "advanced"
+    elif avg_word_length > 5.5:
+        vocabulary_level = "moderate"
+    else:
+        vocabulary_level = "simple"
+
+    # Determine structure pattern
+    if uses_bullets and not uses_numbered:
+        structure_pattern = "bullet-lists"
+    elif uses_numbered:
+        structure_pattern = "headers-heavy"
+    elif avg_paragraph_length > 5:
+        structure_pattern = "paragraphs"
+    else:
+        structure_pattern = "mixed"
+
+    # Determine formality
+    if contraction_ratio > 0.2 or first_person_ratio > 0.3:
+        formality = "casual"
+    elif contraction_ratio < 0.05 and first_person_ratio < 0.1:
+        formality = "formal"
+    else:
+        formality = "moderate"
+
+    # Build initial profile
+    profile = StyleProfile(
+        vocabulary_level=vocabulary_level,
+        formality=formality,
+        avg_sentence_length=round(avg_sentence_length, 1),
+        avg_paragraph_length=round(avg_paragraph_length, 1),
+        structure_pattern=structure_pattern,
+        bullet_preference=uses_bullets,
+        uses_passive_voice=round(passive_ratio, 2),
+        uses_first_person=first_person_ratio > 0.1,
+        uses_contractions=contraction_ratio > 0.1,
+        uses_bold_emphasis=uses_bold,
+        uses_italic_emphasis=uses_italic,
+        uses_numbered_lists=uses_numbered,
+        source_documents=document_names or [],
+        confidence_score=min(1.0, len(document_contents) * 0.2),  # More docs = higher confidence
+    )
+
+    # Use LLM for deeper analysis if enabled
+    if use_llm_analysis and document_contents:
+        try:
+            from backend.services.llm import EnhancedLLMFactory
+
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="content_generation",
+                user_id=None,
+            )
+
+            # Sample text for LLM analysis
+            sample_text = "\n\n---\n\n".join([
+                content[:1500] for content in document_contents[:5]
+            ])
+
+            analysis_prompt = f"""Analyze this text sample and identify writing style characteristics.
+
+TEXT SAMPLES:
+{sample_text}
+
+Provide a JSON response with:
+{{
+    "tone": "formal" | "casual" | "technical" | "friendly" | "academic",
+    "key_phrases": ["list of 3-5 common phrases or patterns"],
+    "domain_terms": ["list of 3-5 domain-specific terms used"],
+    "heading_style": "title_case" | "sentence_case" | "all_caps",
+    "recommended_tone": "brief description of how to write in this style"
+}}
+
+Return ONLY valid JSON:"""
+
+            response = await llm.ainvoke(analysis_prompt)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+
+            # Parse LLM response
+            import json
+            json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
+            if json_match:
+                llm_analysis = json.loads(json_match.group())
+                profile.tone = llm_analysis.get("tone", profile.tone)
+                profile.key_phrases = llm_analysis.get("key_phrases", [])
+                profile.domain_terms = llm_analysis.get("domain_terms", [])
+                profile.heading_style = llm_analysis.get("heading_style", "title_case")
+                profile.confidence_score = min(1.0, profile.confidence_score + 0.2)
+
+        except Exception as e:
+            logger.warning(f"LLM style analysis failed: {e}")
+
+    return profile
+
+
+def apply_style_to_prompt(prompt: str, style: StyleProfile) -> str:
+    """Apply style profile instructions to a generation prompt.
+
+    Args:
+        prompt: Original generation prompt
+        style: StyleProfile to apply
+
+    Returns:
+        Prompt with style instructions appended
+    """
+    style_instructions = f"""
+---WRITING STYLE GUIDANCE (internal - follow but do not output)---
+Based on existing documents, match this style:
+
+TONE & FORMALITY:
+- Tone: {style.tone}
+- Formality: {style.formality}
+- Vocabulary: {style.vocabulary_level} complexity
+
+SENTENCE STRUCTURE:
+- Target sentence length: ~{style.avg_sentence_length:.0f} words
+- Target paragraph length: ~{style.avg_paragraph_length:.0f} sentences
+{"- Use first person (I, we) when appropriate" if style.uses_first_person else "- Avoid first person pronouns"}
+{"- Contractions are OK (don't, can't)" if style.uses_contractions else "- Avoid contractions (use 'do not', 'cannot')"}
+
+FORMATTING:
+- Structure: {style.structure_pattern}
+{"- Prefer bullet points for lists" if style.bullet_preference else "- Prefer prose over bullet points"}
+{"- Use **bold** for emphasis" if style.uses_bold_emphasis else ""}
+{"- Use _italic_ for emphasis" if style.uses_italic_emphasis else ""}
+- Heading style: {style.heading_style}
+"""
+
+    if style.key_phrases:
+        style_instructions += f"\nKEY PHRASES to use when relevant:\n"
+        for phrase in style.key_phrases[:5]:
+            style_instructions += f"- \"{phrase}\"\n"
+
+    if style.domain_terms:
+        style_instructions += f"\nDOMAIN TERMS to incorporate:\n"
+        for term in style.domain_terms[:5]:
+            style_instructions += f"- {term}\n"
+
+    style_instructions += "---END STYLE GUIDANCE---\n"
+
+    return prompt + "\n" + style_instructions
 
 
 def hex_to_rgb(hex_color: str) -> tuple:
@@ -749,7 +1396,8 @@ class GenerationConfig:
     min_relevance_score: float = 0.01  # RRF scores are typically 0-0.1, not 0-1
 
     # Output settings - loaded from database settings or environment
-    output_dir: str = "/tmp/generated_docs"
+    # Use persistent storage instead of /tmp
+    output_dir: str = str(Path(__file__).resolve().parents[2] / "data" / "generated_docs")
     include_sources: bool = field(
         default_factory=lambda: _get_generation_setting(
             "generation.include_sources", "GENERATION_INCLUDE_SOURCES", True

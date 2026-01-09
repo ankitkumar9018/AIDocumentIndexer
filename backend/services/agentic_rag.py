@@ -15,6 +15,7 @@ Features:
 - Synthesizes final answer from multiple sources
 """
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -26,6 +27,10 @@ import uuid
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# Default timeout for LLM calls and RAG queries (in seconds)
+# This is a fallback - actual value is read from settings (rag.agentic_timeout_seconds)
+DEFAULT_OPERATION_TIMEOUT = 300  # 5 minutes
 
 
 # =============================================================================
@@ -195,12 +200,14 @@ class AgenticRAGService:
         llm_service=None,
         max_iterations: int = 5,
         max_sub_queries: int = 5,
+        operation_timeout: float = DEFAULT_OPERATION_TIMEOUT,
     ):
         self.rag = rag_service
         self.graph = knowledge_graph_service
         self.llm = llm_service
         self.max_iterations = max_iterations
         self.max_sub_queries = max_sub_queries
+        self.operation_timeout = operation_timeout
 
     async def _get_llm(self):
         """Get LLM for generation."""
@@ -305,8 +312,26 @@ class AgenticRAGService:
                 current_knowledge=knowledge_text or "No information gathered yet.",
             )
 
-            response = await llm.ainvoke(prompt)
-            content = response.content if hasattr(response, 'content') else str(response)
+            try:
+                response = await asyncio.wait_for(
+                    llm.ainvoke(prompt),
+                    timeout=self.operation_timeout
+                )
+                content = response.content if hasattr(response, 'content') else str(response)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "LLM reasoning timed out",
+                    iteration=iteration,
+                    timeout=self.operation_timeout
+                )
+                # On timeout, try to answer with what we have
+                if knowledge:
+                    final_answer = await self._synthesize_answer(
+                        query, sub_queries, knowledge, sources
+                    )
+                else:
+                    final_answer = "I apologize, but the request timed out. Please try again with a simpler question."
+                break
 
             # Parse response
             thought, action, action_input = self._parse_react_response(content)
@@ -448,55 +473,74 @@ class AgenticRAGService:
             Tuple of (observation, sources)
         """
         sources = []
+        observation: Optional[str] = None
 
         try:
-            if action == AgentAction.SEARCH:
-                # Use RAG service to search
-                result = await self.rag.query(
-                    question=action_input,
-                    collection_filter=collection_filter,
-                    access_tier=access_tier,
-                )
+            # Wrap all actions in timeout to prevent hanging
+            async def execute_with_timeout():
+                nonlocal observation, sources
 
-                observation = result.content
-                sources = [
-                    {
-                        "document_id": str(s.document_id),
-                        "document_name": s.document_name,
-                        "snippet": s.snippet,
-                        "relevance_score": s.relevance_score,
-                    }
-                    for s in result.sources
-                ]
+                if action == AgentAction.SEARCH:
+                    # Use RAG service to search
+                    result = await self.rag.query(
+                        question=action_input,
+                        collection_filter=collection_filter,
+                        access_tier=access_tier,
+                    )
 
-            elif action == AgentAction.GRAPH_SEARCH:
-                # Use knowledge graph if available
-                if self.graph:
-                    context = await self.graph.graph_search(action_input)
-                    observation = context.graph_summary
+                    observation = result.content
+                    sources = [
+                        {
+                            "document_id": str(s.document_id),
+                            "document_name": s.document_name,
+                            "snippet": s.snippet,
+                            "relevance_score": s.relevance_score,
+                        }
+                        for s in result.sources
+                    ]
+
+                elif action == AgentAction.GRAPH_SEARCH:
+                    # Use knowledge graph if available
+                    if self.graph:
+                        context = await self.graph.graph_search(action_input)
+                        observation = context.graph_summary
+                    else:
+                        observation = "Knowledge graph not available."
+
+                elif action == AgentAction.SUMMARIZE:
+                    # Summarize provided text
+                    llm, _ = await self._get_llm()
+                    prompt = f"Summarize the following in 2-3 sentences:\n\n{action_input}"
+                    response = await llm.ainvoke(prompt)
+                    observation = response.content if hasattr(response, 'content') else str(response)
+
+                elif action == AgentAction.COMPARE:
+                    # Compare items
+                    llm, _ = await self._get_llm()
+                    prompt = f"Compare and contrast the following:\n\n{action_input}"
+                    response = await llm.ainvoke(prompt)
+                    observation = response.content if hasattr(response, 'content') else str(response)
+
+                elif action == AgentAction.ANSWER:
+                    # Final answer - just return the input
+                    observation = action_input
+
                 else:
-                    observation = "Knowledge graph not available."
+                    observation = f"Action {action.value} not implemented."
 
-            elif action == AgentAction.SUMMARIZE:
-                # Summarize provided text
-                llm, _ = await self._get_llm()
-                prompt = f"Summarize the following in 2-3 sentences:\n\n{action_input}"
-                response = await llm.ainvoke(prompt)
-                observation = response.content if hasattr(response, 'content') else str(response)
+            # Execute with timeout
+            await asyncio.wait_for(
+                execute_with_timeout(),
+                timeout=self.operation_timeout
+            )
 
-            elif action == AgentAction.COMPARE:
-                # Compare items
-                llm, _ = await self._get_llm()
-                prompt = f"Compare and contrast the following:\n\n{action_input}"
-                response = await llm.ainvoke(prompt)
-                observation = response.content if hasattr(response, 'content') else str(response)
-
-            elif action == AgentAction.ANSWER:
-                # Final answer - just return the input
-                observation = action_input
-
-            else:
-                observation = f"Action {action.value} not implemented."
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Action execution timed out",
+                action=action.value,
+                timeout=self.operation_timeout
+            )
+            observation = f"Action timed out after {self.operation_timeout}s. Moving to next step."
 
         except Exception as e:
             logger.error("Action execution failed", action=action.value, error=str(e))
@@ -526,6 +570,100 @@ class AgenticRAGService:
                     sq.completed = True
                     sq.result = observation[:500]
 
+    async def _build_graph_context(
+        self,
+        query: str,
+        sub_queries: List[SubQuery],
+    ) -> str:
+        """
+        Build graph context from knowledge graph for multi-hop reasoning.
+
+        Extracts relevant entities from the query and sub-queries,
+        then retrieves their relationships from the knowledge graph.
+
+        Args:
+            query: The main query
+            sub_queries: Decomposed sub-queries
+
+        Returns:
+            Formatted graph context string for synthesis
+        """
+        try:
+            from backend.services.knowledge_graph import get_knowledge_graph_service
+            from backend.db.database import async_session_context
+
+            async with async_session_context() as session:
+                kg_service = get_knowledge_graph_service(session)
+
+                # Collect all query terms to search for entities
+                all_query_text = query + " " + " ".join(sq.query for sq in sub_queries)
+
+                # Find entities mentioned in queries using hybrid search
+                entities = await kg_service.find_entities_hybrid(
+                    query=all_query_text,
+                    limit=10,
+                    semantic_weight=0.6,  # Favor semantic for complex queries
+                )
+
+                if not entities:
+                    logger.debug("No entities found in knowledge graph for query")
+                    return ""
+
+                context_parts = []
+
+                # Build context for top entities
+                for entity, score in entities[:5]:
+                    entity_info = f"Entity: {entity.name} ({entity.entity_type.value if hasattr(entity.entity_type, 'value') else entity.entity_type})"
+
+                    if entity.description:
+                        entity_info += f"\n  Description: {entity.description}"
+
+                    # Get entity neighborhood (related entities)
+                    try:
+                        neighbors, relations = await kg_service.get_entity_neighborhood(
+                            entity_id=entity.id,
+                            max_hops=2,
+                            max_neighbors=5,
+                        )
+
+                        if neighbors:
+                            related_names = [n.name for n in neighbors[:5]]
+                            entity_info += f"\n  Related to: {', '.join(related_names)}"
+
+                        if relations:
+                            rel_descriptions = []
+                            for rel in relations[:3]:
+                                if rel.source_entity and rel.target_entity:
+                                    rel_desc = f"{rel.source_entity.name} → {rel.relation_type.value if hasattr(rel.relation_type, 'value') else rel.relation_type} → {rel.target_entity.name}"
+                                    rel_descriptions.append(rel_desc)
+                            if rel_descriptions:
+                                entity_info += f"\n  Relationships: {'; '.join(rel_descriptions)}"
+
+                    except Exception as e:
+                        logger.debug(f"Failed to get entity neighborhood: {e}")
+
+                    context_parts.append(entity_info)
+
+                if not context_parts:
+                    return ""
+
+                graph_context = "Knowledge Graph Context:\n" + "\n\n".join(context_parts)
+
+                logger.debug(
+                    "Built graph context for synthesis",
+                    entity_count=len(entities),
+                    context_length=len(graph_context),
+                )
+
+                return graph_context
+
+        except ImportError:
+            logger.debug("Knowledge graph service not available")
+            return ""
+        except Exception as e:
+            logger.warning(f"Failed to build graph context: {e}")
+            return ""
+
     async def _synthesize_answer(
         self,
         query: str,
@@ -548,15 +686,28 @@ class AgenticRAGService:
             for s in sources[:10]
         )
 
+        # Build graph context for multi-hop reasoning
+        graph_context = await self._build_graph_context(query, sub_queries)
+
         prompt = SYNTHESIS_PROMPT.format(
             query=query,
             sub_answers="\n\n".join(sub_answers) or "No sub-questions answered.",
-            graph_context="",  # TODO: Add graph context
+            graph_context=graph_context or "No knowledge graph context available.",
             retrieved_context=retrieved_context or "No additional context.",
         )
 
-        response = await llm.ainvoke(prompt)
-        return response.content if hasattr(response, 'content') else str(response)
+        try:
+            response = await asyncio.wait_for(
+                llm.ainvoke(prompt),
+                timeout=self.operation_timeout
+            )
+            return response.content if hasattr(response, 'content') else str(response)
+        except asyncio.TimeoutError:
+            logger.warning("Synthesis timed out", timeout=self.operation_timeout)
+            # Return best effort from knowledge
+            if knowledge:
+                return f"Based on the available information: {list(knowledge.values())[0][:500]}"
+            return "Unable to synthesize answer due to timeout."
 
     # -------------------------------------------------------------------------
     # Main Entry Point
@@ -705,9 +856,25 @@ def get_agentic_rag_service(
     knowledge_graph_service=None,
     llm_service=None,
 ) -> AgenticRAGService:
-    """Create configured agentic RAG service."""
+    """Create configured agentic RAG service with settings from admin panel."""
+    from backend.services.settings import get_settings_service
+
+    settings = get_settings_service()
+
+    # Get timeout from settings (default 120 seconds for complex agent queries)
+    timeout = settings.get_default_value("rag.agentic_timeout_seconds")
+    if timeout is None:
+        timeout = 300  # Fallback default (5 minutes)
+
+    # Get max iterations from settings
+    max_iterations = settings.get_default_value("rag.agentic_max_iterations")
+    if max_iterations is None:
+        max_iterations = 5
+
     return AgenticRAGService(
         rag_service=rag_service,
         knowledge_graph_service=knowledge_graph_service,
         llm_service=llm_service,
+        max_iterations=max_iterations,
+        operation_timeout=float(timeout),
     )

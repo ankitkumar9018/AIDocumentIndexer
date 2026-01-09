@@ -46,8 +46,29 @@ class DatabaseConfig:
     """Database configuration from environment variables."""
 
     def __init__(self):
-        self.database_type = os.getenv("DATABASE_TYPE", "postgresql")
-        self.database_url = os.getenv("DATABASE_URL", "")
+        # Check for LOCAL_MODE first - overrides other settings
+        self.local_mode = os.getenv("LOCAL_MODE", "false").lower() == "true"
+
+        if self.local_mode:
+            # Force SQLite + local settings in local mode
+            self.database_type = "sqlite"
+            default_db_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                "data",
+                "aidocindexer.db"
+            )
+            self.database_url = os.getenv(
+                "DATABASE_URL",
+                f"sqlite:///{default_db_path}"
+            )
+            # Ensure VECTOR_STORE_BACKEND is set for local mode
+            if not os.getenv("VECTOR_STORE_BACKEND"):
+                os.environ["VECTOR_STORE_BACKEND"] = "chroma"
+            logger.info("Running in LOCAL_MODE - using SQLite + ChromaDB")
+        else:
+            self.database_type = os.getenv("DATABASE_TYPE", "postgresql")
+            self.database_url = os.getenv("DATABASE_URL", "")
+
         # Increased default pool size from 5 to 30 for better concurrency
         # Scale: 5 connections supports ~15 concurrent users
         #        30 connections supports ~100 concurrent users
@@ -55,6 +76,16 @@ class DatabaseConfig:
         self.pool_size = int(os.getenv("DB_POOL_SIZE", "30"))
         self.max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "20"))
         self.echo = os.getenv("APP_ENV") == "development"
+
+    @property
+    def is_sqlite(self) -> bool:
+        """Check if using SQLite database."""
+        return "sqlite" in self.database_url.lower() or self.database_type == "sqlite"
+
+    @property
+    def is_local_mode(self) -> bool:
+        """Check if running in local mode."""
+        return self.local_mode or self.is_sqlite
 
     @property
     def async_url(self) -> str:

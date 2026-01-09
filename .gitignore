@@ -166,6 +166,28 @@ uploads/
 temp/
 input_files/
 
+# =============================================================================
+# Application Data (persistent storage)
+# =============================================================================
+# These folders contain user uploads and generated content
+# They should NOT be in git but should persist across reboots
+
+# Document uploads
+data/uploads/
+
+# Generated documents (DOCX, PPTX, PDF output)
+data/generated_docs/
+
+# Generated images for documents
+data/generated_images/
+
+# ChromaDB vector store
+data/chroma/
+data/chroma_backup*/
+
+# Ray temporary files
+.ray_temp/
+
 # Model files (too large for git)
 *.bin
 *.gguf

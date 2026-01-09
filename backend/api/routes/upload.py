@@ -48,8 +48,10 @@ router = APIRouter()
 # This provides both speed (in-memory) and persistence (database)
 _processing_status_cache: Dict[str, Dict] = {}
 
-# Upload directory
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/tmp/aidocindexer/uploads"))
+# Upload directory - use persistent storage, not /tmp which gets cleared on reboot
+# Default to ./data/uploads relative to project root
+_default_upload_dir = Path(__file__).resolve().parents[3] / "data" / "uploads"
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(_default_upload_dir)))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 

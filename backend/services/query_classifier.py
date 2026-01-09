@@ -32,6 +32,7 @@ class QueryIntent(str, Enum):
     NAVIGATIONAL = "navigational"  # Find document X, specific file
     PROCEDURAL = "procedural"    # How to X, steps to, process for
     EXPLORATORY = "exploratory"  # Broad exploration, overview
+    AGGREGATION = "aggregation"  # Total X, sum of, average, calculations
     UNKNOWN = "unknown"          # Fallback
 
 
@@ -100,6 +101,19 @@ INTENT_PATTERNS = {
         r"\b(topics?|areas?|subjects?)\s+(related|about)\b",
         r"^(what can you tell me)\s+",
     ],
+    QueryIntent.AGGREGATION: [
+        r"\b(total|sum|aggregate|combined|cumulative)\s+",
+        r"\b(how much|how many)\s+(did|was|were|has|have|is|are)\s+",
+        r"\b(average|avg|mean)\s+(of|for)?\s*",
+        r"\b(spending|revenue|cost|expense|income|profit|budget)\s+",
+        r"\b(calculate|computation|add up)\s+",
+        r"\b(maximum|minimum|highest|lowest)\s+(of|for)?\s*",
+        r"\b(count|number of)\s+\w+\s+(in|from|for|during)\s+",
+        r"\b(last|past|previous)\s+\d+\s+(months?|years?|quarters?|weeks?|days?)",
+        r"\b(q[1-4]|quarter)\s*\d*\s+(spending|revenue|cost|total)",
+        r"\b(fy|fiscal\s+year)\s*\d*",
+        r"\ball\s+(spending|payments?|transactions?|expenses?|costs?)\b",
+    ],
 }
 
 # Default weights for each intent type
@@ -110,6 +124,7 @@ INTENT_WEIGHTS = {
     QueryIntent.NAVIGATIONAL: (0.3, 0.7),  # Strong keyword for specific names/titles
     QueryIntent.PROCEDURAL: (0.7, 0.3),    # Favor vector for process understanding
     QueryIntent.EXPLORATORY: (0.75, 0.25), # Strong vector for broad exploration
+    QueryIntent.AGGREGATION: (0.6, 0.4),   # Balanced - need both semantic and keyword for numerical extraction
     QueryIntent.UNKNOWN: (0.7, 0.3),       # Default: slight vector preference
 }
 

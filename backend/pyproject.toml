@@ -88,7 +88,7 @@ dependencies = [
     "langchain-text-splitters>=0.3.0,<1.0.0",
     "pytesseract>=0.3.13",
     "langchain-anthropic>=0.3.22",
-    "bcrypt<5.0.0",
+    "bcrypt<4.1",
     "unidecode>=1.4.0",
 ]
 
