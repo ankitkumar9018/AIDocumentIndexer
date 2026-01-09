@@ -19,6 +19,9 @@ import structlog
 from backend.api.middleware.auth import get_current_user, CurrentUser
 from backend.services.folder_service import FolderService, get_folder_service
 from backend.db.database import get_async_session
+from backend.db.models import User
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger(__name__)
 
@@ -37,6 +40,7 @@ class CreateFolderRequest(BaseModel):
     inherit_permissions: bool = Field(True, description="Whether to inherit parent's permissions")
     description: Optional[str] = Field(None, max_length=1000, description="Folder description")
     color: Optional[str] = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$", description="Hex color code")
+    tags: Optional[List[str]] = Field(None, description="Tags for folder categorization")
 
 
 class UpdateFolderRequest(BaseModel):
@@ -46,6 +50,7 @@ class UpdateFolderRequest(BaseModel):
     color: Optional[str] = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$")
     access_tier_id: Optional[str] = None
     inherit_permissions: Optional[bool] = None
+    tags: Optional[List[str]] = Field(None, description="Tags for folder categorization")
 
 
 class MoveFolderRequest(BaseModel):
@@ -64,6 +69,7 @@ class FolderResponse(BaseModel):
     inherit_permissions: bool
     description: Optional[str]
     color: Optional[str]
+    tags: Optional[List[str]] = None
     created_at: Optional[str]
     created_by_id: Optional[str]
     document_count: Optional[int] = None
@@ -77,6 +83,7 @@ class FolderTreeNode(BaseModel):
     depth: int
     parent_folder_id: Optional[str]
     color: Optional[str]
+    tags: Optional[List[str]] = None
     children: List["FolderTreeNode"] = []
 
 
@@ -134,6 +141,7 @@ async def create_folder(
             inherit_permissions=request.inherit_permissions,
             description=request.description,
             color=request.color,
+            tags=request.tags,
         )
 
         return FolderResponse(
@@ -146,6 +154,7 @@ async def create_folder(
             inherit_permissions=folder.inherit_permissions,
             description=folder.description,
             color=folder.color,
+            tags=folder.tags or [],
             created_at=folder.created_at.isoformat() if folder.created_at else None,
             created_by_id=str(folder.created_by_id) if folder.created_by_id else None,
         )
@@ -196,19 +205,34 @@ async def list_folders(
 async def get_folder_tree(
     root_folder_id: Optional[str] = Query(None, description="Root folder ID (null for full tree)"),
     current_user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Get folder tree structure for navigation.
 
     Returns nested folder structure with children.
+    Respects user's use_folder_permissions_only flag for permission-based filtering.
     """
     try:
         folder_service = get_folder_service()
         user_tier_level = current_user.get("access_tier_level", 1)
+        user_id = current_user.get("sub")  # JWT uses 'sub' for user ID
+
+        # Fetch use_folder_permissions_only from database for real-time permission check
+        use_folder_permissions_only = False
+        if user_id:
+            result = await db.execute(
+                select(User.use_folder_permissions_only).where(User.id == user_id)
+            )
+            row = result.scalar_one_or_none()
+            if row is not None:
+                use_folder_permissions_only = row
 
         tree = await folder_service.get_folder_tree(
             user_tier_level=user_tier_level,
             root_folder_id=root_folder_id,
+            user_id=user_id,
+            use_folder_permissions_only=use_folder_permissions_only,
         )
 
         return tree
@@ -256,6 +280,7 @@ async def get_folder(
             inherit_permissions=folder.inherit_permissions,
             description=folder.description,
             color=folder.color,
+            tags=folder.tags or [],
             created_at=folder.created_at.isoformat() if folder.created_at else None,
             created_by_id=str(folder.created_by_id) if folder.created_by_id else None,
         )
@@ -332,6 +357,7 @@ async def update_folder(
             color=request.color,
             access_tier_id=request.access_tier_id,
             inherit_permissions=request.inherit_permissions,
+            tags=request.tags,
         )
 
         return FolderResponse(
@@ -344,6 +370,7 @@ async def update_folder(
             inherit_permissions=updated.inherit_permissions,
             description=updated.description,
             color=updated.color,
+            tags=updated.tags or [],
             created_at=updated.created_at.isoformat() if updated.created_at else None,
             created_by_id=str(updated.created_by_id) if updated.created_by_id else None,
         )
@@ -475,6 +502,7 @@ async def move_folder(
             inherit_permissions=moved.inherit_permissions,
             description=moved.description,
             color=moved.color,
+            tags=moved.tags or [],
             created_at=moved.created_at.isoformat() if moved.created_at else None,
             created_by_id=str(moved.created_by_id) if moved.created_by_id else None,
         )
@@ -600,4 +628,221 @@ async def list_folder_documents(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to list documents"
+        )
+
+
+# =============================================================================
+# Folder Permission Endpoints
+# =============================================================================
+
+class GrantPermissionRequest(BaseModel):
+    """Request to grant folder permission."""
+    user_id: str = Field(..., description="User ID to grant permission to")
+    permission_level: str = Field(
+        "view",
+        description="Permission level: view, edit, or manage"
+    )
+    inherit_to_children: bool = Field(
+        True,
+        description="Whether permission cascades to subfolders"
+    )
+
+
+class FolderPermissionResponse(BaseModel):
+    """Folder permission response model."""
+    id: str
+    folder_id: str
+    user_id: str
+    user_email: str
+    user_name: Optional[str]
+    permission_level: str
+    inherit_to_children: bool
+    granted_by_id: Optional[str]
+    created_at: Optional[str]
+
+
+@router.get("/{folder_id}/permissions", response_model=List[FolderPermissionResponse])
+async def get_folder_permissions(
+    folder_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Get all permissions for a folder.
+
+    Only accessible by admins or users with MANAGE permission on the folder.
+    """
+    try:
+        folder_service = get_folder_service()
+        user_tier_level = current_user.get("access_tier_level", 1)
+        user_id = current_user.get("sub")
+
+        # Check folder exists
+        folder = await folder_service.get_folder_by_id(folder_id)
+        if not folder:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Folder not found"
+            )
+
+        # Check access (admin or MANAGE permission)
+        is_admin = user_tier_level >= 100
+        has_manage = await folder_service.check_user_has_folder_permission(
+            folder_id, user_id, "manage"
+        )
+
+        if not is_admin and not has_manage:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No access to view folder permissions"
+            )
+
+        permissions = await folder_service.get_folder_permissions(folder_id)
+        return [FolderPermissionResponse(**p) for p in permissions]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error getting folder permissions", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get permissions"
+        )
+
+
+@router.post("/{folder_id}/permissions", response_model=FolderPermissionResponse)
+async def grant_folder_permission(
+    folder_id: str,
+    request: GrantPermissionRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Grant a user permission to access a folder.
+
+    Only accessible by admins or users with MANAGE permission on the folder.
+    """
+    try:
+        folder_service = get_folder_service()
+        user_tier_level = current_user.get("access_tier_level", 1)
+        granting_user_id = current_user.get("sub")
+
+        # Check folder exists
+        folder = await folder_service.get_folder_by_id(folder_id)
+        if not folder:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Folder not found"
+            )
+
+        # Check access (admin or MANAGE permission)
+        is_admin = user_tier_level >= 100
+        has_manage = await folder_service.check_user_has_folder_permission(
+            folder_id, granting_user_id, "manage"
+        )
+
+        if not is_admin and not has_manage:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No access to grant folder permissions"
+            )
+
+        # Validate permission level
+        valid_levels = ["view", "edit", "manage"]
+        if request.permission_level not in valid_levels:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid permission level. Must be one of: {valid_levels}"
+            )
+
+        # Grant permission
+        permission = await folder_service.grant_folder_permission(
+            folder_id=folder_id,
+            user_id=request.user_id,
+            permission_level=request.permission_level,
+            granted_by_id=granting_user_id,
+            inherit_to_children=request.inherit_to_children,
+        )
+
+        # Fetch full permission data with user info
+        permissions = await folder_service.get_folder_permissions(folder_id)
+        for p in permissions:
+            if p["user_id"] == request.user_id:
+                return FolderPermissionResponse(**p)
+
+        # Fallback if not found (shouldn't happen)
+        return FolderPermissionResponse(
+            id=str(permission.id),
+            folder_id=str(permission.folder_id),
+            user_id=str(permission.user_id),
+            user_email="",
+            user_name=None,
+            permission_level=permission.permission_level,
+            inherit_to_children=permission.inherit_to_children,
+            granted_by_id=str(permission.granted_by_id) if permission.granted_by_id else None,
+            created_at=permission.created_at.isoformat() if permission.created_at else None,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error granting folder permission", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to grant permission"
+        )
+
+
+@router.delete("/{folder_id}/permissions/{user_id}")
+async def revoke_folder_permission(
+    folder_id: str,
+    user_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Revoke a user's permission to a folder.
+
+    Only accessible by admins or users with MANAGE permission on the folder.
+    """
+    try:
+        folder_service = get_folder_service()
+        user_tier_level = current_user.get("access_tier_level", 1)
+        revoking_user_id = current_user.get("sub")
+
+        # Check folder exists
+        folder = await folder_service.get_folder_by_id(folder_id)
+        if not folder:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Folder not found"
+            )
+
+        # Check access (admin or MANAGE permission)
+        is_admin = user_tier_level >= 100
+        has_manage = await folder_service.check_user_has_folder_permission(
+            folder_id, revoking_user_id, "manage"
+        )
+
+        if not is_admin and not has_manage:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No access to revoke folder permissions"
+            )
+
+        # Revoke permission
+        deleted = await folder_service.revoke_folder_permission(folder_id, user_id)
+
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Permission not found"
+            )
+
+        return {"message": "Permission revoked successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error revoking folder permission", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to revoke permission"
         )

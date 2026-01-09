@@ -796,18 +796,101 @@ Execute a request through the multi-agent system.
 
 ## Admin Endpoints
 
-### GET /auth/users
+### GET /admin/users
 
 List all users (admin only).
 
-### PATCH /auth/users/{user_id}
-
-Update user role/tier (admin only).
-
 **Query Parameters:**
-- `role` (string): New role
-- `access_tier` (int): New access tier
-- `is_active` (bool): Active status
+- `page` (int): Page number (default: 1)
+- `page_size` (int): Items per page (default: 20)
+
+**Response:**
+```json
+{
+  "users": [
+    {
+      "id": "uuid",
+      "email": "user@example.com",
+      "name": "User Name",
+      "is_active": true,
+      "access_tier_id": "uuid",
+      "access_tier_name": "Staff",
+      "access_tier_level": 30,
+      "use_folder_permissions_only": false,
+      "created_at": "2025-01-01T00:00:00Z",
+      "last_login_at": "2025-01-08T10:30:00Z"
+    }
+  ],
+  "total": 50,
+  "page": 1,
+  "page_size": 20
+}
+```
+
+### POST /admin/users
+
+Create a new user (admin only).
+
+**Request:**
+```json
+{
+  "email": "newuser@example.com",
+  "password": "securepassword",
+  "full_name": "New User",
+  "access_tier_id": "uuid",
+  "use_folder_permissions_only": false,
+  "initial_folder_permissions": [
+    {
+      "folder_id": "uuid",
+      "permission_level": "view",
+      "inherit_to_children": true
+    }
+  ]
+}
+```
+
+**Request Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `email` | string | Yes | User email address |
+| `password` | string | Yes | Password (min 8 characters) |
+| `full_name` | string | No | User's full name |
+| `access_tier_id` | uuid | Yes | Access tier ID |
+| `use_folder_permissions_only` | bool | No | Restrict to folder-only access (default: false) |
+| `initial_folder_permissions` | array | No | Initial folder access grants |
+
+**Folder Permission Object:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `folder_id` | uuid | Yes | Folder to grant access to |
+| `permission_level` | string | No | `view`, `edit`, or `manage` (default: view) |
+| `inherit_to_children` | bool | No | Apply to subfolders (default: true) |
+
+### PATCH /admin/users/{user_id}
+
+Update user settings (admin only).
+
+**Request:**
+```json
+{
+  "access_tier_id": "uuid",
+  "is_active": true,
+  "use_folder_permissions_only": false
+}
+```
+
+**Request Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `access_tier_id` | uuid | New access tier |
+| `is_active` | bool | Active status |
+| `use_folder_permissions_only` | bool | Restrict to folder-only access |
+
+**Note on `use_folder_permissions_only`:**
+When enabled, the user can ONLY access folders they have been explicitly granted access to via folder permissions. Tier-based access is bypassed entirely. This is useful for:
+- External contractors needing access to specific project folders
+- Temporary collaborators with limited scope
+- Compliance scenarios requiring strict access control
 
 ### GET /admin/ocr/settings
 
@@ -1118,6 +1201,97 @@ List documents in a folder.
 - `include_subfolders` (bool): Include documents from subfolders (default: false)
 - `page` (int): Page number
 - `page_size` (int): Items per page
+
+---
+
+## Folder Permission Endpoints
+
+Per-user folder permissions allow granting specific users access to specific folders, independent of their tier-based access.
+
+### GET /folders/{folder_id}/permissions
+
+Get all users with explicit access to a folder.
+
+**Response:**
+```json
+[
+  {
+    "id": "uuid",
+    "folder_id": "uuid",
+    "folder_name": "Marketing",
+    "folder_path": "/Marketing/",
+    "user_id": "uuid",
+    "user_email": "user@example.com",
+    "user_name": "User Name",
+    "permission_level": "view",
+    "inherit_to_children": true,
+    "granted_by_id": "uuid",
+    "created_at": "2025-01-01T00:00:00Z"
+  }
+]
+```
+
+### POST /folders/{folder_id}/permissions
+
+Grant folder access to a user.
+
+**Request:**
+```json
+{
+  "user_id": "uuid",
+  "permission_level": "view",
+  "inherit_to_children": true
+}
+```
+
+**Permission Levels:**
+| Level | Description |
+|-------|-------------|
+| `view` | Can see folder and read documents |
+| `edit` | Can upload and modify documents |
+| `manage` | Can grant permissions to others |
+
+**Response:**
+```json
+{
+  "id": "uuid",
+  "folder_id": "uuid",
+  "user_id": "uuid",
+  "permission_level": "view",
+  "inherit_to_children": true,
+  "created_at": "2025-01-01T00:00:00Z"
+}
+```
+
+### DELETE /folders/{folder_id}/permissions/{user_id}
+
+Revoke folder access from a user.
+
+**Response:**
+```json
+{
+  "message": "Permission revoked successfully"
+}
+```
+
+### GET /admin/users/{user_id}/folder-permissions
+
+Get all folders a user has explicit access to (admin only).
+
+**Response:**
+```json
+[
+  {
+    "id": "uuid",
+    "folder_id": "uuid",
+    "folder_name": "Marketing",
+    "folder_path": "/Marketing/",
+    "permission_level": "edit",
+    "inherit_to_children": true,
+    "created_at": "2025-01-01T00:00:00Z"
+  }
+]
+```
 
 ---
 

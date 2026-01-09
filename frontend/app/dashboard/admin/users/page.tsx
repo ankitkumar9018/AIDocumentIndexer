@@ -18,6 +18,11 @@ import {
   AlertCircle,
   Plus,
   Trash2,
+  FolderKey,
+  Folder,
+  ChevronRight,
+  X,
+  Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -45,7 +50,14 @@ import {
   useUpdateAccessTier,
   useCreateAccessTier,
   useDeleteAccessTier,
+  useFolderTree,
+  useGrantFolderPermission,
+  folderPermissionQueryKeys,
 } from "@/lib/api/hooks";
+import type { FolderTreeNode } from "@/lib/api";
+import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Dialog,
   DialogContent,
@@ -63,6 +75,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useUser } from "@/lib/auth";
+import { UserFolderPermissionsDialog } from "@/components/user-folder-permissions-dialog";
 
 const getTierIcon = (level: number) => {
   if (level >= 80) return <ShieldCheck className="h-4 w-4 text-green-500" />;
@@ -81,6 +94,15 @@ export default function AdminUsersPage() {
   const [newUserPassword, setNewUserPassword] = useState("");
   const [newUserName, setNewUserName] = useState("");
   const [newUserTierId, setNewUserTierId] = useState("");
+  const [newUserFolderOnly, setNewUserFolderOnly] = useState(false);
+  const [newUserFolderPermissions, setNewUserFolderPermissions] = useState<Array<{
+    folder_id: string;
+    folder_name: string;
+    permission_level: 'view' | 'edit' | 'manage';
+    inherit_to_children: boolean;
+  }>>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState("");
+  const [selectedPermissionLevel, setSelectedPermissionLevel] = useState<'view' | 'edit' | 'manage'>("view");
 
   // Configure Tier dialog state
   const [showConfigureTierDialog, setShowConfigureTierDialog] = useState(false);
@@ -98,6 +120,9 @@ export default function AdminUsersPage() {
   // Add Tier dialog state
   const [showAddTierDialog, setShowAddTierDialog] = useState(false);
   const [newTierName, setNewTierName] = useState("");
+
+  // Folder Permissions dialog state
+  const [folderPermissionsUser, setFolderPermissionsUser] = useState<{ id: string; name: string; email: string } | null>(null);
   const [newTierLevel, setNewTierLevel] = useState(50);
   const [newTierDescription, setNewTierDescription] = useState("");
   const [newTierColor, setNewTierColor] = useState("#6B7280");
@@ -111,6 +136,8 @@ export default function AdminUsersPage() {
 
   const { data: tiersData, isLoading: tiersLoading } = useAccessTiers({ enabled: isAuthenticated });
   const { data: statsData, isLoading: statsLoading } = useAdminStats({ enabled: isAuthenticated });
+  const { data: folderTree } = useFolderTree(undefined, { enabled: isAuthenticated && showAddUserDialog });
+  const queryClient = useQueryClient();
   const updateUser = useUpdateAdminUser();
   const createUser = useCreateUser();
   const updateTier = useUpdateAccessTier();
@@ -139,12 +166,30 @@ export default function AdminUsersPage() {
     }
   };
 
+  // Helper to flatten folder tree
+  const flattenFolderTree = (nodes: FolderTreeNode[], depth = 0): { id: string; name: string; path: string; depth: number }[] => {
+    const result: { id: string; name: string; path: string; depth: number }[] = [];
+    for (const node of nodes) {
+      result.push({ id: node.id, name: node.name, path: node.path || node.name, depth });
+      if (node.children && node.children.length > 0) {
+        result.push(...flattenFolderTree(node.children, depth + 1));
+      }
+    }
+    return result;
+  };
+
+  const flatFolders = folderTree ? flattenFolderTree(folderTree) : [];
+
   // Add User handlers
   const handleOpenAddUser = () => {
     setNewUserEmail("");
     setNewUserPassword("");
     setNewUserName("");
     setNewUserTierId(tiers[0]?.id || "");
+    setNewUserFolderOnly(false);
+    setNewUserFolderPermissions([]);
+    setSelectedFolderId("");
+    setSelectedPermissionLevel("view");
     setShowAddUserDialog(true);
   };
 
@@ -156,6 +201,14 @@ export default function AdminUsersPage() {
         password: newUserPassword,
         name: newUserName || undefined,
         access_tier_id: newUserTierId,
+        use_folder_permissions_only: newUserFolderOnly,
+        initial_folder_permissions: newUserFolderPermissions.length > 0
+          ? newUserFolderPermissions.map((p) => ({
+              folder_id: p.folder_id,
+              permission_level: p.permission_level,
+              inherit_to_children: p.inherit_to_children,
+            }))
+          : undefined,
       });
       setShowAddUserDialog(false);
       toast.success("User created successfully");
@@ -163,6 +216,46 @@ export default function AdminUsersPage() {
     } catch (err: unknown) {
       console.error("Failed to create user:", err);
       toast.error("Failed to create user", {
+        description: getErrorMessage(err),
+      });
+    }
+  };
+
+  const handleAddFolderPermission = () => {
+    if (!selectedFolderId) return;
+    const folder = flatFolders.find((f) => f.id === selectedFolderId);
+    if (!folder) return;
+    if (newUserFolderPermissions.some((p) => p.folder_id === selectedFolderId)) {
+      toast.error("Folder already added");
+      return;
+    }
+    setNewUserFolderPermissions([
+      ...newUserFolderPermissions,
+      {
+        folder_id: selectedFolderId,
+        folder_name: folder.name,
+        permission_level: selectedPermissionLevel,
+        inherit_to_children: true,
+      },
+    ]);
+    setSelectedFolderId("");
+  };
+
+  const handleRemoveFolderPermission = (folderId: string) => {
+    setNewUserFolderPermissions(newUserFolderPermissions.filter((p) => p.folder_id !== folderId));
+  };
+
+  const handleToggleFolderOnly = async (userId: string, currentValue: boolean) => {
+    try {
+      await updateUser.mutateAsync({
+        userId,
+        data: { use_folder_permissions_only: !currentValue },
+      });
+      toast.success(!currentValue ? "User restricted to folder access only" : "User tier-based access restored");
+      refetchUsers();
+    } catch (err: unknown) {
+      console.error("Failed to update user:", err);
+      toast.error("Failed to update user", {
         description: getErrorMessage(err),
       });
     }
@@ -462,6 +555,12 @@ export default function AdminUsersPage() {
                           <span className="text-xs text-muted-foreground">
                             (Level {user.access_tier_level})
                           </span>
+                          {user.use_folder_permissions_only && (
+                            <Badge variant="outline" className="text-xs gap-1 text-amber-600 border-amber-300">
+                              <Lock className="h-3 w-3" />
+                              Folder Only
+                            </Badge>
+                          )}
                         </div>
                       </td>
                       <td className="p-4">
@@ -507,6 +606,25 @@ export default function AdminUsersPage() {
                             <DropdownMenuSeparator />
                             <DropdownMenuItem onClick={() => handleOpenChangeTier(user)}>
                               Change Access Tier
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => setFolderPermissionsUser({
+                                id: user.id,
+                                name: user.name || "",
+                                email: user.email,
+                              })}
+                            >
+                              <FolderKey className="h-4 w-4 mr-2" />
+                              Manage Folder Access
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onClick={() => handleToggleFolderOnly(user.id, user.use_folder_permissions_only)}
+                            >
+                              <Lock className="h-4 w-4 mr-2" />
+                              {user.use_folder_permissions_only
+                                ? "Enable Tier-Based Access"
+                                : "Restrict to Folders Only"}
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -618,57 +736,161 @@ export default function AdminUsersPage() {
 
       {/* Add User Dialog */}
       <Dialog open={showAddUserDialog} onOpenChange={setShowAddUserDialog}>
-        <DialogContent>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add New User</DialogTitle>
             <DialogDescription>
-              Create a new user account with specified access tier.
+              Create a new user account with specified access tier and folder permissions.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="email">Email *</Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="user@example.com"
-                value={newUserEmail}
-                onChange={(e) => setNewUserEmail(e.target.value)}
-              />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="email">Email *</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  placeholder="user@example.com"
+                  value={newUserEmail}
+                  onChange={(e) => setNewUserEmail(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="password">Password *</Label>
+                <Input
+                  id="password"
+                  type="password"
+                  placeholder="Enter password"
+                  value={newUserPassword}
+                  onChange={(e) => setNewUserPassword(e.target.value)}
+                />
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="password">Password *</Label>
-              <Input
-                id="password"
-                type="password"
-                placeholder="Enter password"
-                value={newUserPassword}
-                onChange={(e) => setNewUserPassword(e.target.value)}
-              />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="name">Name</Label>
+                <Input
+                  id="name"
+                  placeholder="John Doe"
+                  value={newUserName}
+                  onChange={(e) => setNewUserName(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="tier">Access Tier *</Label>
+                <Select value={newUserTierId} onValueChange={setNewUserTierId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select tier" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {tiers.map((tier) => (
+                      <SelectItem key={tier.id} value={tier.id}>
+                        {tier.name} (Level {tier.level})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="name">Name</Label>
-              <Input
-                id="name"
-                placeholder="John Doe"
-                value={newUserName}
-                onChange={(e) => setNewUserName(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="tier">Access Tier *</Label>
-              <Select value={newUserTierId} onValueChange={setNewUserTierId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select tier" />
-                </SelectTrigger>
-                <SelectContent>
-                  {tiers.map((tier) => (
-                    <SelectItem key={tier.id} value={tier.id}>
-                      {tier.name} (Level {tier.level})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+
+            {/* Folder Access Mode */}
+            <div className="border rounded-lg p-4 space-y-4 bg-muted/30">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label className="text-sm font-medium flex items-center gap-2">
+                    <Lock className="h-4 w-4" />
+                    Restrict to Folder Access Only
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    User will ONLY see explicitly granted folders (ignores tier-based access)
+                  </p>
+                </div>
+                <Switch
+                  checked={newUserFolderOnly}
+                  onCheckedChange={setNewUserFolderOnly}
+                />
+              </div>
+
+              {/* Initial Folder Permissions */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Initial Folder Access</Label>
+                <div className="flex gap-2">
+                  <Select value={selectedFolderId} onValueChange={setSelectedFolderId}>
+                    <SelectTrigger className="flex-1">
+                      <SelectValue placeholder="Select folder..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {flatFolders
+                        .filter((f) => !newUserFolderPermissions.some((p) => p.folder_id === f.id))
+                        .map((folder) => (
+                          <SelectItem key={folder.id} value={folder.id}>
+                            <div className="flex items-center gap-1">
+                              {folder.depth > 0 && (
+                                <span className="text-muted-foreground mr-1">
+                                  {"  ".repeat(folder.depth)}
+                                  <ChevronRight className="h-3 w-3 inline" />
+                                </span>
+                              )}
+                              <Folder className="h-3 w-3 mr-1" />
+                              {folder.name}
+                            </div>
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    value={selectedPermissionLevel}
+                    onValueChange={(v) => setSelectedPermissionLevel(v as 'view' | 'edit' | 'manage')}
+                  >
+                    <SelectTrigger className="w-28">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="view">View</SelectItem>
+                      <SelectItem value="edit">Edit</SelectItem>
+                      <SelectItem value="manage">Manage</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={handleAddFolderPermission}
+                    disabled={!selectedFolderId}
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+
+                {/* Selected Folders List */}
+                {newUserFolderPermissions.length > 0 && (
+                  <div className="space-y-1 mt-2">
+                    {newUserFolderPermissions.map((perm) => (
+                      <div
+                        key={perm.folder_id}
+                        className="flex items-center justify-between bg-background border rounded px-3 py-2"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Folder className="h-4 w-4 text-muted-foreground" />
+                          <span className="text-sm">{perm.folder_name}</span>
+                          <Badge variant="secondary" className="text-xs">
+                            {perm.permission_level}
+                          </Badge>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          onClick={() => handleRemoveFolderPermission(perm.folder_id)}
+                        >
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
           <DialogFooter>
@@ -866,6 +1088,17 @@ export default function AdminUsersPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* User Folder Permissions Dialog */}
+      {folderPermissionsUser && (
+        <UserFolderPermissionsDialog
+          userId={folderPermissionsUser.id}
+          userName={folderPermissionsUser.name}
+          userEmail={folderPermissionsUser.email}
+          open={!!folderPermissionsUser}
+          onOpenChange={(open) => !open && setFolderPermissionsUser(null)}
+        />
+      )}
     </div>
   );
 }

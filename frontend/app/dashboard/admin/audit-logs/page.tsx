@@ -50,6 +50,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   useAuditLogs,
   useAuditActions,
   useSecurityAuditLogs,
@@ -111,6 +117,7 @@ export default function AuditLogsPage() {
   const [actionFilter, setActionFilter] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [showSecurityOnly, setShowSecurityOnly] = useState(false);
+  const [selectedLog, setSelectedLog] = useState<AuditLogEntry | null>(null);
 
   // Queries
   const { data: auditLogs, isLoading, refetch } = useAuditLogs(
@@ -128,15 +135,18 @@ export default function AuditLogsPage() {
 
   const { data: actions } = useAuditActions({ enabled: isAuthenticated });
 
-  const logs = showSecurityOnly ? securityLogs : auditLogs?.logs;
-  const total = showSecurityOnly ? (securityLogs?.length || 0) : (auditLogs?.total || 0);
+  // Ensure logs is always an array (handle API response format changes)
+  const rawSecurityLogs = Array.isArray(securityLogs) ? securityLogs : [];
+  const rawAuditLogs = Array.isArray(auditLogs?.logs) ? auditLogs.logs : [];
+  const logs = showSecurityOnly ? rawSecurityLogs : rawAuditLogs;
+  const total = showSecurityOnly ? rawSecurityLogs.length : (auditLogs?.total || 0);
   const loading = showSecurityOnly ? securityLoading : isLoading;
 
   const handleRefresh = () => {
     refetch();
   };
 
-  const filteredLogs = logs?.filter((log) => {
+  const filteredLogs = logs.filter((log) => {
     if (!searchQuery) return true;
     const query = searchQuery.toLowerCase();
     return (
@@ -358,7 +368,12 @@ export default function AuditLogsPage() {
                       </TableCell>
                       <TableCell>
                         {log.details && Object.keys(log.details).length > 0 && (
-                          <Button variant="ghost" size="sm" className="h-6 px-2">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2"
+                            onClick={() => setSelectedLog(log)}
+                          >
                             <Eye className="h-3 w-3" />
                           </Button>
                         )}
@@ -407,6 +422,62 @@ export default function AuditLogsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Audit Log Details Dialog */}
+      <Dialog open={!!selectedLog} onOpenChange={(open) => !open && setSelectedLog(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Eye className="h-5 w-5" />
+              Audit Log Details
+            </DialogTitle>
+          </DialogHeader>
+          {selectedLog && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Action:</span>
+                  <Badge className="ml-2" variant="outline">
+                    {selectedLog.action}
+                  </Badge>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Timestamp:</span>
+                  <span className="ml-2">{formatDate(selectedLog.created_at)}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">User:</span>
+                  <span className="ml-2">{selectedLog.user_email || "System"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">IP Address:</span>
+                  <span className="ml-2 font-mono">{selectedLog.ip_address || "N/A"}</span>
+                </div>
+                {selectedLog.resource_type && (
+                  <div>
+                    <span className="text-muted-foreground">Resource Type:</span>
+                    <Badge className="ml-2" variant="secondary">
+                      {selectedLog.resource_type}
+                    </Badge>
+                  </div>
+                )}
+                {selectedLog.resource_id && (
+                  <div>
+                    <span className="text-muted-foreground">Resource ID:</span>
+                    <span className="ml-2 font-mono text-xs">{selectedLog.resource_id}</span>
+                  </div>
+                )}
+              </div>
+              <div>
+                <span className="text-sm text-muted-foreground block mb-2">Details:</span>
+                <pre className="bg-muted p-4 rounded-lg text-xs overflow-auto max-h-96 whitespace-pre-wrap">
+                  {JSON.stringify(selectedLog.details, null, 2)}
+                </pre>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

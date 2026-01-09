@@ -312,7 +312,9 @@ See [CONFIGURATION.md](docs/CONFIGURATION.md) for all available options.
 
 ## Permission System
 
-AIDocumentIndexer uses a dynamic tier-based permission system:
+AIDocumentIndexer uses a two-layer permission system for fine-grained access control:
+
+### Layer 1: Tier-Based Access
 
 | Default Tier | Level | Access |
 |--------------|-------|--------|
@@ -327,6 +329,27 @@ AIDocumentIndexer uses a dynamic tier-based permission system:
 - Users can only assign document tiers ≤ their own tier
 - Users can only create users with tiers ≤ their own tier
 - Permission filtering happens at database level (RLS) - LLM cannot bypass
+
+### Layer 2: Per-User Folder Permissions
+
+Grant specific users access to specific folders, independent of their tier:
+
+| Permission Level | Description |
+|------------------|-------------|
+| **View** | Can see folder and read documents |
+| **Edit** | Can upload and modify documents |
+| **Manage** | Can grant permissions to others |
+
+**Features:**
+- Permissions can inherit to subfolders automatically
+- Manage folder access from both folder view and user management
+- "Folder Only" mode restricts users to explicitly granted folders only
+
+**Use Cases:**
+- External contractors who need access to one project folder
+- Department-specific access without creating new tiers
+- Temporary access for specific collaborations
+- Compliance scenarios requiring strict access control
 
 ---
 

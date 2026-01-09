@@ -298,6 +298,11 @@ class User(Base, UUIDMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
+    # Folder permission mode
+    # If True, user ONLY sees explicitly granted folders (ignores tier-based access)
+    # If False (default), user sees tier-based folders + explicitly granted folders (additive)
+    use_folder_permissions_only: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Foreign keys
     access_tier_id: Mapped[uuid.UUID] = mapped_column(
         GUID(),
@@ -2217,6 +2222,7 @@ class Folder(Base, UUIDMixin, TimestampMixin):
     # Metadata
     description: Mapped[Optional[str]] = mapped_column(Text)
     color: Mapped[Optional[str]] = mapped_column(String(7))  # Hex color e.g., "#1E3A5F"
+    tags: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())  # Folder tags for categorization
 
     # Relationships
     parent_folder: Mapped[Optional["Folder"]] = relationship(
@@ -2242,6 +2248,88 @@ class Folder(Base, UUIDMixin, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<Folder(name='{self.name}', path='{self.path}', depth={self.depth})>"
+
+
+# =============================================================================
+# Folder Permission Model - Per-User Folder Access Control
+# =============================================================================
+
+class FolderPermissionLevel(str, PyEnum):
+    """Permission levels for folder access."""
+    VIEW = "view"      # Can see folder and documents
+    EDIT = "edit"      # Can upload/modify documents
+    MANAGE = "manage"  # Can grant permissions to others
+
+
+class FolderPermission(Base, UUIDMixin, TimestampMixin):
+    """
+    Per-user folder permissions for fine-grained access control.
+
+    This provides an alternative/supplement to tier-based access:
+    - Users with use_folder_permissions_only=False (default) see:
+      tier-based folders + explicitly granted folders (additive)
+    - Users with use_folder_permissions_only=True see:
+      ONLY explicitly granted folders (restrictive)
+
+    Permission levels:
+    - VIEW: Can see the folder and read documents
+    - EDIT: Can upload and modify documents in the folder
+    - MANAGE: Can grant/revoke permissions to other users
+    """
+    __tablename__ = "folder_permissions"
+
+    # Which folder this permission applies to
+    folder_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("folders.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Which user has this permission
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Permission level
+    permission_level: Mapped[str] = mapped_column(
+        String(20),
+        default=FolderPermissionLevel.VIEW.value,
+        nullable=False,
+    )
+
+    # Who granted this permission
+    granted_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Whether this permission cascades to child folders
+    inherit_to_children: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Relationships
+    folder: Mapped["Folder"] = relationship("Folder", foreign_keys=[folder_id])
+    user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+    granted_by: Mapped[Optional["User"]] = relationship("User", foreign_keys=[granted_by_id])
+
+    __table_args__ = (
+        # Unique constraint: one permission per folder-user pair
+        Index(
+            "idx_folder_permissions_unique",
+            "folder_id", "user_id",
+            unique=True,
+        ),
+        Index("idx_folder_permissions_folder", "folder_id"),
+        Index("idx_folder_permissions_user", "user_id"),
+        Index("idx_folder_permissions_granted_by", "granted_by_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<FolderPermission(folder_id={self.folder_id}, user_id={self.user_id}, level='{self.permission_level}')>"
 
 
 # =============================================================================

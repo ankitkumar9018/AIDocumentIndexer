@@ -203,3 +203,48 @@ data/paddle_models/
 
 # ChromaDB data
 chroma_data/
+
+# =============================================================================
+# Additional Patterns
+# =============================================================================
+
+# Jupyter notebooks
+*.ipynb_checkpoints/
+.ipynb_checkpoints/
+
+# Profiling/debugging
+*.prof
+*.trace
+
+# Local config overrides
+config.local.yaml
+settings.local.json
+
+# Terraform/Infrastructure
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Secrets (extra safety)
+secrets/
+*.pem
+*.key
+private/
+
+# ML model outputs
+models/
+checkpoints/
+*.onnx
+
+# Backup files
+*.backup
+
+# Editor specific
+.history/
+*.code-workspace
+
+# UV lock files (optional - some prefer to track)
+# backend/uv.lock
+
+# Runtime files
+*.pid.lock

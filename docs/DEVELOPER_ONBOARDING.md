@@ -484,11 +484,13 @@ class User(Base, UUIDMixin, TimestampMixin):
     email: Mapped[str]
     password_hash: Mapped[str]
     access_tier_id: Mapped[uuid.UUID]  # FK to AccessTier
+    use_folder_permissions_only: Mapped[bool]  # Restrict to explicit folder access
 
     # Relationships
     access_tier: Mapped["AccessTier"]
     documents: Mapped[List["Document"]]
     chat_sessions: Mapped[List["ChatSession"]]
+    folder_permissions: Mapped[List["FolderPermission"]]  # Explicit folder access
 
 class Document(Base, UUIDMixin, TimestampMixin):
     """Uploaded document metadata."""
@@ -537,6 +539,33 @@ class ChatMessage(Base, UUIDMixin):
     source_document_ids: Mapped[List[uuid.UUID]]  # Citations
     model_used: Mapped[Optional[str]]
     tokens_used: Mapped[Optional[int]]
+
+class Folder(Base, UUIDMixin, TimestampMixin):
+    """Hierarchical folder for organizing documents."""
+    name: Mapped[str]
+    path: Mapped[str]                # Full path like "/Marketing/2024/"
+    parent_folder_id: Mapped[Optional[uuid.UUID]]
+    access_tier_id: Mapped[uuid.UUID]
+    tags: Mapped[List[str]]          # Folder tags for categorization
+
+    # Relationships
+    parent: Mapped[Optional["Folder"]]
+    children: Mapped[List["Folder"]]
+    documents: Mapped[List["Document"]]
+    permissions: Mapped[List["FolderPermission"]]
+
+class FolderPermission(Base, UUIDMixin, TimestampMixin):
+    """Per-user folder access permission."""
+    folder_id: Mapped[uuid.UUID]
+    user_id: Mapped[uuid.UUID]
+    permission_level: Mapped[str]    # "view", "edit", "manage"
+    inherit_to_children: Mapped[bool]
+    granted_by_id: Mapped[Optional[uuid.UUID]]
+
+    # Relationships
+    folder: Mapped["Folder"]
+    user: Mapped["User"]
+    granted_by: Mapped[Optional["User"]]
 ```
 
 **Entity Relationship Diagram:**
@@ -547,17 +576,28 @@ class ChatMessage(Base, UUIDMixin):
 │              │ 1:N │              │ 1:N │              │
 │  - level     │     │  - email     │     │  - title     │
 │  - name      │     │  - password  │     │              │
-└──────────────┘     └──────────────┘     └──────────────┘
-       │                    │                    │
-       │ 1:N               │ 1:N               │ 1:N
-       ▼                    ▼                    ▼
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+└──────────────┘     │  - folder_   │     └──────────────┘
+       │            │    perm_only │            │
+       │ 1:N        └──────────────┘            │ 1:N
+       ▼                    │                    ▼
+┌──────────────┐     ┌──────┴───────┐     ┌──────────────┐
 │   Document   │─────│    Chunk     │     │ ChatMessage  │
 │              │ 1:N │              │     │              │
 │  - filename  │     │  - content   │     │  - role      │
 │  - status    │     │  - embedding │     │  - content   │
 │  - metadata  │     │  - page_num  │     │  - sources   │
 └──────────────┘     └──────────────┘     └──────────────┘
+       │
+       │ N:1
+       ▼
+┌──────────────┐     ┌──────────────┐
+│    Folder    │─────│FolderPermis- │
+│              │ 1:N │   sion       │
+│  - name      │     │              │
+│  - path      │     │  - user_id   │
+│  - tags      │     │  - level     │
+│  - parent_id │     │  - inherit   │
+└──────────────┘     └──────────────┘
 ```
 
 ---
@@ -1087,6 +1127,8 @@ rag.ollama_vision_model=llava  # For local Ollama vision
 | `Chunk` | `db/models.py` | Chunk ORM model |
 | `User` | `db/models.py` | User ORM model |
 | `ChatSession` | `db/models.py` | Chat session model |
+| `Folder` | `db/models.py` | Hierarchical folder model with tags |
+| `FolderPermission` | `db/models.py` | Per-user folder access permission |
 
 ### Frontend Types
 
@@ -1098,6 +1140,9 @@ rag.ollama_vision_model=llava  # For local Ollama vision
 | `ChatSource` | `lib/api/client.ts` | Source citation |
 | `UploadOptions` | `lib/api/client.ts` | Upload configuration |
 | `GenerationRequest` | `lib/api/client.ts` | Generation params |
+| `FolderPermissionResponse` | `lib/api/client.ts` | Folder permission from folder view |
+| `UserFolderPermissionResponse` | `lib/api/client.ts` | Folder permission from user view |
+| `AdminUser` | `lib/api/client.ts` | Admin user with folder permissions |
 
 ---
 

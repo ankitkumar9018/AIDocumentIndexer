@@ -21,7 +21,7 @@ from sqlalchemy import select, update, delete, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.db.models import Folder, Document, AccessTier
+from backend.db.models import Folder, Document, AccessTier, FolderPermission, FolderPermissionLevel, User
 from backend.db.database import get_async_session
 
 logger = structlog.get_logger(__name__)
@@ -51,6 +51,7 @@ class FolderService:
         inherit_permissions: bool = True,
         description: Optional[str] = None,
         color: Optional[str] = None,
+        tags: Optional[List[str]] = None,
     ) -> Folder:
         """
         Create a new folder.
@@ -63,6 +64,7 @@ class FolderService:
             inherit_permissions: Whether to inherit parent's permissions
             description: Optional folder description
             color: Optional hex color for UI
+            tags: Optional list of tags for categorization
 
         Returns:
             Created Folder object
@@ -112,6 +114,7 @@ class FolderService:
             created_by_id=uuid.UUID(created_by_id) if created_by_id else None,
             description=description,
             color=color,
+            tags=tags or [],
         )
 
         session.add(folder)
@@ -227,6 +230,7 @@ class FolderService:
                     "inherit_permissions": folder.inherit_permissions,
                     "description": folder.description,
                     "color": folder.color,
+                    "tags": folder.tags or [],
                     "created_at": folder.created_at.isoformat() if folder.created_at else None,
                     "created_by_id": str(folder.created_by_id) if folder.created_by_id else None,
                 }
@@ -243,6 +247,8 @@ class FolderService:
         self,
         user_tier_level: int = 100,
         root_folder_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        use_folder_permissions_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Get full folder tree structure for navigation.
@@ -250,11 +256,22 @@ class FolderService:
         Args:
             user_tier_level: User's access tier level for filtering
             root_folder_id: Start from specific folder (None for all roots)
+            user_id: User ID for permission-based filtering
+            use_folder_permissions_only: If True, only show explicitly granted folders
 
         Returns:
             Nested tree structure of folders
         """
         session = await self._get_session()
+
+        # Get accessible folder IDs if user_id is provided
+        accessible_folder_ids: Optional[set] = None
+        if user_id:
+            accessible_folder_ids = await self.get_user_accessible_folder_ids(
+                user_id=user_id,
+                user_tier_level=user_tier_level,
+                use_folder_permissions_only=use_folder_permissions_only,
+            )
 
         # Get all folders, ordered by path for hierarchical ordering
         query = select(Folder).order_by(Folder.path.asc())
@@ -273,20 +290,30 @@ class FolderService:
         roots: List[Dict[str, Any]] = []
 
         for folder in all_folders:
-            effective_tier = await self.get_effective_tier_level(folder)
-            if user_tier_level < effective_tier:
-                continue  # Skip folders user can't access
+            folder_id_str = str(folder.id)
+
+            # Check access based on mode
+            if accessible_folder_ids is not None:
+                # Use pre-computed accessible folder IDs
+                if folder_id_str not in accessible_folder_ids:
+                    continue  # Skip folders user can't access
+            else:
+                # Fallback to tier-based check only
+                effective_tier = await self.get_effective_tier_level(folder)
+                if user_tier_level < effective_tier:
+                    continue  # Skip folders user can't access
 
             folder_dict = {
-                "id": str(folder.id),
+                "id": folder_id_str,
                 "name": folder.name,
                 "path": folder.path,
                 "depth": folder.depth,
                 "parent_folder_id": str(folder.parent_folder_id) if folder.parent_folder_id else None,
                 "color": folder.color,
+                "tags": folder.tags or [],
                 "children": [],
             }
-            folder_map[str(folder.id)] = folder_dict
+            folder_map[folder_id_str] = folder_dict
 
             if folder.parent_folder_id:
                 parent_id = str(folder.parent_folder_id)
@@ -305,6 +332,7 @@ class FolderService:
         color: Optional[str] = None,
         access_tier_id: Optional[str] = None,
         inherit_permissions: Optional[bool] = None,
+        tags: Optional[List[str]] = None,
     ) -> Optional[Folder]:
         """
         Update folder metadata.
@@ -328,6 +356,8 @@ class FolderService:
             folder.access_tier_id = uuid.UUID(access_tier_id)
         if inherit_permissions is not None:
             folder.inherit_permissions = inherit_permissions
+        if tags is not None:
+            folder.tags = tags
 
         # Handle rename (requires path update for descendants)
         if name and name != folder.name:
@@ -709,6 +739,327 @@ class FolderService:
                 breadcrumbs.append({"id": str(row[0]), "name": row[1]})
 
         return breadcrumbs
+
+    # =========================================================================
+    # Folder Permission Methods
+    # =========================================================================
+
+    async def grant_folder_permission(
+        self,
+        folder_id: str,
+        user_id: str,
+        permission_level: str,
+        granted_by_id: str,
+        inherit_to_children: bool = True,
+    ) -> FolderPermission:
+        """
+        Grant a user permission to access a folder.
+
+        Args:
+            folder_id: Folder to grant access to
+            user_id: User receiving the permission
+            permission_level: VIEW, EDIT, or MANAGE
+            granted_by_id: User granting the permission
+            inherit_to_children: Whether permission cascades to subfolders
+
+        Returns:
+            Created or updated FolderPermission object
+        """
+        session = await self._get_session()
+
+        # Check if permission already exists
+        result = await session.execute(
+            select(FolderPermission).where(
+                and_(
+                    FolderPermission.folder_id == uuid.UUID(folder_id),
+                    FolderPermission.user_id == uuid.UUID(user_id),
+                )
+            )
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            # Update existing permission
+            existing.permission_level = permission_level
+            existing.granted_by_id = uuid.UUID(granted_by_id)
+            existing.inherit_to_children = inherit_to_children
+            await session.commit()
+            await session.refresh(existing)
+            logger.info(
+                "Updated folder permission",
+                folder_id=folder_id,
+                user_id=user_id,
+                level=permission_level,
+            )
+            return existing
+        else:
+            # Create new permission
+            permission = FolderPermission(
+                id=uuid.uuid4(),
+                folder_id=uuid.UUID(folder_id),
+                user_id=uuid.UUID(user_id),
+                permission_level=permission_level,
+                granted_by_id=uuid.UUID(granted_by_id),
+                inherit_to_children=inherit_to_children,
+            )
+            session.add(permission)
+            await session.commit()
+            await session.refresh(permission)
+            logger.info(
+                "Created folder permission",
+                folder_id=folder_id,
+                user_id=user_id,
+                level=permission_level,
+            )
+            return permission
+
+    async def revoke_folder_permission(
+        self,
+        folder_id: str,
+        user_id: str,
+    ) -> bool:
+        """
+        Revoke a user's permission to a folder.
+
+        Args:
+            folder_id: Folder to revoke access from
+            user_id: User losing the permission
+
+        Returns:
+            True if deleted, False if not found
+        """
+        session = await self._get_session()
+
+        result = await session.execute(
+            delete(FolderPermission).where(
+                and_(
+                    FolderPermission.folder_id == uuid.UUID(folder_id),
+                    FolderPermission.user_id == uuid.UUID(user_id),
+                )
+            )
+        )
+        await session.commit()
+
+        deleted = result.rowcount > 0
+        if deleted:
+            logger.info(
+                "Revoked folder permission",
+                folder_id=folder_id,
+                user_id=user_id,
+            )
+        return deleted
+
+    async def get_folder_permissions(
+        self,
+        folder_id: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all permissions for a folder.
+
+        Args:
+            folder_id: Folder ID
+
+        Returns:
+            List of permission dicts with user info
+        """
+        session = await self._get_session()
+
+        result = await session.execute(
+            select(FolderPermission, User)
+            .join(User, FolderPermission.user_id == User.id)
+            .where(FolderPermission.folder_id == uuid.UUID(folder_id))
+            .order_by(User.email)
+        )
+        rows = result.all()
+
+        permissions = []
+        for perm, user in rows:
+            permissions.append({
+                "id": str(perm.id),
+                "folder_id": str(perm.folder_id),
+                "user_id": str(perm.user_id),
+                "user_email": user.email,
+                "user_name": user.name,
+                "permission_level": perm.permission_level,
+                "inherit_to_children": perm.inherit_to_children,
+                "granted_by_id": str(perm.granted_by_id) if perm.granted_by_id else None,
+                "created_at": perm.created_at.isoformat() if perm.created_at else None,
+            })
+
+        return permissions
+
+    async def get_user_folder_permissions(
+        self,
+        user_id: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all folder permissions for a user.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            List of permission dicts with folder info
+        """
+        session = await self._get_session()
+
+        result = await session.execute(
+            select(FolderPermission, Folder)
+            .join(Folder, FolderPermission.folder_id == Folder.id)
+            .where(FolderPermission.user_id == uuid.UUID(user_id))
+            .order_by(Folder.path)
+        )
+        rows = result.all()
+
+        permissions = []
+        for perm, folder in rows:
+            permissions.append({
+                "id": str(perm.id),
+                "folder_id": str(folder.id),
+                "folder_name": folder.name,
+                "folder_path": folder.path,
+                "permission_level": perm.permission_level,
+                "inherit_to_children": perm.inherit_to_children,
+                "created_at": perm.created_at.isoformat() if perm.created_at else None,
+            })
+
+        return permissions
+
+    async def check_user_has_folder_permission(
+        self,
+        folder_id: str,
+        user_id: str,
+        required_level: str = FolderPermissionLevel.VIEW.value,
+    ) -> bool:
+        """
+        Check if a user has the required permission level for a folder.
+
+        This checks:
+        1. Direct permissions on the folder
+        2. Inherited permissions from parent folders
+
+        Args:
+            folder_id: Folder to check
+            user_id: User to check
+            required_level: Required permission level (VIEW, EDIT, MANAGE)
+
+        Returns:
+            True if user has permission, False otherwise
+        """
+        session = await self._get_session()
+
+        # Permission level hierarchy: MANAGE > EDIT > VIEW
+        level_hierarchy = {
+            FolderPermissionLevel.VIEW.value: 1,
+            FolderPermissionLevel.EDIT.value: 2,
+            FolderPermissionLevel.MANAGE.value: 3,
+        }
+        required_level_num = level_hierarchy.get(required_level, 1)
+
+        # Check direct permission
+        result = await session.execute(
+            select(FolderPermission.permission_level).where(
+                and_(
+                    FolderPermission.folder_id == uuid.UUID(folder_id),
+                    FolderPermission.user_id == uuid.UUID(user_id),
+                )
+            )
+        )
+        direct_perm = result.scalar_one_or_none()
+
+        if direct_perm:
+            if level_hierarchy.get(direct_perm, 0) >= required_level_num:
+                return True
+
+        # Check inherited permissions from parent folders
+        folder = await self.get_folder_by_id(folder_id)
+        if not folder:
+            return False
+
+        # Walk up the tree looking for inherited permissions
+        current_path = folder.path
+        while current_path and current_path != "/":
+            # Remove last segment to get parent path
+            parts = [p for p in current_path.split("/") if p]
+            if len(parts) <= 1:
+                break
+            parent_path = "/" + "/".join(parts[:-1]) + "/"
+
+            # Find parent folder
+            result = await session.execute(
+                select(Folder.id).where(Folder.path == parent_path)
+            )
+            parent_id = result.scalar_one_or_none()
+
+            if parent_id:
+                # Check permission on parent with inherit_to_children=True
+                result = await session.execute(
+                    select(FolderPermission.permission_level).where(
+                        and_(
+                            FolderPermission.folder_id == parent_id,
+                            FolderPermission.user_id == uuid.UUID(user_id),
+                            FolderPermission.inherit_to_children == True,
+                        )
+                    )
+                )
+                parent_perm = result.scalar_one_or_none()
+
+                if parent_perm:
+                    if level_hierarchy.get(parent_perm, 0) >= required_level_num:
+                        return True
+
+            current_path = parent_path
+
+        return False
+
+    async def get_user_accessible_folder_ids(
+        self,
+        user_id: str,
+        user_tier_level: int,
+        use_folder_permissions_only: bool,
+    ) -> set:
+        """
+        Get all folder IDs a user can access based on their permissions.
+
+        Args:
+            user_id: User ID
+            user_tier_level: User's access tier level
+            use_folder_permissions_only: Whether to ignore tier-based access
+
+        Returns:
+            Set of accessible folder IDs
+        """
+        session = await self._get_session()
+        accessible_ids = set()
+
+        if not use_folder_permissions_only:
+            # Tier-based access: get all folders user can access by tier
+            result = await session.execute(
+                select(Folder.id, Folder.access_tier_id).join(
+                    AccessTier, Folder.access_tier_id == AccessTier.id
+                ).where(AccessTier.level <= user_tier_level)
+            )
+            for folder_id, _ in result.all():
+                accessible_ids.add(str(folder_id))
+
+        # Permission-based access: get all explicitly granted folders
+        result = await session.execute(
+            select(FolderPermission.folder_id, FolderPermission.inherit_to_children)
+            .where(FolderPermission.user_id == uuid.UUID(user_id))
+        )
+        permission_rows = result.all()
+
+        for folder_id, inherit in permission_rows:
+            accessible_ids.add(str(folder_id))
+
+            if inherit:
+                # Get all subfolders of this folder
+                folder = await self.get_folder_by_id(str(folder_id))
+                if folder:
+                    subfolder_ids = await self._get_subtree_folder_ids(folder.path)
+                    accessible_ids.update(subfolder_ids)
+
+        return accessible_ids
 
 
 # Singleton instance

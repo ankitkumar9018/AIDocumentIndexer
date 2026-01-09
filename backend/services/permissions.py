@@ -41,6 +41,7 @@ class UserContext:
     role: str
     access_tier_level: int
     access_tier_name: str
+    use_folder_permissions_only: bool = False
 
     def can_access_tier(self, tier_level: int) -> bool:
         """Check if user can access a specific tier level."""
@@ -392,4 +393,5 @@ def create_user_context_from_token(token_payload: Dict[str, Any]) -> UserContext
         role=token_payload.get("role", "user"),
         access_tier_level=token_payload.get("access_tier", 10),
         access_tier_name=token_payload.get("tier_name", "Basic"),
+        use_folder_permissions_only=token_payload.get("use_folder_permissions_only", False),
     )

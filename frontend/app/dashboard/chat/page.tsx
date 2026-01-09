@@ -347,13 +347,31 @@ export default function ChatPage() {
   // Only runs when user explicitly clicks a history session (shouldLoadHistory flag)
   useEffect(() => {
     if (shouldLoadHistory && currentSessionId && currentSession?.messages && currentSession.messages.length > 0) {
-      // Transform API messages to local Message format
-      const loadedMessages: Message[] = currentSession.messages.map((msg, index) => ({
-        id: `session-msg-${index}`,
-        role: msg.role as "user" | "assistant",
-        content: msg.content,
-        timestamp: new Date(),
-      }));
+      // Transform API messages to local Message format, including sources
+      const loadedMessages: Message[] = currentSession.messages.map((msg, index) => {
+        const msgId = `session-msg-${index}`;
+        // Get sources for this message if available (keyed by message index)
+        const msgSources = currentSession.sources?.[String(index)] || [];
+        const transformedSources: Source[] = msgSources.map((src) => ({
+          documentId: src.document_id,
+          filename: src.document_name,
+          pageNumber: src.page_number,
+          snippet: src.snippet,
+          fullContent: src.full_content,
+          similarity: src.similarity_score ?? src.relevance_score,
+          collection: src.collection,
+        }));
+
+        return {
+          id: msgId,
+          role: msg.role as "user" | "assistant",
+          content: msg.content,
+          timestamp: new Date(),
+          sources: transformedSources.length > 0 ? transformedSources : undefined,
+          // Note: confidenceScore, isAgentResponse, executionSteps etc. are not persisted
+          // to the database, so they won't be available when loading from history
+        };
+      });
       setMessages(loadedMessages);
       setShouldLoadHistory(false); // Reset flag after loading
     }
@@ -1627,7 +1645,7 @@ export default function ChatPage() {
               </div>
             </div>
 
-            <ScrollArea className="max-h-64">
+            <ScrollArea className="flex-1 min-h-0">
               {filteredSessions.length > 0 ? (
                 filteredSessions.map((session: { id: string; title: string; created_at: string }) => (
                   <div

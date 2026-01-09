@@ -14,6 +14,9 @@ import {
   Move,
   Loader2,
   Home,
+  Tag,
+  X,
+  Share2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -45,6 +48,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import {
   useFolderTree,
@@ -55,6 +59,7 @@ import {
   type FolderTreeNode,
   type CreateFolderRequest,
 } from "@/lib/api";
+import { FolderPermissionsDialog } from "./folder-permissions-dialog";
 
 interface FolderTreeProps {
   selectedFolderId?: string | null;
@@ -126,6 +131,7 @@ function FolderTreeItem({
   onDelete,
   onMove,
   onCreateSubfolder,
+  onShare,
   dragOverFolderId,
   isDropTarget,
 }: {
@@ -139,6 +145,7 @@ function FolderTreeItem({
   onDelete: (folder: FolderTreeNode) => void;
   onMove: (folder: FolderTreeNode) => void;
   onCreateSubfolder: (parentId: string) => void;
+  onShare: (folder: FolderTreeNode) => void;
   dragOverFolderId?: string | null;
   isDropTarget?: boolean;
 }) {
@@ -226,6 +233,10 @@ function FolderTreeItem({
               <Move className="mr-2 h-4 w-4" />
               Move
             </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onShare(folder)}>
+              <Share2 className="mr-2 h-4 w-4" />
+              Share
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="text-destructive focus:text-destructive"
@@ -254,6 +265,7 @@ function FolderTreeItem({
               onDelete={onDelete}
               onMove={onMove}
               onCreateSubfolder={onCreateSubfolder}
+              onShare={onShare}
               dragOverFolderId={dragOverFolderId}
               isDropTarget={isDropTarget}
             />
@@ -280,7 +292,10 @@ export function FolderTree({
   const [selectedFolder, setSelectedFolder] = useState<FolderTreeNode | null>(null);
   const [folderName, setFolderName] = useState("");
   const [folderColor, setFolderColor] = useState("#3B82F6");
+  const [folderTags, setFolderTags] = useState<string[]>([]);
+  const [newTag, setNewTag] = useState("");
   const [deleteRecursive, setDeleteRecursive] = useState(false);
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
 
   // API hooks
   const { data: folderTree, isLoading } = useFolderTree();
@@ -312,10 +327,12 @@ export function FolderTree({
         name: folderName.trim(),
         parent_folder_id: parentFolderId,
         color: folderColor,
+        tags: folderTags.length > 0 ? folderTags : undefined,
       };
       await createFolderMutation.mutateAsync(request);
       toast.success("Folder created");
       setFolderName("");
+      setFolderTags([]);
       setCreateDialogOpen(false);
       // Expand parent if creating subfolder
       if (parentFolderId) {
@@ -337,6 +354,7 @@ export function FolderTree({
         request: {
           name: folderName.trim(),
           color: folderColor,
+          tags: folderTags,
         },
       });
       toast.success("Folder updated");
@@ -390,6 +408,8 @@ export function FolderTree({
     setParentFolderId(parentId);
     setFolderName("");
     setFolderColor("#3B82F6");
+    setFolderTags([]);
+    setNewTag("");
     setCreateDialogOpen(true);
   };
 
@@ -397,6 +417,8 @@ export function FolderTree({
     setSelectedFolder(folder);
     setFolderName(folder.name);
     setFolderColor(folder.color || "#3B82F6");
+    setFolderTags(folder.tags || []);
+    setNewTag("");
     setEditDialogOpen(true);
   };
 
@@ -409,6 +431,30 @@ export function FolderTree({
   const openMoveDialog = (folder: FolderTreeNode) => {
     setSelectedFolder(folder);
     setMoveDialogOpen(true);
+  };
+
+  const openShareDialog = (folder: FolderTreeNode) => {
+    setSelectedFolder(folder);
+    setShareDialogOpen(true);
+  };
+
+  const handleAddTag = () => {
+    const tag = newTag.trim().toLowerCase();
+    if (tag && !folderTags.includes(tag)) {
+      setFolderTags([...folderTags, tag]);
+    }
+    setNewTag("");
+  };
+
+  const handleRemoveTag = (tagToRemove: string) => {
+    setFolderTags(folderTags.filter((t) => t !== tagToRemove));
+  };
+
+  const handleTagKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleAddTag();
+    }
   };
 
   if (isLoading) {
@@ -458,6 +504,7 @@ export function FolderTree({
               onDelete={openDeleteDialog}
               onMove={openMoveDialog}
               onCreateSubfolder={openCreateDialog}
+              onShare={openShareDialog}
               dragOverFolderId={dragOverFolderId}
               isDropTarget={isDropTarget}
             />
@@ -509,6 +556,37 @@ export function FolderTree({
                 ))}
               </div>
             </div>
+            <div className="space-y-2">
+              <Label>Tags</Label>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Add tag and press Enter"
+                  value={newTag}
+                  onChange={(e) => setNewTag(e.target.value)}
+                  onKeyDown={handleTagKeyDown}
+                  className="flex-1"
+                />
+                <Button type="button" variant="outline" size="icon" onClick={handleAddTag}>
+                  <Tag className="h-4 w-4" />
+                </Button>
+              </div>
+              {folderTags.length > 0 && (
+                <div className="flex gap-1 flex-wrap mt-2">
+                  {folderTags.map((tag) => (
+                    <Badge key={tag} variant="secondary" className="gap-1">
+                      {tag}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveTag(tag)}
+                        className="ml-1 hover:text-destructive"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </Badge>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -535,7 +613,7 @@ export function FolderTree({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit Folder</DialogTitle>
-            <DialogDescription>Update folder name and color</DialogDescription>
+            <DialogDescription>Update folder name, color, and tags</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
@@ -564,6 +642,37 @@ export function FolderTree({
                   />
                 ))}
               </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Tags</Label>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Add tag and press Enter"
+                  value={newTag}
+                  onChange={(e) => setNewTag(e.target.value)}
+                  onKeyDown={handleTagKeyDown}
+                  className="flex-1"
+                />
+                <Button type="button" variant="outline" size="icon" onClick={handleAddTag}>
+                  <Tag className="h-4 w-4" />
+                </Button>
+              </div>
+              {folderTags.length > 0 && (
+                <div className="flex gap-1 flex-wrap mt-2">
+                  {folderTags.map((tag) => (
+                    <Badge key={tag} variant="secondary" className="gap-1">
+                      {tag}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveTag(tag)}
+                        className="ml-1 hover:text-destructive"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </Badge>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>
@@ -663,6 +772,16 @@ export function FolderTree({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Folder Permissions Dialog */}
+      {selectedFolder && (
+        <FolderPermissionsDialog
+          folderId={selectedFolder.id}
+          folderName={selectedFolder.name}
+          open={shareDialogOpen}
+          onOpenChange={setShareDialogOpen}
+        />
+      )}
     </div>
   );
 }

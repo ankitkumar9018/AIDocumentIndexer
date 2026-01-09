@@ -21,7 +21,7 @@ from sqlalchemy.orm import selectinload
 import structlog
 
 from backend.db.database import get_async_session
-from backend.db.models import User, AccessTier, AuditLog
+from backend.db.models import User, AccessTier, AuditLog, FolderPermission, Folder
 from backend.api.middleware.auth import (
     get_user_context,
     require_admin,
@@ -107,10 +107,19 @@ class UserBase(BaseModel):
     name: Optional[str] = None
 
 
+class InitialFolderPermission(BaseModel):
+    """Initial folder permission for user creation."""
+    folder_id: UUID
+    permission_level: str = Field(default="view", pattern="^(view|edit|manage)$")
+    inherit_to_children: bool = True
+
+
 class UserCreate(UserBase):
     """User creation request."""
     password: str = Field(..., min_length=8)
     access_tier_id: UUID
+    use_folder_permissions_only: bool = False
+    initial_folder_permissions: Optional[List[InitialFolderPermission]] = None
 
 
 class UserUpdate(BaseModel):
@@ -118,6 +127,7 @@ class UserUpdate(BaseModel):
     name: Optional[str] = None
     access_tier_id: Optional[UUID] = None
     is_active: Optional[bool] = None
+    use_folder_permissions_only: Optional[bool] = None
 
 
 class UserResponse(BaseModel):
@@ -129,6 +139,7 @@ class UserResponse(BaseModel):
     access_tier_id: UUID
     access_tier_name: str
     access_tier_level: int
+    use_folder_permissions_only: bool = False
     created_at: datetime
     last_login_at: Optional[datetime]
 
@@ -529,6 +540,7 @@ async def list_users(
             access_tier_id=user.access_tier_id,
             access_tier_name=user.access_tier.name if user.access_tier else "Unknown",
             access_tier_level=user.access_tier.level if user.access_tier else 0,
+            use_folder_permissions_only=user.use_folder_permissions_only,
             created_at=user.created_at,
             last_login_at=user.last_login_at,
         )
@@ -598,8 +610,34 @@ async def create_user(
         password_hash=hashed_password,
         access_tier_id=user_data.access_tier_id,
         is_active=True,
+        use_folder_permissions_only=user_data.use_folder_permissions_only,
     )
     db.add(new_user)
+    await db.flush()  # Get the user ID without committing
+
+    # Add initial folder permissions if provided
+    if user_data.initial_folder_permissions:
+        for perm in user_data.initial_folder_permissions:
+            # Verify folder exists
+            folder_query = select(Folder).where(Folder.id == perm.folder_id)
+            folder_result = await db.execute(folder_query)
+            folder = folder_result.scalar_one_or_none()
+            if not folder:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Folder {perm.folder_id} not found",
+                )
+
+            folder_permission = FolderPermission(
+                folder_id=perm.folder_id,
+                user_id=new_user.id,
+                permission_level=perm.permission_level,
+                inherit_to_children=perm.inherit_to_children,
+                granted_by_id=admin.user_id,
+            )
+            db.add(folder_permission)
+
     await db.commit()
     await db.refresh(new_user)
 
@@ -632,6 +670,7 @@ async def create_user(
         access_tier_id=new_user.access_tier_id,
         access_tier_name=new_user.access_tier.name if new_user.access_tier else "Unknown",
         access_tier_level=new_user.access_tier.level if new_user.access_tier else 0,
+        use_folder_permissions_only=new_user.use_folder_permissions_only,
         created_at=new_user.created_at,
         last_login_at=new_user.last_login_at,
     )
@@ -670,6 +709,7 @@ async def get_user(
         access_tier_id=user.access_tier_id,
         access_tier_name=user.access_tier.name if user.access_tier else "Unknown",
         access_tier_level=user.access_tier.level if user.access_tier else 0,
+        use_folder_permissions_only=user.use_folder_permissions_only,
         created_at=user.created_at,
         last_login_at=user.last_login_at,
     )
@@ -739,6 +779,13 @@ async def update_user(
         changes["access_tier"] = {"old": old_tier_name, "new": new_tier.name}
         user.access_tier_id = update.access_tier_id
 
+    if update.use_folder_permissions_only is not None:
+        changes["use_folder_permissions_only"] = {
+            "old": user.use_folder_permissions_only,
+            "new": update.use_folder_permissions_only,
+        }
+        user.use_folder_permissions_only = update.use_folder_permissions_only
+
     await db.commit()
     await db.refresh(user)
 
@@ -774,9 +821,60 @@ async def update_user(
         access_tier_id=user.access_tier_id,
         access_tier_name=user.access_tier.name if user.access_tier else "Unknown",
         access_tier_level=user.access_tier.level if user.access_tier else 0,
+        use_folder_permissions_only=user.use_folder_permissions_only,
         created_at=user.created_at,
         last_login_at=user.last_login_at,
     )
+
+
+# =============================================================================
+# User Folder Permissions Endpoints
+# =============================================================================
+
+class UserFolderPermissionResponse(BaseModel):
+    """Response model for user folder permission."""
+    id: str
+    folder_id: str
+    folder_name: str
+    folder_path: str
+    permission_level: str
+    inherit_to_children: bool
+    created_at: Optional[str] = None
+
+
+@router.get("/users/{user_id}/folder-permissions", response_model=List[UserFolderPermissionResponse])
+async def get_user_folder_permissions(
+    user_id: UUID,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get all folder permissions for a user.
+
+    Admin only endpoint.
+    """
+    from backend.services.folder_service import get_folder_service
+
+    logger.info("Getting folder permissions for user", admin_id=admin.user_id, target_user_id=str(user_id))
+
+    # Verify user exists
+    user_query = select(User).where(User.id == user_id)
+    result = await db.execute(user_query)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    folder_service = get_folder_service()
+    permissions = await folder_service.get_user_folder_permissions(str(user_id))
+
+    return [
+        UserFolderPermissionResponse(**p)
+        for p in permissions
+    ]
 
 
 # =============================================================================
