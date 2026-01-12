@@ -24,6 +24,12 @@ import {
   Bot,
   Network,
   Shield,
+  GitBranch,
+  Headphones,
+  Link2,
+  Key,
+  Building2,
+  Lock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -32,6 +38,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { KeyboardShortcutsDialog } from "@/components/keyboard-shortcuts-dialog";
 import { CommandPalette } from "@/components/command-palette";
+import { OrganizationSwitcher } from "@/components/organization-switcher";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -48,13 +55,19 @@ const navigation = [
   { name: "Upload", href: "/dashboard/upload", icon: Upload },
   { name: "Documents", href: "/dashboard/documents", icon: FolderOpen },
   { name: "Create", href: "/dashboard/create", icon: PenTool },
+  { name: "Workflows", href: "/dashboard/workflows", icon: GitBranch },
+  { name: "Audio", href: "/dashboard/audio", icon: Headphones },
+  { name: "Connectors", href: "/dashboard/connectors", icon: Link2 },
   { name: "Collaboration", href: "/dashboard/collaboration", icon: Sparkles },
   { name: "Knowledge Graph", href: "/dashboard/knowledge-graph", icon: Network },
   { name: "Web Scraper", href: "/dashboard/scraper", icon: Globe },
   { name: "Costs", href: "/dashboard/costs", icon: DollarSign },
+  { name: "LLM Gateway", href: "/dashboard/gateway", icon: Key },
+  { name: "Privacy", href: "/dashboard/privacy", icon: Lock },
 ];
 
 const adminNavigation = [
+  { name: "Organizations", href: "/dashboard/admin/organizations", icon: Building2 },
   { name: "Users", href: "/dashboard/admin/users", icon: Users },
   { name: "Agents", href: "/dashboard/admin/agents", icon: Bot },
   { name: "Audit Logs", href: "/dashboard/admin/audit-logs", icon: Shield },
@@ -67,14 +80,20 @@ const pageTitles: Record<string, string> = {
   "/dashboard/upload": "Upload",
   "/dashboard/documents": "Documents",
   "/dashboard/create": "Create",
+  "/dashboard/workflows": "Workflows",
+  "/dashboard/audio": "Audio Overviews",
+  "/dashboard/connectors": "Connectors",
   "/dashboard/collaboration": "Collaboration",
   "/dashboard/knowledge-graph": "Knowledge Graph",
   "/dashboard/scraper": "Web Scraper",
   "/dashboard/costs": "Costs",
+  "/dashboard/gateway": "LLM Gateway",
+  "/dashboard/privacy": "Privacy & Data",
   "/dashboard/admin/users": "Users",
   "/dashboard/admin/agents": "Agent Management",
   "/dashboard/admin/audit-logs": "Audit Logs",
   "/dashboard/admin/settings": "Settings",
+  "/dashboard/admin/organizations": "Organizations",
 };
 
 export default function DashboardLayout({
@@ -131,6 +150,9 @@ export default function DashboardLayout({
               <X className="h-5 w-5" />
             </Button>
           </div>
+
+          {/* Organization Switcher */}
+          <OrganizationSwitcher />
 
           {/* Navigation */}
           <ScrollArea className="flex-1 px-3 py-4">

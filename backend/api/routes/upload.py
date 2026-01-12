@@ -37,12 +37,153 @@ from backend.api.websocket import (
 from backend.services.auto_tagger import AutoTaggerService
 from backend.db.database import get_async_session
 from backend.db.models import Document, Chunk, AccessTier
-from sqlalchemy import select, and_, update
+from backend.api.middleware.auth import get_user_context_optional
+from backend.services.permissions import UserContext
+from sqlalchemy import select, and_, update, delete
 from sqlalchemy.orm import selectinload
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+
+# =============================================================================
+# Startup Functions
+# =============================================================================
+
+async def reset_stuck_upload_jobs() -> int:
+    """
+    Reset stuck upload jobs on startup.
+
+    This function:
+    1. Marks upload jobs as COMPLETED if their document is already completed
+    2. Resets stuck processing jobs (not updated in 5+ minutes) to QUEUED
+
+    Returns:
+        Number of jobs reset/fixed
+    """
+    from datetime import datetime, timedelta
+
+    fixed_count = 0
+
+    async for session in get_async_session():
+        # 1. Mark jobs as COMPLETED if document already completed
+        result = await session.execute(
+            select(UploadJob).where(
+                UploadJob.status != UploadStatus.COMPLETED,
+                UploadJob.file_hash.in_(
+                    select(Document.file_hash).where(Document.processing_status == "COMPLETED")
+                )
+            )
+        )
+        already_completed = result.scalars().all()
+
+        for job in already_completed:
+            job.status = UploadStatus.COMPLETED
+            job.progress = 100
+            job.current_step = "Completed"
+            fixed_count += 1
+            logger.info("Marked upload job as completed (document exists)",
+                       job_id=str(job.id), filename=job.filename)
+
+        # 2. Reset stuck jobs (processing for more than 5 minutes)
+        cutoff_time = datetime.utcnow() - timedelta(minutes=5)
+        result = await session.execute(
+            select(UploadJob).where(
+                UploadJob.status.in_([
+                    UploadStatus.VALIDATING,
+                    UploadStatus.EXTRACTING,
+                    UploadStatus.CHUNKING,
+                    UploadStatus.EMBEDDING,
+                    UploadStatus.INDEXING,
+                ]),
+                UploadJob.updated_at < cutoff_time
+            )
+        )
+        stuck_jobs = result.scalars().all()
+
+        for job in stuck_jobs:
+            # Check if document already completed for this job
+            doc_result = await session.execute(
+                select(Document).where(Document.file_hash == job.file_hash,
+                                       Document.processing_status == "COMPLETED")
+            )
+            existing_doc = doc_result.scalar_one_or_none()
+
+            if existing_doc:
+                job.status = UploadStatus.COMPLETED
+                job.progress = 100
+                job.current_step = "Completed"
+                logger.info("Marked stuck job as completed (document exists)",
+                           job_id=str(job.id), filename=job.filename)
+            else:
+                job.status = UploadStatus.QUEUED
+                job.progress = 0
+                job.current_step = "Queued"
+                job.error_message = None
+                logger.info("Reset stuck job to queued",
+                           job_id=str(job.id), filename=job.filename)
+            fixed_count += 1
+
+        await session.commit()
+
+    return fixed_count
+
+
+# Track last sync time to avoid running on every request
+_last_sync_time: Optional[datetime] = None
+
+
+async def sync_upload_jobs_with_documents(force: bool = False) -> int:
+    """
+    Sync upload jobs with completed documents.
+
+    This is a lightweight sync that only updates jobs where the document
+    is already completed but the job status wasn't updated.
+
+    Only runs every 30 seconds to avoid unnecessary database load,
+    unless force=True.
+
+    Returns:
+        Number of jobs synced
+    """
+    global _last_sync_time
+
+    # Skip if we synced recently (within 30 seconds) unless forced
+    if not force and _last_sync_time:
+        if (datetime.now() - _last_sync_time).total_seconds() < 30:
+            return 0
+
+    _last_sync_time = datetime.now()
+    synced_count = 0
+
+    async for session in get_async_session():
+        # Find jobs that are not COMPLETED but their document IS completed
+        result = await session.execute(
+            select(UploadJob).where(
+                UploadJob.status != UploadStatus.COMPLETED,
+                UploadJob.status != UploadStatus.FAILED,
+                UploadJob.status != UploadStatus.CANCELLED,
+                UploadJob.file_hash.in_(
+                    select(Document.file_hash).where(Document.processing_status == "COMPLETED")
+                )
+            )
+        )
+        jobs_to_sync = result.scalars().all()
+
+        for job in jobs_to_sync:
+            job.status = UploadStatus.COMPLETED
+            job.progress = 100
+            job.current_step = "Completed"
+            synced_count += 1
+            logger.info("Synced upload job to completed",
+                       job_id=str(job.id), filename=job.filename)
+
+        if synced_count > 0:
+            await session.commit()
+
+    return synced_count
+
 
 # In-memory cache for fast access (backed by database for persistence)
 # This provides both speed (in-memory) and persistence (database)
@@ -137,6 +278,10 @@ class UploadOptions(BaseModel):
         default=True,
         description="Prepend document context (title, section) to each chunk for better retrieval"
     )
+    # Multi-tenant fields (populated from user context)
+    organization_id: Optional[str] = None
+    uploaded_by_id: Optional[str] = None
+    is_private: bool = False
 
 
 # =============================================================================
@@ -271,6 +416,13 @@ async def update_upload_job_status(
     document_id: Optional[str] = None,
 ) -> None:
     """Update upload job status in database and cache."""
+    # Convert string file_id to UUID for database comparison
+    try:
+        file_uuid = UUID(file_id)
+    except (ValueError, TypeError):
+        logger.error("Invalid file_id format for status update", file_id=file_id)
+        return
+
     async for session in get_async_session():
         # Build update dict
         update_dict = {
@@ -290,7 +442,7 @@ async def update_upload_job_status(
 
         await session.execute(
             update(UploadJob)
-            .where(UploadJob.id == file_id)
+            .where(UploadJob.id == file_uuid)
             .values(**update_dict)
         )
         await session.commit()
@@ -440,9 +592,17 @@ async def _auto_tag_document(document_id: str, filename: str):
     and updates the document with generated tags.
     """
     try:
+        # Convert string to UUID for database queries
+        from uuid import UUID as PyUUID
+        try:
+            doc_uuid = PyUUID(document_id)
+        except (ValueError, TypeError):
+            logger.error("Invalid document ID for auto-tagging", document_id=document_id)
+            return
+
         async for session in get_async_session():
             # Get document
-            doc_query = select(Document).where(Document.id == document_id)
+            doc_query = select(Document).where(Document.id == doc_uuid)
             result = await session.execute(doc_query)
             document = result.scalar_one_or_none()
 
@@ -453,7 +613,7 @@ async def _auto_tag_document(document_id: str, filename: str):
             # Get first few chunks for content sample
             chunks_query = (
                 select(Chunk)
-                .where(Chunk.document_id == document_id)
+                .where(Chunk.document_id == doc_uuid)
                 .order_by(Chunk.chunk_index)
                 .limit(3)
             )
@@ -551,22 +711,41 @@ async def process_document_background(
 
     # Determine processing mode
     if options.enable_ocr and options.enable_image_analysis:
-        processing_mode = ProcessingMode.SMART
-    elif options.enable_ocr:
         processing_mode = ProcessingMode.FULL
+    elif options.enable_ocr:
+        processing_mode = ProcessingMode.OCR_ENABLED
     else:
-        processing_mode = ProcessingMode.TEXT_ONLY
+        processing_mode = ProcessingMode.BASIC
 
     # Create async status callback
     async def status_callback(doc_id: str, status: PipelineStatus):
         await update_processing_status(file_id_str, status)
 
-    # Create pipeline config with status callback
+    # Create async progress callback for real-time progress updates
+    async def progress_callback(doc_id: str, current: int, total: int):
+        progress_percent = int((current / total) * 100) if total > 0 else 0
+        step_names = {
+            1: "Extracting text",
+            2: "Chunking document",
+            3: "Generating embeddings",
+            4: "Storing in database",
+            5: "Finalizing",
+        }
+        current_step = step_names.get(current, f"Step {current}/{total}")
+        await notify_processing_progress(
+            file_id=file_id_str,
+            status="processing",
+            progress=progress_percent,
+            current_step=current_step,
+        )
+
+    # Create pipeline config with status and progress callbacks
     config = PipelineConfig(
         processing_mode=processing_mode,
         use_ray=True,
         check_duplicates=options.detect_duplicates,
         on_status_change=status_callback,
+        on_progress=progress_callback,
     )
 
     pipeline = DocumentPipeline(config=config)
@@ -579,6 +758,10 @@ async def process_document_background(
             access_tier=options.access_tier,
             collection=options.collection,
             folder_id=options.folder_id,
+            # Multi-tenant parameters for organization isolation
+            organization_id=options.organization_id,
+            uploaded_by_id=options.uploaded_by_id,
+            is_private=options.is_private,
         )
 
         # Update final status in database
@@ -659,7 +842,8 @@ async def upload_single_file(
     smart_chunking: bool = Form(True),
     detect_duplicates: bool = Form(True),
     auto_generate_tags: bool = Form(False),
-    # user = Depends(get_current_user),
+    is_private: bool = Form(False, description="Make document private (only visible to uploader)"),
+    user: Optional["UserContext"] = Depends(get_user_context_optional),
 ):
     """
     Upload a single file for processing.
@@ -716,7 +900,7 @@ async def upload_single_file(
 
     logger.info("File saved", file_id=str(file_id), path=str(file_path))
 
-    # Create processing options
+    # Create processing options with multi-tenant fields from user context
     options = UploadOptions(
         collection=collection,
         folder_id=folder_id,
@@ -726,6 +910,10 @@ async def upload_single_file(
         smart_chunking=smart_chunking,
         detect_duplicates=detect_duplicates,
         auto_generate_tags=auto_generate_tags,
+        # Multi-tenant fields from authenticated user
+        organization_id=user.organization_id if user else None,
+        uploaded_by_id=user.user_id if user else None,
+        is_private=is_private,
     )
 
     # Create upload job in database (persistent storage)
@@ -768,7 +956,8 @@ async def upload_batch(
     folder_id: Optional[str] = Form(None, description="Target folder ID for the documents"),
     access_tier: int = Form(default=1, ge=1, le=100),
     enable_ocr: bool = Form(True),
-    # user = Depends(get_current_user),
+    is_private: bool = Form(False, description="Make documents private (only visible to uploader)"),
+    user: Optional[UserContext] = Depends(get_user_context_optional),
 ):
     """
     Upload multiple files at once.
@@ -843,12 +1032,16 @@ async def upload_batch(
                 enable_ocr=enable_ocr,
             )
 
-            # Queue for background processing
+            # Queue for background processing with multi-tenant fields
             options = UploadOptions(
                 collection=collection,
                 folder_id=folder_id,
                 access_tier=access_tier,
                 enable_ocr=enable_ocr,
+                # Multi-tenant fields from authenticated user
+                organization_id=user.organization_id if user else None,
+                uploaded_by_id=user.user_id if user else None,
+                is_private=is_private,
             )
             background_tasks.add_task(
                 process_document_background,
@@ -926,8 +1119,13 @@ async def get_processing_queue(
     Get the current processing queue status.
 
     Now retrieves from database (persists across server restarts).
+    Also performs automatic sync to update stuck jobs.
     """
-    logger.info("Getting processing queue")
+    # Auto-sync stuck jobs with completed documents (runs on every queue fetch)
+    try:
+        await sync_upload_jobs_with_documents()
+    except Exception as e:
+        logger.warning("Failed to sync upload jobs", error=str(e))
 
     # Get all items from database
     all_jobs = await get_all_upload_jobs(limit=100)
@@ -1049,6 +1247,70 @@ async def retry_processing(
     return {"message": "File queued for reprocessing", "file_id": str(file_id)}
 
 
+@router.post("/retry-queued")
+async def retry_all_queued(
+    background_tasks: BackgroundTasks,
+):
+    """
+    Retry processing all files stuck in QUEUED status.
+
+    This is useful after a server restart when background tasks were lost.
+    """
+    logger.info("Retrying all queued uploads")
+
+    queued_count = 0
+    started_count = 0
+    skipped_count = 0
+    errors = []
+
+    async for session in get_async_session():
+        # Get all queued upload jobs
+        result = await session.execute(
+            select(UploadJob).where(UploadJob.status == UploadStatus.QUEUED)
+        )
+        queued_jobs = result.scalars().all()
+        queued_count = len(queued_jobs)
+
+        for job in queued_jobs:
+            file_path = job.file_path
+
+            # Check if file still exists
+            if not file_path or not Path(file_path).exists():
+                logger.warning("File not found for queued job", file_id=str(job.id), file_path=file_path)
+                skipped_count += 1
+                errors.append(f"{job.filename}: File not found")
+                continue
+
+            # Queue for processing
+            options = UploadOptions(
+                collection=job.collection,
+                folder_id=None,  # folder_id not stored in UploadJob
+                access_tier=job.access_tier or 1,
+                enable_ocr=job.enable_ocr if job.enable_ocr is not None else True,
+                enable_image_analysis=job.enable_image_analysis if job.enable_image_analysis is not None else True,
+                auto_generate_tags=job.auto_generate_tags if job.auto_generate_tags is not None else False,
+            )
+
+            background_tasks.add_task(
+                process_document_background,
+                file_id=job.id,
+                file_path=file_path,
+                options=options,
+            )
+            started_count += 1
+            logger.info("Re-queued file for processing", file_id=str(job.id), filename=job.filename)
+
+    logger.info("Retry queued complete", queued=queued_count, started=started_count, skipped=skipped_count)
+
+    return {
+        "message": f"Started processing {started_count} of {queued_count} queued files",
+        "queued_count": queued_count,
+        "started_count": started_count,
+        "skipped_count": skipped_count,
+        "errors": errors if errors else None,
+    }
+
+
 @router.get("/supported-types")
 async def get_supported_types():
     """
@@ -1068,6 +1330,37 @@ async def get_supported_types():
             "other": ["json", "xml", "html", "htm"],
         },
     }
+
+
+@router.delete("/queue/completed")
+async def clear_completed_uploads():
+    """
+    Clear all completed upload jobs from the queue.
+
+    This removes only completed jobs, leaving failed, processing, and queued items intact.
+    Also clears the in-memory cache for completed items.
+    """
+    logger.info("Clearing completed upload jobs")
+
+    deleted_count = 0
+    async for session in get_async_session():
+        # Delete completed upload jobs
+        result = await session.execute(
+            delete(UploadJob).where(UploadJob.status == UploadStatus.COMPLETED)
+        )
+        deleted_count = result.rowcount
+        await session.commit()
+
+    # Clear completed items from in-memory cache
+    completed_cache_keys = [
+        key for key, value in _processing_status_cache.items()
+        if value.get("status") == "completed"
+    ]
+    for key in completed_cache_keys:
+        del _processing_status_cache[key]
+
+    logger.info("Cleared completed upload jobs", deleted_count=deleted_count)
+    return {"deleted_count": deleted_count, "message": f"Cleared {deleted_count} completed upload jobs"}
 
 
 # =============================================================================

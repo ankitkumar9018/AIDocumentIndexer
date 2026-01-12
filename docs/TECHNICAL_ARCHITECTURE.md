@@ -407,7 +407,7 @@ The AIDocumentIndexer API provides 197 endpoints across 11 categories. All endpo
 | `enable_image_analysis` | bool | true | Analyze embedded images |
 | `smart_chunking` | bool | true | Use semantic chunking |
 | `detect_duplicates` | bool | true | Skip duplicate files |
-| `processing_mode` | string | "smart" | `full`, `smart`, `text_only` |
+| `processing_mode` | string | "full" | `full`, `ocr`, `basic` |
 
 **Processing Status Response:**
 

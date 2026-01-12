@@ -97,7 +97,7 @@ USER ACTION: Clicks "Upload" and selects a file
 │     ──────────────────────────────────────────────────────────────────────  │
 │     │ CALLS: backend/processors/universal.py                               │
 │     │                                                                       │
-│     │ extracted = processor.process(file_path, mode="smart")               │
+│     │ extracted = processor.process(file_path, mode="full")                │
 │     │   └─> _process_pdf() / _process_docx() / _process_pptx() etc.       │
 │     │       └─> For PDFs with images: _ocr_pages_parallel()                │
 │     │           └─> ThreadPoolExecutor with 4 workers                      │
@@ -1233,7 +1233,7 @@ class Document(Base, UUIDMixin, TimestampMixin):
 
     # Processing info
     processing_status: ProcessingStatus  # pending, processing, completed, failed
-    processing_mode: ProcessingMode      # full, smart, text_only
+    processing_mode: ProcessingMode      # basic, ocr, full
     storage_mode: StorageMode            # rag, query_only
     processing_error: Optional[str]
     processed_at: Optional[datetime]
@@ -1986,7 +1986,7 @@ class UniversalProcessor:
     def process(
         self,
         file_path: str,
-        processing_mode: str = "smart"  # "full", "smart", "text_only"
+        processing_mode: str = "full"  # "full", "ocr", "basic"
     ) -> ExtractedContent:
         """
         Extract content from document.
@@ -1994,9 +1994,9 @@ class UniversalProcessor:
         Args:
             file_path: Path to document file
             processing_mode:
-                - "full": Extract everything including OCR on all images
-                - "smart": OCR only on scanned pages, skip decorative images
-                - "text_only": Text extraction only, no images
+                - "full": Text + OCR + AI image analysis (most thorough)
+                - "ocr": Text + OCR for scanned documents
+                - "basic": Text extraction only (fastest)
 
         Returns:
             ExtractedContent with text, pages, images, metadata

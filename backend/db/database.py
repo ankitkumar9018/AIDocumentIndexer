@@ -160,6 +160,7 @@ def get_async_engine() -> AsyncEngine:
             "Async database engine created",
             database_type=db_config.database_type,
             url_type="sqlite" if "sqlite" in db_config.async_url else "other",
+            database_url=db_config.async_url,
         )
 
     return async_engine

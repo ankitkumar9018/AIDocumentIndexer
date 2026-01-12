@@ -2731,6 +2731,8 @@ VALID_OPERATIONS = [
     "web_scraping",
     "agent_planning",
     "agent_execution",
+    "audio_script",
+    "knowledge_graph",
 ]
 
 

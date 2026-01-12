@@ -23,6 +23,7 @@ import {
   ChevronRight,
   X,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -480,6 +481,7 @@ export default function KnowledgeGraphPage() {
   const [nodeLimit, setNodeLimit] = useState(100);
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [isCleaning, setIsCleaning] = useState(false);
 
   // Queries
   const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useKnowledgeGraphStats({
@@ -532,6 +534,28 @@ export default function KnowledgeGraphPage() {
     }
   };
 
+  const handleCleanup = async () => {
+    setIsCleaning(true);
+    try {
+      const result = await api.cleanupKnowledgeGraph(false);
+      if (result.orphan_entities_removed > 0 || result.orphan_relations_removed > 0) {
+        toast.success(result.message || "Cleanup completed");
+      } else {
+        toast.info("No orphan entities found - graph is clean!");
+      }
+      // Refresh the stats and graph after cleanup
+      setTimeout(() => {
+        refetchStats();
+        refetchGraph();
+      }, 500);
+    } catch (error) {
+      console.error("Cleanup error:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to cleanup graph");
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
   if (status === "loading") {
     return (
       <div className="flex items-center justify-center h-64">
@@ -574,6 +598,20 @@ export default function KnowledgeGraphPage() {
               <Sparkles className="h-4 w-4" />
             )}
             {isExtracting ? "Extracting..." : "Extract Entities"}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={handleCleanup}
+            disabled={isCleaning}
+            className="gap-2"
+            title="Remove orphan entities (entities with no document references)"
+          >
+            {isCleaning ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4" />
+            )}
+            {isCleaning ? "Cleaning..." : "Cleanup"}
           </Button>
           <Button variant="outline" onClick={handleRefresh} disabled={graphLoading}>
             <RefreshCw className={`h-4 w-4 mr-2 ${graphLoading ? "animate-spin" : ""}`} />

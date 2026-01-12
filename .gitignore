@@ -181,6 +181,10 @@ data/generated_docs/
 # Generated images for documents
 data/generated_images/
 
+# Generated audio files
+backend/storage/audio/*.mp3
+backend/storage/audio/*.wav
+
 # ChromaDB vector store
 data/chroma/
 data/chroma_backup*/

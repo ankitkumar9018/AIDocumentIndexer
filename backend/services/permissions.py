@@ -35,13 +35,15 @@ class Permission(str, Enum):
 
 @dataclass
 class UserContext:
-    """User context for permission checks."""
+    """User context for permission checks and organization isolation."""
     user_id: str
     email: str
     role: str
     access_tier_level: int
     access_tier_name: str
     use_folder_permissions_only: bool = False
+    organization_id: Optional[str] = None
+    is_superadmin: bool = False
 
     def can_access_tier(self, tier_level: int) -> bool:
         """Check if user can access a specific tier level."""
@@ -50,6 +52,10 @@ class UserContext:
     def is_admin(self) -> bool:
         """Check if user is an admin."""
         return self.role == "admin"
+
+    def can_switch_organization(self) -> bool:
+        """Check if user can switch to other organizations (superadmin only)."""
+        return self.is_superadmin
 
 
 # =============================================================================
@@ -387,6 +393,9 @@ def create_user_context_from_token(token_payload: Dict[str, Any]) -> UserContext
     Returns:
         UserContext object
     """
+    # Get organization_id for multi-tenant isolation
+    organization_id = token_payload.get("organization_id")
+
     return UserContext(
         user_id=token_payload.get("sub", ""),
         email=token_payload.get("email", ""),
@@ -394,4 +403,6 @@ def create_user_context_from_token(token_payload: Dict[str, Any]) -> UserContext
         access_tier_level=token_payload.get("access_tier", 10),
         access_tier_name=token_payload.get("tier_name", "Basic"),
         use_folder_permissions_only=token_payload.get("use_folder_permissions_only", False),
+        organization_id=organization_id,
+        is_superadmin=token_payload.get("is_superadmin", False),
     )

@@ -18,7 +18,7 @@ CREATE EXTENSION IF NOT EXISTS "vector";
 -- =============================================================================
 
 CREATE TYPE processing_status AS ENUM ('pending', 'processing', 'completed', 'failed');
-CREATE TYPE processing_mode AS ENUM ('full', 'smart', 'text_only');
+CREATE TYPE processing_mode AS ENUM ('basic', 'ocr', 'full');
 CREATE TYPE storage_mode AS ENUM ('rag', 'query_only');
 
 -- =============================================================================
@@ -80,7 +80,7 @@ CREATE TABLE documents (
 
     -- Processing info
     processing_status processing_status DEFAULT 'pending',
-    processing_mode processing_mode DEFAULT 'smart',
+    processing_mode processing_mode DEFAULT 'full',
     storage_mode storage_mode DEFAULT 'rag',
     processing_error TEXT,
     processed_at TIMESTAMP WITH TIME ZONE,

@@ -809,3 +809,133 @@ async def extract_entities_from_all_documents(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to extract entities: {str(e)}"
         )
+
+
+# =============================================================================
+# Graph Maintenance Endpoints
+# =============================================================================
+
+class CleanupResponse(BaseModel):
+    """Response model for cleanup operations."""
+    status: str
+    message: str
+    orphan_entities_removed: int = 0
+    orphan_relations_removed: int = 0
+
+
+@router.post(
+    "/cleanup",
+    response_model=CleanupResponse,
+    summary="Clean up orphan entities",
+    description="Remove orphan entities (no document mentions) and orphan relationships.",
+)
+async def cleanup_graph(
+    dry_run: bool = Query(False, description="Preview changes without applying them"),
+    db: AsyncSession = Depends(get_async_session),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Clean up orphan entities and relationships from the knowledge graph.
+
+    Orphan entities are those that no longer have any document mentions
+    (e.g., after documents are deleted). This endpoint removes them
+    to keep the graph clean and performant.
+    """
+    from sqlalchemy import delete, not_
+
+    try:
+        # Find orphan entities (no mentions)
+        mentioned_entity_ids = select(EntityMention.entity_id).distinct()
+        orphan_entities_result = await db.execute(
+            select(Entity.id)
+            .where(not_(Entity.id.in_(mentioned_entity_ids)))
+        )
+        orphan_entity_ids = [row[0] for row in orphan_entities_result.all()]
+
+        orphan_entities_count = len(orphan_entity_ids)
+        orphan_relations_count = 0
+
+        if orphan_entity_ids:
+            # Count relations to be deleted
+            orphan_relations_result = await db.scalar(
+                select(func.count(EntityRelation.id))
+                .where(
+                    EntityRelation.source_entity_id.in_(orphan_entity_ids) |
+                    EntityRelation.target_entity_id.in_(orphan_entity_ids)
+                )
+            )
+            orphan_relations_count = orphan_relations_result or 0
+
+            if not dry_run:
+                # Delete relationships involving orphan entities
+                await db.execute(
+                    delete(EntityRelation)
+                    .where(
+                        EntityRelation.source_entity_id.in_(orphan_entity_ids) |
+                        EntityRelation.target_entity_id.in_(orphan_entity_ids)
+                    )
+                )
+
+                # Delete orphan entities
+                await db.execute(
+                    delete(Entity).where(Entity.id.in_(orphan_entity_ids))
+                )
+
+                await db.commit()
+
+        # Also clean up any remaining orphan relationships
+        valid_entity_ids = select(Entity.id)
+        additional_orphan_relations = await db.scalar(
+            select(func.count(EntityRelation.id))
+            .where(
+                not_(
+                    and_(
+                        EntityRelation.source_entity_id.in_(valid_entity_ids),
+                        EntityRelation.target_entity_id.in_(valid_entity_ids),
+                    )
+                )
+            )
+        )
+
+        if additional_orphan_relations and additional_orphan_relations > 0:
+            orphan_relations_count += additional_orphan_relations
+            if not dry_run:
+                await db.execute(
+                    delete(EntityRelation)
+                    .where(
+                        not_(
+                            and_(
+                                EntityRelation.source_entity_id.in_(valid_entity_ids),
+                                EntityRelation.target_entity_id.in_(valid_entity_ids),
+                            )
+                        )
+                    )
+                )
+                await db.commit()
+
+        if dry_run:
+            return CleanupResponse(
+                status="preview",
+                message=f"Would remove {orphan_entities_count} orphan entities and {orphan_relations_count} orphan relationships.",
+                orphan_entities_removed=orphan_entities_count,
+                orphan_relations_removed=orphan_relations_count,
+            )
+        else:
+            logger.info(
+                "Knowledge graph cleanup complete",
+                orphan_entities=orphan_entities_count,
+                orphan_relations=orphan_relations_count,
+            )
+            return CleanupResponse(
+                status="success",
+                message=f"Removed {orphan_entities_count} orphan entities and {orphan_relations_count} orphan relationships.",
+                orphan_entities_removed=orphan_entities_count,
+                orphan_relations_removed=orphan_relations_count,
+            )
+
+    except Exception as e:
+        logger.error("Failed to cleanup knowledge graph", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to cleanup graph: {str(e)}"
+        )

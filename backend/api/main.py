@@ -85,6 +85,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await seed_admin_user()
         logger.info("Admin user seeded")
 
+        # Fix ChromaDB pickle corruption if present
+        try:
+            from backend.services.vectorstore_local import fix_chromadb_pickle
+            fix_chromadb_pickle()
+            logger.info("ChromaDB health check passed")
+        except Exception as chroma_error:
+            logger.warning("ChromaDB health check failed", error=str(chroma_error))
+
+        # Reset stuck upload jobs and sync with completed documents
+        try:
+            from backend.api.routes.upload import reset_stuck_upload_jobs
+            reset_count = await reset_stuck_upload_jobs()
+            if reset_count > 0:
+                logger.info("Reset stuck upload jobs", count=reset_count)
+        except Exception as reset_error:
+            logger.warning("Failed to reset stuck upload jobs", error=str(reset_error))
+
         # Initialize Ray connection for parallel document processing
         try:
             from backend.ray_workers.config import init_ray
@@ -262,6 +279,14 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.preferences import router as preferences_router
     from backend.api.routes.generation_templates import router as generation_templates_router
     from backend.api.routes.knowledge_graph import router as knowledge_graph_router
+    from backend.api.routes.workflows import router as workflows_router
+    from backend.api.routes.audio import router as audio_router
+    from backend.api.routes.bots import router as bots_router
+    from backend.api.routes.connectors import router as connectors_router
+    from backend.api.routes.gateway import router as gateway_router
+    from backend.api.routes.privacy import router as privacy_router
+    from backend.api.routes.llm_config import router as llm_config_router
+    from backend.api.routes.organizations import router as organizations_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
@@ -272,6 +297,14 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(folders_router, prefix="/api/v1/folders", tags=["Folders"])
     app.include_router(preferences_router, prefix="/api/v1/preferences", tags=["User Preferences"])
     app.include_router(knowledge_graph_router, prefix="/api/v1/knowledge-graph", tags=["Knowledge Graph"])
+    app.include_router(workflows_router, prefix="/api/v1/workflows", tags=["Workflows"])
+    app.include_router(audio_router, prefix="/api/v1/audio", tags=["Audio Overviews"])
+    app.include_router(bots_router, prefix="/api/v1/bots", tags=["Bot Integrations"])
+    app.include_router(connectors_router, prefix="/api/v1/connectors", tags=["Connectors"])
+    app.include_router(gateway_router, prefix="/api/v1/gateway", tags=["LLM Gateway"])
+    app.include_router(privacy_router, prefix="/api/v1/privacy", tags=["Privacy Controls"])
+    app.include_router(llm_config_router, prefix="/api/v1/llm", tags=["LLM Configuration"])
+    app.include_router(organizations_router, prefix="/api/v1/organizations", tags=["Organizations"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

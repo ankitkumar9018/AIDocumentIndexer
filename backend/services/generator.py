@@ -1990,6 +1990,21 @@ Return ONLY a JSON object with this exact structure:
                 total_sources=len(job.sources_used),
             )
 
+            # Backfill section sources from job.sources_used for sections with no sources
+            # This ensures speaker notes have sources to display
+            backfilled_count = 0
+            for section in job.sections:
+                if not section.sources and job.sources_used:
+                    section.sources = job.sources_used[:5]
+                    backfilled_count += 1
+            if backfilled_count > 0:
+                logger.info(
+                    "Backfilled section sources from job sources",
+                    job_id=job_id,
+                    backfilled_sections=backfilled_count,
+                    sources_per_section=min(5, len(job.sources_used)),
+                )
+
             # Move to review or completed based on config
             if self.config.require_section_approval:
                 job.status = GenerationStatus.SECTION_REVIEW
@@ -2308,16 +2323,33 @@ Return ONLY a JSON object with this exact structure:
                         )
                     )
 
-            logger.debug(
-                "Section sources filtered",
-                query=query[:50],
-                sources_after_filter=len(sources),
-            )
+            if sources:
+                logger.info(
+                    "Section sources found",
+                    query=query[:50],
+                    sources_count=len(sources),
+                    source_names=[s.document_name for s in sources[:3]],
+                )
+            else:
+                logger.warning(
+                    "No sources found after filtering",
+                    query=query[:50],
+                    raw_results_count=len(results) if results else 0,
+                    min_score=self.config.min_relevance_score,
+                    hint="Check if documents are indexed or min_relevance_score is too high",
+                )
 
             return sources
 
         except Exception as e:
-            logger.warning("Failed to search sources", error=str(e), query=query[:50])
+            logger.error(
+                "Failed to search sources - sources will be empty for this section",
+                error=str(e),
+                error_type=type(e).__name__,
+                query=query[:50],
+            )
+            import traceback
+            logger.debug("Source search exception traceback", traceback=traceback.format_exc())
             return []
 
     async def _analyze_document_styles(
@@ -3026,33 +3058,61 @@ Match the style and tone of existing documents. Do NOT output these instructions
         output_language = job.metadata.get("output_language", "en")
         language_instruction = ""
         if output_language == "auto":
-            # Auto-detect: programmatically detect title language
-            detected_lang = "en"  # default
+            # Auto-detect: programmatically detect title language with confidence threshold
+            detected_lang = "en"  # default fallback
             detected_lang_name = "English"
+            detection_confidence = 0.0
             try:
-                from langdetect import detect, DetectorFactory
+                from langdetect import detect_langs, DetectorFactory
                 DetectorFactory.seed = 0  # Make deterministic
                 # Combine title and description for better detection
                 text_to_detect = f"{job.title} {job.description or ''}"
-                detected_lang = detect(text_to_detect)
-                # Map detected language to name
-                lang_map = {
-                    "en": "English", "de": "German", "es": "Spanish", "fr": "French",
-                    "it": "Italian", "pt": "Portuguese", "zh-cn": "Chinese", "zh-tw": "Chinese",
-                    "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "hi": "Hindi",
-                    "ru": "Russian", "nl": "Dutch", "pl": "Polish", "tr": "Turkish"
-                }
-                detected_lang_name = lang_map.get(detected_lang, detected_lang.upper())
-                logger.info(f"Auto-detected language from title: {detected_lang} ({detected_lang_name})")
+
+                # detect_langs returns list of languages with probabilities
+                detected_results = detect_langs(text_to_detect)
+                if detected_results:
+                    top_result = detected_results[0]
+                    detected_lang = top_result.lang
+                    detection_confidence = top_result.prob
+
+                    # Map detected language to name
+                    lang_map = {
+                        "en": "English", "de": "German", "es": "Spanish", "fr": "French",
+                        "it": "Italian", "pt": "Portuguese", "zh-cn": "Chinese", "zh-tw": "Chinese",
+                        "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "hi": "Hindi",
+                        "ru": "Russian", "nl": "Dutch", "pl": "Polish", "tr": "Turkish"
+                    }
+                    detected_lang_name = lang_map.get(detected_lang, detected_lang.upper())
+
+                    logger.info(
+                        "Auto-detected language from title",
+                        detected_lang=detected_lang,
+                        detected_lang_name=detected_lang_name,
+                        confidence=f"{detection_confidence:.2%}",
+                        text_sample=text_to_detect[:100]
+                    )
+
+                    # If confidence is low (< 80%), fall back to English
+                    if detection_confidence < 0.80:
+                        logger.warning(
+                            "Low confidence language detection, defaulting to English",
+                            detected_lang=detected_lang,
+                            confidence=f"{detection_confidence:.2%}"
+                        )
+                        detected_lang = "en"
+                        detected_lang_name = "English"
             except Exception as e:
                 logger.warning(f"Language detection failed, using English: {e}")
 
-            # Check for Hinglish (Hindi mixed with English) - common pattern
+            # Only trigger Hinglish mode if:
+            # 1. Hindi was detected with HIGH confidence (>= 0.7)
+            # 2. AND the text clearly contains Hinglish markers
             title_lower = job.title.lower()
             hinglish_markers = ["ke", "ka", "ki", "hai", "ko", "se", "mein", "par", "aur", "liye", "kaise"]
-            has_hinglish = any(marker in title_lower.split() for marker in hinglish_markers)
+            hinglish_word_count = sum(1 for marker in hinglish_markers if marker in title_lower.split())
+            has_hinglish = hinglish_word_count >= 2  # Require at least 2 markers
 
-            if has_hinglish or detected_lang == "hi":
+            if has_hinglish and detected_lang == "hi" and detection_confidence >= 0.70:
                 detected_lang_name = "Hinglish (Hindi mixed with English)"
                 language_instruction = f"""
 ---CRITICAL LANGUAGE REQUIREMENT---
@@ -3070,16 +3130,12 @@ YOU MUST:
 """
             else:
                 language_instruction = f"""
----CRITICAL LANGUAGE REQUIREMENT---
-DETECTED LANGUAGE: {detected_lang_name}
-The document title "{job.title}" is in {detected_lang_name}.
+---LANGUAGE REQUIREMENT---
+OUTPUT LANGUAGE: {detected_lang_name}
 
-YOU MUST:
-1. Generate ALL content in {detected_lang_name}
-2. If source documents are in a different language (e.g., German), TRANSLATE them to {detected_lang_name}
-3. Every slide/section must be in {detected_lang_name}
-4. DO NOT mix languages within a section
-5. DO NOT default to English unless the detected language is English!
+Generate ALL content in {detected_lang_name}.
+If source documents are in a different language, translate them to {detected_lang_name}.
+Keep technical terms and proper nouns in their original form if commonly used that way.
 ---END LANGUAGE REQUIREMENT---
 """
         elif output_language != "en":
@@ -3662,16 +3718,76 @@ Write the improved content:"""
             from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
             from pptx.enum.shapes import MSO_SHAPE
 
-            prs = Presentation()
-            prs.slide_width = Inches(13.333)  # 16:9 aspect ratio
-            prs.slide_height = Inches(7.5)
+            # Check if using a template PPTX
+            template_path = job.metadata.get("template_pptx_path")
+            use_template_styling = False  # When True, skip hardcoded styling to preserve template
+
+            # Standard dimensions for 16:9 (used as reference for scaling)
+            STANDARD_WIDTH = 13.333
+            STANDARD_HEIGHT = 7.5
+
+            if template_path and os.path.exists(template_path):
+                # Use the template - this preserves slide masters, themes, colors
+                prs = Presentation(template_path)
+                # Remove all existing slides from template (keep only masters)
+                while len(prs.slides) > 0:
+                    slide_id = prs.slides._sldIdLst[0].rId
+                    prs.part.drop_rel(slide_id)
+                    del prs.slides._sldIdLst[0]
+                use_template_styling = True
+
+                # Calculate scaling factors for content positioning
+                # Template may have different dimensions than our standard 16:9
+                template_width = prs.slide_width.inches
+                template_height = prs.slide_height.inches
+                width_scale = template_width / STANDARD_WIDTH
+                height_scale = template_height / STANDARD_HEIGHT
+
+                logger.info(
+                    "Using PPTX template - preserving template styling",
+                    template_path=template_path,
+                    masters_count=len(prs.slide_masters),
+                    layouts_count=len(prs.slide_layouts),
+                    template_width=f"{template_width:.2f}in",
+                    template_height=f"{template_height:.2f}in",
+                    width_scale=f"{width_scale:.2f}",
+                    height_scale=f"{height_scale:.2f}",
+                )
+            else:
+                prs = Presentation()
+                prs.slide_width = Inches(STANDARD_WIDTH)  # 16:9 aspect ratio
+                prs.slide_height = Inches(STANDARD_HEIGHT)
+                width_scale = 1.0
+                height_scale = 1.0
+
+            # Helper function to scale dimensions when using templates
+            def scale_inches(value: float, axis: str = "w") -> float:
+                """Scale an Inches value based on template dimensions.
+
+                Args:
+                    value: The original value in inches (designed for 13.333x7.5)
+                    axis: "w" for width scaling, "h" for height scaling
+
+                Returns:
+                    Scaled value in inches
+                """
+                if axis == "w":
+                    return value * width_scale
+                else:
+                    return value * height_scale
+
+            def scaled_inches(value: float, axis: str = "w"):
+                """Return Inches object with scaled value."""
+                return Inches(scale_inches(value, axis))
 
             # Get theme colors from job metadata or use default (with custom color overrides)
+            # Only apply custom theme if NOT using template styling
             theme_key = job.metadata.get("theme", "business")
             custom_colors = job.metadata.get("custom_colors")
             theme = get_theme_colors(theme_key, custom_colors)
 
             # Get font family from job metadata or use default
+            # Only apply custom fonts if NOT using template styling
             font_family_key = job.metadata.get("font_family", "modern")
             font_config = FONT_FAMILIES.get(font_family_key, FONT_FAMILIES["modern"])
             heading_font = font_config["heading"]
@@ -3703,6 +3819,39 @@ Write the improved content:"""
                 return TRANSITION_DURATIONS.get(animation_speed, 750)
 
             transition_duration = get_transition_duration()
+
+            def get_slide_layout(layout_type: str = "content"):
+                """
+                Get appropriate slide layout based on template or default.
+
+                When using template, tries to use template's layouts:
+                - "title": Layout 0 (Title Slide)
+                - "content": Layout 1 (Title and Content)
+                - "blank": Layout 6 (Blank) or last layout
+
+                When not using template, always uses blank layout.
+
+                Args:
+                    layout_type: "title", "content", or "blank"
+
+                Returns:
+                    SlideLayout object
+                """
+                if use_template_styling:
+                    try:
+                        if layout_type == "title" and len(prs.slide_layouts) > 0:
+                            return prs.slide_layouts[0]
+                        elif layout_type == "content" and len(prs.slide_layouts) > 1:
+                            return prs.slide_layouts[1]
+                        elif len(prs.slide_layouts) > 6:
+                            return prs.slide_layouts[6]
+                        else:
+                            return prs.slide_layouts[-1]  # Use last available layout
+                    except Exception as e:
+                        logger.warning(f"Failed to get template layout, using default: {e}")
+                        return prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
+                else:
+                    return prs.slide_layouts[6]  # Blank layout for non-template
 
             def add_slide_notes(slide, notes_text: str):
                 """
@@ -4309,24 +4458,25 @@ Write the improved content:"""
 
             # ========== TITLE SLIDE ==========
             current_slide += 1
-            slide = prs.slides.add_slide(prs.slide_layouts[6])  # Blank layout
+            slide = prs.slides.add_slide(get_slide_layout("title"))
 
             # Add transition if animations are enabled
             if enable_animations:
                 add_slide_transition(slide, "fade", duration=transition_duration, speed=animation_speed)
 
-            # Apply theme-specific background
-            apply_slide_background(slide, is_title_slide=True)
+            # Apply theme-specific background and styling ONLY if not using template
+            if not use_template_styling:
+                apply_slide_background(slide, is_title_slide=True)
 
-            # Accent bar at bottom (theme-aware)
-            accent_bar = slide.shapes.add_shape(
-                MSO_SHAPE.RECTANGLE,
-                Inches(0), Inches(6.5),
-                prs.slide_width, Inches(1)
-            )
-            accent_bar.fill.solid()
-            accent_bar.fill.fore_color.rgb = SECONDARY_COLOR
-            accent_bar.line.fill.background()
+                # Accent bar at bottom (theme-aware)
+                accent_bar = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE,
+                    Inches(0), Inches(6.5),
+                    prs.slide_width, Inches(1)
+                )
+                accent_bar.fill.solid()
+                accent_bar.fill.fore_color.rgb = SECONDARY_COLOR
+                accent_bar.line.fill.background()
 
             # Title text color adapts to background
             title_text_color = get_text_color_for_background(is_dark_bg=True)
@@ -4394,14 +4544,15 @@ Total sections: {len(job.sections)}
             # ========== TABLE OF CONTENTS SLIDE ==========
             if self.config.include_toc:
                 current_slide += 1
-                slide = prs.slides.add_slide(prs.slide_layouts[6])
+                slide = prs.slides.add_slide(get_slide_layout("content"))
 
                 # Add transition if animations are enabled
                 if enable_animations:
                     add_slide_transition(slide, "push", duration=transition_duration, speed=animation_speed)
 
-                # Apply theme-specific header accent
-                add_header_accent(slide, "Contents")
+                # Apply theme-specific header accent ONLY if not using template
+                if not use_template_styling:
+                    add_header_accent(slide, "Contents")
 
                 # TOC Title - position depends on header style
                 title_y = Inches(0.3) if header_style != "none" else Inches(0.5)
@@ -4418,8 +4569,8 @@ Total sections: {len(job.sections)}
                 p.font.bold = True
                 p.font.color.rgb = title_color
 
-                # Add accent elements based on theme
-                if header_style == "none":
+                # Add accent elements based on theme (skip if using template)
+                if header_style == "none" and not use_template_styling:
                     add_accent_elements(slide)
 
                 # TOC items - get theme-specific bullet characters
@@ -4473,15 +4624,16 @@ Total sections: {len(job.sections)}
 
             for section_idx, section in enumerate(job.sections):
                 current_slide += 1
-                slide = prs.slides.add_slide(prs.slide_layouts[6])
+                slide = prs.slides.add_slide(get_slide_layout("content"))
 
                 # Add transition if animations are enabled (cycle through types)
                 if enable_animations:
                     trans_type = content_transitions[section_idx % len(content_transitions)]
                     add_slide_transition(slide, trans_type, duration=transition_duration, speed=animation_speed)
 
-                # Apply theme-specific header accent
-                add_header_accent(slide, section.title)
+                # Apply theme-specific header accent (skip if using template)
+                if not use_template_styling:
+                    add_header_accent(slide, section.title)
 
                 # Check if we have an image for this section
                 has_image = section_idx in section_images
@@ -4501,8 +4653,8 @@ Total sections: {len(job.sections)}
                 p.font.bold = True
                 p.font.color.rgb = title_color
 
-                # Add accent elements for themes without header bar
-                if header_style == "none":
+                # Add accent elements for themes without header bar (skip if using template)
+                if header_style == "none" and not use_template_styling:
                     add_accent_elements(slide)
 
                 # Adjust content area based on whether we have an image and layout
@@ -4531,42 +4683,43 @@ Total sections: {len(job.sections)}
                     image_pos = layout_config.get("image_position", "right")
 
                     # Default content height - will be reduced for some layouts
-                    content_height = Inches(5.2)
-                    content_top = Inches(1.6)
+                    # Scale all dimensions based on template size
+                    content_height = scaled_inches(5.2, "h")
+                    content_top = scaled_inches(1.6, "h")
 
                     if layout_key == "two_column":
                         # Split screen: content left, image right (side by side)
                         content_width = Inches(slide_content_width * 0.48)
-                        content_left = Inches(0.8)
-                        image_left = Inches(7.2)
-                        image_width = Inches(5.5)
+                        content_left = scaled_inches(0.8, "w")
+                        image_left = scaled_inches(7.2, "w")
+                        image_width = scaled_inches(5.5, "w")
                         # Side-by-side layout can use full height
-                        content_height = Inches(5.0)
+                        content_height = scaled_inches(5.0, "h")
                     elif layout_key == "image_focused":
                         # Large image BELOW text - reduce content height to prevent overlap
                         content_width = Inches(slide_content_width)
-                        content_left = Inches(0.8)
+                        content_left = scaled_inches(0.8, "w")
                         # Content area limited to top portion (image starts at Y=4.2")
-                        content_height = Inches(2.4)  # Reduced from 5.2" to prevent overlap
-                        content_top = Inches(1.6)
+                        content_height = scaled_inches(2.4, "h")  # Reduced from 5.2" to prevent overlap
+                        content_top = scaled_inches(1.6, "h")
                         # Image positioned below content
-                        image_left = Inches(2.5)
-                        image_width = Inches(8.0)
+                        image_left = scaled_inches(2.5, "w")
+                        image_width = scaled_inches(8.0, "w")
                     elif layout_key == "minimal":
                         # Clean layout with image on the side
                         content_width = Inches(slide_content_width * 0.6)
-                        content_left = Inches(0.8)
-                        image_left = Inches(8.5)
-                        image_width = Inches(4.0)
+                        content_left = scaled_inches(0.8, "w")
+                        image_left = scaled_inches(8.5, "w")
+                        image_width = scaled_inches(4.0, "w")
                         # Side-by-side can use more height
-                        content_height = Inches(5.0)
+                        content_height = scaled_inches(5.0, "h")
                     else:  # standard layout
-                        content_width = Inches(7.5)
-                        content_left = Inches(0.8)
-                        image_left = Inches(8.5)
-                        image_width = Inches(4.3)
+                        content_width = scaled_inches(7.5, "w")
+                        content_left = scaled_inches(0.8, "w")
+                        image_left = scaled_inches(8.5, "w")
+                        image_width = scaled_inches(4.3, "w")
                         # Side-by-side can use more height
-                        content_height = Inches(5.0)
+                        content_height = scaled_inches(5.0, "h")
 
                     content_box = slide.shapes.add_textbox(
                         content_left, content_top,
@@ -4581,15 +4734,15 @@ Total sections: {len(job.sections)}
                     elif layout_key == "two_column":
                         # Use full width for two-column without image
                         content_width = Inches(slide_content_width)
-                        content_left = Inches(0.8)
+                        content_left = scaled_inches(0.8, "w")
                     else:
                         # Standard full width
-                        content_width = Inches(11.5)
-                        content_left = Inches(0.8)
+                        content_width = scaled_inches(11.5, "w")
+                        content_left = scaled_inches(0.8, "w")
 
                     content_box = slide.shapes.add_textbox(
-                        content_left, Inches(1.6),
-                        content_width, Inches(5.2)
+                        content_left, scaled_inches(1.6, "h"),
+                        content_width, scaled_inches(5.2, "h")
                     )
 
                 tf = content_box.text_frame
@@ -4735,30 +4888,30 @@ Total sections: {len(job.sections)}
                     try:
                         image_path = section_images[section_idx]
 
-                        # Position image based on layout template
+                        # Position image based on layout template (scaled for template dimensions)
                         if layout_key == "image_focused":
                             # Large centered image BELOW content (content ends at ~4.0")
                             slide.shapes.add_picture(
                                 image_path,
-                                image_left, Inches(4.2),  # Start below content area
+                                image_left, scaled_inches(4.2, "h"),  # Start below content area
                                 width=image_width,
-                                height=Inches(3.0),  # Slightly smaller to fit
+                                height=scaled_inches(3.0, "h"),  # Slightly smaller to fit
                             )
                         elif layout_key == "two_column":
                             # Image on right side, vertically centered
                             slide.shapes.add_picture(
                                 image_path,
-                                image_left, Inches(2.0),
+                                image_left, scaled_inches(2.0, "h"),
                                 width=image_width,
-                                height=Inches(4.0),
+                                height=scaled_inches(4.0, "h"),
                             )
                         else:
                             # Standard/minimal: image on right (side-by-side, no vertical overlap)
                             slide.shapes.add_picture(
                                 image_path,
-                                image_left, Inches(1.8),
+                                image_left, scaled_inches(1.8, "h"),
                                 width=image_width,
-                                height=Inches(4.5),  # Can be taller since side-by-side
+                                height=scaled_inches(4.5, "h"),  # Can be taller since side-by-side
                             )
 
                         logger.debug(
@@ -4817,8 +4970,25 @@ Total sections: {len(job.sections)}
                         notes_parts.append(content_summary)
                         notes_parts.append("")
 
-                # Add sources
+                # Add sources - fallback to job-level sources if section has none
                 section_sources = section.sources or []
+                used_fallback = False
+                if not section_sources and job.sources_used:
+                    # Use top sources from job as fallback
+                    section_sources = job.sources_used[:5]
+                    used_fallback = True
+                    logger.info(
+                        "Using job-level sources as fallback for section notes",
+                        section_title=section_title[:30],
+                        fallback_sources=len(section_sources),
+                    )
+                logger.debug(
+                    "PPTX notes - section sources check",
+                    section_title=section_title[:30],
+                    sources_count=len(section_sources),
+                    used_fallback=used_fallback,
+                    source_names=[s.document_name for s in section_sources[:3]] if section_sources else [],
+                )
                 if section_sources:
                     source_lines = []
                     for s in section_sources[:5]:
@@ -4867,14 +5037,15 @@ Total sections: {len(job.sections)}
                 logger.warning(f"Sources slide SKIPPED - no sources_used (RAG may have returned no results)")
             if include_sources and job.sources_used:
                 current_slide += 1
-                slide = prs.slides.add_slide(prs.slide_layouts[6])
+                slide = prs.slides.add_slide(get_slide_layout("content"))
 
                 # Add transition if animations are enabled
                 if enable_animations:
                     add_slide_transition(slide, "blinds", duration=transition_duration, speed=animation_speed)
 
-                # Apply theme-specific header accent
-                add_header_accent(slide, "Sources & References")
+                # Apply theme-specific header accent (skip if using template)
+                if not use_template_styling:
+                    add_header_accent(slide, "Sources & References")
 
                 # Sources title - position depends on header style
                 title_y = Inches(0.3) if header_style != "none" else Inches(0.5)
@@ -4891,8 +5062,8 @@ Total sections: {len(job.sections)}
                 p.font.bold = True
                 p.font.color.rgb = title_color
 
-                # Add accent elements for themes without header bar
-                if header_style == "none":
+                # Add accent elements for themes without header bar (skip if using template)
+                if header_style == "none" and not use_template_styling:
                     add_accent_elements(slide)
 
                 # Sources list

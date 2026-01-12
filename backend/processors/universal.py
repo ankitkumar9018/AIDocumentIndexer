@@ -148,6 +148,7 @@ class UniversalProcessor:
             max_ocr_workers: Maximum number of parallel OCR workers
         """
         import os
+        import hashlib
         self.enable_ocr = enable_ocr
         self.enable_image_analysis = enable_image_analysis
         # Use provided language, env var, or default to English
@@ -162,17 +163,21 @@ class UniversalProcessor:
         self._easyocr_engine = None
         self._pdf_processor = None
 
+        # Image OCR cache for duplicate detection within a document
+        # Key: image hash, Value: OCR result text
+        self._image_ocr_cache: Dict[str, str] = {}
+
     def process(
         self,
         file_path: str,
-        processing_mode: str = "smart",
+        processing_mode: str = "full",
     ) -> ExtractedContent:
         """
         Process a document and extract content.
 
         Args:
             file_path: Path to the document
-            processing_mode: "full", "smart", or "text_only"
+            processing_mode: "full", "ocr", or "basic"
 
         Returns:
             ExtractedContent: Extracted text and metadata
@@ -195,6 +200,9 @@ class UniversalProcessor:
             extension=extension,
             processing_mode=processing_mode,
         )
+
+        # Clear OCR cache for new document (duplicate detection is per-document)
+        self.clear_ocr_cache()
 
         try:
             content = processor_method(file_path, processing_mode)
@@ -244,8 +252,8 @@ class UniversalProcessor:
                 "has_images": len(page.get_images()) > 0,
             })
 
-            # Extract images if not text_only mode
-            if mode != "text_only":
+            # Extract images if not basic mode
+            if mode != "basic":
                 for img_index, img in enumerate(page.get_images()):
                     images.append({
                         "page_number": page_num,
@@ -388,9 +396,9 @@ class UniversalProcessor:
                 table_data.append(row_data)
             tables.append({"data": table_data})
 
-        # Extract images if not text_only mode
+        # Extract images if not basic mode
         extracted_images: List[ExtractedImage] = []
-        if mode != "text_only" and self.enable_image_analysis:
+        if mode != "basic" and self.enable_image_analysis:
             extracted_images = self._extract_docx_images(doc)
 
         return ExtractedContent(
@@ -486,8 +494,8 @@ class UniversalProcessor:
                         row_text = [cell.text for cell in row.cells]
                         slide_text.append(" | ".join(row_text))
 
-                # Extract images if not text_only mode
-                if mode != "text_only" and self.enable_image_analysis:
+                # Extract images if not basic mode
+                if mode != "basic" and self.enable_image_analysis:
                     if hasattr(shape, "image"):
                         try:
                             img_blob = shape.image.blob
@@ -630,9 +638,9 @@ class UniversalProcessor:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 soup = BeautifulSoup(f.read(), "html.parser")
 
-            # Extract images if not text_only mode
+            # Extract images if not basic mode
             extracted_images: List[ExtractedImage] = []
-            if mode != "text_only" and self.enable_image_analysis:
+            if mode != "basic" and self.enable_image_analysis:
                 image_index = 0
                 for img in soup.find_all("img"):
                     src = img.get("src", "")
@@ -693,7 +701,7 @@ class UniversalProcessor:
 
     def _process_image(self, file_path: str, mode: str) -> ExtractedContent:
         """Process image using OCR."""
-        if mode == "text_only":
+        if mode == "basic":
             return ExtractedContent(
                 text="",
                 metadata={"file_type": "image", "file_path": file_path, "skipped": True},
@@ -944,6 +952,57 @@ class UniversalProcessor:
             logger.error("EasyOCR failed", error=str(e), language=self.ocr_language)
             return ""
 
+    def _compute_image_hash(self, img_data: bytes) -> str:
+        """
+        Compute a hash of image data for duplicate detection.
+
+        Uses SHA-256 for fast, reliable hashing.
+        """
+        import hashlib
+        return hashlib.sha256(img_data).hexdigest()
+
+    def _get_cached_ocr(self, img_data: bytes) -> Optional[str]:
+        """
+        Check if OCR result for this image is already cached.
+
+        Args:
+            img_data: Raw image bytes
+
+        Returns:
+            Cached OCR text if found, None otherwise
+        """
+        img_hash = self._compute_image_hash(img_data)
+        cached = self._image_ocr_cache.get(img_hash)
+        if cached is not None:
+            logger.debug(
+                "OCR cache hit - reusing result for duplicate image",
+                hash=img_hash[:16],
+            )
+        return cached
+
+    def _cache_ocr_result(self, img_data: bytes, ocr_text: str) -> None:
+        """
+        Cache OCR result for an image.
+
+        Args:
+            img_data: Raw image bytes
+            ocr_text: OCR result text
+        """
+        img_hash = self._compute_image_hash(img_data)
+        self._image_ocr_cache[img_hash] = ocr_text
+        logger.debug(
+            "Cached OCR result for image",
+            hash=img_hash[:16],
+            text_length=len(ocr_text),
+        )
+
+    def clear_ocr_cache(self) -> None:
+        """Clear the image OCR cache (call between documents)."""
+        cache_size = len(self._image_ocr_cache)
+        self._image_ocr_cache.clear()
+        if cache_size > 0:
+            logger.debug("Cleared OCR cache", cached_images=cache_size)
+
     def _optimize_image_for_ocr(self, img_data: bytes) -> bytes:
         """
         Optimize image before OCR to reduce processing time.
@@ -985,10 +1044,11 @@ class UniversalProcessor:
 
     def _ocr_page(self, page, file_size_mb: float = 0) -> str:
         """
-        OCR a PDF page with smart optimization.
+        OCR a PDF page with smart optimization and duplicate detection.
 
         Uses adaptive zoom based on file size and applies image optimization
-        when smart_image_handling is enabled.
+        when smart_image_handling is enabled. Caches results to avoid
+        re-OCR'ing duplicate images within the same document.
         """
         try:
             import fitz  # Import here since it's conditional
@@ -1015,6 +1075,11 @@ class UniversalProcessor:
             if self.smart_image_handling and self.optimization_config.compress_before_ocr:
                 img_data = self._optimize_image_for_ocr(img_data)
 
+            # Check cache for duplicate image
+            cached_text = self._get_cached_ocr(img_data)
+            if cached_text is not None:
+                return cached_text
+
             # Save temp file for OCR
             import tempfile
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
@@ -1025,6 +1090,9 @@ class UniversalProcessor:
 
             # Clean up
             os.unlink(temp_path)
+
+            # Cache result for future duplicate detection
+            self._cache_ocr_result(img_data, text)
 
             return text
         except Exception as e:
@@ -1061,7 +1129,7 @@ class UniversalProcessor:
         results: Dict[int, str] = {}
 
         def ocr_single_page(page_idx: int) -> tuple:
-            """OCR a single page (runs in thread pool)."""
+            """OCR a single page (runs in thread pool) with duplicate detection."""
             try:
                 import fitz
 
@@ -1086,18 +1154,26 @@ class UniversalProcessor:
                 if self.smart_image_handling and self.optimization_config.compress_before_ocr:
                     img_data = self._optimize_image_for_ocr(img_data)
 
+                doc.close()
+
+                # Check cache for duplicate image (thread-safe read)
+                cached_text = self._get_cached_ocr(img_data)
+                if cached_text is not None:
+                    return (page_idx, cached_text)
+
                 # Save temp file for OCR
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
                     f.write(img_data)
                     temp_path = f.name
-
-                doc.close()
 
                 # Run OCR
                 text = self._ocr_image(temp_path)
 
                 # Clean up temp file
                 os.unlink(temp_path)
+
+                # Cache result (may have race condition but acceptable for performance)
+                self._cache_ocr_result(img_data, text)
 
                 return (page_idx, text)
 

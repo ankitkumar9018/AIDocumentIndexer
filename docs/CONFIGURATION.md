@@ -223,7 +223,7 @@ python backend/scripts/migrate_paddle_models.py
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DEFAULT_PROCESSING_MODE` | Default mode (full/smart/text_only) | `smart` |
+| `DEFAULT_PROCESSING_MODE` | Default mode (full/ocr/basic) | `full` |
 | `SMART_CHUNKING_ENABLED` | Use semantic chunking | `true` |
 | `SMART_IMAGE_HANDLING` | Auto-optimize images | `true` |
 | `DETECT_DUPLICATES` | Skip duplicate files | `true` |

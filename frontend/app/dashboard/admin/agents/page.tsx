@@ -201,6 +201,10 @@ export default function AgentsAdminPage() {
     enabled: false,
   });
 
+  // Trajectory detail dialog state
+  const [showTrajectoryDialog, setShowTrajectoryDialog] = useState(false);
+  const [selectedTrajectory, setSelectedTrajectory] = useState<AgentTrajectory | null>(null);
+
   // Queries - only fetch when authenticated
   const { data: statusData, isLoading: statusLoading, refetch: refetchStatus } = useAgentStatus({ enabled: isAuthenticated });
   const { data: jobsData, isLoading: jobsLoading } = useOptimizationJobs(undefined, { enabled: isAuthenticated });
@@ -976,7 +980,14 @@ export default function AgentsAdminPage() {
                 </TableHeader>
                 <TableBody>
                   {trajectories.map((traj) => (
-                    <TableRow key={traj.id}>
+                    <TableRow
+                      key={traj.id}
+                      className="cursor-pointer hover:bg-muted/50"
+                      onClick={() => {
+                        setSelectedTrajectory(traj);
+                        setShowTrajectoryDialog(true);
+                      }}
+                    >
                       <TableCell className="font-medium">
                         {traj.agent_name || "Unknown"}
                       </TableCell>
@@ -1757,6 +1768,175 @@ export default function AgentsAdminPage() {
             >
               {updateSettingsMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Save Settings
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Trajectory Detail Dialog */}
+      <Dialog open={showTrajectoryDialog} onOpenChange={setShowTrajectoryDialog}>
+        <DialogContent className="sm:max-w-3xl max-h-[80vh]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Activity className="h-5 w-5" />
+              Execution Trajectory
+            </DialogTitle>
+            <DialogDescription>
+              View detailed execution steps and results
+            </DialogDescription>
+          </DialogHeader>
+          {selectedTrajectory && (
+            <ScrollArea className="max-h-[60vh] pr-4">
+              <div className="space-y-4">
+                {/* Summary */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Agent</p>
+                    <p className="font-medium">{selectedTrajectory.agent_name || "Unknown"}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Task Type</p>
+                    <p className="font-medium">{selectedTrajectory.task_type}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Status</p>
+                    {selectedTrajectory.success ? (
+                      <Badge variant="default" className="bg-green-500">Success</Badge>
+                    ) : (
+                      <Badge variant="destructive">Failed</Badge>
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Quality Score</p>
+                    <p className="font-medium">{(selectedTrajectory.quality_score ?? 0).toFixed(1)}/5</p>
+                  </div>
+                </div>
+
+                {/* Metrics */}
+                <div className="grid grid-cols-3 gap-4 p-3 bg-muted/50 rounded-lg">
+                  <div className="text-center">
+                    <p className="text-2xl font-bold">{formatNumber(selectedTrajectory.total_tokens)}</p>
+                    <p className="text-xs text-muted-foreground">Tokens</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="text-2xl font-bold">{formatDuration(selectedTrajectory.total_duration_ms)}</p>
+                    <p className="text-xs text-muted-foreground">Duration</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="text-2xl font-bold">${(selectedTrajectory.total_cost_usd ?? 0).toFixed(4)}</p>
+                    <p className="text-xs text-muted-foreground">Cost</p>
+                  </div>
+                </div>
+
+                {/* Input Summary */}
+                <div className="space-y-2">
+                  <h4 className="font-medium flex items-center gap-2">
+                    <MessageSquare className="h-4 w-4" />
+                    Input Summary
+                  </h4>
+                  <div className="p-3 bg-muted/50 rounded-lg text-sm">
+                    {selectedTrajectory.input_summary || "No input summary available"}
+                  </div>
+                </div>
+
+                {/* Error Message */}
+                {selectedTrajectory.error_message && (
+                  <div className="space-y-2">
+                    <h4 className="font-medium flex items-center gap-2 text-destructive">
+                      <AlertCircle className="h-4 w-4" />
+                      Error
+                    </h4>
+                    <div className="p-3 bg-destructive/10 text-destructive rounded-lg text-sm">
+                      {selectedTrajectory.error_message}
+                    </div>
+                  </div>
+                )}
+
+                {/* Trajectory Steps */}
+                <div className="space-y-2">
+                  <h4 className="font-medium flex items-center gap-2">
+                    <History className="h-4 w-4" />
+                    Execution Steps ({Array.isArray(selectedTrajectory.trajectory_steps) ? selectedTrajectory.trajectory_steps.length : 0})
+                  </h4>
+                  <div className="space-y-2">
+                    {Array.isArray(selectedTrajectory.trajectory_steps) && selectedTrajectory.trajectory_steps.length > 0 ? (
+                      selectedTrajectory.trajectory_steps.map((step, index) => {
+                        const stepObj = step as Record<string, unknown>;
+                        return (
+                          <div key={index} className="p-3 border rounded-lg space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium text-sm">
+                                Step {index + 1}: {String(stepObj.action || stepObj.type || "Unknown")}
+                              </span>
+                              {stepObj.duration_ms ? (
+                                <span className="text-xs text-muted-foreground">
+                                  {formatDuration(Number(stepObj.duration_ms))}
+                                </span>
+                              ) : null}
+                            </div>
+                            {stepObj.input ? (
+                              <div className="text-xs">
+                                <span className="text-muted-foreground">Input: </span>
+                                <code className="bg-muted px-1 rounded">
+                                  {typeof stepObj.input === "string"
+                                    ? (stepObj.input as string).slice(0, 100) + ((stepObj.input as string).length > 100 ? "..." : "")
+                                    : JSON.stringify(stepObj.input).slice(0, 100)}
+                                </code>
+                              </div>
+                            ) : null}
+                            {stepObj.output ? (
+                              <div className="text-xs">
+                                <span className="text-muted-foreground">Output: </span>
+                                <code className="bg-muted px-1 rounded">
+                                  {typeof stepObj.output === "string"
+                                    ? (stepObj.output as string).slice(0, 100) + ((stepObj.output as string).length > 100 ? "..." : "")
+                                    : JSON.stringify(stepObj.output).slice(0, 100)}
+                                </code>
+                              </div>
+                            ) : null}
+                            {stepObj.error ? (
+                              <div className="text-xs text-destructive">
+                                <span>Error: </span>
+                                {String(stepObj.error)}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="p-3 text-center text-muted-foreground text-sm">
+                        No execution steps recorded
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* User Feedback */}
+                {(selectedTrajectory.user_rating || selectedTrajectory.user_feedback) && (
+                  <div className="space-y-2">
+                    <h4 className="font-medium">User Feedback</h4>
+                    <div className="p-3 bg-muted/50 rounded-lg">
+                      {selectedTrajectory.user_rating && (
+                        <p className="text-sm">Rating: {selectedTrajectory.user_rating}/5</p>
+                      )}
+                      {selectedTrajectory.user_feedback && (
+                        <p className="text-sm mt-1">{selectedTrajectory.user_feedback}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Metadata */}
+                <div className="text-xs text-muted-foreground pt-2 border-t">
+                  <p>Session ID: {selectedTrajectory.session_id}</p>
+                  <p>Created: {new Date(selectedTrajectory.created_at).toLocaleString()}</p>
+                </div>
+              </div>
+            </ScrollArea>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowTrajectoryDialog(false)}>
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

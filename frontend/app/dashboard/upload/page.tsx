@@ -62,6 +62,7 @@ import {
   useSupportedFileTypes,
   useAccessTiers,
   ProcessingStatus,
+  api,
 } from "@/lib/api";
 import { FolderSelector } from "@/components/folder-selector";
 
@@ -131,7 +132,7 @@ export default function UploadPage() {
     smart_chunking: true,
     detect_duplicates: true,
     auto_generate_tags: false,
-    processing_mode: "smart" as "full" | "smart" | "text_only",
+    processing_mode: "full" as "full" | "ocr" | "basic",
     access_tier: undefined as number | undefined,
   });
 
@@ -319,17 +320,47 @@ export default function UploadPage() {
     });
   };
 
+  const [isClearingCompleted, setIsClearingCompleted] = useState(false);
+
+  const handleClearCompleted = async () => {
+    try {
+      setIsClearingCompleted(true);
+      const result = await api.clearCompletedUploads();
+      toast.success("Completed uploads cleared", {
+        description: `${result.deleted_count} completed items removed from queue`,
+      });
+      refetchQueue();
+    } catch (error) {
+      console.error("Failed to clear completed uploads:", error);
+      toast.error("Failed to clear completed uploads", {
+        description: getErrorMessage(error),
+      });
+    } finally {
+      setIsClearingCompleted(false);
+    }
+  };
+
   const isUploading = uploadFile.isPending || uploadBatch.isPending;
 
   // Use real queue data from API (no mock fallback)
   const queueItems: ProcessingStatus[] = queue?.items ?? [];
 
+  // Active processing statuses from backend UploadStatus enum
+  // These are the intermediate statuses that indicate active processing
+  const ACTIVE_PROCESSING_STATUSES = [
+    "validating",
+    "extracting",
+    "chunking",
+    "embedding",
+    "indexing"
+  ];
+
   const stats = {
     total: queueItems.length,
-    processing: queueItems.filter((i) => i.status === "processing").length,
-    queued: queueItems.filter((i) => i.status === "queued").length,
-    completed: queueItems.filter((i) => i.status === "completed").length,
-    failed: queueItems.filter((i) => i.status === "failed").length,
+    processing: queueItems.filter((i) => ACTIVE_PROCESSING_STATUSES.includes(i.status.toLowerCase())).length,
+    queued: queueItems.filter((i) => i.status.toLowerCase() === "queued").length,
+    completed: queueItems.filter((i) => i.status.toLowerCase() === "completed").length,
+    failed: queueItems.filter((i) => ["failed", "cancelled"].includes(i.status.toLowerCase())).length,
   };
 
   return (
@@ -365,6 +396,21 @@ export default function UploadPage() {
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
           </Button>
+          {stats.completed > 0 && (
+            <Button
+              onClick={handleClearCompleted}
+              variant="outline"
+              size="sm"
+              disabled={isClearingCompleted}
+            >
+              {isClearingCompleted ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4 mr-2" />
+              )}
+              Clear Completed ({stats.completed})
+            </Button>
+          )}
         </div>
       </div>
 
@@ -545,16 +591,16 @@ export default function UploadPage() {
                     onChange={(e) =>
                       setProcessingOptions((prev) => ({
                         ...prev,
-                        processing_mode: e.target.value as "full" | "smart" | "text_only",
+                        processing_mode: e.target.value as "full" | "ocr" | "basic",
                       }))
                     }
                   >
-                    <option value="smart">Smart (Recommended)</option>
-                    <option value="full">Full (All features)</option>
-                    <option value="text_only">Text Only (Fastest)</option>
+                    <option value="full">Full (Recommended)</option>
+                    <option value="ocr">OCR Enabled</option>
+                    <option value="basic">Basic (Fastest)</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Smart mode optimizes processing based on file content
+                    Full mode includes text extraction, OCR, and AI image analysis
                   </p>
                 </div>
 
@@ -651,8 +697,8 @@ export default function UploadPage() {
                     Clear All
                   </Button>
                 </div>
-                <ScrollArea className="max-h-48">
-                  <div className="space-y-2">
+                <div className="max-h-48 overflow-y-auto rounded-md border border-border">
+                  <div className="space-y-2 p-2">
                     {selectedFiles.map((file, index) => {
                       const FileIcon = getFileIconFromType(file.type);
                       return (
@@ -679,7 +725,7 @@ export default function UploadPage() {
                       );
                     })}
                   </div>
-                </ScrollArea>
+                </div>
               </div>
             )}
 

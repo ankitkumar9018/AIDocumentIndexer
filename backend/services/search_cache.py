@@ -10,60 +10,35 @@ Benefits:
 - Supports both exact-match and fuzzy-match caching
 
 Settings-aware: Respects cache.search_cache_enabled and cache.search_cache_ttl settings.
+
+Note: This module is being migrated to the unified cache abstraction.
+      See backend/services/cache/ for the new implementation.
 """
 
-import hashlib
-import json
-import os
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 
-from backend.services.redis_client import RedisCache, SEARCH_CACHE_TTL
+from backend.services.redis_client import SEARCH_CACHE_TTL
+from backend.services.cache import RedisBackedCache, CacheKeyGenerator
 
 logger = structlog.get_logger(__name__)
 
-# Cache settings
-_cache_enabled: Optional[bool] = None
-_cache_ttl: Optional[int] = None
-
-
-async def _get_cache_settings() -> Tuple[bool, int]:
-    """Get search cache settings from database."""
-    global _cache_enabled, _cache_ttl
-
-    if _cache_enabled is not None and _cache_ttl is not None:
-        return _cache_enabled, _cache_ttl
-
-    try:
-        from backend.services.settings import get_settings_service
-
-        settings = get_settings_service()
-        enabled = await settings.get_setting("cache.search_cache_enabled")
-        ttl = await settings.get_setting("cache.search_cache_ttl")
-
-        _cache_enabled = enabled if enabled is not None else True
-        _cache_ttl = ttl if ttl is not None else SEARCH_CACHE_TTL
-
-        return _cache_enabled, _cache_ttl
-    except Exception as e:
-        logger.debug("Could not load search cache settings, using defaults", error=str(e))
-        return True, SEARCH_CACHE_TTL
+# Cache key generator for search results
+_search_keygen = CacheKeyGenerator(prefix="search", normalize=True)
 
 
 def invalidate_cache_settings():
     """Invalidate cached settings (call after settings change)."""
-    global _cache_enabled, _cache_ttl
-    _cache_enabled = None
-    _cache_ttl = None
+    cache = get_search_cache()
+    cache.invalidate_settings()
 
 
-class SearchResultCache:
+class SearchResultCache(RedisBackedCache[List[Dict[str, Any]]]):
     """
     Redis-backed cache for search results.
 
-    Caches search results with intelligent key generation that considers:
+    Uses the unified cache abstraction with intelligent key generation that considers:
     - Query text (normalized)
     - Search type (vector, keyword, hybrid)
     - Access tier level
@@ -87,64 +62,14 @@ class SearchResultCache:
             default_ttl: Default time-to-live for cached results (seconds)
             max_memory_items: Max items in memory fallback cache
         """
-        self.default_ttl = default_ttl
-        self.max_memory_items = max_memory_items
-        self._redis_cache = RedisCache(prefix="search", default_ttl=default_ttl)
-        self._memory_cache: Dict[str, Dict[str, Any]] = {}
-        self._memory_order: List[str] = []  # LRU tracking
-        self._stats = {
-            "hits": 0,
-            "misses": 0,
-            "cached": 0,
-        }
-
-    def _generate_cache_key(
-        self,
-        query: str,
-        search_type: str,
-        access_tier_level: int,
-        top_k: int,
-        document_ids: Optional[List[str]] = None,
-        vector_weight: Optional[float] = None,
-        keyword_weight: Optional[float] = None,
-        collection_filter: Optional[str] = None,
-    ) -> str:
-        """
-        Generate a deterministic cache key from search parameters.
-
-        Args:
-            query: Search query text
-            search_type: Type of search (vector, keyword, hybrid)
-            access_tier_level: User's access tier
-            top_k: Number of results requested
-            document_ids: Optional document filter
-            vector_weight: Weight for vector results
-            keyword_weight: Weight for keyword results
-            collection_filter: Optional collection filter
-
-        Returns:
-            SHA256 hash of normalized parameters
-        """
-        # Normalize query (lowercase, strip whitespace)
-        normalized_query = query.strip().lower()
-
-        # Sort document_ids for consistent hashing
-        doc_ids_str = ",".join(sorted(document_ids)) if document_ids else ""
-
-        # Build key components
-        key_parts = [
-            f"q:{normalized_query}",
-            f"t:{search_type}",
-            f"a:{access_tier_level}",
-            f"k:{top_k}",
-            f"d:{doc_ids_str}",
-            f"vw:{vector_weight or 'default'}",
-            f"kw:{keyword_weight or 'default'}",
-            f"c:{collection_filter or 'all'}",
-        ]
-
-        key_string = "|".join(key_parts)
-        return hashlib.sha256(key_string.encode("utf-8")).hexdigest()[:32]
+        super().__init__(
+            prefix="search",
+            ttl_seconds=default_ttl,
+            max_items=max_memory_items,
+            settings_key="cache.search_cache",
+        )
+        # Additional stats for backward compatibility
+        self._cached_count = 0
 
     async def get(
         self,
@@ -173,44 +98,25 @@ class SearchResultCache:
         Returns:
             Cached results as list of dicts, or None if not cached
         """
-        # Check if caching is enabled
-        enabled, _ = await _get_cache_settings()
-        if not enabled:
-            return None
-
-        cache_key = self._generate_cache_key(
+        cache_key = _search_keygen.search_key(
             query=query,
             search_type=search_type,
-            access_tier_level=access_tier_level,
+            access_tier=access_tier_level,
             top_k=top_k,
             document_ids=document_ids,
             vector_weight=vector_weight,
             keyword_weight=keyword_weight,
-            collection_filter=collection_filter,
+            collection=collection_filter,
         )
 
-        # Try Redis cache first
-        try:
-            cached = await self._redis_cache.get(cache_key)
-            if cached:
-                self._stats["hits"] += 1
-                logger.debug("Search cache hit (Redis)", key=cache_key[:8], query=query[:30])
-                return cached
-        except Exception:
-            pass  # Fall back to memory
+        result = await super().get(cache_key)
 
-        # Try memory cache
-        if cache_key in self._memory_cache:
-            self._stats["hits"] += 1
-            # Update LRU order
-            if cache_key in self._memory_order:
-                self._memory_order.remove(cache_key)
-            self._memory_order.append(cache_key)
-            logger.debug("Search cache hit (memory)", key=cache_key[:8])
-            return self._memory_cache[cache_key]
+        if result is not None:
+            logger.debug("Search cache hit", key=cache_key[:8], query=query[:30])
+        else:
+            logger.debug("Search cache miss", key=cache_key[:8], query=query[:30])
 
-        self._stats["misses"] += 1
-        return None
+        return result
 
     async def set(
         self,
@@ -241,42 +147,24 @@ class SearchResultCache:
         Returns:
             True if cached successfully
         """
-        # Check if caching is enabled
-        enabled, ttl = await _get_cache_settings()
-        if not enabled:
-            return False
-
-        cache_key = self._generate_cache_key(
+        cache_key = _search_keygen.search_key(
             query=query,
             search_type=search_type,
-            access_tier_level=access_tier_level,
+            access_tier=access_tier_level,
             top_k=top_k,
             document_ids=document_ids,
             vector_weight=vector_weight,
             keyword_weight=keyword_weight,
-            collection_filter=collection_filter,
+            collection=collection_filter,
         )
 
-        # Try Redis cache first
-        try:
-            await self._redis_cache.set(cache_key, results, ttl=ttl)
-            self._stats["cached"] += 1
-            logger.debug("Search results cached (Redis)", key=cache_key[:8], count=len(results))
-            return True
-        except Exception:
-            pass  # Fall back to memory
+        success = await super().set(cache_key, results)
 
-        # Memory cache with LRU eviction
-        if len(self._memory_cache) >= self.max_memory_items:
-            # Evict oldest
-            oldest = self._memory_order.pop(0)
-            del self._memory_cache[oldest]
+        if success:
+            self._cached_count += 1
+            logger.debug("Search results cached", key=cache_key[:8], count=len(results))
 
-        self._memory_cache[cache_key] = results
-        self._memory_order.append(cache_key)
-        self._stats["cached"] += 1
-        logger.debug("Search results cached (memory)", key=cache_key[:8], count=len(results))
-        return True
+        return success
 
     async def invalidate_for_document(self, document_id: str) -> int:
         """
@@ -294,38 +182,31 @@ class SearchResultCache:
         Returns:
             Number of memory cache entries invalidated
         """
-        # For memory cache, we can do exact invalidation
-        # (Redis entries will expire via TTL)
-        invalidated = 0
-
-        # In memory cache, we'd need to track which documents each cache entry covers
-        # For simplicity, we clear all memory cache on document changes
-        if self._memory_cache:
-            invalidated = len(self._memory_cache)
-            self._memory_cache.clear()
-            self._memory_order.clear()
+        # Clear memory cache (Redis entries will expire via TTL)
+        count = await self.clear()
+        if count > 0:
             logger.info("Search cache cleared due to document change", document_id=document_id)
+        return count
 
-        return invalidated
-
-    async def clear(self) -> None:
+    async def clear(self) -> int:
         """Clear all cached search results."""
-        self._memory_cache.clear()
-        self._memory_order.clear()
-        self._stats = {"hits": 0, "misses": 0, "cached": 0}
-        logger.info("Search cache cleared")
+        count = await super().clear()
+        self._cached_count = 0
+        logger.info("Search cache cleared", entries_cleared=count)
+        return count
 
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
-        total = self._stats["hits"] + self._stats["misses"]
-        hit_rate = self._stats["hits"] / total if total > 0 else 0.0
-
+        stats = super().get_stats()
         return {
-            "hits": self._stats["hits"],
-            "misses": self._stats["misses"],
-            "cached": self._stats["cached"],
-            "hit_rate": hit_rate,
-            "memory_items": len(self._memory_cache),
+            "hits": stats.hits,
+            "misses": stats.misses,
+            "cached": self._cached_count,
+            "hit_rate": stats.hit_rate,
+            "memory_items": stats.size,
+            "redis_hits": stats.redis_hits,
+            "redis_misses": stats.redis_misses,
+            "redis_errors": stats.redis_errors,
         }
 
 

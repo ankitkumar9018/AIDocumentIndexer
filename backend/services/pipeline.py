@@ -13,8 +13,9 @@ Supports both synchronous and Ray-parallel processing.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Union, Awaitable
 from pathlib import Path
+import inspect
 from datetime import datetime
 from enum import Enum
 import hashlib
@@ -96,7 +97,7 @@ class PipelineConfig:
     def __init__(
         self,
         # Processing mode
-        processing_mode: ProcessingMode = ProcessingMode.SMART,
+        processing_mode: ProcessingMode = ProcessingMode.FULL,
         use_ray: bool = True,
 
         # Chunking settings
@@ -124,9 +125,9 @@ class PipelineConfig:
         enable_multimodal: bool = None,  # Read from settings if not set
         caption_images: bool = True,  # Generate captions for extracted images
 
-        # Progress callbacks
-        on_status_change: Optional[Callable[[str, ProcessingStatus], None]] = None,
-        on_progress: Optional[Callable[[str, int, int], None]] = None,
+        # Progress callbacks (can be sync or async)
+        on_status_change: Optional[Union[Callable[[str, ProcessingStatus], None], Callable[[str, ProcessingStatus], Awaitable[None]]]] = None,
+        on_progress: Optional[Union[Callable[[str, int, int], None], Callable[[str, int, int], Awaitable[None]]]] = None,
     ):
         self.processing_mode = processing_mode
         self.use_ray = use_ray
@@ -250,14 +251,36 @@ class DocumentPipeline:
         )
 
     def _update_status(self, doc_id: str, status: ProcessingStatus):
-        """Update processing status via callback."""
+        """Update processing status via callback (sync or async)."""
         if self.config.on_status_change:
-            self.config.on_status_change(doc_id, status)
+            result = self.config.on_status_change(doc_id, status)
+            # If it's a coroutine, schedule it
+            if inspect.iscoroutine(result):
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(result)
+                    else:
+                        loop.run_until_complete(result)
+                except RuntimeError:
+                    # No event loop, run in new loop
+                    asyncio.run(result)
 
     def _update_progress(self, doc_id: str, current: int, total: int):
-        """Update progress via callback."""
+        """Update progress via callback (sync or async)."""
         if self.config.on_progress:
-            self.config.on_progress(doc_id, current, total)
+            result = self.config.on_progress(doc_id, current, total)
+            # If it's a coroutine, schedule it
+            if inspect.iscoroutine(result):
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(result)
+                    else:
+                        loop.run_until_complete(result)
+                except RuntimeError:
+                    # No event loop, run in new loop
+                    asyncio.run(result)
 
     def compute_file_hash(self, file_path: str) -> str:
         """Compute SHA-256 hash of file for deduplication."""
@@ -284,6 +307,9 @@ class DocumentPipeline:
         access_tier: int = 10,
         collection: Optional[str] = None,
         folder_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        uploaded_by_id: Optional[str] = None,
+        is_private: bool = False,
     ) -> ProcessingResult:
         """
         Process a single document through the full pipeline.
@@ -295,6 +321,9 @@ class DocumentPipeline:
             access_tier: Access tier for the document
             collection: Collection name for organization
             folder_id: Optional folder ID to place the document in
+            organization_id: Organization ID for multi-tenant isolation
+            uploaded_by_id: User ID who uploaded the document
+            is_private: Whether this is a private document (only visible to uploader)
 
         Returns:
             ProcessingResult with all extracted data
@@ -578,6 +607,10 @@ class DocumentPipeline:
                     access_tier=access_tier,
                     collection=collection,
                     processing_result=result,
+                    organization_id=organization_id,
+                    uploaded_by_id=uploaded_by_id,
+                    is_private=is_private,
+                    folder_id=folder_id,
                 )
                 return result
 
@@ -613,6 +646,9 @@ class DocumentPipeline:
                         access_tier_id=access_tier_id,
                         filename=original_filename,
                         collection=collection,
+                        organization_id=organization_id,
+                        uploaded_by_id=uploaded_by_id,
+                        is_private=is_private,
                     )
                 else:
                     logger.warning(
@@ -640,6 +676,10 @@ class DocumentPipeline:
                 access_tier=access_tier,
                 collection=collection,
                 processing_result=result,
+                organization_id=organization_id,
+                uploaded_by_id=uploaded_by_id,
+                is_private=is_private,
+                folder_id=folder_id,
             )
 
             # Track hash for deduplication
@@ -799,6 +839,9 @@ class DocumentPipeline:
         access_tier_id: str,
         filename: Optional[str] = None,
         collection: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        uploaded_by_id: Optional[str] = None,
+        is_private: bool = False,
     ):
         """Index document chunks using our custom VectorStore."""
         if not self._custom_vectorstore:
@@ -820,13 +863,16 @@ class DocumentPipeline:
                     "char_count": len(chunk.content),
                 })
 
-            # Add to vector store
+            # Add to vector store with multi-tenant metadata
             chunk_ids = await self._custom_vectorstore.add_chunks(
                 chunks=chunk_data,
                 document_id=document_id,
                 access_tier_id=access_tier_id,
                 document_filename=filename,
                 collection=collection,
+                organization_id=organization_id,
+                uploaded_by_id=uploaded_by_id,
+                is_private=is_private,
             )
 
             logger.debug(
@@ -895,6 +941,10 @@ class DocumentPipeline:
         access_tier: int,
         collection: Optional[str],
         processing_result: "ProcessingResult",
+        organization_id: Optional[str] = None,
+        uploaded_by_id: Optional[str] = None,
+        is_private: bool = False,
+        folder_id: Optional[str] = None,
     ) -> None:
         """
         Create or update Document record in database after successful processing.
@@ -950,6 +1000,9 @@ class DocumentPipeline:
                     # else: keep existing tags unchanged
                     existing_doc.access_tier_id = access_tier_obj.id
                     existing_doc.processed_at = datetime.now()
+                    # Set folder_id if provided (allows moving document to folder on re-upload)
+                    if folder_id:
+                        existing_doc.folder_id = uuid.UUID(folder_id)
 
                     await db.commit()
 
@@ -979,6 +1032,12 @@ class DocumentPipeline:
                         tags=[collection] if collection else [],  # Initialize with collection, auto-tag will merge more
                         access_tier_id=access_tier_obj.id,
                         processed_at=datetime.now(),
+                        # Multi-tenant fields
+                        organization_id=uuid.UUID(organization_id) if organization_id else None,
+                        uploaded_by_id=uuid.UUID(uploaded_by_id) if uploaded_by_id else None,
+                        is_private=is_private,
+                        # Folder assignment
+                        folder_id=uuid.UUID(folder_id) if folder_id else None,
                     )
 
                     db.add(document)

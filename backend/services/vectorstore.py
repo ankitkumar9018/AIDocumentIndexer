@@ -397,6 +397,9 @@ class VectorStore:
         document_ids: Optional[List[str]] = None,
         similarity_threshold: Optional[float] = None,
         session: Optional[AsyncSession] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Perform vector similarity search.
@@ -408,6 +411,9 @@ class VectorStore:
             document_ids: Optional list of document IDs to search within
             similarity_threshold: Minimum similarity score
             session: Optional existing database session
+            organization_id: Optional organization ID for multi-tenant isolation
+            user_id: Optional user ID for private document access
+            is_superadmin: Whether the user is a superadmin (can see all private docs)
 
         Returns:
             List of SearchResult objects
@@ -443,6 +449,31 @@ class VectorStore:
                     )
                 )
             )
+
+            # Filter by organization for multi-tenant isolation
+            if organization_id:
+                org_uuid = uuid.UUID(organization_id)
+                query = query.where(Chunk.organization_id == org_uuid)
+
+            # Filter private documents (only owner or superadmin can access)
+            # Superadmins can see all private documents
+            # Regular users can only see their own private documents
+            if not is_superadmin:
+                if user_id:
+                    user_uuid = uuid.UUID(user_id)
+                    # Allow: public documents OR private docs owned by this user
+                    query = query.where(
+                        or_(
+                            Document.is_private == False,
+                            and_(
+                                Document.is_private == True,
+                                Document.uploaded_by_id == user_uuid
+                            )
+                        )
+                    )
+                else:
+                    # No user ID - only show public documents
+                    query = query.where(Document.is_private == False)
 
             # Filter by document IDs if provided
             if document_ids:
@@ -494,6 +525,9 @@ class VectorStore:
         access_tier_level: int = 100,
         document_ids: Optional[List[str]] = None,
         session: Optional[AsyncSession] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Perform full-text keyword search with operator support.
@@ -511,6 +545,9 @@ class VectorStore:
             access_tier_level: Maximum access tier level for filtering
             document_ids: Optional list of document IDs to search within
             session: Optional existing database session
+            organization_id: Optional organization ID for multi-tenant isolation
+            user_id: Optional user ID for private document access
+            is_superadmin: Whether the user is a superadmin (can see all private docs)
 
         Returns:
             List of SearchResult objects
@@ -554,6 +591,27 @@ class VectorStore:
                     )
                 )
             )
+
+            # Filter by organization for multi-tenant isolation
+            if organization_id:
+                org_uuid = uuid.UUID(organization_id)
+                base_query = base_query.where(Chunk.organization_id == org_uuid)
+
+            # Filter private documents (only owner or superadmin can access)
+            if not is_superadmin:
+                if user_id:
+                    user_uuid = uuid.UUID(user_id)
+                    base_query = base_query.where(
+                        or_(
+                            Document.is_private == False,
+                            and_(
+                                Document.is_private == True,
+                                Document.uploaded_by_id == user_uuid
+                            )
+                        )
+                    )
+                else:
+                    base_query = base_query.where(Document.is_private == False)
 
             # Filter by document IDs if provided
             if document_ids:
@@ -608,6 +666,9 @@ class VectorStore:
         access_tier_level: int = 100,
         document_ids: Optional[List[str]] = None,
         session: Optional[AsyncSession] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Search documents using enhanced metadata (summaries, keywords, questions).
@@ -621,6 +682,9 @@ class VectorStore:
             access_tier_level: Maximum access tier level for filtering
             document_ids: Optional list of document IDs to search within
             session: Optional existing database session
+            organization_id: Optional organization ID for multi-tenant isolation
+            user_id: Optional user ID for private document access
+            is_superadmin: Whether the user is a superadmin (can see all private docs)
 
         Returns:
             List of SearchResult objects (one per matching document)
@@ -635,6 +699,27 @@ class VectorStore:
                 .where(Document.enhanced_metadata.isnot(None))
                 .where(Document.processing_status == ProcessingStatus.COMPLETED)
             )
+
+            # Filter by organization for multi-tenant isolation
+            if organization_id:
+                org_uuid = uuid.UUID(organization_id)
+                base_query = base_query.where(Document.organization_id == org_uuid)
+
+            # Filter private documents (only owner or superadmin can access)
+            if not is_superadmin:
+                if user_id:
+                    user_uuid = uuid.UUID(user_id)
+                    base_query = base_query.where(
+                        or_(
+                            Document.is_private == False,
+                            and_(
+                                Document.is_private == True,
+                                Document.uploaded_by_id == user_uuid
+                            )
+                        )
+                    )
+                else:
+                    base_query = base_query.where(Document.is_private == False)
 
             # Filter by document IDs if provided
             if document_ids:
@@ -748,6 +833,9 @@ class VectorStore:
         keyword_weight: Optional[float] = None,
         use_enhanced: Optional[bool] = None,
         session: Optional[AsyncSession] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Perform hybrid search combining vector similarity, keyword matching,
@@ -765,6 +853,9 @@ class VectorStore:
             keyword_weight: Weight for keyword results (0-1)
             use_enhanced: Whether to include enhanced metadata search
             session: Optional existing database session
+            organization_id: Optional organization ID for multi-tenant isolation
+            user_id: Optional user ID for private document access
+            is_superadmin: Whether the user is a superadmin (can see all private docs)
 
         Returns:
             List of SearchResult objects
@@ -785,6 +876,9 @@ class VectorStore:
             access_tier_level=access_tier_level,
             document_ids=document_ids,
             session=session,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         keyword_results = await self.keyword_search(
@@ -793,6 +887,9 @@ class VectorStore:
             access_tier_level=access_tier_level,
             document_ids=document_ids,
             session=session,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         # Optionally search enhanced metadata
@@ -801,9 +898,12 @@ class VectorStore:
             enhanced_results = await self.enhanced_metadata_search(
                 query=query,
                 top_k=fetch_k,
+                organization_id=organization_id,
                 access_tier_level=access_tier_level,
                 document_ids=document_ids,
                 session=session,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
         # Reciprocal Rank Fusion
@@ -1178,6 +1278,9 @@ class VectorStore:
         session: Optional[AsyncSession] = None,
         vector_weight: Optional[float] = None,
         keyword_weight: Optional[float] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Unified search interface.
@@ -1192,6 +1295,9 @@ class VectorStore:
             session: Optional database session
             vector_weight: Dynamic weight for vector results (0-1), overrides config
             keyword_weight: Dynamic weight for keyword results (0-1), overrides config
+            organization_id: Optional organization ID for multi-tenant isolation
+            user_id: Optional user ID for private document access
+            is_superadmin: Whether the user is a superadmin (can see all private docs)
 
         Returns:
             List of SearchResult objects
@@ -1207,6 +1313,9 @@ class VectorStore:
                 access_tier_level=access_tier_level,
                 document_ids=document_ids,
                 session=session,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
         elif search_type == SearchType.KEYWORD:
@@ -1216,6 +1325,9 @@ class VectorStore:
                 access_tier_level=access_tier_level,
                 document_ids=document_ids,
                 session=session,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
         else:  # HYBRID
@@ -1228,6 +1340,9 @@ class VectorStore:
                     access_tier_level=access_tier_level,
                     document_ids=document_ids,
                     session=session,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
 
             return await self.hybrid_search(
@@ -1239,6 +1354,9 @@ class VectorStore:
                 session=session,
                 vector_weight=vector_weight,
                 keyword_weight=keyword_weight,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
     # =========================================================================

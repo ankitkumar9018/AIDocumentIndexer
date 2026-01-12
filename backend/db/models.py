@@ -201,9 +201,9 @@ class UploadStatus(str, PyEnum):
 
 class ProcessingMode(str, PyEnum):
     """Document processing mode."""
-    FULL = "full"
-    SMART = "smart"
-    TEXT_ONLY = "text_only"
+    BASIC = "basic"           # Text extraction only (fastest)
+    OCR_ENABLED = "ocr"       # Text + OCR for scanned documents
+    FULL = "full"             # Text + OCR + AI image analysis (most thorough)
 
 
 class StorageMode(str, PyEnum):
@@ -283,6 +283,78 @@ class AccessTier(Base, UUIDMixin, TimestampMixin):
         return f"<AccessTier(name='{self.name}', level={self.level})>"
 
 
+class OrganizationRole(str, PyEnum):
+    """Roles within an organization."""
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
+class Organization(Base, UUIDMixin, TimestampMixin):
+    """
+    Organization model for multi-tenant support.
+
+    Organizations group users and resources together with
+    shared settings and feature flags.
+    """
+    __tablename__ = "organizations"
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    plan: Mapped[Optional[str]] = mapped_column(String(50), default="free")
+    settings: Mapped[Optional[dict]] = mapped_column(JSONType, default=dict)
+    max_users: Mapped[int] = mapped_column(Integer, default=5)
+    max_storage_gb: Mapped[int] = mapped_column(Integer, default=10)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Relationships
+    members: Mapped[List["OrganizationMember"]] = relationship(
+        "OrganizationMember", back_populates="organization", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<Organization(name='{self.name}', slug='{self.slug}')>"
+
+
+class OrganizationMember(Base, UUIDMixin):
+    """
+    Organization membership model.
+
+    Links users to organizations with a specific role.
+    """
+    __tablename__ = "organization_members"
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[OrganizationRole] = mapped_column(
+        Enum(OrganizationRole, native_enum=False, length=20),
+        default=OrganizationRole.MEMBER,
+    )
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # Relationships
+    organization: Mapped["Organization"] = relationship("Organization", back_populates="members")
+    user: Mapped["User"] = relationship("User", back_populates="organization_memberships")
+
+    __table_args__ = (
+        Index("ix_org_members_org_user", "organization_id", "user_id", unique=True),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OrganizationMember(org={self.organization_id}, user={self.user_id}, role={self.role})>"
+
+
 class User(Base, UUIDMixin, TimestampMixin):
     """
     User account model.
@@ -297,6 +369,17 @@ class User(Base, UUIDMixin, TimestampMixin):
     name: Mapped[Optional[str]] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Superadmin flag - superadmins can access all organizations and have full system control
+    is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    # Current organization context - which org the user is currently working in
+    # Superadmins can switch this to any org, regular users are limited to their memberships
+    current_organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Folder permission mode
     # If True, user ONLY sees explicitly granted folders (ignores tier-based access)
@@ -317,9 +400,15 @@ class User(Base, UUIDMixin, TimestampMixin):
     # Relationships
     access_tier: Mapped["AccessTier"] = relationship("AccessTier", back_populates="users")
     created_by: Mapped[Optional["User"]] = relationship("User", remote_side="User.id")
+    current_organization: Mapped[Optional["Organization"]] = relationship(
+        "Organization", foreign_keys=[current_organization_id]
+    )
     documents: Mapped[List["Document"]] = relationship("Document", back_populates="uploaded_by")
     chat_sessions: Mapped[List["ChatSession"]] = relationship("ChatSession", back_populates="user")
     audit_logs: Mapped[List["AuditLog"]] = relationship("AuditLog", back_populates="user")
+    organization_memberships: Mapped[List["OrganizationMember"]] = relationship(
+        "OrganizationMember", back_populates="user", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<User(email='{self.email}', tier='{self.access_tier.name if self.access_tier else None}')>"
@@ -333,6 +422,14 @@ class Document(Base, UUIDMixin, TimestampMixin):
     The actual file content is stored in chunks.
     """
     __tablename__ = "documents"
+
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     # File identification
     file_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
@@ -351,7 +448,7 @@ class Document(Base, UUIDMixin, TimestampMixin):
     )
     processing_mode: Mapped[ProcessingMode] = mapped_column(
         Enum(ProcessingMode),
-        default=ProcessingMode.SMART,
+        default=ProcessingMode.FULL,
     )
     storage_mode: Mapped[StorageMode] = mapped_column(
         Enum(StorageMode),
@@ -376,6 +473,11 @@ class Document(Base, UUIDMixin, TimestampMixin):
     # Source info (for auto-indexed files)
     source_path: Mapped[Optional[str]] = mapped_column(String(1000))
     is_auto_indexed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Private document flag
+    # When True, only the uploaded_by user or superadmins can access this document.
+    # Private documents are deleted when the owner user is deleted.
+    is_private: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     # Foreign keys
     access_tier_id: Mapped[uuid.UUID] = mapped_column(
@@ -431,6 +533,14 @@ class Chunk(Base, UUIDMixin):
     - parent_chunk_id: Reference to parent chunk in hierarchy
     """
     __tablename__ = "chunks"
+
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     # Content
     content: Mapped[str] = mapped_column(Text, nullable=False)
@@ -504,6 +614,14 @@ class ScrapedContent(Base, UUIDMixin):
     """
     __tablename__ = "scraped_content"
 
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
     url: Mapped[str] = mapped_column(String(2000), nullable=False)
     url_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     title: Mapped[Optional[str]] = mapped_column(String(500))
@@ -549,6 +667,14 @@ class ChatSession(Base, UUIDMixin, TimestampMixin):
     """
     __tablename__ = "chat_sessions"
 
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
     title: Mapped[Optional[str]] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -586,6 +712,14 @@ class ChatMessage(Base, UUIDMixin):
     Stores user queries and assistant responses with source citations.
     """
     __tablename__ = "chat_messages"
+
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     role: Mapped[MessageRole] = mapped_column(Enum(MessageRole), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1902,6 +2036,14 @@ class Entity(Base, UUIDMixin):
     """
     __tablename__ = "entities"
 
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
     # Entity identification
     name: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
     name_normalized: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
@@ -2036,6 +2178,14 @@ class EntityRelation(Base, UUIDMixin):
     Represents edges in the knowledge graph, enabling multi-hop reasoning.
     """
     __tablename__ = "entity_relations"
+
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     # Source and target entities
     source_entity_id: Mapped[uuid.UUID] = mapped_column(
@@ -2183,6 +2333,14 @@ class Folder(Base, UUIDMixin, TimestampMixin):
     - Admin users (tier 100) can access all folders
     """
     __tablename__ = "folders"
+
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     # Folder name (displayed in UI)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -2415,6 +2573,1063 @@ class GenerationTemplate(Base, UUIDMixin, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<GenerationTemplate(name='{self.name}', category='{self.category}', system={self.is_system})>"
+
+
+# =============================================================================
+# Workflow Models (Phase 1A)
+# =============================================================================
+
+
+class WorkflowStatus(str, PyEnum):
+    """Workflow execution status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+
+
+class WorkflowTriggerType(str, PyEnum):
+    """Types of workflow triggers."""
+    MANUAL = "manual"
+    SCHEDULED = "scheduled"
+    WEBHOOK = "webhook"
+    FORM = "form"
+    EVENT = "event"
+
+
+class WorkflowNodeType(str, PyEnum):
+    """Types of workflow nodes."""
+    AGENT = "agent"
+    ACTION = "action"
+    CONDITION = "condition"
+    LOOP = "loop"
+    CODE = "code"
+    DELAY = "delay"
+    HTTP = "http"
+    NOTIFICATION = "notification"
+    HUMAN_APPROVAL = "human_approval"
+    START = "start"
+    END = "end"
+
+
+class Workflow(Base, UUIDMixin, TimestampMixin):
+    """
+    Workflow definition for automation.
+
+    Enables visual workflow creation with drag-and-drop nodes
+    connected by edges. Supports various trigger types and
+    execution modes.
+    """
+    __tablename__ = "workflows"
+
+    # Organization scope (multi-tenant)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        nullable=True,
+        index=True,
+    )
+
+    # Workflow metadata
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Status
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_draft: Mapped[bool] = mapped_column(Boolean, default=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Trigger configuration
+    trigger_type: Mapped[str] = mapped_column(
+        String(50),
+        default=WorkflowTriggerType.MANUAL.value,
+        nullable=False,
+    )
+    trigger_config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # For scheduled: {"cron": "0 9 * * *", "timezone": "UTC"}
+    # For webhook: {"secret": "...", "path": "/webhooks/workflow/..."}
+    # For form: {"fields": [...]}
+
+    # Global workflow settings
+    config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Stores: timeout, retry_policy, notifications, etc.
+
+    # Ownership
+    created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Relationships
+    nodes: Mapped[List["WorkflowNode"]] = relationship(
+        "WorkflowNode",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+    )
+    edges: Mapped[List["WorkflowEdge"]] = relationship(
+        "WorkflowEdge",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+    )
+    executions: Mapped[List["WorkflowExecution"]] = relationship(
+        "WorkflowExecution",
+        back_populates="workflow",
+    )
+    created_by: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_workflows_organization", "organization_id"),
+        Index("idx_workflows_active", "is_active"),
+        Index("idx_workflows_trigger", "trigger_type"),
+        Index("idx_workflows_created_by", "created_by_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Workflow(name='{self.name}', trigger='{self.trigger_type}', active={self.is_active})>"
+
+
+class WorkflowNode(Base, UUIDMixin):
+    """
+    Individual node in a workflow.
+
+    Each node represents a step in the workflow that can:
+    - Execute an agent task
+    - Make decisions based on conditions
+    - Loop over data
+    - Execute custom code
+    - Wait for delays or approvals
+    - Make HTTP requests
+    - Send notifications
+    """
+    __tablename__ = "workflow_nodes"
+
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("workflows.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Node identification
+    node_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Visual position in the canvas
+    position_x: Mapped[float] = mapped_column(Float, default=0.0)
+    position_y: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Node-specific configuration (varies by node_type)
+    config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Agent: {"agent_id": "...", "input_mapping": {...}}
+    # Condition: {"expression": "{{result.status}} == 'success'"}
+    # Loop: {"array_path": "{{data.items}}", "batch_size": 10}
+    # Code: {"language": "javascript", "code": "..."}
+    # Delay: {"seconds": 60} or {"until": "{{scheduled_time}}"}
+    # HTTP: {"url": "...", "method": "POST", "headers": {...}}
+    # Notification: {"channel": "email", "template": "..."}
+    # Human Approval: {"approvers": [...], "timeout_hours": 24}
+
+    # Relationships
+    workflow: Mapped["Workflow"] = relationship("Workflow", back_populates="nodes")
+
+    __table_args__ = (
+        Index("idx_workflow_nodes_workflow", "workflow_id"),
+        Index("idx_workflow_nodes_type", "node_type"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WorkflowNode(name='{self.name}', type='{self.node_type}')>"
+
+
+class WorkflowEdge(Base, UUIDMixin):
+    """
+    Connection between workflow nodes.
+
+    Edges define the flow of execution and can include
+    conditional logic for branching.
+    """
+    __tablename__ = "workflow_edges"
+
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("workflows.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Source and target nodes
+    source_node_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("workflow_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_node_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("workflow_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Edge label for UI
+    label: Mapped[Optional[str]] = mapped_column(String(100))
+
+    # Condition for taking this edge (for branching from condition nodes)
+    condition: Mapped[Optional[str]] = mapped_column(Text)
+    # Example: "true", "false", "{{result}} > 10"
+
+    # Edge type for styling
+    edge_type: Mapped[str] = mapped_column(String(20), default="default")
+    # default, success, error, conditional
+
+    # Relationships
+    workflow: Mapped["Workflow"] = relationship("Workflow", back_populates="edges")
+
+    __table_args__ = (
+        Index("idx_workflow_edges_workflow", "workflow_id"),
+        Index("idx_workflow_edges_source", "source_node_id"),
+        Index("idx_workflow_edges_target", "target_node_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WorkflowEdge(source={self.source_node_id}, target={self.target_node_id})>"
+
+
+class WorkflowExecution(Base, UUIDMixin, TimestampMixin):
+    """
+    Tracks individual workflow executions.
+
+    Each execution represents one run of a workflow,
+    with full tracking of status, timing, and results.
+    """
+    __tablename__ = "workflow_executions"
+
+    # Organization scope
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        nullable=True,
+        index=True,
+    )
+
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("workflows.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Execution status
+    status: Mapped[str] = mapped_column(
+        String(50),
+        default=WorkflowStatus.PENDING.value,
+        index=True,
+    )
+
+    # Current position in workflow
+    current_node_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID())
+
+    # Trigger information
+    trigger_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    trigger_data: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Webhook payload, form data, scheduled time, etc.
+
+    # Execution data
+    input_data: Mapped[Optional[dict]] = mapped_column(JSONType())
+    output_data: Mapped[Optional[dict]] = mapped_column(JSONType())
+    context: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Runtime context: variables, intermediate results
+
+    # Error handling
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    error_node_id: Mapped[Optional[uuid.UUID]] = mapped_column(GUID())
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Timing
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Who triggered it
+    triggered_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Relationships
+    workflow: Mapped["Workflow"] = relationship("Workflow", back_populates="executions")
+    triggered_by: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_workflow_executions_org", "organization_id"),
+        Index("idx_workflow_executions_workflow", "workflow_id"),
+        Index("idx_workflow_executions_status", "status"),
+        Index("idx_workflow_executions_started", "started_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WorkflowExecution(workflow_id={self.workflow_id}, status='{self.status}')>"
+
+
+class WorkflowNodeExecution(Base, UUIDMixin):
+    """
+    Tracks execution of individual nodes within a workflow execution.
+
+    Provides detailed logging for debugging and analytics.
+    """
+    __tablename__ = "workflow_node_executions"
+
+    execution_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("workflow_executions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("workflow_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Status
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    # Input/output for this node
+    input_data: Mapped[Optional[dict]] = mapped_column(JSONType())
+    output_data: Mapped[Optional[dict]] = mapped_column(JSONType())
+
+    # Error info
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Timing
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+
+    __table_args__ = (
+        Index("idx_workflow_node_exec_execution", "execution_id"),
+        Index("idx_workflow_node_exec_node", "node_id"),
+    )
+
+
+# =============================================================================
+# Audio Overview Models (Phase 1B)
+# =============================================================================
+
+
+class AudioOverviewFormat(str, PyEnum):
+    """Formats for audio overview generation."""
+    DEEP_DIVE = "deep_dive"
+    BRIEF = "brief"
+    CRITIQUE = "critique"
+    DEBATE = "debate"
+    LECTURE = "lecture"
+    INTERVIEW = "interview"
+
+
+class AudioOverviewStatus(str, PyEnum):
+    """Status of audio overview generation."""
+    PENDING = "pending"
+    GENERATING_SCRIPT = "generating_script"
+    GENERATING_AUDIO = "generating_audio"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class AudioOverview(Base, UUIDMixin, TimestampMixin):
+    """
+    AI-generated audio overviews/podcasts from documents.
+
+    Inspired by NotebookLM's Audio Overview feature.
+    Generates podcast-style discussions between AI hosts
+    about the content of selected documents.
+    """
+    __tablename__ = "audio_overviews"
+
+    # Organization scope
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        nullable=True,
+        index=True,
+    )
+
+    # Source documents
+    document_ids: Mapped[List[uuid.UUID]] = mapped_column(
+        UUIDArrayType(),
+        nullable=False,
+    )
+    folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("folders.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Audio metadata
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Format and configuration
+    format: Mapped[str] = mapped_column(
+        String(50),
+        default=AudioOverviewFormat.DEEP_DIVE.value,
+        nullable=False,
+    )
+    language: Mapped[str] = mapped_column(String(10), default="en")
+
+    # Host configuration
+    host_config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # {"host_a": {"name": "Alex", "voice": "alloy", "style": "curious"},
+    #  "host_b": {"name": "Jordan", "voice": "echo", "style": "analytical"}}
+
+    # Generation settings
+    target_duration_minutes: Mapped[Optional[int]] = mapped_column(Integer)
+    tone: Mapped[Optional[str]] = mapped_column(String(50))  # casual, professional, academic
+
+    # Generated content
+    script: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # {"segments": [{"speaker": "host_a", "text": "...", "timestamp_ms": 0}, ...]}
+
+    transcript: Mapped[Optional[str]] = mapped_column(Text)
+    summary: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Audio file info
+    audio_url: Mapped[Optional[str]] = mapped_column(String(1000))
+    storage_path: Mapped[Optional[str]] = mapped_column(String(1000))
+    duration_seconds: Mapped[Optional[int]] = mapped_column(Integer)
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger)
+    audio_format: Mapped[str] = mapped_column(String(10), default="mp3")
+
+    # TTS provider used
+    tts_provider: Mapped[Optional[str]] = mapped_column(String(50))
+    # openai, elevenlabs, coqui, etc.
+
+    # Processing status
+    status: Mapped[str] = mapped_column(
+        String(50),
+        default=AudioOverviewStatus.PENDING.value,
+        index=True,
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Progress tracking
+    progress_percent: Mapped[int] = mapped_column(Integer, default=0)
+    current_step: Mapped[Optional[str]] = mapped_column(String(100))
+
+    # Ownership
+    created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Usage tracking
+    play_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_played_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Relationships
+    created_by: Mapped[Optional["User"]] = relationship("User")
+    folder: Mapped[Optional["Folder"]] = relationship("Folder")
+
+    __table_args__ = (
+        Index("idx_audio_overviews_org", "organization_id"),
+        Index("idx_audio_overviews_status", "status"),
+        Index("idx_audio_overviews_format", "format"),
+        Index("idx_audio_overviews_created_by", "created_by_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AudioOverview(title='{self.title}', format='{self.format}', status='{self.status}')>"
+
+
+# =============================================================================
+# Bot Connection Models (Phase 2)
+# =============================================================================
+
+
+class BotPlatform(str, PyEnum):
+    """Supported bot platforms."""
+    SLACK = "slack"
+    TEAMS = "teams"
+    DISCORD = "discord"
+    TELEGRAM = "telegram"
+
+
+class BotConnection(Base, UUIDMixin, TimestampMixin):
+    """
+    External bot/chat platform integrations.
+
+    Enables AI assistant access from chat platforms
+    like Slack, Microsoft Teams, Discord, etc.
+    """
+    __tablename__ = "bot_connections"
+
+    # Organization scope
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        nullable=True,
+        index=True,
+    )
+
+    # Connection details
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    platform: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    # Platform-specific identifiers
+    workspace_id: Mapped[Optional[str]] = mapped_column(String(255))
+    # Slack: team_id, Teams: tenant_id
+
+    bot_user_id: Mapped[Optional[str]] = mapped_column(String(255))
+    # The bot's user ID in the platform
+
+    # Credentials (encrypted at service layer)
+    bot_token_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    refresh_token_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    signing_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Webhook URL for incoming events
+    webhook_url: Mapped[Optional[str]] = mapped_column(String(1000))
+
+    # Configuration
+    config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # {"allowed_channels": [...], "default_agent_id": "...",
+    #  "mention_required": true, "response_visibility": "thread"}
+
+    # Permissions
+    allowed_users: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+    allowed_channels: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+
+    # Status
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_event_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Error tracking
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Ownership
+    created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Relationships
+    created_by: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_bot_connections_org", "organization_id"),
+        Index("idx_bot_connections_platform", "platform"),
+        Index("idx_bot_connections_active", "is_active"),
+        Index("idx_bot_connections_workspace", "platform", "workspace_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<BotConnection(name='{self.name}', platform='{self.platform}', active={self.is_active})>"
+
+
+# =============================================================================
+# Connector Models (Phase 3)
+# =============================================================================
+
+
+class ConnectorType(str, PyEnum):
+    """Types of data source connectors."""
+    GOOGLE_DRIVE = "google_drive"
+    NOTION = "notion"
+    CONFLUENCE = "confluence"
+    ONEDRIVE = "onedrive"
+    SHAREPOINT = "sharepoint"
+    SLACK_DATA = "slack_data"
+    YOUTUBE = "youtube"
+    GITHUB = "github"
+    DROPBOX = "dropbox"
+    BOX = "box"
+
+
+class ConnectorStatus(str, PyEnum):
+    """Status of a connector instance."""
+    CONNECTED = "connected"
+    SYNCING = "syncing"
+    ERROR = "error"
+    DISCONNECTED = "disconnected"
+    RATE_LIMITED = "rate_limited"
+
+
+class ConnectorInstance(Base, UUIDMixin, TimestampMixin):
+    """
+    Data source connector instances.
+
+    Enables automatic synchronization of content from
+    external services like Google Drive, Notion, Confluence, etc.
+    """
+    __tablename__ = "connector_instances"
+
+    # Organization scope
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        nullable=True,
+        index=True,
+    )
+
+    # Connector identity
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    connector_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    # OAuth credentials (encrypted at service layer)
+    access_token_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    refresh_token_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # API key (for non-OAuth connectors)
+    api_key_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+
+    # External account info
+    external_account_id: Mapped[Optional[str]] = mapped_column(String(255))
+    external_account_email: Mapped[Optional[str]] = mapped_column(String(255))
+
+    # Sync configuration
+    config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # {"folders": ["folder_id_1", "folder_id_2"],
+    #  "file_types": [".pdf", ".docx"],
+    #  "exclude_patterns": ["*.tmp"],
+    #  "max_file_size_mb": 100}
+
+    # Target folder for synced documents
+    target_folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("folders.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Sync settings
+    auto_sync: Mapped[bool] = mapped_column(Boolean, default=True)
+    sync_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    sync_mode: Mapped[str] = mapped_column(String(20), default="incremental")
+    # full, incremental
+
+    # Sync state
+    last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_sync_cursor: Mapped[Optional[str]] = mapped_column(Text)
+    # Cursor/token for incremental sync
+    next_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Statistics
+    total_resources_synced: Mapped[int] = mapped_column(Integer, default=0)
+    total_bytes_synced: Mapped[int] = mapped_column(BigInteger, default=0)
+
+    # Status
+    status: Mapped[str] = mapped_column(
+        String(50),
+        default=ConnectorStatus.CONNECTED.value,
+        index=True,
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Rate limiting
+    rate_limit_reset_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Ownership
+    created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Relationships
+    synced_resources: Mapped[List["SyncedResource"]] = relationship(
+        "SyncedResource",
+        back_populates="connector",
+        cascade="all, delete-orphan",
+    )
+    target_folder: Mapped[Optional["Folder"]] = relationship("Folder")
+    created_by: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_connector_instances_org", "organization_id"),
+        Index("idx_connector_instances_type", "connector_type"),
+        Index("idx_connector_instances_status", "status"),
+        Index("idx_connector_instances_next_sync", "next_sync_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ConnectorInstance(name='{self.name}', type='{self.connector_type}', status='{self.status}')>"
+
+
+class SyncedResource(Base, UUIDMixin, TimestampMixin):
+    """
+    Resources synced from external data sources.
+
+    Tracks the mapping between external resources and
+    local documents, enabling incremental sync.
+    """
+    __tablename__ = "synced_resources"
+
+    # Organization scope
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        nullable=True,
+        index=True,
+    )
+
+    connector_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("connector_instances.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # External resource identity
+    external_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    external_parent_id: Mapped[Optional[str]] = mapped_column(String(500))
+    resource_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    # file, folder, page, database, message, video, etc.
+
+    # Resource metadata
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    mime_type: Mapped[Optional[str]] = mapped_column(String(100))
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger)
+    external_url: Mapped[Optional[str]] = mapped_column(String(2000))
+
+    # Version tracking
+    external_version: Mapped[Optional[str]] = mapped_column(String(100))
+    external_modified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    external_modified_by: Mapped[Optional[str]] = mapped_column(String(255))
+
+    # Local document link
+    document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Sync metadata
+    resource_metadata: Mapped[Optional[dict]] = mapped_column(
+        "metadata",  # Column name in DB is still "metadata"
+        JSONType(),
+    )
+    # External properties, permissions, etc.
+
+    # Sync state
+    sync_status: Mapped[str] = mapped_column(String(50), default="synced")
+    # synced, pending, syncing, error, deleted
+    last_synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    sync_error: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Relationships
+    connector: Mapped["ConnectorInstance"] = relationship(
+        "ConnectorInstance",
+        back_populates="synced_resources",
+    )
+    document: Mapped[Optional["Document"]] = relationship("Document")
+
+    __table_args__ = (
+        Index("idx_synced_resources_org", "organization_id"),
+        Index("idx_synced_resources_connector", "connector_id"),
+        Index("idx_synced_resources_external", "connector_id", "external_id", unique=True),
+        Index("idx_synced_resources_document", "document_id"),
+        Index("idx_synced_resources_status", "sync_status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SyncedResource(name='{self.name}', type='{self.resource_type}', status='{self.sync_status}')>"
+
+
+# =============================================================================
+# LLM Gateway Models (Phase 4)
+# =============================================================================
+
+
+class BudgetPeriod(str, PyEnum):
+    """Budget period types."""
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+    YEARLY = "yearly"
+
+
+class Budget(Base, UUIDMixin, TimestampMixin):
+    """
+    Organization and user budget management.
+
+    Enables cost control with configurable limits
+    and automatic enforcement.
+    """
+    __tablename__ = "budgets"
+
+    # Organization scope
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        nullable=True,
+        index=True,
+    )
+
+    # Optional user-specific budget (if null, applies to org)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # Budget name for identification
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Period configuration
+    period: Mapped[str] = mapped_column(
+        String(20),
+        default=BudgetPeriod.MONTHLY.value,
+        nullable=False,
+    )
+
+    # Limits (in USD)
+    limit_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    soft_limit_amount: Mapped[Optional[float]] = mapped_column(Float)
+    # Soft limit triggers warning, hard limit blocks requests
+
+    # Current usage
+    current_spend: Mapped[float] = mapped_column(Float, default=0.0)
+    current_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    current_requests: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Reset tracking
+    period_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    period_end: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Enforcement
+    is_hard_limit: Mapped[bool] = mapped_column(Boolean, default=False)
+    # If true, requests are blocked when limit reached
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    paused_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Alert configuration
+    alert_thresholds: Mapped[Optional[List[int]]] = mapped_column(JSONType())
+    # [50, 80, 100] - percentages to alert at
+    last_alert_threshold: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Relationships
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_budgets_org", "organization_id"),
+        Index("idx_budgets_user", "user_id"),
+        Index("idx_budgets_active", "is_active"),
+        Index("idx_budgets_period_end", "period_end"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Budget(name='{self.name}', limit={self.limit_amount}, spend={self.current_spend})>"
+
+
+class VirtualApiKey(Base, UUIDMixin, TimestampMixin):
+    """
+    Virtual API keys for external access.
+
+    Enables issuing scoped API keys to users or
+    external applications without exposing provider credentials.
+    """
+    __tablename__ = "virtual_api_keys"
+
+    # Organization scope
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        nullable=True,
+        index=True,
+    )
+
+    # Key owner (if null, org-level key)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # Key identification
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Key value (only prefix stored, full key shown once at creation)
+    key_prefix: Mapped[str] = mapped_column(String(12), nullable=False)
+    # e.g., "sk_live_abc1"
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    # SHA-256 hash for lookup
+
+    # Permissions
+    scopes: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+    # ["chat", "documents:read", "agents:execute"]
+
+    allowed_models: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+    # ["gpt-4", "claude-3-opus"] - if null, all models allowed
+
+    allowed_ips: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+    # IP whitelist
+
+    # Rate limiting
+    rate_limit_rpm: Mapped[Optional[int]] = mapped_column(Integer)
+    # Requests per minute
+    rate_limit_tpd: Mapped[Optional[int]] = mapped_column(Integer)
+    # Tokens per day
+
+    # Budget (optional - separate from org/user budget)
+    monthly_budget: Mapped[Optional[float]] = mapped_column(Float)
+    current_month_spend: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Status
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Usage tracking
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    total_requests: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_cost: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # Relationships
+    user: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_virtual_api_keys_org", "organization_id"),
+        Index("idx_virtual_api_keys_user", "user_id"),
+        Index("idx_virtual_api_keys_hash", "key_hash"),
+        Index("idx_virtual_api_keys_active", "is_active"),
+        Index("idx_virtual_api_keys_prefix", "key_prefix"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<VirtualApiKey(name='{self.name}', prefix='{self.key_prefix}', active={self.is_active})>"
+
+
+# =============================================================================
+# Image Generation Models (Phase 5)
+# =============================================================================
+
+
+class ImageGenerationProvider(str, PyEnum):
+    """Image generation providers."""
+    OPENAI_DALLE = "openai_dalle"
+    STABILITY = "stability"
+    LOCALAI = "localai"
+    COMFYUI = "comfyui"
+    REPLICATE = "replicate"
+
+
+class ImageGenerationStatus(str, PyEnum):
+    """Status of image generation."""
+    PENDING = "pending"
+    GENERATING = "generating"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class GeneratedImage(Base, UUIDMixin, TimestampMixin):
+    """
+    AI-generated images.
+
+    Tracks image generation requests and results,
+    supporting multiple providers and use cases.
+    """
+    __tablename__ = "generated_images"
+
+    # Organization scope
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        nullable=True,
+        index=True,
+    )
+
+    # Generation request
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    enhanced_prompt: Mapped[Optional[str]] = mapped_column(Text)
+    # Prompt after RAG enhancement
+
+    negative_prompt: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Configuration
+    provider: Mapped[str] = mapped_column(
+        String(50),
+        default=ImageGenerationProvider.OPENAI_DALLE.value,
+        nullable=False,
+    )
+    model: Mapped[Optional[str]] = mapped_column(String(100))
+    # dall-e-3, stable-diffusion-xl, etc.
+
+    # Image settings
+    width: Mapped[int] = mapped_column(Integer, default=1024)
+    height: Mapped[int] = mapped_column(Integer, default=1024)
+    style: Mapped[Optional[str]] = mapped_column(String(50))
+    # vivid, natural, etc.
+    quality: Mapped[Optional[str]] = mapped_column(String(20))
+    # standard, hd
+
+    # Context (for document-aware generation)
+    context_document_ids: Mapped[Optional[List[uuid.UUID]]] = mapped_column(UUIDArrayType())
+    context_text: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Result
+    image_url: Mapped[Optional[str]] = mapped_column(String(2000))
+    storage_path: Mapped[Optional[str]] = mapped_column(String(1000))
+    thumbnail_path: Mapped[Optional[str]] = mapped_column(String(1000))
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger)
+
+    # Status
+    status: Mapped[str] = mapped_column(
+        String(50),
+        default=ImageGenerationStatus.PENDING.value,
+        index=True,
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Cost tracking
+    cost_usd: Mapped[Optional[float]] = mapped_column(Float)
+
+    # Ownership
+    created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Usage tracking
+    download_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Relationships
+    created_by: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_generated_images_org", "organization_id"),
+        Index("idx_generated_images_status", "status"),
+        Index("idx_generated_images_provider", "provider"),
+        Index("idx_generated_images_created_by", "created_by_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<GeneratedImage(prompt='{self.prompt[:50]}...', status='{self.status}')>"
 
 
 # =============================================================================

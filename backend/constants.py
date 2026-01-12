@@ -62,9 +62,9 @@ EMBEDDING_DIMENSIONS: Dict[str, int] = {
 
 class ProcessingMode(str, Enum):
     """Document processing modes."""
-    FULL = "full"
-    SMART = "smart"
-    TEXT_ONLY = "text_only"
+    BASIC = "basic"           # Text extraction only (fastest)
+    OCR_ENABLED = "ocr"       # Text + OCR for scanned documents
+    FULL = "full"             # Text + OCR + AI image analysis (most thorough)
 
 
 class DocumentStatus(str, Enum):

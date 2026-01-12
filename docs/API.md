@@ -439,7 +439,7 @@ Upload a single file.
 - `smart_image_handling` (optional, default: true): Optimize images for faster processing
 - `smart_chunking` (optional, default: true): Use semantic chunking
 - `detect_duplicates` (optional, default: true): Skip duplicate files
-- `processing_mode` (optional): "full", "smart" (default), or "text_only"
+- `processing_mode` (optional): "full" (default), "ocr", or "basic"
 - `chunking_strategy` (optional, default: "semantic"): "simple", "semantic", or "hierarchical"
 - `enable_contextual_headers` (optional, default: true): Prepend document context to each chunk
 

@@ -438,11 +438,13 @@ export default function DocumentsPage() {
     });
   }, [documents, searchQuery, selectedFileType, selectedSizeFilter, selectedDateRange, showFavoritesOnly, favorites]);
 
-  // Pagination calculations
-  const totalPages = Math.ceil(filteredDocuments.length / pageSize);
+  // Pagination calculations - use server-side total count
+  const totalCount = documentsData?.total ?? 0;
+  const totalPages = Math.ceil(totalCount / pageSize);
   const startIndex = (currentPage - 1) * pageSize;
-  const endIndex = startIndex + pageSize;
-  const paginatedDocuments = filteredDocuments.slice(startIndex, endIndex);
+  const endIndex = Math.min(startIndex + pageSize, totalCount);
+  // Documents are already paginated by the server, no need to slice again
+  const paginatedDocuments = filteredDocuments;
 
   // Reset to page 1 when filters change
   const handleSearchChange = (value: string) => {
@@ -600,6 +602,13 @@ export default function DocumentsPage() {
 
   const handleBulkAutoTag = async () => {
     if (selectedDocuments.size === 0) return;
+
+    if (selectedDocuments.size > 20) {
+      toast.error("Too many documents selected", {
+        description: "Maximum 20 documents per bulk auto-tag request. Please select fewer documents.",
+      });
+      return;
+    }
 
     try {
       setIsAutoTagging(true);
@@ -1574,11 +1583,11 @@ export default function DocumentsPage() {
       )}
 
       {/* Pagination Controls */}
-      {filteredDocuments.length > 0 && (
+      {totalCount > 0 && (
         <div className="flex flex-col sm:flex-row items-center justify-between gap-4 py-4">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <span>
-              Showing {startIndex + 1}-{Math.min(endIndex, filteredDocuments.length)} of {filteredDocuments.length}
+              Showing {startIndex + 1}-{endIndex} of {totalCount}
             </span>
             <span className="mx-2">•</span>
             <span>Page size:</span>
@@ -1646,7 +1655,7 @@ export default function DocumentsPage() {
       )}
 
       {/* Empty State */}
-      {!isLoading && filteredDocuments.length === 0 && (
+      {!isLoading && totalCount === 0 && (
         <div className="text-center py-12">
           <FileText className="h-12 w-12 mx-auto text-muted-foreground opacity-50 mb-3" />
           <h3 className="text-lg font-medium">No documents found</h3>
@@ -1662,7 +1671,7 @@ export default function DocumentsPage() {
       <div className="grid gap-4 sm:grid-cols-3">
         <Card>
           <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{documentsData?.total ?? documents.length}</div>
+            <div className="text-2xl font-bold">{totalCount}</div>
             <p className="text-sm text-muted-foreground">Total Documents</p>
           </CardContent>
         </Card>

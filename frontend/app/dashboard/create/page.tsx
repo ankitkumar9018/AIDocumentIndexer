@@ -27,6 +27,7 @@ import {
   FolderOpen,
   Save,
   SpellCheck,
+  Info,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -166,6 +167,19 @@ export default function CreatePage() {
   const [styleFolderId, setStyleFolderId] = useState<string | null>(null);
   const [includeStyleSubfolders, setIncludeStyleSubfolders] = useState(true);
 
+  // PPTX Template (visual styling from existing PPTX)
+  const [pptxTemplates, setPptxTemplates] = useState<Array<{ template_id: string; filename?: string; slide_count: number; created_at: string }>>([]);
+  const [selectedPptxTemplate, setSelectedPptxTemplate] = useState<string | null>(null);
+  const [isUploadingTemplate, setIsUploadingTemplate] = useState(false);
+  const [templateSuggestions, setTemplateSuggestions] = useState<Array<{
+    template_id: string;
+    filename: string;
+    slide_count: number;
+    score: number;
+    reason: string;
+  }>>([]);
+  const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
+
   // Template dialogs
   const [showTemplateSelector, setShowTemplateSelector] = useState(false);
   const [showSaveTemplate, setShowSaveTemplate] = useState(false);
@@ -205,6 +219,71 @@ export default function CreatePage() {
   const handleEnhanceQueryChange = (enabled: boolean) => {
     setEnhanceQuery(enabled);
     localStorage.setItem("create_enhance_query", JSON.stringify(enabled));
+  };
+
+  // Load PPTX templates when PPTX format is selected
+  useEffect(() => {
+    if (selectedFormat === "pptx" && isAuthenticated) {
+      const loadTemplates = async () => {
+        try {
+          const { api } = await import("@/lib/api");
+          const templates = await api.listPptxTemplates();
+          setPptxTemplates(templates);
+        } catch (error) {
+          console.error("Failed to load PPTX templates:", error);
+        }
+      };
+      loadTemplates();
+    }
+  }, [selectedFormat, isAuthenticated]);
+
+  // Fetch AI template suggestions when topic/context changes (debounced)
+  useEffect(() => {
+    if (selectedFormat !== "pptx" || !isAuthenticated || !topic || !context) {
+      setTemplateSuggestions([]);
+      return;
+    }
+
+    // Debounce the API call
+    const timer = setTimeout(async () => {
+      if (pptxTemplates.length === 0) return; // No templates to suggest from
+
+      setIsFetchingSuggestions(true);
+      try {
+        const { api } = await import("@/lib/api");
+        const result = await api.suggestPptxTemplates(topic, context);
+        setTemplateSuggestions(result.suggestions);
+      } catch (error) {
+        console.error("Failed to get template suggestions:", error);
+        setTemplateSuggestions([]);
+      } finally {
+        setIsFetchingSuggestions(false);
+      }
+    }, 1000); // Wait 1 second after typing stops
+
+    return () => clearTimeout(timer);
+  }, [selectedFormat, isAuthenticated, topic, context, pptxTemplates.length]);
+
+  // Handle PPTX template upload
+  const handleTemplateUpload = async (file: File) => {
+    setIsUploadingTemplate(true);
+    try {
+      const { api } = await import("@/lib/api");
+      const result = await api.uploadPptxTemplate(file);
+      toast.success("Template uploaded", {
+        description: result.message,
+      });
+      // Refresh template list
+      const templates = await api.listPptxTemplates();
+      setPptxTemplates(templates);
+      setSelectedPptxTemplate(result.template_id);
+    } catch (error: any) {
+      toast.error("Failed to upload template", {
+        description: error.message || "An error occurred",
+      });
+    } finally {
+      setIsUploadingTemplate(false);
+    }
   };
 
   // Auto-suggest theme when topic and context are provided (debounced)
@@ -314,6 +393,8 @@ export default function CreatePage() {
               include_style_subfolders: useExistingDocs ? includeStyleSubfolders : undefined,
               // Query Enhancement for source search
               enhance_query: enhanceQuery ?? undefined,
+              // PPTX Template for visual styling
+              template_pptx_id: selectedFormat === "pptx" && selectedPptxTemplate ? selectedPptxTemplate : undefined,
             });
             setCurrentJobId(newJob.id);
             await generateOutline.mutateAsync({
@@ -1017,17 +1098,33 @@ export default function CreatePage() {
                   )}
                 </div>
 
-                {/* Theme Selector */}
+                {/* Theme Selector - Hidden when using PPTX template */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <label className="text-sm font-medium">Document Theme</label>
-                    {isLoadingThemeSuggestion && (
+                    {selectedFormat === "pptx" && selectedPptxTemplate && (
+                      <span className="text-xs text-blue-600 flex items-center gap-1">
+                        <Info className="h-3 w-3" />
+                        Using template styling
+                      </span>
+                    )}
+                    {isLoadingThemeSuggestion && !selectedPptxTemplate && (
                       <span className="text-xs text-muted-foreground flex items-center gap-1">
                         <Loader2 className="h-3 w-3 animate-spin" />
                         Suggesting theme...
                       </span>
                     )}
                   </div>
+                  {/* Show message when PPTX template is selected */}
+                  {selectedFormat === "pptx" && selectedPptxTemplate ? (
+                    <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 dark:bg-blue-950/20 dark:border-blue-800">
+                      <p className="text-sm text-blue-700 dark:text-blue-300">
+                        Theme colors are disabled when using an uploaded PPTX template.
+                        The generated presentation will use the template&apos;s styling.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
                   {themeSuggestionReason && (
                     <p className="text-xs text-muted-foreground flex items-center gap-1">
                       <Sparkles className="h-3 w-3" />
@@ -1184,6 +1281,8 @@ export default function CreatePage() {
                       </div>
                     )}
                   </div>
+                    </>
+                  )}
                 </div>
 
                 {/* Font & Layout Selection (only for PPTX/DOCX/PDF) */}
@@ -1415,6 +1514,124 @@ export default function CreatePage() {
                       Adds detailed AI reasoning and source references to each slide&apos;s speaker notes.
                       Title slide always includes generation info (model, date, theme).
                     </p>
+                  </div>
+                )}
+
+                {/* PPTX Template from Uploaded Documents (PPTX only) */}
+                {selectedFormat === "pptx" && (
+                  <div className="mt-4 pt-4 border-t space-y-3">
+                    <div>
+                      <h3 className="text-sm font-medium">Use Uploaded PPTX as Template</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Select a previously uploaded presentation to inherit its styling and design
+                      </p>
+                    </div>
+
+                    {pptxTemplates.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs text-muted-foreground">Available Templates:</label>
+                          {isFetchingSuggestions && (
+                            <span className="text-xs text-muted-foreground flex items-center gap-1">
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                              Analyzing templates...
+                            </span>
+                          )}
+                          {!isFetchingSuggestions && templateSuggestions.length > 0 && (
+                            <span className="text-xs text-primary flex items-center gap-1">
+                              <Sparkles className="h-3 w-3" />
+                              AI recommendations available
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div
+                            onClick={() => setSelectedPptxTemplate(null)}
+                            className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                              selectedPptxTemplate === null
+                                ? "border-primary ring-2 ring-primary/20"
+                                : "border-border hover:border-primary/50"
+                            }`}
+                          >
+                            <p className="text-sm font-medium">No Template</p>
+                            <p className="text-xs text-muted-foreground">Use default styling</p>
+                          </div>
+                          {/* Sort templates: AI-recommended first (by score descending), then others */}
+                          {[...pptxTemplates]
+                            .sort((a, b) => {
+                              const suggestionA = templateSuggestions.find(s => s.template_id === a.template_id);
+                              const suggestionB = templateSuggestions.find(s => s.template_id === b.template_id);
+                              const scoreA = suggestionA?.score ?? -1;
+                              const scoreB = suggestionB?.score ?? -1;
+                              return scoreB - scoreA;
+                            })
+                            .map((template) => {
+                              const suggestion = templateSuggestions.find(s => s.template_id === template.template_id);
+                              const isRecommended = suggestion && suggestion.score >= 70;
+                              return (
+                                <div
+                                  key={template.template_id}
+                                  onClick={() => setSelectedPptxTemplate(template.template_id)}
+                                  className={`p-3 rounded-lg border cursor-pointer transition-all relative ${
+                                    selectedPptxTemplate === template.template_id
+                                      ? "border-primary ring-2 ring-primary/20"
+                                      : isRecommended
+                                        ? "border-green-500/50 hover:border-green-500"
+                                        : "border-border hover:border-primary/50"
+                                  }`}
+                                >
+                                  {isRecommended && (
+                                    <div className="absolute -top-2 -right-2 bg-green-500 text-white text-[10px] px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
+                                      <Sparkles className="h-2.5 w-2.5" />
+                                      {suggestion.score}%
+                                    </div>
+                                  )}
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium truncate">
+                                        {template.filename || `Template ${template.template_id.slice(0, 8)}`}
+                                      </p>
+                                      <p className="text-xs text-muted-foreground">
+                                        {template.slide_count} slides • {new Date(template.created_at).toLocaleDateString()}
+                                      </p>
+                                      {suggestion && suggestion.reason && (
+                                        <p className="text-xs text-green-600 dark:text-green-400 mt-1 line-clamp-2">
+                                          {suggestion.reason}
+                                        </p>
+                                      )}
+                                    </div>
+                                    {/* Info icon - these are uploaded documents, not deletable from here */}
+                                    <div
+                                      className="p-1 rounded text-muted-foreground"
+                                      title="This is an uploaded document that can be used as a template"
+                                    >
+                                      <FileText className="h-3 w-3" />
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                        </div>
+                      </div>
+                    )}
+
+                    {pptxTemplates.length === 0 && (
+                      <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50 border">
+                        <FileText className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
+                        <p className="text-xs text-muted-foreground">
+                          No PPTX documents found. Upload presentations in the Documents section to use them as templates.
+                        </p>
+                      </div>
+                    )}
+
+                    {selectedPptxTemplate && (
+                      <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/50">
+                        <Sparkles className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                        <p className="text-xs text-blue-700 dark:text-blue-300">
+                          The generated presentation will use the slide master, fonts, and colors from your selected template.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

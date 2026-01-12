@@ -12,56 +12,35 @@ Benefits:
 - Enables efficient re-indexing of unchanged documents
 
 Settings-aware: Respects cache.embedding_cache_enabled setting.
+
+Note: This module is being migrated to the unified cache abstraction.
+      See backend/services/cache/ for the new implementation.
 """
 
-import hashlib
-import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 
+from backend.services.cache import RedisBackedCache, CacheKeyGenerator
+
 logger = structlog.get_logger(__name__)
 
-# Cache state
-_cache_enabled: Optional[bool] = None
-_cache_ttl_days: Optional[int] = None
-
-
-async def _get_cache_settings() -> tuple[bool, int]:
-    """Get embedding cache settings from database."""
-    global _cache_enabled, _cache_ttl_days
-
-    if _cache_enabled is not None and _cache_ttl_days is not None:
-        return _cache_enabled, _cache_ttl_days
-
-    try:
-        from backend.services.settings import get_settings_service
-
-        settings = get_settings_service()
-        enabled = await settings.get_setting("cache.embedding_cache_enabled")
-        ttl_days = await settings.get_setting("cache.embedding_cache_ttl_days")
-
-        _cache_enabled = enabled if enabled is not None else True
-        _cache_ttl_days = ttl_days if ttl_days is not None else 7
-
-        return _cache_enabled, _cache_ttl_days
-    except Exception as e:
-        logger.debug("Could not load cache settings, using defaults", error=str(e))
-        return True, 7
+# Cache key generator for embeddings
+_embedding_keygen = CacheKeyGenerator(prefix="embed", normalize=True)
 
 
 def invalidate_cache_settings():
     """Invalidate cached settings (call after settings change)."""
-    global _cache_enabled, _cache_ttl_days
-    _cache_enabled = None
-    _cache_ttl_days = None
+    # Delegate to the cache instance
+    cache = get_embedding_cache()
+    cache.invalidate_settings()
 
 
-class EmbeddingCache:
+class EmbeddingCache(RedisBackedCache[List[float]]):
     """
     Cache for embedding vectors with content-based deduplication.
 
-    Uses Redis for distributed caching with in-memory fallback.
+    Uses the unified cache abstraction with Redis backend and memory fallback.
     """
 
     def __init__(
@@ -76,21 +55,14 @@ class EmbeddingCache:
             cache_ttl: Time-to-live for cached embeddings (seconds)
             max_memory_items: Max items in memory fallback cache
         """
-        self.cache_ttl = cache_ttl
-        self.max_memory_items = max_memory_items
-        self._memory_cache: Dict[str, List[float]] = {}
-        self._memory_order: List[str] = []  # LRU tracking
-        self._stats = {
-            "hits": 0,
-            "misses": 0,
-            "cached": 0,
-        }
-
-    def _compute_hash(self, text: str) -> str:
-        """Compute content hash for cache key."""
-        # Normalize text before hashing
-        normalized = text.strip().lower()
-        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+        super().__init__(
+            prefix="embed",
+            ttl_seconds=cache_ttl,
+            max_items=max_memory_items,
+            settings_key="cache.embedding_cache",
+        )
+        # Additional stats for backward compatibility
+        self._cached_count = 0
 
     async def get(self, text: str) -> Optional[List[float]]:
         """
@@ -102,36 +74,15 @@ class EmbeddingCache:
         Returns:
             Cached embedding or None
         """
-        # Check if caching is enabled
-        enabled, _ = await _get_cache_settings()
-        if not enabled:
-            return None
+        cache_key = _embedding_keygen.content_key(text)
+        result = await super().get(cache_key)
 
-        cache_key = self._compute_hash(text)
+        if result is not None:
+            logger.debug("Embedding cache hit", key=cache_key[:8])
+        else:
+            logger.debug("Embedding cache miss", key=cache_key[:8])
 
-        # Try Redis first
-        try:
-            from backend.services.redis_client import embedding_cache as redis_cache
-
-            cached = await redis_cache.get(cache_key)
-            if cached:
-                self._stats["hits"] += 1
-                logger.debug("Embedding cache hit (Redis)", key=cache_key[:8])
-                return cached
-        except Exception:
-            pass  # Fall back to memory
-
-        # Try memory cache
-        if cache_key in self._memory_cache:
-            self._stats["hits"] += 1
-            # Update LRU order
-            self._memory_order.remove(cache_key)
-            self._memory_order.append(cache_key)
-            logger.debug("Embedding cache hit (memory)", key=cache_key[:8])
-            return self._memory_cache[cache_key]
-
-        self._stats["misses"] += 1
-        return None
+        return result
 
     async def set(self, text: str, embedding: List[float]) -> bool:
         """
@@ -144,37 +95,14 @@ class EmbeddingCache:
         Returns:
             True if cached successfully
         """
-        # Check if caching is enabled
-        enabled, ttl_days = await _get_cache_settings()
-        if not enabled:
-            return False
+        cache_key = _embedding_keygen.content_key(text)
+        success = await super().set(cache_key, embedding)
 
-        cache_key = self._compute_hash(text)
-        # Use settings-based TTL
-        cache_ttl = ttl_days * 24 * 60 * 60  # Convert days to seconds
+        if success:
+            self._cached_count += 1
+            logger.debug("Embedding cached", key=cache_key[:8])
 
-        # Try Redis first
-        try:
-            from backend.services.redis_client import embedding_cache as redis_cache
-
-            await redis_cache.set(cache_key, embedding, ttl=cache_ttl)
-            self._stats["cached"] += 1
-            logger.debug("Embedding cached (Redis)", key=cache_key[:8])
-            return True
-        except Exception:
-            pass  # Fall back to memory
-
-        # Memory cache with LRU eviction
-        if len(self._memory_cache) >= self.max_memory_items:
-            # Evict oldest
-            oldest = self._memory_order.pop(0)
-            del self._memory_cache[oldest]
-
-        self._memory_cache[cache_key] = embedding
-        self._memory_order.append(cache_key)
-        self._stats["cached"] += 1
-        logger.debug("Embedding cached (memory)", key=cache_key[:8])
-        return True
+        return success
 
     async def get_many(
         self,
@@ -224,26 +152,27 @@ class EmbeddingCache:
 
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
-        total = self._stats["hits"] + self._stats["misses"]
-        hit_rate = self._stats["hits"] / total if total > 0 else 0.0
-
+        stats = super().get_stats()
         return {
-            "hits": self._stats["hits"],
-            "misses": self._stats["misses"],
-            "cached": self._stats["cached"],
-            "hit_rate": hit_rate,
-            "memory_items": len(self._memory_cache),
+            "hits": stats.hits,
+            "misses": stats.misses,
+            "cached": self._cached_count,
+            "hit_rate": stats.hit_rate,
+            "memory_items": stats.size,
+            "redis_hits": stats.redis_hits,
+            "redis_misses": stats.redis_misses,
+            "redis_errors": stats.redis_errors,
         }
 
     def clear_stats(self) -> None:
         """Reset statistics."""
-        self._stats = {"hits": 0, "misses": 0, "cached": 0}
+        self.reset_stats()
+        self._cached_count = 0
 
     async def clear(self) -> None:
         """Clear all cached embeddings."""
-        self._memory_cache.clear()
-        self._memory_order.clear()
-        self._stats = {"hits": 0, "misses": 0, "cached": 0}
+        await super().clear()
+        self._cached_count = 0
         logger.info("Embedding cache cleared")
 
 

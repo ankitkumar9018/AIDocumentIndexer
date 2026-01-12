@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import update
+from sqlalchemy import update, select
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 import jwt
@@ -20,7 +20,7 @@ import os
 from passlib.context import CryptContext
 
 from backend.db.database import get_async_session
-from backend.db.models import User
+from backend.db.models import User, AccessTier
 
 logger = structlog.get_logger(__name__)
 
@@ -135,8 +135,15 @@ def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
 
 
-def create_access_token(user_id: str, email: str, role: str, access_tier: int) -> str:
-    """Create a JWT access token."""
+def create_access_token(
+    user_id: str,
+    email: str,
+    role: str,
+    access_tier: int,
+    organization_id: Optional[str] = None,
+    is_superadmin: bool = False,
+) -> str:
+    """Create a JWT access token with organization context."""
     expires = datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
     payload = {
         "sub": user_id,
@@ -146,6 +153,12 @@ def create_access_token(user_id: str, email: str, role: str, access_tier: int) -
         "exp": expires,
         "iat": datetime.utcnow(),
     }
+    # Include organization_id for multi-tenant isolation
+    if organization_id:
+        payload["organization_id"] = organization_id
+    # Include superadmin flag for organization switching capability
+    if is_superadmin:
+        payload["is_superadmin"] = True
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -287,60 +300,118 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_async_sess
     """
     logger.info("Login attempt", email=request.email)
 
-    # Find user
-    user = _users.get(request.email)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+    # Find user in database
+    query = select(User).where(User.email == request.email)
+    result = await db.execute(query)
+    db_user = result.scalar_one_or_none()
+
+    # Fallback to mock users for backward compatibility
+    if not db_user:
+        user = _users.get(request.email)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",
+            )
+
+        # Verify password against mock user
+        if not verify_password(request.password, user["password_hash"]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",
+            )
+
+        if not user["is_active"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User account is disabled",
+            )
+
+        # Create token with mock user data
+        access_token = create_access_token(
+            user_id=user["id"],
+            email=user["email"],
+            role=user["role"],
+            access_tier=user["access_tier"],
         )
 
-    # Verify password
-    if not verify_password(request.password, user["password_hash"]):
+        return TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=JWT_EXPIRATION_HOURS * 3600,
+            user=UserResponse(
+                id=user["id"],
+                email=user["email"],
+                full_name=user["full_name"],
+                role=user["role"],
+                access_tier=user["access_tier"],
+                is_active=user["is_active"],
+                created_at=user["created_at"],
+            ),
+        )
+
+    # Verify password against database user
+    if not db_user.password_hash or not verify_password(request.password, db_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
     # Check if user is active
-    if not user["is_active"]:
+    if not db_user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is disabled",
         )
 
-    # Create token
+    # Get access tier level
+    access_tier_level = 30  # default
+    if db_user.access_tier_id:
+        tier_query = select(AccessTier).where(AccessTier.id == db_user.access_tier_id)
+        tier_result = await db.execute(tier_query)
+        tier = tier_result.scalar_one_or_none()
+        if tier:
+            access_tier_level = tier.level
+
+    # Determine role based on superadmin status or access tier
+    role = "admin" if db_user.is_superadmin else "user"
+
+    # Get organization_id from user's current_organization_id
+    organization_id = str(db_user.current_organization_id) if db_user.current_organization_id else None
+
+    # Create token with actual database user ID and organization context
     access_token = create_access_token(
-        user_id=user["id"],
-        email=user["email"],
-        role=user["role"],
-        access_tier=user["access_tier"],
+        user_id=str(db_user.id),
+        email=db_user.email,
+        role=role,
+        access_tier=access_tier_level,
+        organization_id=organization_id,
+        is_superadmin=db_user.is_superadmin,
     )
 
     # Update last_login_at in database
     try:
-        await db.execute(
-            update(User).where(User.email == request.email).values(last_login_at=datetime.utcnow())
-        )
+        db_user.last_login_at = datetime.utcnow()
         await db.commit()
         logger.info("Updated last_login_at", email=request.email)
     except Exception as e:
         logger.warning("Failed to update last_login_at", email=request.email, error=str(e))
         # Don't fail the login if we can't update the timestamp
 
-    logger.info("Login successful", email=request.email, role=user["role"])
+    logger.info("Login successful", email=request.email, role=role)
 
     return TokenResponse(
         access_token=access_token,
+        token_type="bearer",
         expires_in=JWT_EXPIRATION_HOURS * 3600,
         user=UserResponse(
-            id=user["id"],
-            email=user["email"],
-            full_name=user["full_name"],
-            role=user["role"],
-            access_tier=user["access_tier"],
-            is_active=user["is_active"],
-            created_at=user["created_at"],
+            id=str(db_user.id),
+            email=db_user.email,
+            full_name=db_user.name or "User",
+            role=role,
+            access_tier=access_tier_level,
+            is_active=db_user.is_active,
+            created_at=db_user.created_at or datetime.utcnow(),
         ),
     )
 
@@ -504,10 +575,12 @@ async def refresh_token(user: dict = Depends(get_current_user_for_refresh)):
     The signature must still be valid (not tampered with).
     """
     access_token = create_access_token(
-        user_id=user["id"],
+        user_id=user.get("sub") or user.get("id"),
         email=user["email"],
         role=user["role"],
         access_tier=user["access_tier"],
+        organization_id=user.get("organization_id"),
+        is_superadmin=user.get("is_superadmin", False),
     )
 
     return {

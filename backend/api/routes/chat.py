@@ -238,6 +238,8 @@ class ChatRequest(BaseModel):
     language: Optional[str] = Field(default="auto", description="Language code for response. Use 'auto' to respond in the same language as the question, or specify: en, de, es, fr, it, pt, nl, pl, ru, zh, ja, ko, ar, hi")
     # Query enhancement toggle
     enhance_query: Optional[bool] = Field(default=None, description="Enable query enhancement (expansion + HyDE). None = use admin default setting.")
+    # Restrict to documents only - when enabled in general mode, LLM won't use pre-trained knowledge
+    restrict_to_documents: bool = Field(default=False, description="When enabled in general mode, the assistant will not use pre-trained knowledge and will suggest switching to document mode.")
 
     @property
     def effective_collection_filters(self) -> Optional[List[str]]:
@@ -356,6 +358,7 @@ async def create_chat_completion(
                     agent_context["options"] = request.agent_options.model_dump()
 
                 final_output = ""
+                agent_sources = []  # Collect sources from agent execution
                 async for update in orchestrator.process_request(
                     request=request.message,
                     session_id=str(session_id),
@@ -366,6 +369,11 @@ async def create_chat_completion(
                 ):
                     if update.get("type") == "plan_completed":
                         final_output = update.get("output", "")
+                    elif update.get("type") == "sources":
+                        # Collect sources emitted by agents (research steps)
+                        sources_data = update.get("data", [])
+                        if sources_data:
+                            agent_sources.extend(sources_data)
                     elif update.get("type") == "approval_required":
                         # For non-streaming, we can't wait for approval
                         return ChatResponse(
@@ -378,15 +386,58 @@ async def create_chat_completion(
                     elif update.get("type") == "error":
                         raise HTTPException(status_code=500, detail=update.get("error", "Agent execution failed"))
 
+                # Convert agent sources to ChatSource format if available
+                formatted_sources = []
+                if agent_sources and request.include_sources:
+                    for src in agent_sources[:request.max_sources]:
+                        if isinstance(src, dict):
+                            formatted_sources.append(ChatSource(
+                                document_id=src.get("document_id", ""),
+                                document_name=src.get("document_name", src.get("title", "Unknown")),
+                                content=src.get("content", ""),
+                                score=src.get("score", 0.0),
+                                chunk_index=src.get("chunk_index", 0),
+                            ))
+
                 return ChatResponse(
                     session_id=session_id,
                     message_id=message_id,
                     content=final_output,
-                    sources=[],  # Agents don't return traditional sources
+                    sources=formatted_sources,
                     created_at=datetime.now(),
                 )
 
         elif request.mode == "general":
+            # Check if restrict_to_documents is enabled - return helpful message without using LLM
+            if request.restrict_to_documents:
+                restricted_response = (
+                    "I'm currently restricted from using my pre-trained knowledge. "
+                    "In this mode, I can only answer questions using information from your uploaded documents.\n\n"
+                    "To get an answer, please either:\n"
+                    "1. **Switch to Document Mode** - I'll search your documents for relevant information\n"
+                    "2. **Disable 'No AI Knowledge'** toggle - Allow me to use my general knowledge\n\n"
+                    "This restriction ensures all responses are strictly based on your document content."
+                )
+
+                # Save the interaction if not query_only
+                if not request.query_only:
+                    await save_chat_messages(
+                        session_id=session_id,
+                        user_message=request.message,
+                        assistant_response=restricted_response,
+                        user_id=user.user_id,
+                        user_email=user.email,
+                        model_used="restricted-mode",
+                    )
+
+                return ChatResponse(
+                    session_id=session_id,
+                    message_id=message_id,
+                    content=restricted_response,
+                    sources=[],
+                    created_at=datetime.now(),
+                )
+
             # Use general chat service (no RAG)
             from backend.services.general_chat import get_general_chat_service
             general_service = get_general_chat_service()
@@ -557,7 +608,8 @@ async def create_chat_completion(
                 question=request.message,
                 session_id=str(session_id) if not request.query_only else None,
                 collection_filter=request.first_collection_filter,
-                access_tier=100,  # Default tier; use user.access_tier when auth is enabled
+                access_tier=user.access_tier_level,  # User's access tier for RLS
+                user_id=user.user_id,  # User ID for private document access
                 include_collection_context=request.include_collection_context,
                 additional_context=temp_context,  # Include temporary document context if available
                 top_k=request.top_k,  # Per-query document count override
@@ -565,6 +617,8 @@ async def create_chat_completion(
                 include_subfolders=request.include_subfolders,
                 language=request.language or "en",  # Language for response
                 enhance_query=request.enhance_query,  # Per-query enhancement override
+                organization_id=user.organization_id,  # Organization for multi-tenant isolation
+                is_superadmin=user.is_superadmin,  # Superadmin can access all private docs
             )
 
             # Convert sources to API format
@@ -804,6 +858,33 @@ async def create_streaming_completion(
         # Send session info first
         yield f"data: {json.dumps({'type': 'session', 'session_id': str(session_id)})}\n\n"
 
+        # Check if restrict_to_documents is enabled - return helpful message without using LLM
+        if request.restrict_to_documents:
+            restricted_response = (
+                "I'm currently restricted from using my pre-trained knowledge. "
+                "In this mode, I can only answer questions using information from your uploaded documents.\n\n"
+                "To get an answer, please either:\n"
+                "1. **Switch to Document Mode** - I'll search your documents for relevant information\n"
+                "2. **Disable 'No AI Knowledge'** toggle - Allow me to use my general knowledge\n\n"
+                "This restriction ensures all responses are strictly based on your document content."
+            )
+
+            yield f"data: {json.dumps({'type': 'content', 'data': restricted_response})}\n\n"
+
+            # Save the interaction if not query_only
+            if not request.query_only:
+                await save_chat_messages(
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=restricted_response,
+                    user_id=user.user_id,
+                    user_email=user.email,
+                    model_used="restricted-mode",
+                )
+
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
+
         try:
             general_service = get_general_chat_service()
             response = await general_service.query(
@@ -862,13 +943,16 @@ async def create_streaming_completion(
                 question=request.message,
                 session_id=str(session_id) if not request.query_only else None,
                 collection_filter=request.first_collection_filter,
-                access_tier=100,  # Default tier; use user.access_tier when auth is enabled
+                access_tier=user.access_tier_level,  # User's access tier for RLS
+                user_id=user.user_id,  # User ID for private document access
                 include_collection_context=request.include_collection_context,
                 top_k=request.top_k,  # Per-query document count override
                 folder_id=request.folder_id,  # Folder-scoped query
                 include_subfolders=request.include_subfolders,
                 language=request.language or "en",  # Language for response
                 enhance_query=request.enhance_query,  # Per-query enhancement override
+                organization_id=user.organization_id,  # Organization for multi-tenant isolation
+                is_superadmin=user.is_superadmin,  # Superadmin can access all private docs
             ):
                 if chunk.type == "content":
                     accumulated_content.append(chunk.data)
@@ -1699,3 +1783,143 @@ async def get_session_token_count(session_id: UUID):
     except Exception as e:
         logger.error("Failed to get token count", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to get token count: {str(e)}")
+
+
+# =============================================================================
+# @Mention Autocomplete Endpoints
+# =============================================================================
+
+class MentionSuggestion(BaseModel):
+    """A single @mention autocomplete suggestion."""
+    type: str  # folder, document, tag, type, recent
+    value: str  # The full mention value to insert
+    display: str  # Display text
+    description: Optional[str] = None
+
+
+class MentionAutocompleteResponse(BaseModel):
+    """Response for mention autocomplete."""
+    suggestions: List[MentionSuggestion]
+
+
+class ParsedMentionInfo(BaseModel):
+    """Information about parsed @mentions in a query."""
+    clean_query: str
+    has_filters: bool
+    folder_count: int
+    document_count: int
+    tag_count: int
+    date_filter: Optional[str] = None
+    mentions: List[dict]
+
+
+@router.get("/mentions/autocomplete", response_model=MentionAutocompleteResponse)
+async def get_mention_autocomplete(
+    partial: str = Query(..., min_length=1, description="Partial @mention text"),
+    user: AuthenticatedUser = None,
+):
+    """
+    Get autocomplete suggestions for @mentions in chat.
+
+    Supports:
+    - @folder:Name → Filter to folder
+    - @document:file.pdf or @doc:file.pdf → Filter to document
+    - @tag:collection → Filter by tag/collection
+    - @recent:7d → Filter to recent documents (d=days, w=weeks, m=months)
+    - @all → Search all documents
+
+    Example: GET /mentions/autocomplete?partial=@folder:Mar
+    Returns suggestions for folders starting with "Mar"
+    """
+    from backend.services.mention_parser import get_mention_autocomplete
+    from backend.db.database import async_session_context
+
+    autocomplete = get_mention_autocomplete()
+
+    try:
+        async with async_session_context() as db:
+            suggestions = await autocomplete.get_suggestions(
+                partial=partial,
+                session=db,
+                organization_id=user.organization_id if user else None,
+                user_id=user.user_id if user else None,
+                limit=10,
+            )
+
+            return MentionAutocompleteResponse(
+                suggestions=[
+                    MentionSuggestion(
+                        type=s.type,
+                        value=s.value,
+                        display=s.display,
+                        description=s.description,
+                    )
+                    for s in suggestions
+                ]
+            )
+
+    except Exception as e:
+        logger.error("Mention autocomplete failed", error=str(e))
+        return MentionAutocompleteResponse(suggestions=[])
+
+
+@router.post("/mentions/parse", response_model=ParsedMentionInfo)
+async def parse_mentions(
+    query: str = Query(..., min_length=1, description="Query with @mentions"),
+    resolve: bool = Query(default=True, description="Resolve names to IDs"),
+    user: AuthenticatedUser = None,
+):
+    """
+    Parse @mentions from a query string.
+
+    Returns the clean query (without @mentions) and extracted filter information.
+
+    Example: POST /mentions/parse?query=What are sales? @folder:Marketing @recent:7d
+    Returns:
+    {
+        "clean_query": "What are sales?",
+        "has_filters": true,
+        "folder_count": 1,
+        "document_count": 0,
+        "tag_count": 0,
+        "date_filter": "2026-01-03T...",
+        "mentions": [...]
+    }
+    """
+    from backend.services.mention_parser import get_mention_parser
+    from backend.db.database import async_session_context
+
+    parser = get_mention_parser()
+    parsed = parser.parse(query)
+
+    # Resolve mentions if requested
+    if resolve and (parsed.folder_names or parsed.document_names):
+        try:
+            async with async_session_context() as db:
+                parsed = await parser.resolve_mentions(
+                    parsed,
+                    session=db,
+                    organization_id=user.organization_id if user else None,
+                    user_id=user.user_id if user else None,
+                )
+        except Exception as e:
+            logger.warning("Failed to resolve mentions", error=str(e))
+
+    return ParsedMentionInfo(
+        clean_query=parsed.clean_query,
+        has_filters=parsed.has_filters(),
+        folder_count=len(parsed.folder_ids),
+        document_count=len(parsed.document_ids),
+        tag_count=len(parsed.collection_filters),
+        date_filter=parsed.date_filter.isoformat() if parsed.date_filter else None,
+        mentions=[
+            {
+                "type": m.mention_type,
+                "value": m.value,
+                "original": m.original,
+                "resolved_id": m.resolved_id,
+                "resolved_name": m.resolved_name,
+            }
+            for m in parsed.mentions
+        ],
+    )

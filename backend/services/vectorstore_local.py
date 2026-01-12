@@ -8,8 +8,10 @@ Alternative to pgvector for local development and testing.
 
 import os
 import uuid
+import pickle
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
+from pathlib import Path
 
 import structlog
 import chromadb
@@ -21,6 +23,92 @@ from backend.db.database import async_session_context
 from sqlalchemy import select
 
 logger = structlog.get_logger(__name__)
+
+
+def fix_chromadb_pickle() -> bool:
+    """
+    Fix ChromaDB index_metadata.pickle corruption.
+
+    ChromaDB may save the pickle file as a dict instead of PersistentData object,
+    causing "'dict' object has no attribute 'dimensionality'" errors.
+
+    This function checks all segment directories and fixes any corrupted pickle files.
+
+    Returns:
+        True if any files were fixed, False otherwise
+    """
+    from chromadb.segment.impl.vector.local_persistent_hnsw import PersistentData
+
+    chroma_dir = Path(os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma"))
+    if not chroma_dir.exists():
+        return False
+
+    fixed_count = 0
+
+    # Find all index_metadata.pickle files
+    for pickle_path in chroma_dir.glob("*/index_metadata.pickle"):
+        try:
+            with open(pickle_path, 'rb') as f:
+                data = pickle.load(f)
+
+            # Check if it's a dict instead of PersistentData
+            if isinstance(data, dict):
+                logger.warning(
+                    "Found corrupted ChromaDB pickle file, fixing...",
+                    path=str(pickle_path),
+                    dimensionality=data.get('dimensionality')
+                )
+
+                # Convert to PersistentData
+                # Default to 768 dimensions (nomic-embed-text) if not set
+                persist_data = PersistentData(
+                    dimensionality=data.get('dimensionality') or 768,
+                    total_elements_added=data.get('total_elements_added', 0),
+                    id_to_label=data.get('id_to_label', {}),
+                    label_to_id=data.get('label_to_id', {}),
+                    id_to_seq_id=data.get('id_to_seq_id', {}),
+                )
+
+                with open(pickle_path, 'wb') as f:
+                    pickle.dump(persist_data, f, pickle.HIGHEST_PROTOCOL)
+
+                logger.info(
+                    "Fixed ChromaDB pickle file",
+                    path=str(pickle_path),
+                    dimensionality=persist_data.dimensionality,
+                    total_elements=persist_data.total_elements_added
+                )
+                fixed_count += 1
+
+            elif hasattr(data, 'dimensionality') and data.dimensionality is None:
+                # PersistentData with None dimensionality
+                logger.warning(
+                    "Found ChromaDB pickle with None dimensionality, fixing...",
+                    path=str(pickle_path)
+                )
+
+                persist_data = PersistentData(
+                    dimensionality=768,  # Default to nomic-embed-text dimensions
+                    total_elements_added=data.total_elements_added,
+                    id_to_label=data.id_to_label,
+                    label_to_id=data.label_to_id,
+                    id_to_seq_id=data.id_to_seq_id,
+                )
+
+                with open(pickle_path, 'wb') as f:
+                    pickle.dump(persist_data, f, pickle.HIGHEST_PROTOCOL)
+
+                logger.info("Fixed ChromaDB pickle dimensionality", path=str(pickle_path))
+                fixed_count += 1
+
+        except Exception as e:
+            logger.error(
+                "Failed to check/fix ChromaDB pickle",
+                path=str(pickle_path),
+                error=str(e)
+            )
+
+    return fixed_count > 0
 
 
 # =============================================================================
@@ -108,6 +196,9 @@ class ChromaVectorStore:
         document_filename: Optional[str] = None,
         collection: Optional[str] = None,
         session: Optional[Any] = None,  # Ignored for ChromaDB
+        organization_id: Optional[str] = None,
+        uploaded_by_id: Optional[str] = None,
+        is_private: bool = False,
     ) -> List[str]:
         """
         Add chunks with embeddings to ChromaDB and SQLite database.
@@ -119,6 +210,9 @@ class ChromaVectorStore:
             document_filename: Filename of the source document (for display in search results)
             collection: Collection/tag name for document grouping
             session: Ignored (kept for interface compatibility)
+            organization_id: Organization ID for multi-tenant isolation
+            uploaded_by_id: User ID who uploaded the document (for private doc access)
+            is_private: Whether this is a private document
 
         Returns:
             List of created chunk IDs
@@ -138,7 +232,7 @@ class ChromaVectorStore:
             embeddings.append(chunk_data.get("embedding", []))
             documents.append(chunk_data["content"])
 
-            # Store metadata for filtering
+            # Store metadata for filtering (including multi-tenant and private doc info)
             metadatas.append({
                 "document_id": document_id,
                 "access_tier_id": access_tier_id,
@@ -150,10 +244,14 @@ class ChromaVectorStore:
                 "token_count": chunk_data.get("token_count") or 0,
                 "char_count": chunk_data.get("char_count", len(chunk_data["content"])),
                 "content_hash": chunk_data.get("content_hash", ""),
+                # Multi-tenant and privacy fields
+                "organization_id": organization_id or "",
+                "uploaded_by_id": uploaded_by_id or "",
+                "is_private": is_private,
             })
 
             # Prepare SQLite chunk record (without embedding - stored in ChromaDB)
-            db_chunks.append(ChunkModel(
+            chunk_record = ChunkModel(
                 id=uuid.UUID(chunk_id),
                 document_id=uuid.UUID(document_id),
                 access_tier_id=uuid.UUID(access_tier_id),
@@ -164,7 +262,11 @@ class ChromaVectorStore:
                 section_title=chunk_data.get("section_title"),
                 token_count=chunk_data.get("token_count") or len(chunk_data["content"]) // 4,
                 char_count=chunk_data.get("char_count", len(chunk_data["content"])),
-            ))
+            )
+            # Set organization_id if provided (column may exist from migration)
+            if organization_id and hasattr(chunk_record, 'organization_id'):
+                chunk_record.organization_id = uuid.UUID(organization_id)
+            db_chunks.append(chunk_record)
 
         # Add to ChromaDB
         if ids:
@@ -326,6 +428,114 @@ class ChromaVectorStore:
 
         return results
 
+    def _build_where_clause(
+        self,
+        document_ids: Optional[List[str]] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Build ChromaDB where clause for multi-tenant filtering.
+
+        Args:
+            document_ids: Optional list of document IDs to search within
+            organization_id: Organization ID for tenant isolation
+            user_id: User ID for private document access
+            is_superadmin: Whether user is superadmin (bypasses org filter)
+
+        Returns:
+            ChromaDB where clause dict or None
+        """
+        conditions = []
+
+        # Filter by document IDs if provided
+        if document_ids:
+            conditions.append({"document_id": {"$in": document_ids}})
+
+        # Organization filtering (unless superadmin)
+        if organization_id and not is_superadmin:
+            conditions.append({"organization_id": organization_id})
+
+        # Private document filtering:
+        # Show public docs OR private docs owned by the user
+        if user_id:
+            # ChromaDB doesn't support complex OR with mixed conditions,
+            # so we'll do post-retrieval filtering for private docs
+            pass  # Handled in _filter_private_docs
+
+        # Combine conditions
+        if not conditions:
+            return None
+        elif len(conditions) == 1:
+            return conditions[0]
+        else:
+            return {"$and": conditions}
+
+    async def _filter_private_docs(
+        self,
+        results: List[SearchResult],
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
+    ) -> List[SearchResult]:
+        """
+        Post-retrieval filter for private documents.
+
+        Private documents are only visible to their owner or superadmins.
+
+        Args:
+            results: Search results to filter
+            user_id: Current user ID
+            is_superadmin: Whether user is superadmin
+
+        Returns:
+            Filtered results
+        """
+        if not results or is_superadmin:
+            return results
+
+        # Get document privacy info from SQLite for accurate filtering
+        doc_ids = list(set(r.document_id for r in results if r.document_id))
+        if not doc_ids:
+            return results
+
+        async with async_session_context() as db:
+            try:
+                doc_uuids = [uuid.UUID(d) for d in doc_ids]
+                query = (
+                    select(Document.id, Document.is_private, Document.uploaded_by_id)
+                    .where(Document.id.in_(doc_uuids))
+                )
+                result = await db.execute(query)
+                doc_info = {str(row[0]): (row[1], str(row[2]) if row[2] else None) for row in result.all()}
+
+                filtered = []
+                for r in results:
+                    if r.document_id not in doc_info:
+                        filtered.append(r)  # Keep if not in DB (shouldn't happen)
+                        continue
+
+                    is_private, owner_id = doc_info[r.document_id]
+                    if not is_private:
+                        # Public document - include
+                        filtered.append(r)
+                    elif user_id and owner_id == user_id:
+                        # Private but user is owner - include
+                        filtered.append(r)
+                    # Else: private doc, user is not owner - exclude
+
+                if len(filtered) < len(results):
+                    logger.debug(
+                        "Filtered private documents from results",
+                        original_count=len(results),
+                        filtered_count=len(filtered),
+                    )
+                return filtered
+
+            except Exception as e:
+                logger.warning("Failed to filter private documents", error=str(e))
+                return results
+
     async def similarity_search(
         self,
         query_embedding: List[float],
@@ -334,9 +544,12 @@ class ChromaVectorStore:
         document_ids: Optional[List[str]] = None,
         similarity_threshold: Optional[float] = None,
         session: Optional[Any] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
-        Perform vector similarity search.
+        Perform vector similarity search with multi-tenant filtering.
 
         Args:
             query_embedding: Query embedding vector
@@ -345,16 +558,22 @@ class ChromaVectorStore:
             document_ids: Optional list of document IDs to search within
             similarity_threshold: Minimum similarity score
             session: Ignored (kept for interface compatibility)
+            organization_id: Organization ID for tenant isolation
+            user_id: User ID for private document access
+            is_superadmin: Whether user is superadmin (bypasses filters)
 
         Returns:
             List of SearchResult objects
         """
         top_k = top_k or self.config.default_top_k
 
-        # Build where clause for filtering
-        where_clause = None
-        if document_ids:
-            where_clause = {"document_id": {"$in": document_ids}}
+        # Build where clause for multi-tenant filtering
+        where_clause = self._build_where_clause(
+            document_ids=document_ids,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
+        )
 
         logger.info(
             "ChromaDB similarity search starting",
@@ -411,8 +630,9 @@ class ChromaVectorStore:
                     section_title=metadata.get("section_title"),
                 ))
 
-        # Filter out soft-deleted documents
-        return await self._filter_soft_deleted(search_results)
+        # Filter out soft-deleted documents and private docs
+        filtered_results = await self._filter_soft_deleted(search_results)
+        return await self._filter_private_docs(filtered_results, user_id=user_id, is_superadmin=is_superadmin)
 
     async def keyword_search(
         self,
@@ -421,6 +641,9 @@ class ChromaVectorStore:
         access_tier_level: int = 100,
         document_ids: Optional[List[str]] = None,
         session: Optional[Any] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Perform simple keyword search (case-insensitive substring match).
@@ -435,16 +658,22 @@ class ChromaVectorStore:
             access_tier_level: Maximum access tier level for filtering
             document_ids: Optional list of document IDs to search within
             session: Ignored (kept for interface compatibility)
+            organization_id: Organization ID for tenant isolation
+            user_id: User ID for private document access
+            is_superadmin: Whether user is superadmin (bypasses filters)
 
         Returns:
             List of SearchResult objects
         """
         top_k = top_k or self.config.default_top_k
 
-        # Build where clause
-        where_clause = None
-        if document_ids:
-            where_clause = {"document_id": {"$in": document_ids}}
+        # Build where clause with multi-tenant filtering
+        where_clause = self._build_where_clause(
+            document_ids=document_ids,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
+        )
 
         # ChromaDB supports $contains operator for text search
         # Get all documents and filter manually (not efficient for large datasets)
@@ -485,9 +714,9 @@ class ChromaVectorStore:
 
         # Sort by score and limit
         search_results.sort(key=lambda x: x.score, reverse=True)
-        # Filter out soft-deleted documents
+        # Filter out soft-deleted documents and private docs
         filtered_results = await self._filter_soft_deleted(search_results[:top_k])
-        return filtered_results
+        return await self._filter_private_docs(filtered_results, user_id=user_id, is_superadmin=is_superadmin)
 
     async def enhanced_metadata_search(
         self,
@@ -496,6 +725,9 @@ class ChromaVectorStore:
         access_tier_level: int = 100,
         document_ids: Optional[List[str]] = None,
         session: Optional[Any] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Search documents using enhanced metadata (summaries, keywords, questions).
@@ -509,6 +741,9 @@ class ChromaVectorStore:
             access_tier_level: Maximum access tier level for filtering
             document_ids: Optional list of document IDs to search within
             session: Ignored (kept for interface compatibility)
+            organization_id: Organization ID for tenant isolation
+            user_id: User ID for private document access
+            is_superadmin: Whether user is superadmin (bypasses filters)
 
         Returns:
             List of SearchResult objects (one per matching document)
@@ -529,6 +764,25 @@ class ChromaVectorStore:
             if document_ids:
                 doc_uuids = [uuid_module.UUID(d) for d in document_ids]
                 base_query = base_query.where(Document.id.in_(doc_uuids))
+
+            # Organization filtering (unless superadmin)
+            if organization_id and not is_superadmin:
+                base_query = base_query.where(Document.organization_id == uuid_module.UUID(organization_id))
+
+            # Private document filtering
+            if not is_superadmin:
+                # Show public docs OR private docs owned by the user
+                if user_id:
+                    from sqlalchemy import or_
+                    base_query = base_query.where(
+                        or_(
+                            Document.is_private == False,  # noqa: E712
+                            Document.uploaded_by_id == uuid_module.UUID(user_id)
+                        )
+                    )
+                else:
+                    # No user_id, only show public docs
+                    base_query = base_query.where(Document.is_private == False)  # noqa: E712
 
             result = await db.execute(base_query)
             documents = result.scalars().all()
@@ -636,6 +890,9 @@ class ChromaVectorStore:
         keyword_weight: Optional[float] = None,
         use_enhanced: Optional[bool] = None,
         session: Optional[Any] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Perform hybrid search combining vector similarity, keyword matching,
@@ -653,6 +910,9 @@ class ChromaVectorStore:
             keyword_weight: Weight for keyword results (0-1)
             use_enhanced: Whether to include enhanced metadata search
             session: Ignored (kept for interface compatibility)
+            organization_id: Organization ID for tenant isolation
+            user_id: User ID for private document access
+            is_superadmin: Whether user is superadmin (bypasses filters)
 
         Returns:
             List of SearchResult objects
@@ -666,12 +926,15 @@ class ChromaVectorStore:
         # Get more results from each method for better fusion
         fetch_k = self.config.rerank_top_k if self.config.enable_reranking else top_k * 2
 
-        # Run searches
+        # Run searches with multi-tenant filtering
         vector_results = await self.similarity_search(
             query_embedding=query_embedding,
             top_k=fetch_k,
             access_tier_level=access_tier_level,
             document_ids=document_ids,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         keyword_results = await self.keyword_search(
@@ -679,6 +942,9 @@ class ChromaVectorStore:
             top_k=fetch_k,
             access_tier_level=access_tier_level,
             document_ids=document_ids,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         # Optionally search enhanced metadata
@@ -689,6 +955,9 @@ class ChromaVectorStore:
                 top_k=fetch_k,
                 access_tier_level=access_tier_level,
                 document_ids=document_ids,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
         # Reciprocal Rank Fusion
@@ -775,9 +1044,12 @@ class ChromaVectorStore:
         session: Optional[Any] = None,
         vector_weight: Optional[float] = None,
         keyword_weight: Optional[float] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
-        Unified search interface.
+        Unified search interface with multi-tenant filtering.
 
         Args:
             query: Search query string
@@ -789,9 +1061,12 @@ class ChromaVectorStore:
             session: Ignored (kept for interface compatibility)
             vector_weight: Dynamic weight for vector results (0-1), overrides config
             keyword_weight: Dynamic weight for keyword results (0-1), overrides config
+            organization_id: Organization ID for multi-tenant filtering
+            user_id: User ID for private document access
+            is_superadmin: Whether user is superadmin (bypasses org and privacy filters)
 
         Returns:
-            List of SearchResult objects
+            List of SearchResult objects filtered by organization and privacy
         """
         search_type = search_type or self.config.search_type
 
@@ -803,6 +1078,9 @@ class ChromaVectorStore:
                 top_k=top_k,
                 access_tier_level=access_tier_level,
                 document_ids=document_ids,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
         elif search_type == SearchType.KEYWORD:
@@ -811,6 +1089,9 @@ class ChromaVectorStore:
                 top_k=top_k,
                 access_tier_level=access_tier_level,
                 document_ids=document_ids,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
         else:  # HYBRID
@@ -821,6 +1102,9 @@ class ChromaVectorStore:
                     top_k=top_k,
                     access_tier_level=access_tier_level,
                     document_ids=document_ids,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
 
             return await self.hybrid_search(
@@ -831,6 +1115,9 @@ class ChromaVectorStore:
                 document_ids=document_ids,
                 vector_weight=vector_weight,
                 keyword_weight=keyword_weight,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
     # =========================================================================

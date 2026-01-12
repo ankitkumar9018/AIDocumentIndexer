@@ -342,6 +342,34 @@ def get_permission_service_dependency() -> PermissionService:
 
 
 # =============================================================================
+# Organization Filtering Helper
+# =============================================================================
+
+def get_org_filter(user: UserContext) -> Optional[UUID]:
+    """
+    Get organization ID for filtering queries.
+
+    Returns the organization_id to use for filtering data.
+    Returns None if no organization filtering should be applied.
+
+    Usage:
+        @router.get("/documents")
+        async def list_documents(user: AuthenticatedUser):
+            org_id = get_org_filter(user)
+            query = select(Document)
+            if org_id:
+                query = query.where(Document.organization_id == org_id)
+            ...
+    """
+    if user.organization_id:
+        try:
+            return UUID(user.organization_id)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+# =============================================================================
 # Type Aliases for Cleaner Code
 # =============================================================================
 

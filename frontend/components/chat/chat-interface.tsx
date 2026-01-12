@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Send, Paperclip, StopCircle, FileText, ExternalLink, Loader2, Settings2, Download } from "lucide-react";
+import { Send, Paperclip, StopCircle, FileText, ExternalLink, Loader2, Settings2, Download, X, Image as ImageIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -32,11 +32,22 @@ export interface Source {
   snippet: string;
 }
 
+interface ImageAttachment {
+  id: string;
+  data: string;
+  mimeType: string;
+  name: string;
+  preview: string;
+}
+
 interface ChatInterfaceProps {
   sessionId?: string;
   className?: string;
   modelId?: string;
 }
+
+const ACCEPTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
 
 export function ChatInterface({ sessionId: initialSessionId, className, modelId = "gpt-4o" }: ChatInterfaceProps) {
   const [messages, setMessages] = React.useState<Message[]>([]);
@@ -44,8 +55,10 @@ export function ChatInterface({ sessionId: initialSessionId, className, modelId 
   const [isLoading, setIsLoading] = React.useState(false);
   const [showSources, setShowSources] = React.useState(true);
   const [sessionId, setSessionId] = React.useState(initialSessionId || crypto.randomUUID());
+  const [imageAttachments, setImageAttachments] = React.useState<ImageAttachment[]>([]);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
   const abortControllerRef = React.useRef<AbortController | null>(null);
 
   // Calculate total tokens from conversation history
@@ -62,6 +75,49 @@ export function ChatInterface({ sessionId: initialSessionId, className, modelId 
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // Handle file selection
+  const handleFileSelect = React.useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    for (const file of Array.from(files)) {
+      if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) {
+        continue;
+      }
+      if (file.size > MAX_IMAGE_SIZE) {
+        continue;
+      }
+      if (imageAttachments.length >= 4) {
+        break;
+      }
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const base64Data = dataUrl.split(",")[1];
+        setImageAttachments((prev) => [
+          ...prev,
+          {
+            id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+            data: base64Data,
+            mimeType: file.type,
+            name: file.name,
+            preview: dataUrl,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    }
+    // Reset file input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  }, [imageAttachments.length]);
+
+  const removeAttachment = React.useCallback((id: string) => {
+    setImageAttachments((prev) => prev.filter((img) => img.id !== id));
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -171,11 +227,15 @@ export function ChatInterface({ sessionId: initialSessionId, className, modelId 
   };
 
   return (
-    <div className={cn("flex flex-col h-full", className)}>
+    <div
+      className={cn("flex flex-col h-full", className)}
+      role="region"
+      aria-label="Chat interface"
+    >
       {/* Chat Header */}
-      <div className="flex items-center justify-between border-b px-4 py-3">
+      <header className="flex items-center justify-between border-b px-4 py-3">
         <div>
-          <h2 className="font-semibold">AI Assistant</h2>
+          <h2 className="font-semibold" id="chat-heading">AI Assistant</h2>
           <p className="text-sm text-muted-foreground">
             Ask questions about your documents
           </p>
@@ -188,19 +248,28 @@ export function ChatInterface({ sessionId: initialSessionId, className, modelId 
             variant="ghost"
             size="sm"
             onClick={() => setShowSources(!showSources)}
+            aria-pressed={showSources}
+            aria-label={showSources ? "Hide source citations" : "Show source citations"}
           >
-            <Settings2 className="mr-2 h-4 w-4" />
+            <Settings2 className="mr-2 h-4 w-4" aria-hidden="true" />
             {showSources ? "Hide Sources" : "Show Sources"}
           </Button>
         </div>
-      </div>
+      </header>
 
       {/* Messages Area */}
-      <ScrollArea ref={scrollRef} className="flex-1 p-4">
+      <ScrollArea
+        ref={scrollRef}
+        className="flex-1 p-4"
+        role="log"
+        aria-label="Chat messages"
+        aria-live="polite"
+        aria-relevant="additions"
+      >
         {messages.length === 0 ? (
           <EmptyState />
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-4" role="list" aria-label="Conversation history">
             {messages.map((message) => (
               <ChatMessage
                 key={message.id}
@@ -213,8 +282,30 @@ export function ChatInterface({ sessionId: initialSessionId, className, modelId 
       </ScrollArea>
 
       {/* Input Area */}
-      <div className="border-t p-4">
-        <form onSubmit={handleSubmit} className="flex gap-2">
+      <footer className="border-t p-4">
+        {/* Image Attachments Preview */}
+        {imageAttachments.length > 0 && (
+          <div className="flex gap-2 mb-3 flex-wrap">
+            {imageAttachments.map((img) => (
+              <div key={img.id} className="relative group">
+                <img
+                  src={img.preview}
+                  alt={img.name}
+                  className="h-16 w-16 object-cover rounded-md border"
+                />
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(img.id)}
+                  className="absolute -top-2 -right-2 bg-destructive text-destructive-foreground rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                  aria-label={`Remove ${img.name}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <form onSubmit={handleSubmit} className="flex gap-2" role="form" aria-label="Send a message">
           <PromptTemplatesDialog
             onApply={(text) => setInput(text)}
             trigger={
@@ -223,29 +314,41 @@ export function ChatInterface({ sessionId: initialSessionId, className, modelId 
                 variant="ghost"
                 size="icon"
                 className="shrink-0"
-                title="Prompt templates"
+                aria-label="Open prompt templates"
               >
-                <FileText className="h-5 w-5" />
+                <FileText className="h-5 w-5" aria-hidden="true" />
               </Button>
             }
+          />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ACCEPTED_IMAGE_TYPES.join(",")}
+            multiple
+            onChange={handleFileSelect}
+            className="hidden"
+            aria-label="Upload images"
           />
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            className="shrink-0"
-            title="Attach files (coming soon)"
-            disabled
+            className={cn("shrink-0", imageAttachments.length > 0 && "text-primary")}
+            aria-label="Attach images"
+            disabled={isLoading || imageAttachments.length >= 4}
+            onClick={() => fileInputRef.current?.click()}
           >
-            <Paperclip className="h-5 w-5" />
+            <ImageIcon className="h-5 w-5" aria-hidden="true" />
           </Button>
           <Input
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask a question about your documents..."
+            placeholder={imageAttachments.length > 0 ? "Describe what you want to know about these images..." : "Ask a question about your documents..."}
             disabled={isLoading}
             className="flex-1"
+            aria-label="Message input"
+            aria-describedby="chat-heading"
           />
           {isLoading ? (
             <Button
@@ -254,8 +357,9 @@ export function ChatInterface({ sessionId: initialSessionId, className, modelId 
               size="icon"
               onClick={handleStop}
               className="shrink-0"
+              aria-label="Stop generating response"
             >
-              <StopCircle className="h-5 w-5" />
+              <StopCircle className="h-5 w-5" aria-hidden="true" />
             </Button>
           ) : (
             <Button
@@ -263,8 +367,9 @@ export function ChatInterface({ sessionId: initialSessionId, className, modelId 
               size="icon"
               disabled={!input.trim()}
               className="shrink-0"
+              aria-label="Send message"
             >
-              <Send className="h-5 w-5" />
+              <Send className="h-5 w-5" aria-hidden="true" />
             </Button>
           )}
         </form>
@@ -280,7 +385,7 @@ export function ChatInterface({ sessionId: initialSessionId, className, modelId 
             Verify important information
           </p>
         </div>
-      </div>
+      </footer>
     </div>
   );
 }
@@ -294,13 +399,15 @@ function ChatMessage({ message, showSources }: ChatMessageProps) {
   const isUser = message.role === "user";
 
   return (
-    <div
+    <article
       className={cn(
         "flex gap-3",
         isUser ? "flex-row-reverse" : "flex-row"
       )}
+      role="listitem"
+      aria-label={`${isUser ? "Your" : "AI Assistant's"} message`}
     >
-      <Avatar className="h-8 w-8 shrink-0">
+      <Avatar className="h-8 w-8 shrink-0" aria-hidden="true">
         <AvatarFallback className={isUser ? "bg-primary text-primary-foreground" : "bg-muted"}>
           {isUser ? "U" : "AI"}
         </AvatarFallback>
@@ -322,32 +429,41 @@ function ChatMessage({ message, showSources }: ChatMessageProps) {
         >
           <p className="whitespace-pre-wrap">{message.content}</p>
           {message.isStreaming && (
-            <span className="inline-block w-2 h-4 ml-1 bg-current animate-pulse" />
+            <span
+              className="inline-block w-2 h-4 ml-1 bg-current animate-pulse"
+              aria-label="Response in progress"
+              role="status"
+            />
           )}
         </div>
 
         {/* Sources */}
         {showSources && message.sources && message.sources.length > 0 && (
-          <div className="w-full space-y-2">
+          <aside className="w-full space-y-2" aria-label="Source citations">
             <p className="text-xs font-medium text-muted-foreground">
               Sources ({message.sources.length})
             </p>
-            <div className="grid gap-2">
+            <ul className="grid gap-2" role="list" aria-label="Referenced documents">
               {message.sources.map((source) => (
-                <SourceCard key={source.chunkId} source={source} />
+                <li key={source.chunkId}>
+                  <SourceCard source={source} />
+                </li>
               ))}
-            </div>
-          </div>
+            </ul>
+          </aside>
         )}
 
-        <span className="text-xs text-muted-foreground">
+        <time
+          className="text-xs text-muted-foreground"
+          dateTime={message.timestamp.toISOString()}
+        >
           {message.timestamp.toLocaleTimeString([], {
             hour: "2-digit",
             minute: "2-digit",
           })}
-        </span>
+        </time>
       </div>
-    </div>
+    </article>
   );
 }
 
@@ -359,11 +475,14 @@ function SourceCard({ source }: SourceCardProps) {
   return (
     <Card className="p-3 text-sm">
       <div className="flex items-start gap-2">
-        <FileText className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+        <FileText className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2">
             <p className="font-medium truncate">{source.documentName}</p>
-            <span className="text-xs text-muted-foreground shrink-0">
+            <span
+              className="text-xs text-muted-foreground shrink-0"
+              aria-label={`Relevance: ${Math.round(source.relevanceScore * 100)} percent match`}
+            >
               {Math.round(source.relevanceScore * 100)}% match
             </span>
           </div>
@@ -376,8 +495,13 @@ function SourceCard({ source }: SourceCardProps) {
             {source.snippet}
           </p>
         </div>
-        <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0">
-          <ExternalLink className="h-3 w-3" />
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0"
+          aria-label={`Open ${source.documentName}`}
+        >
+          <ExternalLink className="h-3 w-3" aria-hidden="true" />
         </Button>
       </div>
     </Card>
@@ -393,8 +517,15 @@ function EmptyState() {
   ];
 
   return (
-    <div className="flex flex-col items-center justify-center h-full text-center px-4">
-      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 mb-4">
+    <div
+      className="flex flex-col items-center justify-center h-full text-center px-4"
+      role="status"
+      aria-label="No messages yet. Start a conversation by typing a question."
+    >
+      <div
+        className="flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 mb-4"
+        aria-hidden="true"
+      >
         <FileText className="h-8 w-8 text-primary" />
       </div>
       <h3 className="text-lg font-semibold mb-2">
@@ -404,20 +535,24 @@ function EmptyState() {
         Ask questions about your documents and get answers with source citations.
         The AI will search through your entire knowledge base.
       </p>
-      <div className="grid gap-2 w-full max-w-md">
-        <p className="text-sm font-medium text-muted-foreground">
+      <nav className="grid gap-2 w-full max-w-md" aria-label="Suggested questions">
+        <p className="text-sm font-medium text-muted-foreground" id="suggestions-label">
           Try asking:
         </p>
-        {suggestions.map((suggestion, i) => (
-          <Button
-            key={i}
-            variant="outline"
-            className="justify-start h-auto py-2 px-3 text-left"
-          >
-            <span className="truncate">{suggestion}</span>
-          </Button>
-        ))}
-      </div>
+        <ul className="grid gap-2" role="list" aria-labelledby="suggestions-label">
+          {suggestions.map((suggestion, i) => (
+            <li key={i}>
+              <Button
+                variant="outline"
+                className="justify-start h-auto py-2 px-3 text-left w-full"
+                aria-label={`Ask: ${suggestion}`}
+              >
+                <span className="truncate">{suggestion}</span>
+              </Button>
+            </li>
+          ))}
+        </ul>
+      </nav>
     </div>
   );
 }

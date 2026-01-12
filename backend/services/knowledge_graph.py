@@ -32,7 +32,7 @@ from unidecode import unidecode  # Unicode to ASCII transliteration
 from backend.db.models import (
     Entity, EntityMention, EntityRelation,
     EntityType, RelationType,
-    Document, Chunk,
+    Document, Chunk, AccessTier,
 )
 from backend.services.llm import EnhancedLLMFactory
 from backend.services.embeddings import get_embedding_service
@@ -693,6 +693,7 @@ class KnowledgeGraphService:
         entity_types: Optional[List[EntityType]] = None,
         limit: int = 10,
         query_language: Optional[str] = None,
+        organization_id: Optional[str] = None,
     ) -> List[Entity]:
         """
         Find entities relevant to a query with language-aware matching.
@@ -709,6 +710,7 @@ class KnowledgeGraphService:
             entity_types: Optional filter by entity types
             limit: Max results
             query_language: Optional language code for variant search
+            organization_id: Optional organization ID for multi-tenant isolation
 
         Returns:
             List of relevant entities, prioritized by match quality
@@ -738,6 +740,11 @@ class KnowledgeGraphService:
             )
 
         base_query = select(Entity).where(or_(*conditions))
+
+        # Filter by organization for multi-tenant isolation
+        if organization_id:
+            org_uuid = uuid.UUID(organization_id)
+            base_query = base_query.where(Entity.organization_id == org_uuid)
 
         # Optional entity type filter
         if entity_types:
@@ -778,6 +785,7 @@ class KnowledgeGraphService:
         entity_types: Optional[List[EntityType]] = None,
         top_k: int = 10,
         similarity_threshold: float = 0.7,
+        organization_id: Optional[str] = None,
     ) -> List[Tuple[Entity, float]]:
         """
         Search entities using embedding similarity.
@@ -791,6 +799,7 @@ class KnowledgeGraphService:
             entity_types: Optional filter by entity types
             top_k: Maximum results to return
             similarity_threshold: Minimum similarity score (0-1)
+            organization_id: Optional organization ID for multi-tenant isolation
 
         Returns:
             List of (entity, similarity_score) tuples sorted by similarity
@@ -807,6 +816,11 @@ class KnowledgeGraphService:
 
         # Build base query for entities with embeddings
         base_query = select(Entity).where(Entity.embedding.isnot(None))
+
+        # Filter by organization for multi-tenant isolation
+        if organization_id:
+            org_uuid = uuid.UUID(organization_id)
+            base_query = base_query.where(Entity.organization_id == org_uuid)
 
         if entity_types:
             base_query = base_query.where(Entity.entity_type.in_(entity_types))
@@ -853,6 +867,7 @@ class KnowledgeGraphService:
         limit: int = 10,
         query_language: Optional[str] = None,
         semantic_weight: float = 0.5,
+        organization_id: Optional[str] = None,
     ) -> List[Tuple[Entity, float]]:
         """
         Hybrid entity search combining text-based and semantic matching.
@@ -867,6 +882,7 @@ class KnowledgeGraphService:
             limit: Maximum results
             query_language: Optional language code
             semantic_weight: Weight for semantic scores (0-1), text weight = 1 - semantic_weight
+            organization_id: Optional organization ID for multi-tenant isolation
 
         Returns:
             List of (entity, combined_score) tuples
@@ -877,6 +893,7 @@ class KnowledgeGraphService:
             entity_types=entity_types,
             limit=limit * 2,  # Get more candidates for merging
             query_language=query_language,
+            organization_id=organization_id,
         )
 
         # Get semantic matches
@@ -885,6 +902,7 @@ class KnowledgeGraphService:
             entity_types=entity_types,
             top_k=limit * 2,
             similarity_threshold=0.5,  # Lower threshold for hybrid
+            organization_id=organization_id,
         )
 
         # Combine results with scoring
@@ -992,6 +1010,7 @@ class KnowledgeGraphService:
         entity_id: uuid.UUID,
         max_hops: int = 2,
         max_neighbors: int = 20,
+        organization_id: Optional[str] = None,
     ) -> Tuple[List[Entity], List[EntityRelation]]:
         """
         Get entities connected to a given entity within N hops.
@@ -1000,6 +1019,7 @@ class KnowledgeGraphService:
             entity_id: Starting entity
             max_hops: Maximum graph distance
             max_neighbors: Maximum entities to return
+            organization_id: Optional organization ID for multi-tenant isolation
 
         Returns:
             Tuple of (entities, relations)
@@ -1013,7 +1033,7 @@ class KnowledgeGraphService:
                 break
 
             # Get outgoing relations
-            result = await self.db.execute(
+            relation_query = (
                 select(EntityRelation)
                 .options(
                     selectinload(EntityRelation.source_entity),
@@ -1025,9 +1045,16 @@ class KnowledgeGraphService:
                         EntityRelation.target_entity_id.in_(frontier),
                     )
                 )
-                .order_by(EntityRelation.weight.desc())
-                .limit(max_neighbors)
             )
+
+            # Filter by organization for multi-tenant isolation
+            if organization_id:
+                org_uuid = uuid.UUID(organization_id)
+                relation_query = relation_query.where(EntityRelation.organization_id == org_uuid)
+
+            relation_query = relation_query.order_by(EntityRelation.weight.desc()).limit(max_neighbors)
+
+            result = await self.db.execute(relation_query)
             relations = list(result.scalars().all())
 
             new_frontier: Set[uuid.UUID] = set()
@@ -1063,6 +1090,10 @@ class KnowledgeGraphService:
         query: str,
         max_hops: int = 2,
         top_k: int = 10,
+        organization_id: Optional[str] = None,
+        access_tier_level: int = 100,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> GraphRAGContext:
         """
         Perform graph-enhanced search for a query.
@@ -1076,12 +1107,20 @@ class KnowledgeGraphService:
             query: Search query
             max_hops: Graph traversal depth
             top_k: Max results
+            organization_id: Optional organization ID for multi-tenant isolation
+            access_tier_level: Maximum access tier level for filtering
+            user_id: Optional user ID for private document access
+            is_superadmin: Whether the user is a superadmin
 
         Returns:
             GraphRAGContext with entities, relations, and chunks
         """
-        # Step 1: Find query entities
-        query_entities = await self.find_entities_by_query(query, limit=5)
+        # Step 1: Find query entities (filtered by organization)
+        query_entities = await self.find_entities_by_query(
+            query,
+            limit=5,
+            organization_id=organization_id,
+        )
 
         if not query_entities:
             logger.debug("No entities found for query", query=query)
@@ -1093,7 +1132,7 @@ class KnowledgeGraphService:
                 entity_context="",
             )
 
-        # Step 2: Expand through graph
+        # Step 2: Expand through graph (filtered by organization)
         all_entities: Dict[uuid.UUID, Entity] = {}
         all_relations: List[EntityRelation] = []
 
@@ -1103,20 +1142,51 @@ class KnowledgeGraphService:
                 entity.id,
                 max_hops=max_hops,
                 max_neighbors=top_k,
+                organization_id=organization_id,
             )
             for n in neighbors:
                 all_entities[n.id] = n
             all_relations.extend(relations)
 
-        # Step 3: Get document chunks for these entities
+        # Step 3: Get document chunks for these entities with proper filtering
         entity_ids = list(all_entities.keys())
 
-        result = await self.db.execute(
+        # Build base query with joins for filtering
+        chunk_query = (
             select(EntityMention)
-            .options(selectinload(EntityMention.chunk))
+            .options(selectinload(EntityMention.chunk).selectinload(Chunk.document))
+            .join(Chunk, EntityMention.chunk_id == Chunk.id)
+            .join(Document, Chunk.document_id == Document.id)
+            .join(AccessTier, Document.access_tier_id == AccessTier.id)
             .where(EntityMention.entity_id.in_(entity_ids))
-            .limit(top_k * 2)
+            # Filter by access tier
+            .where(AccessTier.level <= access_tier_level)
         )
+
+        # Filter by organization for multi-tenant isolation
+        if organization_id:
+            org_uuid = uuid.UUID(organization_id)
+            chunk_query = chunk_query.where(Chunk.organization_id == org_uuid)
+
+        # Filter private documents (only owner or superadmin can access)
+        if not is_superadmin:
+            if user_id:
+                user_uuid = uuid.UUID(user_id)
+                chunk_query = chunk_query.where(
+                    or_(
+                        Document.is_private == False,
+                        and_(
+                            Document.is_private == True,
+                            Document.uploaded_by_id == user_uuid
+                        )
+                    )
+                )
+            else:
+                chunk_query = chunk_query.where(Document.is_private == False)
+
+        chunk_query = chunk_query.limit(top_k * 2)
+
+        result = await self.db.execute(chunk_query)
         mentions = result.scalars().all()
 
         chunks = []

@@ -562,7 +562,7 @@ ray start --head
 If you encounter out-of-memory errors:
 
 1. Reduce `RAY_NUM_CPUS` in `.env`
-2. Use `text_only` processing mode
+2. Use `basic` processing mode
 3. Process documents in smaller batches
 4. Increase system swap space
 

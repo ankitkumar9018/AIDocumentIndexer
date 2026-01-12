@@ -8,8 +8,10 @@ Endpoints for generating documents with human-in-the-loop workflow.
 from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
+import os
+import shutil
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -157,6 +159,11 @@ class CreateJobRequest(BaseModel):
     enhance_query: Optional[bool] = Field(
         default=None,
         description="Enable query enhancement (expansion + HyDE) for source search. None = use admin default."
+    )
+    # PPTX Template - use an existing PPTX as a visual template
+    template_pptx_id: Optional[str] = Field(
+        default=None,
+        description="ID of an uploaded PPTX template to use for styling/branding"
     )
 
     @property
@@ -451,6 +458,30 @@ async def create_generation_job(
     # Store query enhancement preference (None means use admin setting)
     if request.enhance_query is not None:
         metadata["enhance_query"] = request.enhance_query
+
+    # Store PPTX template if provided
+    if request.template_pptx_id:
+        # Look up template from uploaded documents
+        from backend.db.database import get_async_session
+        from backend.db.models import Document
+        from sqlalchemy import select
+
+        template_path = None
+        async for session in get_async_session():
+            query = select(Document).where(Document.id == request.template_pptx_id)
+            result = await session.execute(query)
+            doc = result.scalar_one_or_none()
+            if doc and doc.file_path and os.path.exists(doc.file_path):
+                template_path = doc.file_path
+            break
+
+        if not template_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"PPTX template not found: {request.template_pptx_id}",
+            )
+        metadata["template_pptx_id"] = request.template_pptx_id
+        metadata["template_pptx_path"] = template_path
 
     # Store user email for notes/metadata display
     metadata["user_email"] = user.email
@@ -1578,3 +1609,354 @@ async def check_job_spelling(
             for issue in all_issues
         ],
     )
+
+
+# =============================================================================
+# PPTX Template Upload
+# =============================================================================
+
+class TemplateUploadResponse(BaseModel):
+    """Response for template upload."""
+    template_id: str
+    filename: str
+    slide_count: int
+    master_layouts: List[str]
+    theme_colors: Optional[dict] = None
+    message: str
+
+
+@router.post("/templates/pptx", response_model=TemplateUploadResponse)
+async def upload_pptx_template(
+    user: AuthenticatedUser,
+    file: UploadFile = File(...),
+) -> TemplateUploadResponse:
+    """
+    Upload a PPTX file to use as a visual template.
+
+    The uploaded PPTX's slide master, colors, fonts, and layouts will be
+    extracted and can be used when generating new presentations.
+    """
+    # Validate file type
+    if not file.filename or not file.filename.lower().endswith('.pptx'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only .pptx files are supported as templates"
+        )
+
+    # Create templates directory
+    templates_dir = os.path.join("storage", "templates", "pptx")
+    os.makedirs(templates_dir, exist_ok=True)
+
+    # Generate unique ID for template
+    import uuid
+    template_id = str(uuid.uuid4())
+    template_path = os.path.join(templates_dir, f"{template_id}.pptx")
+
+    # Save the file
+    try:
+        with open(template_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        logger.error("Failed to save template file", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save template file"
+        )
+
+    # Analyze the template
+    try:
+        from pptx import Presentation
+        prs = Presentation(template_path)
+
+        # Get slide count
+        slide_count = len(prs.slides)
+
+        # Get master layouts
+        master_layouts = []
+        for slide_master in prs.slide_masters:
+            for layout in slide_master.slide_layouts:
+                master_layouts.append(layout.name)
+
+        # Extract theme colors if available
+        theme_colors = None
+        try:
+            if prs.slide_masters and len(prs.slide_masters) > 0:
+                master = prs.slide_masters[0]
+                theme = master.theme_color_scheme if hasattr(master, 'theme_color_scheme') else None
+                if theme:
+                    theme_colors = {
+                        "primary": str(theme.accent1) if hasattr(theme, 'accent1') else None,
+                        "secondary": str(theme.accent2) if hasattr(theme, 'accent2') else None,
+                    }
+        except Exception:
+            pass  # Theme extraction is optional
+
+        logger.info(
+            "PPTX template uploaded",
+            template_id=template_id,
+            filename=file.filename,
+            slide_count=slide_count,
+            layouts=len(master_layouts),
+        )
+
+        return TemplateUploadResponse(
+            template_id=template_id,
+            filename=file.filename or "template.pptx",
+            slide_count=slide_count,
+            master_layouts=master_layouts[:10],  # Limit to 10 layouts
+            theme_colors=theme_colors,
+            message=f"Template uploaded successfully with {slide_count} slides and {len(master_layouts)} layouts"
+        )
+
+    except Exception as e:
+        # Clean up on failure
+        if os.path.exists(template_path):
+            os.remove(template_path)
+        logger.error("Failed to analyze template", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to analyze PPTX template: {str(e)}"
+        )
+
+
+@router.get("/templates/pptx")
+async def list_pptx_templates(
+    user: AuthenticatedUser,
+) -> List[dict]:
+    """List all uploaded PPTX documents that can be used as templates."""
+    from backend.db.database import get_async_session
+    from backend.db.models import Document
+    from sqlalchemy import select, or_
+
+    templates = []
+
+    # Query uploaded PPTX documents from database
+    async for session in get_async_session():
+        query = select(Document).where(
+            or_(
+                Document.file_type == "pptx",
+                Document.filename.ilike("%.pptx")
+            )
+        ).order_by(Document.created_at.desc()).limit(50)
+
+        result = await session.execute(query)
+        docs = result.scalars().all()
+
+        for doc in docs:
+            # Try to get slide count from the actual file
+            slide_count = 0
+            file_path = doc.file_path
+
+            if file_path and os.path.exists(file_path):
+                try:
+                    from pptx import Presentation
+                    prs = Presentation(file_path)
+                    slide_count = len(prs.slides)
+                except Exception as e:
+                    logger.warning(f"Failed to analyze PPTX {doc.filename}: {e}")
+
+            # Get original filename from original_filename field or filename field
+            original_name = doc.original_filename or doc.filename
+
+            templates.append({
+                "template_id": str(doc.id),
+                "filename": original_name,
+                "slide_count": slide_count,
+                "created_at": doc.created_at.isoformat() if doc.created_at else datetime.now().isoformat(),
+            })
+
+    return templates
+
+
+@router.delete("/templates/pptx/{template_id}")
+async def delete_pptx_template(
+    template_id: str,
+    user: AuthenticatedUser,
+) -> dict:
+    """Delete a PPTX template."""
+    template_path = os.path.join("storage", "templates", "pptx", f"{template_id}.pptx")
+
+    if not os.path.exists(template_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Template not found"
+        )
+
+    os.remove(template_path)
+    return {"message": "Template deleted successfully"}
+
+
+class SuggestTemplateRequest(BaseModel):
+    """Request for AI template suggestions."""
+    title: str = Field(..., description="Document title")
+    description: str = Field(..., description="Document description/topic")
+
+
+class TemplateSuggestion(BaseModel):
+    """AI-suggested template with score and reason."""
+    template_id: str
+    filename: str
+    slide_count: int
+    score: float = Field(..., ge=0, le=100, description="Relevance score 0-100")
+    reason: str = Field(..., description="Why this template fits")
+
+
+class SuggestTemplateResponse(BaseModel):
+    """Response with ranked template suggestions."""
+    suggestions: List[TemplateSuggestion]
+    message: str
+
+
+@router.post("/templates/pptx/suggest", response_model=SuggestTemplateResponse)
+async def suggest_pptx_templates(
+    request: SuggestTemplateRequest,
+    user: AuthenticatedUser,
+) -> SuggestTemplateResponse:
+    """
+    Get AI-powered template suggestions based on document title and description.
+
+    Analyzes uploaded PPTX documents and scores them for relevance to the
+    new document topic, returning a ranked list with explanations.
+    """
+    from backend.services.llm import EnhancedLLMFactory
+    from backend.db.database import get_async_session
+    from backend.db.models import Document
+    from sqlalchemy import select, or_
+
+    # Query uploaded PPTX documents from database
+    templates = []
+    async for session in get_async_session():
+        # Get PPTX documents that can serve as templates
+        query = select(Document).where(
+            or_(
+                Document.file_type == "pptx",
+                Document.filename.ilike("%.pptx")
+            )
+        ).order_by(Document.created_at.desc()).limit(20)
+
+        result = await session.execute(query)
+        docs = result.scalars().all()
+
+        for doc in docs:
+            # Try to get slide count from the actual file
+            slide_count = 0
+            layout_count = 0
+            file_path = doc.file_path
+
+            if file_path and os.path.exists(file_path):
+                try:
+                    from pptx import Presentation
+                    prs = Presentation(file_path)
+                    slide_count = len(prs.slides)
+                    layout_count = len(prs.slide_layouts)
+                except Exception as e:
+                    logger.warning(f"Failed to analyze PPTX {doc.filename}: {e}")
+
+            # Get original filename from original_filename field or filename field
+            original_name = doc.original_filename or doc.filename
+
+            templates.append({
+                "template_id": str(doc.id),
+                "filename": original_name,
+                "file_path": file_path,
+                "slide_count": slide_count,
+                "layout_count": layout_count,
+                "title": doc.title or original_name,
+            })
+
+    if not templates:
+        return SuggestTemplateResponse(
+            suggestions=[],
+            message="No PPTX documents found. Upload some presentations first to use as templates."
+        )
+
+    # Use LLM to score templates based on their titles/names
+    llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+        operation="content_generation",
+        user_id=None,
+    )
+
+    # Build prompt for template scoring - include filenames which often describe the content
+    template_info = "\n".join([
+        f"- Template {i+1}: \"{t['title']}\" ({t['slide_count']} slides)"
+        for i, t in enumerate(templates)
+    ])
+
+    prompt = f"""Analyze these existing PPTX presentations and score them as templates for a NEW document:
+
+NEW Document Title: {request.title}
+NEW Document Description: {request.description}
+
+Available Presentations (to use as style/design templates):
+{template_info}
+
+Score each presentation as a potential TEMPLATE based on:
+1. Topic similarity - Does the presentation topic match the new document?
+2. Professional context - Is it appropriate for the same audience?
+3. Design suitability - Would this presentation's style fit the new content?
+
+Respond in JSON format:
+{{
+  "rankings": [
+    {{"template_index": 0, "score": 85, "reason": "Similar business topic, professional style"}},
+    {{"template_index": 1, "score": 45, "reason": "Different industry but good design"}}
+  ]
+}}
+
+Include templates scoring above 30. Rank by score descending."""
+
+    try:
+        response = await llm.ainvoke(prompt)
+        response_text = response.content if hasattr(response, 'content') else str(response)
+
+        # Parse JSON from response
+        import json
+        import re
+
+        # Extract JSON from response
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if json_match:
+            rankings_data = json.loads(json_match.group())
+            rankings = rankings_data.get("rankings", [])
+        else:
+            rankings = []
+
+        # Build suggestions from rankings
+        suggestions = []
+        for ranking in rankings:
+            idx = ranking.get("template_index", 0)
+            if 0 <= idx < len(templates):
+                template = templates[idx]
+                suggestions.append(TemplateSuggestion(
+                    template_id=template["template_id"],
+                    filename=template["filename"],
+                    slide_count=template["slide_count"],
+                    score=min(100, max(0, ranking.get("score", 50))),
+                    reason=ranking.get("reason", "AI-suggested template")
+                ))
+
+        # Sort by score descending
+        suggestions.sort(key=lambda x: x.score, reverse=True)
+
+        return SuggestTemplateResponse(
+            suggestions=suggestions[:5],  # Top 5
+            message=f"Found {len(suggestions)} matching templates from your uploaded presentations"
+        )
+
+    except Exception as e:
+        logger.warning(f"AI template suggestion failed: {e}")
+        # Fallback: return all templates with default score
+        fallback_suggestions = [
+            TemplateSuggestion(
+                template_id=t["template_id"],
+                filename=t["filename"],
+                slide_count=t["slide_count"],
+                score=50.0,
+                reason="Available as template (AI scoring unavailable)"
+            )
+            for t in templates[:5]
+        ]
+        return SuggestTemplateResponse(
+            suggestions=fallback_suggestions,
+            message="AI scoring unavailable, showing uploaded presentations"
+        )

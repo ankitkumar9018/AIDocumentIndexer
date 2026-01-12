@@ -402,14 +402,15 @@ def embed_batch_ray(
     This runs on Ray workers for distributed processing.
     """
     # Reconstruct config from dict (Ray requires serializable objects)
+    # LLMConfig reads from env vars, so we create instance and override from dict if provided
+    config = LLMConfig.from_env()
     if config_dict:
-        config = LLMConfig(
-            openai_api_key=config_dict.get("openai_api_key"),
-            ollama_base_url=config_dict.get("ollama_base_url"),
-            anthropic_api_key=config_dict.get("anthropic_api_key"),
-        )
-    else:
-        config = LLMConfig.from_env()
+        if config_dict.get("openai_api_key"):
+            config.openai_api_key = config_dict["openai_api_key"]
+        if config_dict.get("ollama_base_url"):
+            config.ollama_base_url = config_dict["ollama_base_url"]
+        if config_dict.get("anthropic_api_key"):
+            config.anthropic_api_key = config_dict["anthropic_api_key"]
 
     service = EmbeddingService(provider=provider, model=model, config=config)
     return service.embed_texts(texts)

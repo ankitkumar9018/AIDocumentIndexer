@@ -36,6 +36,7 @@ import {
   Mic,
   Upload,
   Globe,
+  BrainCog,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -77,6 +78,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -314,6 +316,8 @@ export default function ChatPage() {
   const [enhanceQuery, setEnhanceQuery] = useState<boolean | null>(null);
   // Image attachments for vision mode
   const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
+  // Restrict to documents only - disables LLM's pre-trained knowledge in general mode
+  const [restrictToDocuments, setRestrictToDocuments] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -963,6 +967,7 @@ export default function ChatPage() {
           top_k: topK || undefined,
           language: outputLanguage, // Output language for response
           enhance_query: enhanceQuery ?? undefined, // Per-query enhancement override
+          restrict_to_documents: sourceMode === "general" && restrictToDocuments, // Block AI knowledge in general mode
         };
 
         // Add images if present
@@ -1978,6 +1983,55 @@ export default function ChatPage() {
                   <span className="hidden sm:inline">General</span>
                 </Button>
               </div>
+
+              {/* No AI Knowledge Toggle - Only visible for general mode */}
+              {sourceMode === "general" && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant={restrictToDocuments ? "default" : "outline"}
+                      size="sm"
+                      className={cn(
+                        "gap-1.5 h-8",
+                        restrictToDocuments && "bg-amber-500 hover:bg-amber-600 text-white"
+                      )}
+                      aria-label="Toggle AI knowledge restriction"
+                    >
+                      <BrainCog className="h-4 w-4" aria-hidden="true" />
+                      <span className="hidden sm:inline">No AI Knowledge</span>
+                      {restrictToDocuments && (
+                        <Badge variant="secondary" className="text-[10px] px-1 py-0 bg-white/20 ml-1">
+                          ON
+                        </Badge>
+                      )}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-80" align="start">
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="restrict-toggle" className="text-sm font-medium">
+                            Disable AI Knowledge
+                          </Label>
+                          <p className="text-xs text-muted-foreground">
+                            Block pre-trained knowledge
+                          </p>
+                        </div>
+                        <Switch
+                          id="restrict-toggle"
+                          checked={restrictToDocuments}
+                          onCheckedChange={setRestrictToDocuments}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground border-t pt-2">
+                        When enabled, the AI will not use its general knowledge and will only respond
+                        based on your uploaded documents. Useful for ensuring answers come strictly
+                        from your document base.
+                      </p>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              )}
 
               {/* Agent Mode Toggle */}
               <Button

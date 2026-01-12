@@ -4,6 +4,10 @@ AIDocumentIndexer - RAG Service
 
 Retrieval-Augmented Generation service using LangChain.
 Provides hybrid search (vector + keyword) and conversational RAG chains.
+
+NOTE: This module is being refactored into backend/services/rag_module/
+Data models, config, and prompts have been extracted. RAGService remains here
+for now during incremental migration.
 """
 
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
@@ -95,448 +99,28 @@ from backend.services.self_rag import (
 # Note: KnowledgeGraphService is imported lazily inside _enhance_with_knowledge_graph
 # to avoid circular imports (knowledge_graph -> llm -> services.__init__ -> rag)
 
+# Import from new modular structure
+from backend.services.rag_module.models import Source, RAGResponse, StreamChunk
+from backend.services.rag_module.config import RAGConfig
+from backend.services.rag_module.prompts import (
+    RAG_SYSTEM_PROMPT,
+    RAG_PROMPT_TEMPLATE,
+    CONVERSATIONAL_RAG_TEMPLATE,
+    LANGUAGE_NAMES,
+    get_language_instruction as _get_language_instruction,
+    parse_suggested_questions as _parse_suggested_questions,
+)
+
 logger = structlog.get_logger(__name__)
 
 
-@dataclass
-class Source:
-    """Source citation for RAG response."""
-    document_id: str
-    document_name: str
-    chunk_id: str
-    collection: Optional[str] = None  # Collection/tag for document grouping
-    page_number: Optional[int] = None
-    slide_number: Optional[int] = None
-    relevance_score: float = 0.0  # RRF score for ranking (may be tiny ~0.01-0.03)
-    similarity_score: float = 0.0  # Original vector cosine similarity (0-1) for display
-    snippet: str = ""
-    full_content: str = ""  # Full chunk content for source viewer
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    # Context expansion (surrounding chunks for navigation)
-    prev_chunk_snippet: Optional[str] = None
-    next_chunk_snippet: Optional[str] = None
-    chunk_index: Optional[int] = None
+# NOTE: Source, RAGResponse, StreamChunk, RAGConfig are now imported from
+# backend.services.rag_module. The following class definitions have been removed
+# and replaced with imports at the top of this file.
 
-
-@dataclass
-class RAGResponse:
-    """Response from RAG query."""
-    content: str
-    sources: List[Source]
-    query: str
-    model: str
-    tokens_used: Optional[int] = None
-    processing_time_ms: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    # Verification/confidence fields
-    confidence_score: Optional[float] = None  # 0-1 confidence
-    confidence_level: Optional[str] = None  # "high", "medium", "low"
-    verification_result: Optional[VerificationResult] = None
-    # Suggested follow-up questions
-    suggested_questions: List[str] = field(default_factory=list)
-    # Confidence warning for UI display (empty string = no warning)
-    confidence_warning: str = ""
-    # CRAG result if query was refined
-    crag_result: Optional[CRAGResult] = None
-
-
-@dataclass
-class StreamChunk:
-    """A chunk in streaming response."""
-    type: str  # "content", "source", "metadata", "done", "error"
-    data: Any
-
-
-class RAGConfig:
-    """Configuration for RAG service."""
-
-    def __init__(
-        self,
-        # Retrieval settings - None means "read from settings service"
-        top_k: int = None,
-        similarity_threshold: float = None,
-        use_hybrid_search: bool = True,
-        rerank_results: bool = None,
-
-        # Response settings
-        max_response_tokens: int = 2048,
-        temperature: float = 0.7,
-        include_sources: bool = True,
-
-        # Memory settings
-        memory_window: int = 10,  # Number of conversation turns to remember
-
-        # Model settings
-        chat_provider: str = None,  # Will use DEFAULT_LLM_PROVIDER env var
-        chat_model: Optional[str] = None,
-        embedding_provider: str = None,  # Will use DEFAULT_LLM_PROVIDER env var
-        embedding_model: Optional[str] = None,
-
-        # Query expansion settings (optional, improves recall by 8-12%)
-        enable_query_expansion: bool = None,  # Read from env if not set
-        query_expansion_count: int = None,  # Number of query variations
-        query_expansion_model: str = "gpt-4o-mini",  # Cost-effective model
-
-        # Verification settings (Self-RAG)
-        enable_verification: bool = None,  # Read from env if not set
-        verification_level: str = None,  # "none", "quick", "standard", "thorough"
-
-        # Dynamic search weighting (query intent classification)
-        enable_dynamic_weighting: bool = None,  # Read from env if not set
-
-        # HyDE (Hypothetical Document Embeddings) - improves recall for short/abstract queries
-        enable_hyde: bool = None,  # Read from env if not set
-        hyde_min_query_words: int = 5,  # Only use HyDE for queries shorter than this
-
-        # CRAG (Corrective RAG) - auto-refines queries on low confidence
-        enable_crag: bool = None,  # Read from env if not set
-        crag_confidence_threshold: float = 0.5,  # Trigger CRAG below this confidence
-
-        # Two-stage retrieval - fast ANN + ColBERT reranking for better precision at scale
-        enable_two_stage_retrieval: bool = None,  # Read from settings if not set
-        two_stage_candidates: int = 150,  # Stage 1 candidates (ANN retrieval)
-        use_colbert_reranker: bool = True,  # Use ColBERT (else cross-encoder) in stage 2
-
-        # Hierarchical retrieval - document-first strategy for better diversity
-        enable_hierarchical_retrieval: bool = None,  # Read from settings if not set
-        hierarchical_doc_limit: int = 10,  # Max documents in stage 1
-        hierarchical_chunks_per_doc: int = 3,  # Chunks per document in stage 2
-
-        # Semantic deduplication - remove near-duplicate chunks from expanded queries
-        enable_semantic_dedup: bool = None,  # Read from settings if not set
-        semantic_dedup_threshold: float = 0.95,  # Similarity threshold for dedup
-
-        # Knowledge graph integration - entity-aware retrieval
-        enable_knowledge_graph: bool = None,  # Read from settings if not set
-        knowledge_graph_max_hops: int = 2,  # Graph traversal depth
-
-        # Smart pre-filtering for large collections (10k+ docs)
-        enable_smart_filter: bool = None,  # Read from settings if not set
-        smart_filter_min_docs: int = 500,  # Minimum docs to trigger pre-filtering
-        smart_filter_max_candidates: int = 1000,  # Max docs after pre-filtering
-
-        # Self-RAG (response verification and hallucination detection)
-        enable_self_rag: bool = None,  # Read from settings if not set
-        self_rag_min_supported_ratio: float = 0.7,  # Min ratio of supported claims
-        self_rag_enable_regeneration: bool = True,  # Auto-regenerate on issues
-    ):
-        import os
-        from backend.services.settings import get_settings_service
-
-        # Default provider from environment variable
-        default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
-        settings = get_settings_service()
-
-        # Read retrieval settings from settings service defaults
-        # These are synchronous reads of default values; async DB values applied at runtime
-        if top_k is None:
-            top_k = settings.get_default_value("rag.top_k") or 10
-        if similarity_threshold is None:
-            similarity_threshold = settings.get_default_value("rag.similarity_threshold") or 0.55
-        if rerank_results is None:
-            rerank_results = settings.get_default_value("rag.rerank_results")
-            if rerank_results is None:
-                rerank_results = True
-
-        # Read RAG settings - try settings service first, then environment variables
-        if enable_query_expansion is None:
-            enable_query_expansion = settings.get_default_value("rag.query_expansion_enabled")
-            if enable_query_expansion is None:
-                enable_query_expansion = os.getenv("ENABLE_QUERY_EXPANSION", "true").lower() == "true"
-        if query_expansion_count is None:
-            query_expansion_count = settings.get_default_value("rag.query_expansion_count")
-            if query_expansion_count is None:
-                query_expansion_count = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))
-        if enable_verification is None:
-            enable_verification = settings.get_default_value("rag.verification_enabled")
-            if enable_verification is None:
-                enable_verification = os.getenv("ENABLE_VERIFICATION", "true").lower() == "true"
-        if verification_level is None:
-            verification_level = settings.get_default_value("rag.verification_level")
-            if verification_level is None:
-                verification_level = os.getenv("VERIFICATION_LEVEL", "quick")
-        if enable_dynamic_weighting is None:
-            enable_dynamic_weighting = settings.get_default_value("rag.dynamic_weighting_enabled")
-            if enable_dynamic_weighting is None:
-                enable_dynamic_weighting = os.getenv("ENABLE_DYNAMIC_WEIGHTING", "true").lower() == "true"
-        if enable_hyde is None:
-            enable_hyde = settings.get_default_value("rag.hyde_enabled")
-            if enable_hyde is None:
-                enable_hyde = os.getenv("ENABLE_HYDE", "true").lower() == "true"
-        if enable_crag is None:
-            enable_crag = settings.get_default_value("rag.crag_enabled")
-            if enable_crag is None:
-                enable_crag = os.getenv("ENABLE_CRAG", "true").lower() == "true"
-        # Read other HyDE/CRAG settings from settings service
-        if hyde_min_query_words == 5:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.hyde_min_query_words")
-            if stored_value is not None:
-                hyde_min_query_words = stored_value
-        if crag_confidence_threshold == 0.5:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.crag_confidence_threshold")
-            if stored_value is not None:
-                crag_confidence_threshold = stored_value
-
-        # Read two-stage retrieval settings
-        if enable_two_stage_retrieval is None:
-            enable_two_stage_retrieval = settings.get_default_value("rag.two_stage_retrieval_enabled")
-            if enable_two_stage_retrieval is None:
-                enable_two_stage_retrieval = os.getenv("TWO_STAGE_RETRIEVAL_ENABLED", "false").lower() == "true"
-        if two_stage_candidates == 150:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.stage1_candidates")
-            if stored_value is not None:
-                two_stage_candidates = stored_value
-        if use_colbert_reranker:  # Default is True, check settings for override
-            stored_value = settings.get_default_value("rag.use_colbert_reranker")
-            if stored_value is not None:
-                use_colbert_reranker = stored_value
-
-        # Read hierarchical retrieval settings
-        if enable_hierarchical_retrieval is None:
-            enable_hierarchical_retrieval = settings.get_default_value("rag.hierarchical_enabled")
-            if enable_hierarchical_retrieval is None:
-                enable_hierarchical_retrieval = os.getenv("ENABLE_HIERARCHICAL_RETRIEVAL", "false").lower() == "true"
-        if hierarchical_doc_limit == 10:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.hierarchical_doc_limit")
-            if stored_value is not None:
-                hierarchical_doc_limit = stored_value
-        if hierarchical_chunks_per_doc == 3:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.hierarchical_chunks_per_doc")
-            if stored_value is not None:
-                hierarchical_chunks_per_doc = stored_value
-
-        # Read semantic deduplication settings
-        if enable_semantic_dedup is None:
-            enable_semantic_dedup = settings.get_default_value("rag.semantic_dedup_enabled")
-            if enable_semantic_dedup is None:
-                enable_semantic_dedup = os.getenv("ENABLE_SEMANTIC_DEDUP", "true").lower() == "true"
-        if semantic_dedup_threshold == 0.95:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.semantic_dedup_threshold")
-            if stored_value is not None:
-                semantic_dedup_threshold = stored_value
-
-        # Read knowledge graph settings
-        if enable_knowledge_graph is None:
-            enable_knowledge_graph = settings.get_default_value("rag.knowledge_graph_enabled")
-            if enable_knowledge_graph is None:
-                enable_knowledge_graph = os.getenv("ENABLE_KNOWLEDGE_GRAPH", "false").lower() == "true"
-        if knowledge_graph_max_hops == 2:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.knowledge_graph_max_hops")
-            if stored_value is not None:
-                knowledge_graph_max_hops = stored_value
-
-        # Read smart filter settings
-        if enable_smart_filter is None:
-            enable_smart_filter = settings.get_default_value("rag.smart_filter_enabled")
-            if enable_smart_filter is None:
-                enable_smart_filter = os.getenv("ENABLE_SMART_FILTER", "true").lower() == "true"
-        if smart_filter_min_docs == 500:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.smart_filter_min_docs")
-            if stored_value is not None:
-                smart_filter_min_docs = stored_value
-        if smart_filter_max_candidates == 1000:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.smart_filter_max_candidates")
-            if stored_value is not None:
-                smart_filter_max_candidates = stored_value
-
-        # Read Self-RAG settings
-        if enable_self_rag is None:
-            enable_self_rag = settings.get_default_value("rag.self_rag_enabled")
-            if enable_self_rag is None:
-                enable_self_rag = os.getenv("ENABLE_SELF_RAG", "false").lower() == "true"
-        if self_rag_min_supported_ratio == 0.7:  # Default value, might be overridden
-            stored_value = settings.get_default_value("rag.self_rag_min_supported_ratio")
-            if stored_value is not None:
-                self_rag_min_supported_ratio = stored_value
-
-        self.top_k = top_k
-        self.similarity_threshold = similarity_threshold
-        self.use_hybrid_search = use_hybrid_search
-        self.rerank_results = rerank_results
-        self.max_response_tokens = max_response_tokens
-        self.temperature = temperature
-        self.include_sources = include_sources
-        self.memory_window = memory_window
-        self.chat_provider = chat_provider or default_provider
-        self.chat_model = chat_model
-        self.embedding_provider = embedding_provider or default_provider
-        self.embedding_model = embedding_model
-        # Query expansion
-        self.enable_query_expansion = enable_query_expansion
-        self.query_expansion_count = query_expansion_count
-        self.query_expansion_model = query_expansion_model
-        # Verification
-        self.enable_verification = enable_verification
-        self.verification_level = verification_level
-        # Dynamic weighting
-        self.enable_dynamic_weighting = enable_dynamic_weighting
-        # HyDE
-        self.enable_hyde = enable_hyde
-        self.hyde_min_query_words = hyde_min_query_words
-        # CRAG
-        self.enable_crag = enable_crag
-        self.crag_confidence_threshold = crag_confidence_threshold
-        # Two-stage retrieval
-        self.enable_two_stage_retrieval = enable_two_stage_retrieval
-        self.two_stage_candidates = two_stage_candidates
-        self.use_colbert_reranker = use_colbert_reranker
-        # Hierarchical retrieval
-        self.enable_hierarchical_retrieval = enable_hierarchical_retrieval
-        self.hierarchical_doc_limit = hierarchical_doc_limit
-        self.hierarchical_chunks_per_doc = hierarchical_chunks_per_doc
-        # Semantic deduplication
-        self.enable_semantic_dedup = enable_semantic_dedup
-        self.semantic_dedup_threshold = semantic_dedup_threshold
-        # Knowledge graph
-        self.enable_knowledge_graph = enable_knowledge_graph
-        self.knowledge_graph_max_hops = knowledge_graph_max_hops
-        # Smart pre-filtering
-        self.enable_smart_filter = enable_smart_filter
-        self.smart_filter_min_docs = smart_filter_min_docs
-        self.smart_filter_max_candidates = smart_filter_max_candidates
-        # Self-RAG
-        self.enable_self_rag = enable_self_rag
-        self.self_rag_min_supported_ratio = self_rag_min_supported_ratio
-        self.self_rag_enable_regeneration = self_rag_enable_regeneration
-
-
-# =============================================================================
-# Prompt Templates
-# =============================================================================
-
-RAG_SYSTEM_PROMPT = """You are an intelligent assistant for the AI Document Indexer system.
-Your role is to help users find information from their document archive and answer questions based on the retrieved content.
-
-Guidelines:
-1. Answer questions based primarily on the provided context from the documents
-2. If the context doesn't contain relevant information, say so clearly
-3. Always cite your sources by mentioning the document names
-4. Be concise but thorough in your responses
-5. If asked about something outside the document context, clarify that your knowledge comes from the indexed documents
-
-Remember: You are helping users explore their historical document archive spanning many years of work."""
-
-RAG_PROMPT_TEMPLATE = """Use the following context from the document archive to answer the user's question.
-If the context doesn't contain relevant information to answer the question, say so.
-
-Context:
-{context}
-
-Question: {question}
-
-Provide a helpful, accurate answer based on the context. Cite specific documents when referencing information.
-
-At the end of your response, on a new line, suggest 2-3 related follow-up questions the user might want to ask, prefixed with "SUGGESTED_QUESTIONS:" and separated by "|". Example:
-SUGGESTED_QUESTIONS: What are the key benefits?|How does this compare to alternatives?|When was this implemented?"""
-
-CONVERSATIONAL_RAG_TEMPLATE = """You are having a conversation with a user about their document archive.
-Use the retrieved context and conversation history to provide helpful answers.
-
-Retrieved Context:
-{context}
-
-Based on this context and our conversation, please answer the user's latest question.
-If the context doesn't contain relevant information, acknowledge that and provide what help you can.
-
-At the end of your response, on a new line, suggest 2-3 related follow-up questions the user might want to ask, prefixed with "SUGGESTED_QUESTIONS:" and separated by "|". Example:
-SUGGESTED_QUESTIONS: What are the key benefits?|How does this compare to alternatives?|When was this implemented?"""
-
-# Language code to name mapping for multilingual support
-LANGUAGE_NAMES = {
-    "en": "English",
-    "de": "German",
-    "es": "Spanish",
-    "fr": "French",
-    "it": "Italian",
-    "pt": "Portuguese",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "ru": "Russian",
-    "zh": "Chinese",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "ar": "Arabic",
-    "hi": "Hindi",
-}
-
-
-def _get_language_instruction(language: str, auto_detect: bool = False) -> str:
-    """
-    Get language instruction for the LLM prompt.
-
-    The system supports:
-    - Documents in ANY language (German, French, Chinese, etc.)
-    - Queries in ANY language
-    - Responses in the user's selected output language OR the query language (auto_detect)
-
-    Args:
-        language: Language code for OUTPUT (en, de, es, etc.)
-        auto_detect: If True and language is "en", respond in the same language as the question
-
-    Returns:
-        Language instruction string
-    """
-    if language == "en" and auto_detect:
-        # Auto-detect mode: respond in the same language as the question
-        # Make it VERY explicit for smaller models that don't follow instructions well
-        return """
-CRITICAL LANGUAGE AND SCRIPT REQUIREMENT (MUST FOLLOW):
-1. FIRST, identify the language AND SCRIPT of the USER'S QUESTION (not the documents!)
-2. THEN, respond ONLY in that SAME language AND SAME SCRIPT as the user's question
-3. IMPORTANT about Indian languages:
-   - Hinglish = Hindi written in LATIN/ROMAN script (like "kya hai", "accha hai") - respond in Latin script
-   - If user writes in Devanagari (Hindi script like क्या), respond in Devanagari
-   - NEVER respond in Gujarati, Bengali, Tamil, or other scripts unless user used them!
-4. If the user asks in English, respond in English
-5. If the user asks in German, respond in German
-6. IGNORE the language of source documents - they may be in any language
-7. TRANSLATE all information FROM documents INTO the user's question language AND script
-
-Example: "kya marketing ke baare mea hai?" - Hinglish (Latin script), respond like: "Haan, marketing ke baare mein..."
-"""
-
-    if language == "en":
-        return ""
-
-    language_name = LANGUAGE_NAMES.get(language, "English")
-    return f"""
-LANGUAGE REQUIREMENT:
-- Your response must be ENTIRELY in {language_name}
-- The source documents may be in ANY language (German, English, French, Chinese, etc.)
-- Translate and synthesize information from ALL source documents into {language_name}
-- The user's question may also be in any language - understand it and respond in {language_name}
-- Do NOT mix languages in your response - use only {language_name}
-- Technical terms and proper nouns may remain in their original form if commonly used that way
-"""
-
-
-def _parse_suggested_questions(content: str) -> Tuple[str, List[str]]:
-    """
-    Parse suggested questions from response content.
-
-    Args:
-        content: Full response content from LLM
-
-    Returns:
-        Tuple of (cleaned_content, list_of_suggested_questions)
-    """
-    suggested_questions = []
-    cleaned_content = content
-
-    # Look for SUGGESTED_QUESTIONS: line
-    if "SUGGESTED_QUESTIONS:" in content:
-        lines = content.split("\n")
-        new_lines = []
-        for line in lines:
-            if line.strip().startswith("SUGGESTED_QUESTIONS:"):
-                # Extract questions from this line
-                questions_part = line.split("SUGGESTED_QUESTIONS:", 1)[1].strip()
-                suggested_questions = [q.strip() for q in questions_part.split("|") if q.strip()]
-            else:
-                new_lines.append(line)
-        cleaned_content = "\n".join(new_lines).rstrip()
-
-    return cleaned_content, suggested_questions
+# NOTE: RAG_SYSTEM_PROMPT, RAG_PROMPT_TEMPLATE, CONVERSATIONAL_RAG_TEMPLATE,
+# LANGUAGE_NAMES, _get_language_instruction, and _parse_suggested_questions are
+# now imported from backend.services.rag_module.prompts
 
 
 # =============================================================================
@@ -992,6 +576,9 @@ class RAGService:
         limit: int = 5,
         collection_filter: Optional[str] = None,
         access_tier: int = 100,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Search documents without generating an LLM response.
@@ -1004,6 +591,9 @@ class RAGService:
             limit: Maximum number of results to return
             collection_filter: Filter by collection
             access_tier: User's access tier for RLS
+            organization_id: Organization ID for multi-tenant isolation
+            user_id: User ID for private document access
+            is_superadmin: Whether user is a superadmin (can access all private docs)
 
         Returns:
             List of document dicts with content, source, and score
@@ -1013,6 +603,7 @@ class RAGService:
             query_length=len(query),
             limit=limit,
             collection_filter=collection_filter,
+            organization_id=organization_id,
         )
 
         # Use _retrieve to get document chunks
@@ -1021,6 +612,9 @@ class RAGService:
             collection_filter=collection_filter,
             access_tier=access_tier,
             top_k=limit,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         # Format results for agent consumption
@@ -1069,6 +663,8 @@ class RAGService:
         include_subfolders: bool = True,  # Include subfolders in folder query
         language: str = "en",  # Language for response
         enhance_query: Optional[bool] = None,  # Per-query override for query enhancement (expansion + HyDE)
+        organization_id: Optional[str] = None,  # Organization ID for multi-tenant isolation
+        is_superadmin: bool = False,  # Whether user is a superadmin
     ) -> RAGResponse:
         """
         Query the RAG system.
@@ -1078,7 +674,7 @@ class RAGService:
             session_id: Session ID for conversation memory
             collection_filter: Filter by document collection
             access_tier: User's access tier for RLS
-            user_id: User ID for usage tracking
+            user_id: User ID for usage tracking and private document access
             include_collection_context: Whether to include collection tags in LLM context
             additional_context: Additional context to include (e.g., from temp documents)
             top_k: Optional override for number of documents to retrieve
@@ -1087,6 +683,8 @@ class RAGService:
             language: Language code for response (en, de, es, fr, etc.)
             enhance_query: Per-query override for query enhancement (expansion + HyDE).
                            None = use admin default, True = enable, False = disable.
+            organization_id: Organization ID for multi-tenant isolation.
+            is_superadmin: Whether user is a superadmin (can access all private docs).
 
         Returns:
             RAGResponse with answer and sources
@@ -1128,6 +726,8 @@ class RAGService:
                     folder_id=folder_id,
                     include_subfolders=include_subfolders,
                     language=language,
+                    organization_id=organization_id,
+                    is_superadmin=is_superadmin,
                 )
 
         # Check if query decomposition is enabled
@@ -1196,6 +796,9 @@ class RAGService:
                     top_k=max(top_k // len(decomposed_query.sub_queries), 3),
                     document_ids=folder_document_ids,
                     enhance_query=enhance_query,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
                 # Deduplicate by chunk_id
                 for doc in sub_docs:
@@ -1218,6 +821,9 @@ class RAGService:
                 top_k=top_k,
                 document_ids=folder_document_ids,  # Filter to folder documents
                 enhance_query=enhance_query,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
             logger.debug("Retrieved documents from vectorstore", count=len(retrieved_docs))
 
@@ -1381,6 +987,9 @@ class RAGService:
                         access_tier=access_tier,
                         top_k=top_k,
                         document_ids=document_ids,  # Maintain folder filtering if applicable
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        is_superadmin=is_superadmin,
                     )
 
                     if new_retrieved_docs and len(new_retrieved_docs) > 0:
@@ -1506,6 +1115,8 @@ class RAGService:
         include_subfolders: bool = True,  # Include subfolders in folder-scoped query
         language: str = "en",  # Language for response
         enhance_query: Optional[bool] = None,  # Per-query override for query enhancement (expansion + HyDE)
+        organization_id: Optional[str] = None,  # Organization ID for multi-tenant isolation
+        is_superadmin: bool = False,  # Whether user is a superadmin
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Query RAG with streaming response.
@@ -1515,7 +1126,7 @@ class RAGService:
             session_id: Session ID for memory
             collection_filter: Collection filter
             access_tier: User's access tier
-            user_id: User ID for usage tracking
+            user_id: User ID for usage tracking and private document access
             include_collection_context: Whether to include collection tags in LLM context
             top_k: Optional override for number of documents to retrieve
             folder_id: Optional folder ID to restrict search to
@@ -1523,6 +1134,8 @@ class RAGService:
             language: Language code for response (en, de, es, fr, etc.)
             enhance_query: Per-query override for query enhancement (expansion + HyDE).
                            None = use config default, True = enable, False = disable.
+            organization_id: Organization ID for multi-tenant isolation.
+            is_superadmin: Whether user is a superadmin (can access all private docs).
 
         Yields:
             StreamChunk objects with response parts
@@ -1578,6 +1191,9 @@ class RAGService:
             top_k=top_k,
             document_ids=document_ids,
             enhance_query=enhance_query,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         context, sources = self._format_context(retrieved_docs, include_collection_context)
@@ -1700,6 +1316,8 @@ class RAGService:
         folder_id: Optional[str] = None,
         include_subfolders: bool = True,
         language: str = "en",
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> RAGResponse:
         """
         Handle queries requiring numerical aggregation (e.g., "What is the total spending by Company A in last 4 months?").
@@ -1711,10 +1329,12 @@ class RAGService:
             session_id: Session ID for conversation memory
             collection_filter: Filter by document collection
             access_tier: User's access tier for RLS
-            user_id: User ID for usage tracking
+            user_id: User ID for usage tracking and private document access
             folder_id: Optional folder ID to scope query to
             include_subfolders: Whether to include documents from subfolders
             language: Language code for response
+            organization_id: Organization ID for multi-tenant isolation
+            is_superadmin: Whether user is a superadmin (can access all private docs)
 
         Returns:
             RAGResponse with aggregated answer and sources
@@ -1770,6 +1390,9 @@ class RAGService:
             top_k=aggregation_top_k,
             document_ids=folder_document_ids,
             enhance_query=True,  # Always enhance for aggregation
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         if not retrieved_docs:
@@ -1897,6 +1520,9 @@ class RAGService:
         top_k: Optional[int] = None,
         document_ids: Optional[List[str]] = None,
         enhance_query: Optional[bool] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve relevant documents for query.
@@ -1909,6 +1535,9 @@ class RAGService:
             document_ids: Optional list of document IDs to filter to (for folder-scoped queries)
             enhance_query: Per-query override for query enhancement (expansion + HyDE).
                            None = use config default, True = enable, False = disable.
+            organization_id: Optional organization ID for multi-tenant isolation
+            user_id: Optional user ID for private document access
+            is_superadmin: Whether user is a superadmin (can access all private docs)
 
         Returns:
             List of (document, score) tuples
@@ -1993,6 +1622,9 @@ class RAGService:
                     access_tier=access_tier,
                     top_k=top_k,
                     document_ids=document_ids,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
             elif self._vector_store is not None:
                 return await self._retrieve_with_langchain_store(
@@ -2042,6 +1674,7 @@ class RAGService:
                 vectorstore_type=type(self._custom_vectorstore).__name__ if self._custom_vectorstore else None,
                 collection_filter=collection_filter,
                 has_folder_filter=document_ids is not None,
+                organization_id=organization_id,
             )
             if self._custom_vectorstore is not None:
                 results = await self._retrieve_with_custom_store(
@@ -2050,6 +1683,9 @@ class RAGService:
                     access_tier=access_tier,
                     top_k=top_k,
                     document_ids=document_ids,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
             elif self._vector_store is not None:
                 results = await self._retrieve_with_langchain_store(
@@ -2099,6 +1735,9 @@ class RAGService:
         access_tier: int = 100,
         top_k: int = 5,
         document_ids: Optional[List[str]] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve using our custom VectorStore service.
@@ -2109,6 +1748,9 @@ class RAGService:
             access_tier: User's access tier
             top_k: Number of results
             document_ids: Optional list of document IDs to filter to (for folder-scoped queries)
+            organization_id: Optional organization ID for multi-tenant isolation
+            user_id: Optional user ID for private document access
+            is_superadmin: Whether user is a superadmin (can access all private docs)
 
         Returns:
             List of (Document, score) tuples
@@ -2296,6 +1938,9 @@ class RAGService:
                     document_ids=document_ids,
                     vector_weight=vector_weight,
                     keyword_weight=keyword_weight,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
 
             # Convert SearchResult to LangChain Document format
@@ -2344,6 +1989,10 @@ class RAGService:
                     query=query,
                     existing_results=langchain_results,
                     top_k=top_k,
+                    organization_id=organization_id,
+                    access_tier_level=access_tier,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
 
             return langchain_results
@@ -2453,6 +2102,10 @@ class RAGService:
         query: str,
         existing_results: List[Tuple[Document, float]],
         top_k: int = 5,
+        organization_id: Optional[str] = None,
+        access_tier_level: int = 100,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[Tuple[Document, float]]:
         """
         Enhance retrieval results with knowledge graph context.
@@ -2471,6 +2124,10 @@ class RAGService:
             query: Search query
             existing_results: Results from vector search
             top_k: Maximum additional chunks to add from KG
+            organization_id: Optional organization ID for multi-tenant isolation
+            access_tier_level: Maximum access tier level for filtering
+            user_id: Optional user ID for private document access
+            is_superadmin: Whether the user is a superadmin
 
         Returns:
             Merged results with KG-enhanced chunks (original + KG chunks)
@@ -2488,11 +2145,15 @@ class RAGService:
             async with async_session_context() as db:
                 kg_service = await get_knowledge_graph_service(db)
 
-                # Get graph-enhanced context
+                # Get graph-enhanced context with proper filtering
                 graph_context: GraphRAGContext = await kg_service.graph_search(
                     query=query,
                     max_hops=self._knowledge_graph_max_hops,
                     top_k=top_k,
+                    organization_id=organization_id,
+                    access_tier_level=access_tier_level,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
 
                 if not graph_context.chunks:

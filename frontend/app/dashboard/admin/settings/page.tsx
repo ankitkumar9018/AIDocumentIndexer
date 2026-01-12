@@ -45,8 +45,11 @@ import {
   Workflow,
   Play,
   Scan,
+  Volume2,
+  Mic,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   Card,
@@ -106,6 +109,11 @@ import {
   useRedisStatus,
   useCeleryStatus,
   useInvalidateRedisCache,
+  useTTSSettings,
+  useUpdateTTSSettings,
+  useCoquiModels,
+  useDownloadCoquiModel,
+  useDeleteCoquiModel,
 } from "@/lib/api/hooks";
 import type { LLMProvider, LLMProviderType, DatabaseConnectionType } from "@/lib/api/client";
 import { useUser } from "@/lib/auth";
@@ -193,6 +201,10 @@ export default function AdminSettingsPage() {
   const [deletedDocsError, setDeletedDocsError] = useState<string | null>(null);
   const [restoringDocId, setRestoringDocId] = useState<string | null>(null);
   const [hardDeletingDocId, setHardDeletingDocId] = useState<string | null>(null);
+  // Bulk selection state for deleted documents
+  const [selectedDeletedDocs, setSelectedDeletedDocs] = useState<Set<string>>(new Set());
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+  const [isBulkRestoring, setIsBulkRestoring] = useState(false);
 
   // Real API calls - only fetch when authenticated
   const { data: settingsData, isLoading: settingsLoading, error: settingsError, refetch: refetchSettings } = useSettings({ enabled: isAuthenticated });
@@ -320,6 +332,110 @@ export default function AdminSettingsPage() {
       alert(`Failed to delete: ${getErrorMessage(err)}`);
     } finally {
       setHardDeletingDocId(null);
+    }
+  };
+
+  // Bulk restore selected deleted documents
+  const handleBulkRestore = async () => {
+    if (selectedDeletedDocs.size === 0) return;
+
+    setIsBulkRestoring(true);
+    const ids = Array.from(selectedDeletedDocs);
+    let restoredCount = 0;
+    let failedCount = 0;
+
+    try {
+      const { api } = await import("@/lib/api/client");
+      for (const id of ids) {
+        try {
+          await api.restoreDeletedDocument(id);
+          restoredCount++;
+        } catch (err) {
+          console.error(`Failed to restore document ${id}:`, err);
+          failedCount++;
+        }
+      }
+
+      if (failedCount > 0) {
+        alert(`Restored ${restoredCount} documents. ${failedCount} failed.`);
+      } else {
+        alert(`Successfully restored ${restoredCount} documents.`);
+      }
+
+      // Clear selection and refresh
+      setSelectedDeletedDocs(new Set());
+      await fetchDeletedDocs(deletedDocsPage);
+      refetchDbInfo();
+    } catch (err) {
+      console.error("Bulk restore failed:", err);
+      alert(`Bulk restore failed: ${getErrorMessage(err)}`);
+    } finally {
+      setIsBulkRestoring(false);
+    }
+  };
+
+  // Bulk permanently delete selected deleted documents
+  const handleBulkPermanentDelete = async () => {
+    if (selectedDeletedDocs.size === 0) return;
+
+    if (!confirm(`Permanently delete ${selectedDeletedDocs.size} documents? This cannot be undone.`)) {
+      return;
+    }
+
+    setIsBulkDeleting(true);
+    const ids = Array.from(selectedDeletedDocs);
+    let deletedCount = 0;
+    let failedCount = 0;
+
+    try {
+      const { api } = await import("@/lib/api/client");
+      for (const id of ids) {
+        try {
+          await api.deleteDocument(id, true); // hard_delete=true
+          deletedCount++;
+        } catch (err) {
+          console.error(`Failed to permanently delete document ${id}:`, err);
+          failedCount++;
+        }
+      }
+
+      if (failedCount > 0) {
+        alert(`Permanently deleted ${deletedCount} documents. ${failedCount} failed.`);
+      } else {
+        alert(`Successfully permanently deleted ${deletedCount} documents.`);
+      }
+
+      // Clear selection and refresh
+      setSelectedDeletedDocs(new Set());
+      await fetchDeletedDocs(deletedDocsPage);
+      refetchDbInfo();
+    } catch (err) {
+      console.error("Bulk delete failed:", err);
+      alert(`Bulk delete failed: ${getErrorMessage(err)}`);
+    } finally {
+      setIsBulkDeleting(false);
+    }
+  };
+
+  // Toggle selection of a deleted document
+  const toggleDeletedDocSelection = (docId: string) => {
+    setSelectedDeletedDocs(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(docId)) {
+        newSet.delete(docId);
+      } else {
+        newSet.add(docId);
+      }
+      return newSet;
+    });
+  };
+
+  // Toggle select all deleted documents
+  const toggleSelectAllDeletedDocs = () => {
+    if (selectedDeletedDocs.size === deletedDocs.length && deletedDocs.length > 0) {
+      setSelectedDeletedDocs(new Set());
+    } else {
+      setSelectedDeletedDocs(new Set(deletedDocs.map(d => d.id)));
     }
   };
 
@@ -789,6 +905,10 @@ export default function AdminSettingsPage() {
           <TabsTrigger value="ocr" className="flex items-center gap-2">
             <Scan className="h-4 w-4" />
             OCR Configuration
+          </TabsTrigger>
+          <TabsTrigger value="models" className="flex items-center gap-2">
+            <Cog className="h-4 w-4" />
+            Model Configuration
           </TabsTrigger>
           <TabsTrigger value="jobqueue" className="flex items-center gap-2">
             <Workflow className="h-4 w-4" />
@@ -1874,9 +1994,43 @@ VECTOR_STORE_BACKEND=auto`}
               )}
 
               {deletedDocsTotal > 0 && (
-                <p className="text-sm font-medium">
-                  {deletedDocsTotal} deleted document{deletedDocsTotal !== 1 ? "s" : ""} found
-                </p>
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium">
+                    {deletedDocsTotal} deleted document{deletedDocsTotal !== 1 ? "s" : ""} found
+                  </p>
+                  {/* Bulk action bar - shown when items are selected */}
+                  {selectedDeletedDocs.size > 0 && (
+                    <div className="flex items-center gap-2 p-2 bg-muted rounded-md">
+                      <span className="text-sm font-medium">{selectedDeletedDocs.size} selected</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleBulkRestore}
+                        disabled={isBulkRestoring || isBulkDeleting}
+                      >
+                        {isBulkRestoring ? (
+                          <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                        ) : (
+                          <RotateCcw className="h-4 w-4 mr-1" />
+                        )}
+                        Restore Selected
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={handleBulkPermanentDelete}
+                        disabled={isBulkRestoring || isBulkDeleting}
+                      >
+                        {isBulkDeleting ? (
+                          <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4 mr-1" />
+                        )}
+                        Delete Selected
+                      </Button>
+                    </div>
+                  )}
+                </div>
               )}
 
               {deletedDocsLoading ? (
@@ -1885,24 +2039,46 @@ VECTOR_STORE_BACKEND=auto`}
                 </div>
               ) : deletedDocs.length > 0 ? (
                 <div className="space-y-2">
+                  {/* Select all header */}
+                  <div className="flex items-center gap-2 p-2 border-b">
+                    <Checkbox
+                      checked={selectedDeletedDocs.size === deletedDocs.length && deletedDocs.length > 0}
+                      onCheckedChange={toggleSelectAllDeletedDocs}
+                      disabled={isBulkRestoring || isBulkDeleting}
+                    />
+                    <span className="text-sm text-muted-foreground">
+                      {selectedDeletedDocs.size === deletedDocs.length && deletedDocs.length > 0
+                        ? "Deselect all"
+                        : "Select all"}
+                    </span>
+                  </div>
                   {deletedDocs.map((doc) => (
                     <div
                       key={doc.id}
-                      className="flex items-center justify-between p-3 rounded-lg border bg-muted/50"
+                      className={`flex items-center justify-between p-3 rounded-lg border ${
+                        selectedDeletedDocs.has(doc.id) ? "bg-primary/5 border-primary/50" : "bg-muted/50"
+                      }`}
                     >
-                      <div className="flex flex-col min-w-0 flex-1">
-                        <span className="font-medium truncate">{doc.name}</span>
-                        <span className="text-xs text-muted-foreground">
-                          {doc.file_type} • {(doc.file_size / 1024).toFixed(1)} KB
-                          {doc.deleted_at && ` • Deleted: ${new Date(doc.deleted_at).toLocaleDateString()}`}
-                        </span>
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <Checkbox
+                          checked={selectedDeletedDocs.has(doc.id)}
+                          onCheckedChange={() => toggleDeletedDocSelection(doc.id)}
+                          disabled={isBulkRestoring || isBulkDeleting || restoringDocId === doc.id || hardDeletingDocId === doc.id}
+                        />
+                        <div className="flex flex-col min-w-0 flex-1">
+                          <span className="font-medium truncate">{doc.name}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {doc.file_type} • {(doc.file_size / 1024).toFixed(1)} KB
+                            {doc.deleted_at && ` • Deleted: ${new Date(doc.deleted_at).toLocaleDateString()}`}
+                          </span>
+                        </div>
                       </div>
                       <div className="flex items-center gap-2 ml-2">
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={() => handleRestoreDocument(doc.id)}
-                          disabled={restoringDocId === doc.id || hardDeletingDocId === doc.id}
+                          disabled={restoringDocId === doc.id || hardDeletingDocId === doc.id || isBulkRestoring || isBulkDeleting}
                         >
                           {restoringDocId === doc.id ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -1917,7 +2093,7 @@ VECTOR_STORE_BACKEND=auto`}
                           variant="destructive"
                           size="sm"
                           onClick={() => handleHardDeleteDocument(doc.id, doc.name)}
-                          disabled={restoringDocId === doc.id || hardDeletingDocId === doc.id}
+                          disabled={restoringDocId === doc.id || hardDeletingDocId === doc.id || isBulkRestoring || isBulkDeleting}
                         >
                           {hardDeletingDocId === doc.id ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -2810,9 +2986,6 @@ VECTOR_STORE_BACKEND=auto`}
             </div>
             </CardContent>
           </Card>
-
-          {/* Operation-Level LLM Configuration Card - Also in Notifications for cost alerts */}
-          <OperationLevelConfigCard providers={providersData?.providers || []} />
         </TabsContent>
 
         {/* Analytics Tab */}
@@ -3127,6 +3300,11 @@ VECTOR_STORE_BACKEND=auto`}
           )}
         </TabsContent>
 
+        {/* Model Configuration Tab */}
+        <TabsContent value="models" className="space-y-6">
+          <ModelConfigurationSection providers={providersData?.providers || []} />
+        </TabsContent>
+
         {/* Job Queue Tab */}
         <TabsContent value="jobqueue" className="space-y-6">
           <JobQueueSettings
@@ -3172,6 +3350,8 @@ const OPERATION_ICONS: Record<string, React.ReactNode> = {
   web_scraping: <Globe className="h-4 w-4" />,
   agent_planning: <Workflow className="h-4 w-4" />,
   agent_execution: <Play className="h-4 w-4" />,
+  audio_script: <Volume2 className="h-4 w-4" />,
+  knowledge_graph: <Scan className="h-4 w-4" />,
 };
 
 const OPERATION_LABELS: Record<string, string> = {
@@ -3187,6 +3367,8 @@ const OPERATION_LABELS: Record<string, string> = {
   web_scraping: "Web Scraping",
   agent_planning: "Agent Planning",
   agent_execution: "Agent Execution",
+  audio_script: "Audio Script Generation",
+  knowledge_graph: "Knowledge Graph",
 };
 
 function OperationLevelConfigCard({ providers }: { providers: LLMProvider[] }) {
@@ -4091,5 +4273,278 @@ function JobQueueSettings({
         </CardContent>
       </Card>
     </>
+  );
+}
+
+// =============================================================================
+// Model Configuration Section
+// =============================================================================
+
+function ModelConfigurationSection({ providers }: { providers: LLMProvider[] }) {
+  const [activeTab, setActiveTab] = useState<"llm" | "tts">("llm");
+
+  return (
+    <div className="space-y-6">
+      {/* Sub-tabs for LLM Config and TTS */}
+      <div className="flex gap-2 border-b pb-2">
+        <Button
+          variant={activeTab === "llm" ? "default" : "ghost"}
+          size="sm"
+          onClick={() => setActiveTab("llm")}
+          className="flex items-center gap-2"
+        >
+          <MessageSquare className="h-4 w-4" />
+          LLM Configuration
+        </Button>
+        <Button
+          variant={activeTab === "tts" ? "default" : "ghost"}
+          size="sm"
+          onClick={() => setActiveTab("tts")}
+          className="flex items-center gap-2"
+        >
+          <Volume2 className="h-4 w-4" />
+          Text-to-Speech
+        </Button>
+      </div>
+
+      {activeTab === "llm" && (
+        <OperationLevelConfigCard providers={providers} />
+      )}
+
+      {activeTab === "tts" && (
+        <TTSConfigurationSection />
+      )}
+    </div>
+  );
+}
+
+// TTS Configuration Section with default provider and Coqui model management
+function TTSConfigurationSection() {
+  const { data: ttsSettings, isLoading: settingsLoading } = useTTSSettings();
+  const { data: coquiModels, isLoading: modelsLoading } = useCoquiModels();
+  const updateSettings = useUpdateTTSSettings();
+  const downloadModel = useDownloadCoquiModel();
+  const deleteModel = useDeleteCoquiModel();
+
+  const [selectedProvider, setSelectedProvider] = useState<string>("");
+  const [downloadingModel, setDownloadingModel] = useState<string | null>(null);
+  const [deletingModel, setDeletingModel] = useState<string | null>(null);
+
+  // Update selected provider when settings load
+  useEffect(() => {
+    if (ttsSettings?.default_provider && !selectedProvider) {
+      setSelectedProvider(ttsSettings.default_provider);
+    }
+  }, [ttsSettings, selectedProvider]);
+
+  const handleProviderChange = async (provider: string) => {
+    setSelectedProvider(provider);
+    try {
+      await updateSettings.mutateAsync(provider);
+    } catch (error) {
+      console.error("Failed to update TTS provider:", error);
+    }
+  };
+
+  const handleDownloadModel = async (modelName: string) => {
+    setDownloadingModel(modelName);
+    try {
+      await downloadModel.mutateAsync(modelName);
+    } catch (error) {
+      console.error("Failed to download model:", error);
+    } finally {
+      setDownloadingModel(null);
+    }
+  };
+
+  const handleDeleteModel = async (modelName: string) => {
+    setDeletingModel(modelName);
+    try {
+      await deleteModel.mutateAsync(modelName);
+    } catch (error) {
+      console.error("Failed to delete model:", error);
+    } finally {
+      setDeletingModel(null);
+    }
+  };
+
+  if (settingsLoading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Default TTS Provider */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Mic className="h-5 w-5" />
+            Default TTS Provider
+          </CardTitle>
+          <CardDescription>
+            Select the default text-to-speech provider for audio overview generation
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Provider</Label>
+            <Select
+              value={selectedProvider}
+              onValueChange={handleProviderChange}
+              disabled={updateSettings.isPending}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select a TTS provider" />
+              </SelectTrigger>
+              <SelectContent>
+                {ttsSettings?.available_providers?.map((provider) => (
+                  <SelectItem key={provider.id} value={provider.id}>
+                    <div className="flex items-center gap-2">
+                      <span>{provider.name}</span>
+                      {!provider.requires_api_key && (
+                        <Badge variant="secondary" className="text-xs">Free</Badge>
+                      )}
+                      {!provider.is_available && (
+                        <Badge variant="destructive" className="text-xs">Unavailable</Badge>
+                      )}
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Provider Info */}
+          {selectedProvider && ttsSettings?.available_providers && (
+            <div className="p-3 rounded-lg bg-muted/50 space-y-2">
+              {(() => {
+                const provider = ttsSettings.available_providers.find(p => p.id === selectedProvider);
+                if (!provider) return null;
+                return (
+                  <>
+                    <p className="text-sm">{provider.description}</p>
+                    <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                      <span>Cost: {provider.cost}</span>
+                      {provider.requires_api_key && (
+                        <span className="flex items-center gap-1">
+                          <Key className="h-3 w-3" />
+                          API Key Required
+                        </span>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
+          {updateSettings.isPending && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Saving...
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Coqui TTS Model Management - only show if Coqui is available */}
+      {ttsSettings?.available_providers?.find(p => p.id === "coqui")?.is_available && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <HardDrive className="h-5 w-5" />
+              Coqui TTS Models
+            </CardTitle>
+            <CardDescription>
+              Manage locally installed Coqui TTS models for offline text-to-speech
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {modelsLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : coquiModels && coquiModels.length > 0 ? (
+              <div className="space-y-3">
+                {coquiModels.map((model) => (
+                  <div
+                    key={model.name}
+                    className="flex items-center justify-between p-3 rounded-lg border"
+                  >
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium">{model.name}</p>
+                        <Badge variant={model.is_installed ? "default" : "secondary"}>
+                          {model.is_installed ? "Installed" : "Available"}
+                        </Badge>
+                        <Badge variant="outline">{model.language}</Badge>
+                      </div>
+                      <p className="text-sm text-muted-foreground">{model.description}</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Size: {model.size_mb} MB
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {model.is_installed ? (
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => handleDeleteModel(model.name)}
+                          disabled={deletingModel === model.name}
+                        >
+                          {deletingModel === model.name ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-4 w-4" />
+                          )}
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleDownloadModel(model.name)}
+                          disabled={downloadingModel === model.name}
+                        >
+                          {downloadingModel === model.name ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="h-4 w-4" />
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-muted-foreground">
+                <p>No Coqui models available</p>
+                <p className="text-sm mt-1">
+                  Install Coqui TTS to enable local text-to-speech models
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Info about TTS options */}
+      <Alert>
+        <Volume2 className="h-4 w-4" />
+        <AlertDescription>
+          <strong>TTS Provider Options:</strong>
+          <ul className="mt-2 space-y-1 text-sm list-disc list-inside">
+            <li><strong>Edge TTS</strong> - Free Microsoft voices, no API key required</li>
+            <li><strong>OpenAI TTS</strong> - High quality, requires API key</li>
+            <li><strong>ElevenLabs</strong> - Premium realistic voices, requires API key</li>
+            <li><strong>Coqui TTS</strong> - Local/offline, requires GPU for best performance</li>
+          </ul>
+        </AlertDescription>
+      </Alert>
+    </div>
   );
 }
