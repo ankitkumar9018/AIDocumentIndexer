@@ -1,0 +1,16 @@
+{
+  "id": "docx-technical-report",
+  "name": "Technical Report",
+  "description": "Technical documentation and report template",
+  "category": "reports",
+  "file_type": "docx",
+  "tags": [
+    "technical",
+    "documentation",
+    "engineering",
+    "formal"
+  ],
+  "primary_color": "#0F766E",
+  "style": "technical",
+  "tone": "formal"
+}

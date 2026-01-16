@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useSession } from "next-auth/react";
+import dynamic from "next/dynamic";
 import {
   Network,
   Search,
@@ -24,7 +25,22 @@ import {
   X,
   Sparkles,
   Trash2,
+  Box,
+  Square,
 } from "lucide-react";
+
+// Dynamically import WebGL graph to avoid SSR issues
+const WebGLGraph = dynamic(
+  () => import("@/components/knowledge-graph/WebGLGraph"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center h-full">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    ),
+  }
+);
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -482,6 +498,7 @@ export default function KnowledgeGraphPage() {
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
+  const [use3DView, setUse3DView] = useState(false); // Toggle between 2D canvas and 3D WebGL
 
   // Queries
   const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useKnowledgeGraphStats({
@@ -860,9 +877,32 @@ export default function KnowledgeGraphPage() {
                     </span>
                   )}
                 </CardTitle>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Info className="h-3 w-3" />
-                  <span>Click nodes to view details. Drag to pan.</span>
+                <div className="flex items-center gap-4">
+                  {/* 2D/3D Toggle */}
+                  <div className="flex items-center gap-1 border rounded-lg p-0.5">
+                    <Button
+                      variant={!use3DView ? "secondary" : "ghost"}
+                      size="sm"
+                      className="h-7 px-2 gap-1"
+                      onClick={() => setUse3DView(false)}
+                    >
+                      <Square className="h-3 w-3" />
+                      <span className="text-xs">2D</span>
+                    </Button>
+                    <Button
+                      variant={use3DView ? "secondary" : "ghost"}
+                      size="sm"
+                      className="h-7 px-2 gap-1"
+                      onClick={() => setUse3DView(true)}
+                    >
+                      <Box className="h-3 w-3" />
+                      <span className="text-xs">3D</span>
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Info className="h-3 w-3" />
+                    <span>{use3DView ? "Drag to rotate. Scroll to zoom." : "Click nodes to view details. Drag to pan."}</span>
+                  </div>
                 </div>
               </div>
             </CardHeader>
@@ -872,12 +912,22 @@ export default function KnowledgeGraphPage() {
                   <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
                 </div>
               ) : graphData && graphData.nodes.length > 0 ? (
-                <GraphVisualization
-                  nodes={graphData.nodes}
-                  edges={graphData.edges}
-                  onNodeClick={handleNodeClick}
-                  selectedNodeId={selectedEntityId}
-                />
+                use3DView ? (
+                  <WebGLGraph
+                    nodes={graphData.nodes}
+                    edges={graphData.edges}
+                    onNodeClick={handleNodeClick}
+                    selectedNodeId={selectedEntityId}
+                    height={500}
+                  />
+                ) : (
+                  <GraphVisualization
+                    nodes={graphData.nodes}
+                    edges={graphData.edges}
+                    onNodeClick={handleNodeClick}
+                    selectedNodeId={selectedEntityId}
+                  />
+                )
               ) : (
                 <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
                   <Network className="h-12 w-12 mb-4 opacity-50" />

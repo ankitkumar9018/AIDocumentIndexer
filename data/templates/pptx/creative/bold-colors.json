@@ -1,0 +1,19 @@
+{
+  "id": "creative-bold-colors",
+  "name": "Bold Colors",
+  "description": "Vibrant, attention-grabbing design with bold colors",
+  "category": "creative",
+  "file_type": "pptx",
+  "tags": [
+    "bold",
+    "colorful",
+    "vibrant",
+    "creative"
+  ],
+  "primary_color": "#DC2626",
+  "style": "bold",
+  "tone": "casual",
+  "recommended_slides": 8,
+  "max_bullet_chars": 60,
+  "supports_images": true
+}

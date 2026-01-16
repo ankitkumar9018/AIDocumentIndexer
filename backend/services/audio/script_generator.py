@@ -410,39 +410,64 @@ Return a JSON object with this structure:
 CRITICAL - MAKE IT SOUND HUMAN, NOT ROBOTIC:
 The dialogue MUST sound like real people talking, not a scripted presentation. Include:
 
-1. FILLER WORDS (use in ~30% of turns): "um", "uh", "like", "you know", "actually", "basically", "I mean"
+1. FILLER WORDS (use in ~40% of turns): "um", "uh", "like", "you know", "actually", "basically", "I mean", "kind of", "sort of"
    Example: "So, um, the interesting thing here is..." NOT "The interesting thing here is..."
 
-2. REACTIONS AND INTERJECTIONS (use in ~40% of turns):
-   - Agreement: "Yeah", "Right, right", "Mm-hmm", "Exactly", "Totally"
-   - Surprise: "Oh!", "Wow", "Wait, really?", "No way!", "Huh"
-   - Thinking: "Hmm...", "Let me think...", "So...", "Well..."
-   - Amusement: "Ha!", "Ha ha", "That's funny", "Heh"
+2. REACTIONS AND INTERJECTIONS (use in ~50% of turns):
+   - Agreement: "Yeah", "Right, right", "Mm-hmm", "Exactly", "Totally", "Oh for sure", "Absolutely"
+   - Surprise: "Oh!", "Wow", "Wait, really?", "No way!", "Huh", "Whoa", "Oh my gosh"
+   - Thinking: "Hmm...", "Let me think...", "So...", "Well...", "I wonder..."
+   - Amusement: "Ha!", "Ha ha", "That's funny", "Heh", "Oh man"
+   - Skepticism: "I don't know about that...", "Really though?", "Hmm, interesting..."
 
-3. NATURAL PAUSES using "..." (use frequently):
+3. NATURAL PAUSES using "..." (use VERY frequently - almost every turn):
    Example: "So... I was reading this and... honestly, it blew my mind."
+   Use pauses mid-thought: "The thing is... when you really think about it..."
 
-4. INCOMPLETE THOUGHTS AND INTERRUPTIONS:
+4. INCOMPLETE THOUGHTS AND SELF-CORRECTIONS:
    Example: "And the thing is— well, actually, let me back up a second."
+   Example: "It's like... no wait, that's not quite right. What I mean is..."
 
-5. CASUAL PHRASES:
+5. CASUAL CONVERSATIONAL STARTERS:
    - "Here's the thing..."
    - "You know what's crazy?"
    - "I gotta say..."
    - "Okay, so..."
    - "The way I see it..."
+   - "Can I just say..."
+   - "This is where it gets interesting..."
+   - "So get this..."
+
+6. VERBAL ACKNOWLEDGMENTS when listening:
+   - "Mm-hmm", "Right", "Yeah yeah", "Okay", "Got it", "I see"
+   - Use short responses before longer ones: "Yeah, yeah, and that's exactly why..."
+
+7. NATURAL SPEECH PATTERNS:
+   - Vary sentence length dramatically (mix very short with longer)
+   - Use contractions always: "don't", "can't", "it's", "that's", "I'm"
+   - Repeat words for emphasis: "It's really, really important"
+   - Trail off sometimes: "And then the whole thing just..."
+   - Ask rhetorical questions: "Right?", "You know?", "Isn't that wild?"
+
+8. EMOTIONAL VARIATION - vary emotions throughout:
+   - excited, curious, thoughtful, surprised, amused, skeptical, impressed, confused, confident
 
 BAD EXAMPLE (too robotic):
 "The document discusses three main points. First, we have the introduction. Second, there is the methodology."
 
 GOOD EXAMPLE (natural):
-"Okay so... the document, um, it covers like three big things. And honestly? The first one really caught my attention. So basically..."
+"Okay so... the document, um, it covers like three big things. And honestly? The first one really caught my attention. So basically... wait, let me back up. You know what's funny is..."
+
+ANOTHER GOOD EXAMPLE:
+"Yeah yeah, and— oh this is the good part— so they found that... get this... the numbers were completely off. Like, not even close!"
 
 NEVER USE:
 - Bracketed actions like [laughs], [chuckles], [sighs] - TTS reads these literally as words!
 - Formal academic language
 - Perfect grammar in every sentence
-- Robotic transitions like "Moving on to the next point"
+- Robotic transitions like "Moving on to the next point" or "Let's discuss"
+- Overly polished, rehearsed-sounding phrases
+- Starting every response the same way
 """
 
         if custom_instructions:
@@ -585,15 +610,23 @@ For each turn, respond with JSON:
 {{"speaker": "host1", "text": "So, um, here's the thing...", "emotion": "curious", "continue": true}}
 
 CRITICAL - SOUND HUMAN, NOT ROBOTIC:
-1. Use filler words (~30% of turns): "um", "uh", "like", "you know", "actually"
-2. Start with reactions (~40% of turns): "Yeah", "Oh!", "Hmm...", "Right, right", "Ha!"
-3. Use "..." for natural pauses: "So... I was thinking..."
-4. Sound casual: "Here's the thing...", "Okay so...", "I gotta say..."
+1. Use filler words (~40% of turns): "um", "uh", "like", "you know", "actually", "kind of", "basically"
+2. Start with reactions (~50% of turns): "Yeah", "Oh!", "Hmm...", "Right, right", "Ha!", "Whoa", "Okay so"
+3. Use "..." for natural pauses FREQUENTLY: "So... I was thinking...", "The thing is... when you..."
+4. Sound casual and conversational: "Here's the thing...", "Okay so...", "I gotta say...", "Can I just say..."
+5. Use verbal acknowledgments: "Mm-hmm", "Yeah yeah", "Right", "Got it"
+6. Vary emotions: excited, curious, thoughtful, surprised, amused, skeptical, impressed
+7. Mix short and long responses. Use rhetorical questions: "Right?", "You know?"
+8. Self-correct sometimes: "It's like... no wait, what I mean is..."
 
 EXAMPLE of natural turn:
-{{"speaker": "host1", "text": "Yeah, so... the interesting thing is, um, when you look at this closely... it's actually pretty wild.", "emotion": "curious", "continue": true}}
+{{"speaker": "host1", "text": "Yeah, so... the interesting thing is, um, when you look at this closely... it's actually pretty wild. Like, not what you'd expect at all.", "emotion": "curious", "continue": true}}
+
+ANOTHER EXAMPLE:
+{{"speaker": "host2", "text": "Oh wow, really? That's— wait, so you're saying the whole thing was just... off?", "emotion": "surprised", "continue": true}}
 
 NEVER USE: [laughs], [sighs], or any bracketed actions - TTS reads them as words!
+NEVER start every turn the same way. Vary your openings!
 
 Set "continue" to false when approaching the end.
 {custom_instructions or ""}

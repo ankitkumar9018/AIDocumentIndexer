@@ -699,6 +699,61 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         description="Chart image resolution (DPI) - higher = larger file size (100-300)"
     ),
 
+    # Quality Review Settings
+    SettingDefinition(
+        key="generation.enable_quality_review",
+        category=SettingCategory.GENERATION,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable LLM-based content review before rendering. Reviews slide/page content for issues like text overflow, incomplete bullets, and formatting problems."
+    ),
+    SettingDefinition(
+        key="generation.min_quality_score",
+        category=SettingCategory.GENERATION,
+        default_value=0.7,
+        value_type=ValueType.NUMBER,
+        description="Minimum quality score threshold (0.0-1.0). Content below this score triggers auto-fix attempts."
+    ),
+
+    # Vision-Based Review Settings (PPTX)
+    SettingDefinition(
+        key="generation.enable_vision_review",
+        category=SettingCategory.GENERATION,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable vision-based slide review for PPTX. Renders slides to images and uses vision LLM to detect visual issues like text overflow, poor contrast, or layout problems. Resource-intensive - requires LibreOffice for rendering."
+    ),
+    SettingDefinition(
+        key="generation.vision_review_model",
+        category=SettingCategory.GENERATION,
+        default_value="auto",
+        value_type=ValueType.STRING,
+        description="Vision model for slide review (auto, claude-3-sonnet, gpt-4-vision, ollama-llava). 'auto' uses the configured vision provider from RAG settings."
+    ),
+    SettingDefinition(
+        key="generation.vision_review_all_slides",
+        category=SettingCategory.GENERATION,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Review all slides with vision model. When false, only reviews content slides (skips title, TOC, sources). Enable for thorough review at higher cost."
+    ),
+
+    # LLM Rewrite Settings
+    SettingDefinition(
+        key="generation.enable_llm_rewrite",
+        category=SettingCategory.GENERATION,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Use LLM to intelligently rewrite text that exceeds slide/page constraints, preserving key insights. When disabled, uses simple truncation."
+    ),
+    SettingDefinition(
+        key="generation.llm_rewrite_model",
+        category=SettingCategory.GENERATION,
+        default_value="auto",
+        value_type=ValueType.STRING,
+        description="LLM model for content rewriting (auto, gpt-4o-mini, claude-3-haiku). 'auto' uses a fast model for quick rewrites."
+    ),
+
     # ==========================================================================
     # Web Scraping Configuration
     # ==========================================================================

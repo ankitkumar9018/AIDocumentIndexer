@@ -1,0 +1,19 @@
+{
+  "id": "creative-geometric",
+  "name": "Geometric",
+  "description": "Modern geometric shapes and teal color scheme",
+  "category": "creative",
+  "file_type": "pptx",
+  "tags": [
+    "geometric",
+    "shapes",
+    "modern",
+    "teal"
+  ],
+  "primary_color": "#0D9488",
+  "style": "geometric",
+  "tone": "modern",
+  "recommended_slides": 10,
+  "max_bullet_chars": 65,
+  "supports_images": true
+}

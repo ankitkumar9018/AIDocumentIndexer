@@ -1,0 +1,167 @@
+/* Modern/Tech PDF Stylesheet */
+/* For use with WeasyPrint + Jinja2 */
+
+:root {
+    --primary-color: #10B981;
+    --secondary-color: #059669;
+    --text-color: #111827;
+    --background-color: #FFFFFF;
+    --accent-color: #3B82F6;
+    --border-color: #D1D5DB;
+    --dark-bg: #1F2937;
+}
+
+@page {
+    size: A4;
+    margin: 0.75in;
+
+    @top-right {
+        content: element(header);
+    }
+
+    @bottom-right {
+        content: "Page " counter(page);
+        font-size: 9pt;
+        color: #6B7280;
+    }
+}
+
+/* Typography - Modern sans-serif */
+body {
+    font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.6;
+    color: var(--text-color);
+}
+
+h1 {
+    font-size: 28pt;
+    font-weight: 700;
+    color: var(--dark-bg);
+    margin-bottom: 0.4in;
+    letter-spacing: -0.02em;
+}
+
+h2 {
+    font-size: 20pt;
+    font-weight: 600;
+    color: var(--primary-color);
+    margin-top: 0.4in;
+    margin-bottom: 0.2in;
+}
+
+h3 {
+    font-size: 14pt;
+    font-weight: 600;
+    color: var(--dark-bg);
+    margin-top: 0.25in;
+}
+
+p {
+    margin-bottom: 0.12in;
+}
+
+/* Code blocks */
+code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 9pt;
+    background-color: #F3F4F6;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+pre {
+    background-color: var(--dark-bg);
+    color: #F9FAFB;
+    padding: 0.2in;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 9pt;
+}
+
+pre code {
+    background: none;
+    padding: 0;
+}
+
+/* Tables - Modern flat design */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.2in 0;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+th {
+    background-color: var(--dark-bg);
+    color: white;
+    font-weight: 600;
+    text-align: left;
+    padding: 0.12in 0.15in;
+}
+
+td {
+    padding: 0.1in 0.15in;
+    border-bottom: 1px solid var(--border-color);
+}
+
+/* Cards */
+.card {
+    background: white;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 0.2in;
+    margin: 0.15in 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* Badges */
+.badge {
+    display: inline-block;
+    background-color: var(--primary-color);
+    color: white;
+    font-size: 8pt;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    text-transform: uppercase;
+}
+
+/* Metrics/KPIs */
+.metric {
+    text-align: center;
+    padding: 0.2in;
+}
+
+.metric-value {
+    font-size: 32pt;
+    font-weight: 700;
+    color: var(--primary-color);
+}
+
+.metric-label {
+    font-size: 10pt;
+    color: #6B7280;
+    text-transform: uppercase;
+}
+
+/* Title page - Modern */
+.title-page {
+    page-break-after: always;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-height: 100%;
+}
+
+.title-page h1 {
+    font-size: 42pt;
+    margin-bottom: 0.3in;
+}
+
+.title-page .subtitle {
+    font-size: 16pt;
+    color: var(--primary-color);
+    font-weight: 500;
+}

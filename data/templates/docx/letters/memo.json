@@ -1,0 +1,16 @@
+{
+  "id": "docx-memo",
+  "name": "Memo",
+  "description": "Internal memo template for office communication",
+  "category": "letters",
+  "file_type": "docx",
+  "tags": [
+    "memo",
+    "internal",
+    "communication",
+    "office"
+  ],
+  "primary_color": "#475569",
+  "style": "minimal",
+  "tone": "professional"
+}

@@ -1,0 +1,19 @@
+{
+  "id": "corporate-gradient-modern",
+  "name": "Gradient Modern",
+  "description": "Contemporary design with gradient accents",
+  "category": "corporate",
+  "file_type": "pptx",
+  "tags": [
+    "gradient",
+    "modern",
+    "colorful",
+    "contemporary"
+  ],
+  "primary_color": "#7C3AED",
+  "style": "modern",
+  "tone": "professional",
+  "recommended_slides": 10,
+  "max_bullet_chars": 70,
+  "supports_images": true
+}

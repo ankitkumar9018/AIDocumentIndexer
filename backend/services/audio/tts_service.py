@@ -298,20 +298,49 @@ class EdgeTTSProvider(BaseTTSProvider):
         text = re.sub(r'\[coughs?\]', 'Ahem ahem.', text, flags=re.IGNORECASE)
         text = re.sub(r'\[pauses?\]', '...', text, flags=re.IGNORECASE)
         text = re.sub(r'\[thinks?\]', 'Hmm...', text, flags=re.IGNORECASE)
+        text = re.sub(r'\[surprised\]', 'Oh!', text, flags=re.IGNORECASE)
+        text = re.sub(r'\[excited\]', '', text, flags=re.IGNORECASE)
 
         # Remove any remaining bracketed actions
         text = re.sub(r'\[[^\]]+\]', '', text)
 
-        # Add natural pauses after certain phrases
-        text = re.sub(r'(Well,)', r'\1 ...', text)
-        text = re.sub(r'(You know,)', r'\1 ...', text)
-        text = re.sub(r'(I mean,)', r'\1 ...', text)
-        text = re.sub(r'(So,)', r'\1 ...', text)
+        # Add natural pauses after certain conversational phrases (if not already paused)
+        pause_phrases = [
+            (r'(Well,)(?!\s*\.\.\.)', r'\1 ...'),
+            (r'(You know,)(?!\s*\.\.\.)', r'\1 ...'),
+            (r'(I mean,)(?!\s*\.\.\.)', r'\1 ...'),
+            (r'(So,)(?!\s*\.\.\.)', r'\1 ...'),
+            (r'(Actually,)(?!\s*\.\.\.)', r'\1 ...'),
+            (r'(Honestly,)(?!\s*\.\.\.)', r'\1 ...'),
+            (r'(Like,)(?!\s*\.\.\.)', r'\1 ...'),
+            (r'(Okay so,)(?!\s*\.\.\.)', r'\1 ...'),
+            (r"(Here's the thing,)(?!\s*\.\.\.)", r'\1 ...'),
+            (r'(But then,)(?!\s*\.\.\.)', r'\1 ...'),
+        ]
+        for pattern, replacement in pause_phrases:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
 
-        # Clean up extra spaces
+        # Add micro-pauses before important words for emphasis (using commas)
+        # "it's really important" -> "it's, really important"
+        text = re.sub(r'\b(really|very|actually|literally|absolutely|definitely)\b', r', \1', text, count=1)
+
+        # Ensure em-dashes create a pause effect
+        text = re.sub(r'—', '... ', text)
+        text = re.sub(r'–', '... ', text)
+
+        # Convert multiple periods to proper pause
+        text = re.sub(r'\.{2,}', '...', text)
+
+        # Add slight pause before rhetorical questions
+        text = re.sub(r'(\?\s*)(Right\?|You know\?|Isn\'t that|Aren\'t they)', r'\1 ... \2', text)
+
+        # Clean up extra spaces but preserve pause markers
         text = re.sub(r'\s+', ' ', text).strip()
+        # Ensure pauses have proper spacing
+        text = re.sub(r'\s*\.\.\.\s*', ' ... ', text)
+        text = re.sub(r'^\s*\.\.\.\s*', '... ', text)
 
-        return text
+        return text.strip()
 
     def _get_speech_params_from_emotion(self, emotion: str | None, text: str) -> tuple[str, str]:
         """Get rate and pitch adjustments based on emotion and text content."""
@@ -319,27 +348,45 @@ class EdgeTTSProvider(BaseTTSProvider):
         rate_adjust = 0
         pitch_adjust = 0
 
-        # Adjust based on emotion
+        # Adjust based on emotion - expanded for more natural variation
         if emotion:
             emotion_lower = emotion.lower()
             if emotion_lower in ("excited", "enthusiastic", "energetic"):
-                rate_adjust = 8  # Slightly faster
-                pitch_adjust = 5  # Higher pitch
+                rate_adjust = 10  # Faster, more energy
+                pitch_adjust = 6  # Higher pitch
             elif emotion_lower in ("curious", "interested", "intrigued"):
                 rate_adjust = -3  # Slightly slower
-                pitch_adjust = 3
+                pitch_adjust = 4  # Slightly higher (questioning tone)
             elif emotion_lower in ("thoughtful", "contemplative", "reflective"):
-                rate_adjust = -8  # Slower, more measured
-                pitch_adjust = -2
+                rate_adjust = -10  # Slower, more measured
+                pitch_adjust = -3
             elif emotion_lower in ("surprised", "amazed", "shocked"):
                 rate_adjust = 5
-                pitch_adjust = 8
+                pitch_adjust = 10  # Much higher for surprise
             elif emotion_lower in ("funny", "amused", "playful"):
-                rate_adjust = 3
-                pitch_adjust = 4
+                rate_adjust = 5
+                pitch_adjust = 5
             elif emotion_lower in ("serious", "concerned", "worried"):
+                rate_adjust = -6
+                pitch_adjust = -4
+            elif emotion_lower in ("skeptical", "doubtful", "uncertain"):
+                rate_adjust = -4
+                pitch_adjust = 2  # Slight rise for questioning
+            elif emotion_lower in ("impressed", "admiring"):
+                rate_adjust = -2
+                pitch_adjust = 3
+            elif emotion_lower in ("confident", "assertive"):
+                rate_adjust = 2
+                pitch_adjust = -2  # Lower, more authoritative
+            elif emotion_lower in ("confused", "puzzled"):
                 rate_adjust = -5
-                pitch_adjust = -3
+                pitch_adjust = 4  # Rising intonation
+            elif emotion_lower in ("agreeing", "affirming"):
+                rate_adjust = 3
+                pitch_adjust = 2
+            elif emotion_lower in ("dismissive", "casual"):
+                rate_adjust = 5
+                pitch_adjust = -1
 
         # Adjust based on text content
         if text:

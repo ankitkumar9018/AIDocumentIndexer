@@ -69,6 +69,11 @@ class CreateJobRequest(BaseModel):
         default=None,
         description="Include images in generated document. If not set, uses admin setting."
     )
+    # Auto chart/table generation - overrides admin setting if provided (PPTX only)
+    auto_charts: Optional[bool] = Field(
+        default=None,
+        description="Auto-generate native charts and tables from numeric data. If not set, uses admin setting."
+    )
     # Theme selection - defaults to business if not specified
     theme: Optional[str] = Field(
         default="business",
@@ -165,6 +170,24 @@ class CreateJobRequest(BaseModel):
         default=None,
         description="ID of an uploaded PPTX template to use for styling/branding"
     )
+    # Vision-based template analysis - uses vision LLM to analyze template slides
+    enable_template_vision_analysis: Optional[bool] = Field(
+        default=None,
+        description="Enable vision-based template analysis (PPTX only). Uses vision LLM to analyze template slides for styling and layout. None = use system default."
+    )
+    template_vision_model: Optional[str] = Field(
+        default=None,
+        description="Vision model for template analysis. 'auto' uses the system default."
+    )
+    # Vision-based slide review - renders slides to images and uses vision LLM to check visual quality
+    enable_vision_review: Optional[bool] = Field(
+        default=None,
+        description="Enable vision-based slide review (PPTX only). Renders slides to images and uses vision LLM to detect visual issues like text overflow, poor contrast, or layout problems. Resource-intensive - requires LibreOffice for rendering. None = use system default."
+    )
+    vision_review_model: Optional[str] = Field(
+        default=None,
+        description="Vision model for slide review. 'auto' uses the system default."
+    )
 
     @property
     def effective_collection_filter(self) -> Optional[str]:
@@ -188,6 +211,19 @@ class SectionFeedback(BaseModel):
     approved: bool = True
 
 
+class SectionPlanApproval(BaseModel):
+    """Approval/modification for a section plan (pre-generation review)."""
+    section_id: str
+    approved: bool = True  # False to skip this section
+    title: Optional[str] = None  # Optional: edit the title
+    description: Optional[str] = None  # Optional: edit the description
+
+
+class ApproveSectionPlansRequest(BaseModel):
+    """Request to approve section plans before generation."""
+    section_approvals: Optional[List[SectionPlanApproval]] = None
+
+
 class SourceReferenceResponse(BaseModel):
     """Source reference in response."""
     document_id: str
@@ -207,6 +243,10 @@ class SectionResponse(BaseModel):
     sources: List[SourceReferenceResponse]
     approved: bool
     feedback: Optional[str]
+    # Pre-generation review fields
+    description: Optional[str] = None
+    generation_approved: bool = True
+    skipped: bool = False
 
 
 class OutlineResponse(BaseModel):
@@ -283,6 +323,10 @@ def job_to_response(job: GenerationJob) -> JobResponse:
             ],
             approved=s.approved,
             feedback=s.feedback,
+            # Pre-generation review fields
+            description=getattr(s, 'description', None),
+            generation_approved=getattr(s, 'generation_approved', True),
+            skipped=getattr(s, 'skipped', False),
         )
         for s in job.sections
     ]
@@ -437,6 +481,10 @@ async def create_generation_job(
     if request.include_sources is not None:
         metadata["include_sources"] = request.include_sources
 
+    # Store auto_charts preference for PPTX (None means use admin setting)
+    if request.auto_charts is not None:
+        metadata["auto_charts"] = request.auto_charts
+
     # Store style learning settings if enabled
     if request.use_existing_docs:
         metadata["use_existing_docs"] = True
@@ -458,6 +506,16 @@ async def create_generation_job(
     # Store query enhancement preference (None means use admin setting)
     if request.enhance_query is not None:
         metadata["enhance_query"] = request.enhance_query
+
+    # Store vision analysis preferences (for PPTX only) - per-document overrides
+    if request.enable_template_vision_analysis is not None:
+        metadata["enable_template_vision_analysis"] = request.enable_template_vision_analysis
+    if request.template_vision_model:
+        metadata["template_vision_model"] = request.template_vision_model
+    if request.enable_vision_review is not None:
+        metadata["enable_vision_review"] = request.enable_vision_review
+    if request.vision_review_model:
+        metadata["vision_review_model"] = request.vision_review_model
 
     # Store PPTX template if provided
     if request.template_pptx_id:
@@ -482,6 +540,10 @@ async def create_generation_job(
             )
         metadata["template_pptx_id"] = request.template_pptx_id
         metadata["template_pptx_path"] = template_path
+        # Store original template filename for display in generated document metadata
+        # Use original_filename (the actual uploaded name) over filename (UUID storage name)
+        if doc:
+            metadata["template_pptx_filename"] = doc.original_filename or doc.filename or os.path.basename(template_path)
 
     # Store user email for notes/metadata display
     metadata["user_email"] = user.email
@@ -663,6 +725,64 @@ async def approve_outline(
     return job_to_response(job)
 
 
+@router.post("/jobs/{job_id}/sections/approve", response_model=JobResponse)
+async def approve_section_plans(
+    job_id: str,
+    user: AuthenticatedUser,
+    request: Optional[ApproveSectionPlansRequest] = None,
+):
+    """
+    Approve section plans before content generation.
+
+    This endpoint allows users to review and modify section plans before
+    the actual content is generated. Users can:
+    - Skip sections they don't want
+    - Edit section titles and descriptions
+    - Approve all sections to proceed with generation
+
+    Requires status: sections_planning
+    """
+    logger.info("Approving section plans", job_id=job_id)
+
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    try:
+        section_approvals = None
+        if request and request.section_approvals:
+            section_approvals = [
+                {
+                    "section_id": a.section_id,
+                    "approved": a.approved,
+                    "title": a.title,
+                    "description": a.description,
+                }
+                for a in request.section_approvals
+            ]
+        job = await service.approve_section_plans(job_id, section_approvals=section_approvals)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    return job_to_response(job)
+
+
 @router.post("/jobs/{job_id}/generate", response_model=JobResponse)
 async def generate_content(
     job_id: str,
@@ -671,7 +791,7 @@ async def generate_content(
     """
     Generate the document content.
 
-    Requires an approved outline.
+    Requires an approved outline or approved section plans.
     """
     logger.info("Generating content", job_id=job_id)
 
@@ -1960,3 +2080,327 @@ Include templates scoring above 30. Rank by score descending."""
             suggestions=fallback_suggestions,
             message="AI scoring unavailable, showing uploaded presentations"
         )
+
+
+# =============================================================================
+# Document Verification and Repair Endpoints
+# =============================================================================
+
+class VerificationIssue(BaseModel):
+    """A verification issue found in the document."""
+    type: str
+    severity: str  # error, warning, info
+    message: str
+    location: Optional[str] = None
+
+
+class VerificationResult(BaseModel):
+    """Document verification result."""
+    passed: bool
+    issues: List[VerificationIssue]
+    checks_performed: List[str]
+    document_stats: dict
+
+
+class RepairResult(BaseModel):
+    """Document repair result."""
+    success: bool
+    repairs_made: List[str]
+    issues_remaining: List[VerificationIssue]
+    message: str
+
+
+class VerificationActionRequest(BaseModel):
+    """Request to handle verification issues."""
+    action: str = Field(
+        ...,
+        description="Action to take: 'proceed' (keep as-is), 'auto_repair' (let AI fix), 'regenerate' (start over)"
+    )
+
+
+@router.post("/jobs/{job_id}/verify", response_model=VerificationResult)
+async def verify_document(
+    job_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Verify a generated document for issues.
+
+    Checks for:
+    - Empty slides/sections
+    - Missing content
+    - Overflow issues
+    - Format-specific problems
+
+    Returns detailed verification results.
+    """
+    logger.info("Verifying document", job_id=job_id)
+
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    if job.status != GenerationStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document must be completed before verification",
+        )
+
+    if not job.output_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No output file found for this job",
+        )
+
+    try:
+        result = await service.verify_generated_document(
+            file_path=job.output_path,
+            output_format=job.output_format,
+            expected_sections=len(job.sections),
+            job_title=job.title,
+        )
+
+        return VerificationResult(
+            passed=result["passed"],
+            issues=[
+                VerificationIssue(
+                    type=issue.get("type", "unknown"),
+                    severity=issue.get("severity", "warning"),
+                    message=issue.get("message", "Unknown issue"),
+                    location=issue.get("location"),
+                )
+                for issue in result.get("issues", [])
+            ],
+            checks_performed=result.get("checks_performed", []),
+            document_stats=result.get("document_stats", {}),
+        )
+
+    except Exception as e:
+        logger.error("Document verification failed", job_id=job_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Verification failed: {str(e)}",
+        )
+
+
+@router.post("/jobs/{job_id}/repair", response_model=RepairResult)
+async def repair_document(
+    job_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Attempt to auto-repair issues found in a generated document.
+
+    Repairs include:
+    - Removing empty slides/sections
+    - Adding missing speaker notes
+    - Fixing formatting issues
+    - Regenerating problematic sections
+
+    Run /verify first to see what issues exist.
+    """
+    logger.info("Repairing document", job_id=job_id)
+
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    if job.status != GenerationStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document must be completed before repair",
+        )
+
+    if not job.output_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No output file found for this job",
+        )
+
+    try:
+        # First verify to get current issues
+        verification_result = await service.verify_generated_document(
+            file_path=job.output_path,
+            output_format=job.output_format,
+            expected_sections=len(job.sections),
+            job_title=job.title,
+        )
+
+        if verification_result["passed"]:
+            return RepairResult(
+                success=True,
+                repairs_made=[],
+                issues_remaining=[],
+                message="Document has no issues - no repairs needed",
+            )
+
+        # Attempt repair
+        repair_result = await service.repair_document(
+            file_path=job.output_path,
+            output_format=job.output_format,
+            verification_result=verification_result,
+            job=job,
+        )
+
+        # Convert remaining issues
+        remaining_issues = [
+            VerificationIssue(
+                type=issue.get("type", "unknown"),
+                severity=issue.get("severity", "warning"),
+                message=issue.get("message", "Unknown issue"),
+                location=issue.get("location"),
+            )
+            for issue in repair_result.get("issues_remaining", [])
+        ]
+
+        return RepairResult(
+            success=repair_result.get("success", False),
+            repairs_made=repair_result.get("repairs_made", []),
+            issues_remaining=remaining_issues,
+            message=repair_result.get("message", "Repair completed"),
+        )
+
+    except Exception as e:
+        logger.error("Document repair failed", job_id=job_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Repair failed: {str(e)}",
+        )
+
+
+@router.post("/jobs/{job_id}/verification-action", response_model=JobResponse)
+async def handle_verification_action(
+    job_id: str,
+    request: VerificationActionRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Handle user's decision on verification issues.
+
+    Actions:
+    - proceed: Accept document as-is despite issues
+    - auto_repair: Let AI automatically fix issues
+    - regenerate: Mark job for regeneration
+
+    This is the human-in-the-loop step after verification.
+    """
+    logger.info(
+        "Handling verification action",
+        job_id=job_id,
+        action=request.action,
+    )
+
+    valid_actions = {"proceed", "auto_repair", "regenerate"}
+    if request.action not in valid_actions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid action: {request.action}. Valid options: {valid_actions}",
+        )
+
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    try:
+        result = await service.handle_verification_action(
+            job=job,
+            action=request.action,
+        )
+
+        # Refresh job state
+        job = await service.get_job(job_id)
+        return job_to_response(job)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error("Verification action failed", job_id=job_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Action failed: {str(e)}",
+        )
+
+
+@router.get("/jobs/{job_id}/verification-status")
+async def get_verification_status(
+    job_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Get the verification status for a completed document.
+
+    Returns whether verification has been run and what the results were.
+    """
+    service = get_generation_service()
+
+    try:
+        job = await service.get_job(job_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    # Check metadata for verification info
+    verification_result = job.metadata.get("verification_result")
+    requires_review = job.metadata.get("requires_manual_review", False)
+    repair_mode = job.metadata.get("verification_repair_mode", "skip")
+
+    return {
+        "job_id": job_id,
+        "status": job.status.value,
+        "verified": verification_result is not None,
+        "verification_passed": verification_result.get("passed") if verification_result else None,
+        "requires_manual_review": requires_review,
+        "repair_mode": repair_mode,
+        "review_options": job.metadata.get("review_options") if requires_review else None,
+    }

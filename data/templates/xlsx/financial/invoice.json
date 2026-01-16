@@ -1,0 +1,14 @@
+{
+  "id": "xlsx-invoice",
+  "name": "Invoice",
+  "description": "Invoice template for billing",
+  "category": "financial",
+  "file_type": "xlsx",
+  "tags": [
+    "invoice",
+    "billing",
+    "payment",
+    "business"
+  ],
+  "primary_color": "#7C3AED"
+}

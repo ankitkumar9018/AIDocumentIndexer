@@ -10,6 +10,8 @@ This guide covers the new features introduced in AIDocumentIndexer, including th
 2. [Audio Overviews](#audio-overviews)
 3. [Connectors](#connectors)
 4. [LLM Gateway](#llm-gateway)
+5. [Knowledge Graph](#knowledge-graph)
+6. [Settings Presets](#settings-presets)
 
 ---
 
@@ -422,3 +424,100 @@ For detailed API documentation, see [API.md](./API.md).
 - `POST /api/v1/gateway/budgets` - Create budget
 - `GET /api/v1/gateway/keys` - List API keys
 - `POST /api/v1/gateway/keys` - Create API key
+
+---
+
+## Knowledge Graph
+
+The Knowledge Graph feature extracts entities and relationships from your documents, enabling graph-based exploration and queries.
+
+### Accessing the Knowledge Graph
+
+Navigate to **Dashboard > Knowledge Graph** to view and explore entities.
+
+### Features
+
+#### Entity Extraction
+- Automatically extracts named entities (People, Organizations, Locations, Concepts, etc.)
+- Identifies relationships between entities
+- Supports multiple languages with cross-language entity linking
+
+#### Graph Visualization
+
+The knowledge graph offers two rendering modes:
+
+| Mode | Technology | Best For |
+|------|------------|----------|
+| 2D | Canvas | Quick overview, simple graphs |
+| 3D (WebGL) | Three.js + react-force-graph-3d | Large graphs (1000+ nodes), immersive exploration |
+
+**Switching Views:**
+- Use the **2D/3D toggle** in the graph header
+- 3D mode provides smooth rotation, zoom, and node selection
+
+**Controls (3D mode):**
+- **Drag**: Rotate the graph
+- **Scroll**: Zoom in/out
+- **Click**: Select node for details
+
+#### Batch Entity Extraction (Performance)
+
+For large documents, the system uses batch extraction to process multiple chunks per LLM call, reducing processing time by 3-5x.
+
+**How it works:**
+1. Document is split into chunks
+2. Chunks are batched (3 per LLM call by default)
+3. Entities are merged and deduplicated
+4. Relationships are stored in the graph database
+
+**Configuration:**
+```python
+# In backend/services/knowledge_graph.py
+await kg_service.extract_entities_batch(
+    chunks=chunk_texts,
+    batch_size=3,  # Chunks per LLM call
+)
+```
+
+### Entity Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| PERSON | People, individuals | "John Smith" |
+| ORGANIZATION | Companies, institutions | "Anthropic" |
+| LOCATION | Places, cities, countries | "San Francisco" |
+| CONCEPT | Abstract ideas, methodologies | "Machine Learning" |
+| EVENT | Occurrences, meetings | "Q4 Review" |
+| PRODUCT | Products, services | "Claude AI" |
+| TECHNOLOGY | Technologies, tools | "FastAPI" |
+| DATE | Dates, time periods | "2024 Q1" |
+
+### Graceful Fallbacks
+
+The knowledge graph handles LLM unavailability gracefully:
+- If Ollama is not running, entity extraction is skipped (not crashed)
+- Cloud LLM providers can be used as fallback
+- Existing entities remain accessible
+
+---
+
+## Settings Presets
+
+Quick configuration presets are available in **Dashboard > Settings**:
+
+| Preset | Description |
+|--------|-------------|
+| **Speed** | Fast responses, reduced accuracy (fewer RAG results, no reranking) |
+| **Quality** | Best accuracy, slower (more RAG results, reranking enabled) |
+| **Balanced** | Default settings |
+| **Offline** | Local models only (Ollama required) |
+
+### Applying Presets
+
+```bash
+# Via API
+curl -X POST http://localhost:8000/api/v1/settings/apply-preset/speed
+
+# Via UI
+Dashboard > Settings > Presets tab > Click preset button
+```

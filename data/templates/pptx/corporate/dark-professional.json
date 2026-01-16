@@ -1,0 +1,19 @@
+{
+  "id": "corporate-dark-professional",
+  "name": "Dark Professional",
+  "description": "Modern dark theme for tech and professional presentations",
+  "category": "corporate",
+  "file_type": "pptx",
+  "tags": [
+    "dark",
+    "modern",
+    "tech",
+    "professional"
+  ],
+  "primary_color": "#60A5FA",
+  "style": "modern",
+  "tone": "professional",
+  "recommended_slides": 12,
+  "max_bullet_chars": 70,
+  "supports_images": true
+}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import {
   PenTool,
@@ -28,10 +29,12 @@ import {
   Save,
   SpellCheck,
   Info,
+  BarChart3,
+  Eye,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { TemplateSelector, SaveTemplateDialog } from "@/components/generation";
+import { TemplateSelector, SaveTemplateDialog, BuiltInTemplateSelector } from "@/components/generation";
 import {
   Card,
   CardContent,
@@ -40,12 +43,14 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  api,
   useGenerationJobs,
   useGenerationJob,
   useOutputFormats,
   useCreateGenerationJob,
   useGenerateOutline,
   useApproveOutline,
+  useApproveSectionPlans,
   useGenerateContent,
   useDownloadGeneratedDocument,
   useCancelGenerationJob,
@@ -54,7 +59,7 @@ import {
   useSuggestTheme,
   useSpellCheckJob,
 } from "@/lib/api";
-import type { ThemeInfo, StyleGuide, GenerationTemplate, TemplateSettings, GenerationSection, SpellCheckResponse } from "@/lib/api";
+import type { ThemeInfo, StyleGuide, GenerationTemplate, TemplateSettings, GenerationSection, SpellCheckResponse, DocumentTemplateMetadata } from "@/lib/api";
 import { toast } from "sonner";
 import { DocumentFilterPanel } from "@/components/chat/document-filter-panel";
 import { FolderSelector } from "@/components/folder-selector";
@@ -96,7 +101,7 @@ const LANGUAGES = [
 const steps: { id: Step; name: string; description: string }[] = [
   { id: "format", name: "Format", description: "Choose output format" },
   { id: "topic", name: "Topic", description: "Describe your document" },
-  { id: "outline", name: "Outline", description: "Review & edit structure" },
+  { id: "outline", name: "Outline", description: "Review & edit sections" },
   { id: "content", name: "Generate", description: "AI creates content" },
   { id: "download", name: "Download", description: "Get your document" },
 ];
@@ -105,11 +110,13 @@ interface OutlineSection {
   id: string;
   title: string;
   description: string;
+  approved: boolean;
 }
 
 export default function CreatePage() {
   const { status } = useSession();
   const isAuthenticated = status === "authenticated";
+  const searchParams = useSearchParams();
 
   const [currentStep, setCurrentStep] = useState<Step>("format");
   const [selectedFormat, setSelectedFormat] = useState<OutputFormat | null>(null);
@@ -118,6 +125,7 @@ export default function CreatePage() {
   const [tone, setTone] = useState("professional");
   const [outputLanguage, setOutputLanguage] = useState("auto");
   const [includeImages, setIncludeImages] = useState(false); // Disabled by default
+  const [autoCharts, setAutoCharts] = useState(false); // Auto-generate charts/tables from data
   const [selectedCollections, setSelectedCollections] = useState<string[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [includeSubfolders, setIncludeSubfolders] = useState(true);
@@ -152,6 +160,12 @@ export default function CreatePage() {
   // Query Enhancement - controls query expansion + HyDE for source search
   const [enhanceQuery, setEnhanceQuery] = useState<boolean | null>(null);
 
+  // Vision Analysis (PPTX only) - per-document overrides for template analysis
+  const [enableTemplateVisionAnalysis, setEnableTemplateVisionAnalysis] = useState<boolean | null>(null);
+  const [templateVisionModel, setTemplateVisionModel] = useState<string>("auto");
+  const [enableVisionReview, setEnableVisionReview] = useState<boolean | null>(null);
+  const [visionReviewModel, setVisionReviewModel] = useState<string>("auto");
+
   const [availableFonts, setAvailableFonts] = useState<Record<string, any>>({});
   const [availableLayouts, setAvailableLayouts] = useState<Record<string, any>>({});
 
@@ -180,6 +194,9 @@ export default function CreatePage() {
   }>>([]);
   const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
 
+  // Built-in Template (from template library)
+  const [selectedBuiltInTemplate, setSelectedBuiltInTemplate] = useState<DocumentTemplateMetadata | null>(null);
+
   // Template dialogs
   const [showTemplateSelector, setShowTemplateSelector] = useState(false);
   const [showSaveTemplate, setShowSaveTemplate] = useState(false);
@@ -194,7 +211,7 @@ export default function CreatePage() {
   const spellCheckJob = useSpellCheckJob();
 
   // Queries - only fetch when authenticated
-  const { data: job, isLoading: jobLoading } = useGenerationJob(currentJobId || "");
+  const { data: job, isLoading: jobLoading, isError: jobError, error: jobQueryError } = useGenerationJob(currentJobId || "");
   const { data: recentJobs } = useGenerationJobs();
   const { data: collectionsData, isLoading: isLoadingCollections, refetch: refetchCollections } = useCollections({ enabled: isAuthenticated });
   const { data: themesData } = useGetThemes();
@@ -204,6 +221,7 @@ export default function CreatePage() {
   const createJob = useCreateGenerationJob();
   const generateOutline = useGenerateOutline();
   const approveOutline = useApproveOutline();
+  const approveSectionPlans = useApproveSectionPlans();
   const generateContent = useGenerateContent();
   const downloadDocument = useDownloadGeneratedDocument();
   const cancelJob = useCancelGenerationJob();
@@ -215,6 +233,44 @@ export default function CreatePage() {
     const saved = localStorage.getItem("create_enhance_query");
     if (saved !== null) setEnhanceQuery(JSON.parse(saved));
   }, []);
+
+  // Handle URL parameters (job resumption from content review)
+  useEffect(() => {
+    const jobIdParam = searchParams.get('job');
+    const reviewComplete = searchParams.get('reviewComplete');
+
+    if (jobIdParam) {
+      setCurrentJobId(jobIdParam);
+
+      // If review is complete, skip to download step
+      if (reviewComplete === 'true') {
+        setCurrentStep('download');
+        toast.success('Content review completed!', {
+          description: 'Your document is ready for download.',
+        });
+      }
+    }
+  }, [searchParams]);
+
+  // Handle job not found error (e.g., after backend restart)
+  useEffect(() => {
+    if (jobError && currentJobId) {
+      // Check if it's a 404 error (job no longer exists)
+      const errorMessage = jobQueryError instanceof Error ? jobQueryError.message : String(jobQueryError);
+      const is404 = errorMessage.includes('404') || errorMessage.toLowerCase().includes('not found');
+
+      if (is404) {
+        toast.error('Session expired', {
+          description: 'The generation job was not found. This may happen after a server restart. Please start a new document.',
+        });
+        // Reset state to allow starting fresh
+        setCurrentJobId(null);
+        setCurrentStep('format');
+        setOutline([]);
+        setDocumentTitle('');
+      }
+    }
+  }, [jobError, jobQueryError, currentJobId]);
 
   const handleEnhanceQueryChange = (enabled: boolean) => {
     setEnhanceQuery(enabled);
@@ -360,6 +416,7 @@ export default function CreatePage() {
               output_format: selectedFormat!,
               output_language: outputLanguage,
               include_images: includeImages,
+              auto_charts: selectedFormat === "pptx" ? autoCharts : undefined,
               collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
               folder_id: selectedFolderId || undefined,
               include_subfolders: includeSubfolders,
@@ -395,6 +452,11 @@ export default function CreatePage() {
               enhance_query: enhanceQuery ?? undefined,
               // PPTX Template for visual styling
               template_pptx_id: selectedFormat === "pptx" && selectedPptxTemplate ? selectedPptxTemplate : undefined,
+              // Vision Analysis (PPTX only) - per-document overrides
+              enable_template_vision_analysis: selectedFormat === "pptx" && enableTemplateVisionAnalysis !== null ? enableTemplateVisionAnalysis : undefined,
+              template_vision_model: selectedFormat === "pptx" && enableTemplateVisionAnalysis ? templateVisionModel : undefined,
+              enable_vision_review: selectedFormat === "pptx" && enableVisionReview !== null ? enableVisionReview : undefined,
+              vision_review_model: selectedFormat === "pptx" && enableVisionReview ? visionReviewModel : undefined,
             });
             setCurrentJobId(newJob.id);
             await generateOutline.mutateAsync({
@@ -409,21 +471,41 @@ export default function CreatePage() {
         break;
       case "outline":
         if (currentJobId) {
+          // Skip if already generating or completed
+          if (job?.status === "generating" || job?.status === "processing" || job?.status === "completed") {
+            setCurrentStep("content");
+            break;
+          }
           try {
+            // Approve outline with sections that include approval status
             const approvedJob = await approveOutline.mutateAsync({
               jobId: currentJobId,
               modifications: {
                 title: documentTitle || undefined,
                 sections: outline.length > 0 ? outline : undefined,
                 tone,
-                theme: selectedTheme,  // Pass theme (allows changing after outline)
+                theme: selectedTheme,
               },
             });
-            // Only generate content if the job is in the correct state
-            if (approvedJob.status === "outline_approved") {
-              await generateContent.mutateAsync(currentJobId);
+
+            // After outline is approved, approve sections and start generation
+            if (approvedJob.status === "sections_planning" || approvedJob.status === "outline_approved") {
+              // Build section approvals from our outline state
+              const sectionApprovals = outline.map((s, index) => ({
+                section_id: approvedJob.sections?.[index]?.id || s.id,
+                approved: s.approved,
+                title: s.title,
+                description: s.description,
+              }));
+
+              await approveSectionPlans.mutateAsync({
+                jobId: currentJobId,
+                sectionApprovals: sectionApprovals,
+              });
             }
+            // Trigger content generation after section plans are approved
             setCurrentStep("content");
+            await generateContent.mutateAsync(currentJobId);
           } catch (error: any) {
             console.error("Failed to approve outline:", error);
             const errorDetail = error?.detail || error?.message || "";
@@ -433,8 +515,8 @@ export default function CreatePage() {
                 description: "Moving to download step.",
               });
               setCurrentStep("download");
-            } else if (errorDetail.includes("OUTLINE_APPROVED") || errorDetail.includes("GENERATING")) {
-              // Job is already approved or generating, move to content step
+            } else if (errorDetail.includes("OUTLINE_APPROVED") || errorDetail.includes("GENERATING") || errorDetail.includes("SECTIONS_PLANNING")) {
+              // Job is already in progress, move to appropriate step
               toast.info("Generation in progress", {
                 description: "Please wait for content generation to complete.",
               });
@@ -507,7 +589,7 @@ export default function CreatePage() {
   const handleAddSection = () => {
     setOutline([
       ...outline,
-      { id: crypto.randomUUID(), title: "New Section", description: "" },
+      { id: crypto.randomUUID(), title: "New Section", description: "", approved: true },
     ]);
   };
 
@@ -517,6 +599,10 @@ export default function CreatePage() {
 
   const handleUpdateSection = (id: string, field: "title" | "description", value: string) => {
     setOutline(outline.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
+  };
+
+  const handleToggleSectionApproval = (id: string) => {
+    setOutline(outline.map((s) => (s.id === id ? { ...s, approved: !s.approved } : s)));
   };
 
   const handleStartNew = () => {
@@ -574,6 +660,20 @@ export default function CreatePage() {
       setStyleCollections(template.default_collections);
     }
 
+    // Apply vision analysis settings (PPTX only)
+    if (typeof settings.enable_template_vision_analysis === 'boolean') {
+      setEnableTemplateVisionAnalysis(settings.enable_template_vision_analysis);
+    }
+    if (settings.template_vision_model) {
+      setTemplateVisionModel(settings.template_vision_model);
+    }
+    if (typeof settings.enable_vision_review === 'boolean') {
+      setEnableVisionReview(settings.enable_vision_review);
+    }
+    if (settings.vision_review_model) {
+      setVisionReviewModel(settings.vision_review_model);
+    }
+
     toast.success(`Applied template: ${template.name}`);
 
     // Move to topic step if format is set
@@ -599,16 +699,22 @@ export default function CreatePage() {
       secondary: customSecondaryColor,
       accent: customAccentColor,
     } : undefined,
+    // Vision Analysis (PPTX only)
+    enable_template_vision_analysis: enableTemplateVisionAnalysis ?? undefined,
+    template_vision_model: templateVisionModel !== "auto" ? templateVisionModel : undefined,
+    enable_vision_review: enableVisionReview ?? undefined,
+    vision_review_model: visionReviewModel !== "auto" ? visionReviewModel : undefined,
   });
 
   // Update outline from job data
   if (job?.outline && outline.length === 0 && currentStep === "outline") {
     setDocumentTitle(job.outline.title || "");
     setOutline(
-      job.outline.sections?.map((s: { title: string; description: string }, i: number) => ({
+      job.outline.sections?.map((s: { title: string; description?: string }, i: number) => ({
         id: crypto.randomUUID(),
-        title: s.title,
-        description: s.description,
+        title: s.title || "",
+        description: s.description || "",
+        approved: true, // Default all sections to approved
       })) || []
     );
   }
@@ -982,6 +1088,49 @@ export default function CreatePage() {
                   )}
                 </div>
 
+                {/* Auto Charts/Tables Toggle - Only for PPTX */}
+                {selectedFormat === "pptx" && (
+                  <div className="space-y-2">
+                    <div
+                      className={`flex items-center justify-between p-4 rounded-lg border cursor-pointer transition-colors ${
+                        autoCharts
+                          ? "bg-primary/5 border-primary/30"
+                          : "bg-muted/30 border-border hover:bg-muted/50"
+                      }`}
+                      onClick={() => setAutoCharts(!autoCharts)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`p-2 rounded-lg ${autoCharts ? "bg-primary/10" : "bg-muted"}`}>
+                          <BarChart3 className={`h-5 w-5 ${autoCharts ? "text-primary" : "text-muted-foreground"}`} />
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium">Auto-Generate Charts & Tables</p>
+                          <p className="text-xs text-muted-foreground">
+                            Automatically convert numeric data into native PowerPoint charts and tables
+                          </p>
+                        </div>
+                      </div>
+                      <div
+                        className={`w-11 h-6 rounded-full transition-colors flex items-center ${
+                          autoCharts ? "bg-primary justify-end" : "bg-muted-foreground/30 justify-start"
+                        }`}
+                      >
+                        <div className="w-5 h-5 bg-white rounded-full shadow-sm mx-0.5" />
+                      </div>
+                    </div>
+                    {autoCharts && (
+                      <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/50">
+                        <Info className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                        <p className="text-xs text-blue-700 dark:text-blue-300">
+                          When enabled, the AI will detect numeric patterns and structured data in content,
+                          automatically rendering them as native PowerPoint charts (bar, line, pie) or tables
+                          instead of bullet points.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Learn from Existing Documents Toggle */}
                 <div className="space-y-2">
                   <div
@@ -1210,7 +1359,7 @@ export default function CreatePage() {
                       <input
                         type="checkbox"
                         id="useCustomColors"
-                        checked={useCustomColors}
+                        checked={useCustomColors ?? false}
                         onChange={(e) => {
                           setUseCustomColors(e.target.checked);
                           setThemeManuallyChanged(true);
@@ -1285,10 +1434,20 @@ export default function CreatePage() {
                   )}
                 </div>
 
-                {/* Font & Layout Selection (only for PPTX/DOCX/PDF) */}
+                {/* Font & Layout Selection (only for PPTX/DOCX/PDF) - Hide font when using PPTX template */}
                 {(selectedFormat === "pptx" || selectedFormat === "docx" || selectedFormat === "pdf") && Object.keys(availableFonts).length > 0 && (
                   <div className="grid grid-cols-2 gap-4 mt-4">
-                    {/* Font Family Selection */}
+                    {/* Font Family Selection - Hidden when using PPTX template (template fonts will be used) */}
+                    {selectedFormat === "pptx" && selectedPptxTemplate ? (
+                      <div>
+                        <label className="block text-sm font-medium mb-2">Font Style</label>
+                        <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 dark:bg-blue-950/20 dark:border-blue-800">
+                          <p className="text-sm text-blue-700 dark:text-blue-300">
+                            Font styling is inherited from the template.
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
                     <div>
                       <label className="block text-sm font-medium mb-2">Font Style</label>
                       <div className="grid grid-cols-2 gap-2">
@@ -1311,6 +1470,7 @@ export default function CreatePage() {
                         ))}
                       </div>
                     </div>
+                    )}
 
                     {/* Layout Selection (PPTX only) */}
                     {selectedFormat === "pptx" && Object.keys(availableLayouts).length > 0 && (
@@ -1347,7 +1507,7 @@ export default function CreatePage() {
                       <input
                         type="checkbox"
                         id="enableAnimations"
-                        checked={enableAnimations}
+                        checked={enableAnimations ?? false}
                         onChange={(e) => {
                           setEnableAnimations(e.target.checked);
                           setThemeManuallyChanged(true);
@@ -1380,7 +1540,7 @@ export default function CreatePage() {
                           <input
                             type="checkbox"
                             id="useCustomDuration"
-                            checked={useCustomDuration}
+                            checked={useCustomDuration ?? false}
                             onChange={(e) => setUseCustomDuration(e.target.checked)}
                             className="h-4 w-4 rounded border-border"
                           />
@@ -1416,14 +1576,18 @@ export default function CreatePage() {
                   <input
                     type="checkbox"
                     id="enableQualityReview"
-                    checked={enableQualityReview}
+                    checked={enableQualityReview ?? false}
                     onChange={(e) => setEnableQualityReview(e.target.checked)}
                     className="h-4 w-4 rounded border-border"
                   />
                   <label htmlFor="enableQualityReview" className="text-sm font-medium">
                     Enable AI quality review
                   </label>
-                  <span className="text-xs text-muted-foreground">(auto-improves low-quality sections)</span>
+                  <span className="text-xs text-muted-foreground">
+                    {selectedFormat === "pptx"
+                      ? "(reviews slides for text overflow, layout issues & auto-fixes)"
+                      : "(auto-improves low-quality sections)"}
+                  </span>
                 </div>
 
                 {/* AI Proofreading with CriticAgent */}
@@ -1432,7 +1596,7 @@ export default function CreatePage() {
                     <input
                       type="checkbox"
                       id="enableCriticReview"
-                      checked={enableCriticReview}
+                      checked={enableCriticReview ?? false}
                       onChange={(e) => setEnableCriticReview(e.target.checked)}
                       className="h-4 w-4 rounded border-border"
                     />
@@ -1470,7 +1634,7 @@ export default function CreatePage() {
                           <input
                             type="checkbox"
                             id="fixStyling"
-                            checked={fixStyling}
+                            checked={fixStyling ?? false}
                             onChange={(e) => setFixStyling(e.target.checked)}
                             className="h-4 w-4 rounded border-border"
                           />
@@ -1482,7 +1646,7 @@ export default function CreatePage() {
                           <input
                             type="checkbox"
                             id="fixIncomplete"
-                            checked={fixIncomplete}
+                            checked={fixIncomplete ?? false}
                             onChange={(e) => setFixIncomplete(e.target.checked)}
                             className="h-4 w-4 rounded border-border"
                           />
@@ -1502,7 +1666,7 @@ export default function CreatePage() {
                       <input
                         type="checkbox"
                         id="includeNotesExplanation"
-                        checked={includeNotesExplanation}
+                        checked={includeNotesExplanation ?? false}
                         onChange={(e) => setIncludeNotesExplanation(e.target.checked)}
                         className="h-4 w-4 rounded border-border"
                       />
@@ -1517,11 +1681,150 @@ export default function CreatePage() {
                   </div>
                 )}
 
+                {/* Vision Analysis (PPTX only) */}
+                {selectedFormat === "pptx" && (
+                  <div className="mt-4 pt-4 border-t space-y-4">
+                    <div>
+                      <h3 className="text-sm font-medium flex items-center gap-2">
+                        <Eye className="h-4 w-4" />
+                        Vision Analysis
+                      </h3>
+                      <p className="text-xs text-muted-foreground">
+                        Use AI vision to analyze templates and review generated slides
+                      </p>
+                    </div>
+
+                    {/* Template Vision Analysis */}
+                    <div className="space-y-2 bg-muted/30 p-3 rounded-lg">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <label className="text-sm font-medium">Template Vision Analysis</label>
+                          <p className="text-xs text-muted-foreground">
+                            Analyze template slides visually to learn styling and layout
+                          </p>
+                        </div>
+                        <select
+                          className="h-8 px-2 text-sm rounded-md border bg-background"
+                          value={enableTemplateVisionAnalysis === null ? "system" : enableTemplateVisionAnalysis ? "enabled" : "disabled"}
+                          onChange={(e) => {
+                            if (e.target.value === "system") setEnableTemplateVisionAnalysis(null);
+                            else if (e.target.value === "enabled") setEnableTemplateVisionAnalysis(true);
+                            else setEnableTemplateVisionAnalysis(false);
+                          }}
+                        >
+                          <option value="system">Use System Default</option>
+                          <option value="enabled">Enabled</option>
+                          <option value="disabled">Disabled</option>
+                        </select>
+                      </div>
+
+                      {enableTemplateVisionAnalysis && (
+                        <div className="mt-2 space-y-1">
+                          <label className="text-xs text-muted-foreground">Vision Model:</label>
+                          <select
+                            className="w-full h-8 px-2 text-sm rounded-md border bg-background"
+                            value={templateVisionModel}
+                            onChange={(e) => setTemplateVisionModel(e.target.value)}
+                          >
+                            <option value="auto">Auto (Use default vision model)</option>
+                            <option value="gpt-4o">GPT-4o</option>
+                            <option value="gpt-4o-mini">GPT-4o Mini</option>
+                            <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                            <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
+                            <option value="llava">LLaVA (Local)</option>
+                          </select>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Vision-Based Slide Review */}
+                    <div className="space-y-2 bg-muted/30 p-3 rounded-lg">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <label className="text-sm font-medium">Vision-Based Slide Review</label>
+                          <p className="text-xs text-muted-foreground">
+                            Review generated slides for visual issues (overlaps, truncation)
+                          </p>
+                        </div>
+                        <select
+                          className="h-8 px-2 text-sm rounded-md border bg-background"
+                          value={enableVisionReview === null ? "system" : enableVisionReview ? "enabled" : "disabled"}
+                          onChange={(e) => {
+                            if (e.target.value === "system") setEnableVisionReview(null);
+                            else if (e.target.value === "enabled") setEnableVisionReview(true);
+                            else setEnableVisionReview(false);
+                          }}
+                        >
+                          <option value="system">Use System Default</option>
+                          <option value="enabled">Enabled</option>
+                          <option value="disabled">Disabled</option>
+                        </select>
+                      </div>
+
+                      {enableVisionReview && (
+                        <div className="mt-2 space-y-1">
+                          <label className="text-xs text-muted-foreground">Vision Model:</label>
+                          <select
+                            className="w-full h-8 px-2 text-sm rounded-md border bg-background"
+                            value={visionReviewModel}
+                            onChange={(e) => setVisionReviewModel(e.target.value)}
+                          >
+                            <option value="auto">Auto (Use default vision model)</option>
+                            <option value="gpt-4o">GPT-4o</option>
+                            <option value="gpt-4o-mini">GPT-4o Mini</option>
+                            <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                            <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
+                            <option value="llava">LLaVA (Local)</option>
+                          </select>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Built-in Templates (PPTX/DOCX/XLSX) */}
+                {(selectedFormat === "pptx" || selectedFormat === "docx" || selectedFormat === "xlsx") && (
+                  <div className="mt-4 pt-4 border-t space-y-3">
+                    <BuiltInTemplateSelector
+                      fileType={selectedFormat}
+                      onSelectTemplate={(template) => {
+                        setSelectedBuiltInTemplate(template);
+                        // Clear uploaded template selection when built-in is selected
+                        if (selectedFormat === "pptx") {
+                          setSelectedPptxTemplate(null);
+                        }
+                      }}
+                      selectedTemplateId={selectedBuiltInTemplate?.id}
+                    />
+                    {selectedBuiltInTemplate && (
+                      <div className="flex items-start gap-2 p-3 rounded-lg bg-primary/5 border border-primary/20">
+                        <Palette className="h-4 w-4 text-primary shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                          <p className="text-xs text-primary font-medium">
+                            Using: {selectedBuiltInTemplate.name}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {selectedBuiltInTemplate.description}
+                          </p>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-xs"
+                          onClick={() => setSelectedBuiltInTemplate(null)}
+                        >
+                          Clear
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* PPTX Template from Uploaded Documents (PPTX only) */}
                 {selectedFormat === "pptx" && (
                   <div className="mt-4 pt-4 border-t space-y-3">
                     <div>
-                      <h3 className="text-sm font-medium">Use Uploaded PPTX as Template</h3>
+                      <h3 className="text-sm font-medium">Or Use Uploaded PPTX as Template</h3>
                       <p className="text-xs text-muted-foreground">
                         Select a previously uploaded presentation to inherit its styling and design
                       </p>
@@ -1643,15 +1946,20 @@ export default function CreatePage() {
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-xl font-semibold">Review & Edit Outline</h2>
+                  <h2 className="text-xl font-semibold">Review & Edit Sections</h2>
                   <p className="text-muted-foreground">
-                    Customize the structure before generating content
+                    Toggle sections on/off, edit content, or add new sections
                   </p>
                 </div>
-                <Button onClick={handleAddSection} variant="outline" size="sm">
-                  <Plus className="h-4 w-4 mr-2" />
-                  Add Section
-                </Button>
+                <div className="flex items-center gap-4">
+                  <span className="text-sm text-muted-foreground">
+                    {outline.filter(s => s.approved).length} of {outline.length} sections selected
+                  </span>
+                  <Button onClick={handleAddSection} variant="outline" size="sm">
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add Section
+                  </Button>
+                </div>
               </div>
 
               <div className="space-y-4">
@@ -1697,39 +2005,50 @@ export default function CreatePage() {
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Document Title</label>
                   <Input
-                    value={documentTitle}
+                    value={documentTitle || ""}
                     onChange={(e) => setDocumentTitle(e.target.value)}
                     placeholder="Enter document title"
                   />
                 </div>
 
                 <div className="space-y-3">
-                  <label className="text-sm font-medium">Sections</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium">Sections</label>
+                  </div>
                   {outline.map((section, index) => (
                     <div
                       key={section.id}
-                      className="flex items-start gap-3 p-4 rounded-lg border bg-muted/30"
+                      className={`flex items-start gap-3 p-4 rounded-lg border transition-colors ${
+                        section.approved ? 'bg-muted/30' : 'bg-muted/10 opacity-60'
+                      }`}
                     >
-                      <div className="flex items-center gap-2 text-muted-foreground">
-                        <GripVertical className="h-5 w-5 cursor-grab" />
-                        <span className="text-sm font-medium">{index + 1}</span>
+                      <div className="flex items-center gap-2 pt-2">
+                        <input
+                          type="checkbox"
+                          checked={section.approved ?? false}
+                          onChange={() => handleToggleSectionApproval(section.id)}
+                          className="h-4 w-4 rounded border-gray-300"
+                        />
+                        <span className="text-sm font-medium text-muted-foreground">{index + 1}</span>
                       </div>
                       <div className="flex-1 space-y-2">
                         <Input
-                          value={section.title}
+                          value={section.title || ""}
                           onChange={(e) =>
                             handleUpdateSection(section.id, "title", e.target.value)
                           }
                           placeholder="Section title"
                           className="font-medium"
+                          disabled={!section.approved}
                         />
                         <Input
-                          value={section.description}
+                          value={section.description || ""}
                           onChange={(e) =>
                             handleUpdateSection(section.id, "description", e.target.value)
                           }
                           placeholder="Brief description of this section"
                           className="text-sm"
+                          disabled={!section.approved}
                         />
                       </div>
                       <Button
@@ -1742,11 +2061,27 @@ export default function CreatePage() {
                     </div>
                   ))}
                 </div>
+
+                {outline.filter(s => s.approved).length === 0 && outline.length > 0 && (
+                  <div className="text-center py-4 text-muted-foreground">
+                    <AlertCircle className="h-6 w-6 mx-auto mb-2 opacity-50" />
+                    <p className="text-sm">Please select at least one section to generate content for.</p>
+                  </div>
+                )}
+
+                <div className="bg-blue-50 dark:bg-blue-950/30 rounded-lg p-4 text-sm">
+                  <Info className="h-4 w-4 inline mr-2 text-blue-500" />
+                  <span className="text-blue-700 dark:text-blue-300">
+                    Unchecked sections will be skipped during generation. You can edit titles and descriptions to guide the AI.
+                  </span>
+                </div>
               </div>
             </div>
           )}
 
-          {/* Step 4: Content Generation */}
+          {/* Step 4: Section Plans Review (Pre-generation) */}
+
+          {/* Step 5: Content Generation */}
           {currentStep === "content" && (
             <div className="flex flex-col items-center justify-center py-12 space-y-6">
               {isGenerating || jobLoading ? (
@@ -1779,6 +2114,73 @@ export default function CreatePage() {
                       Your document has been generated successfully
                     </p>
                   </div>
+                  {/* Review & Edit option for PPTX and DOCX */}
+                  {(selectedFormat === "pptx" || selectedFormat === "docx") && (
+                    <div className="flex flex-col items-center gap-2 mt-4 p-4 bg-muted/50 rounded-lg">
+                      <p className="text-sm text-muted-foreground text-center max-w-md">
+                        Want to review and edit the content before downloading?
+                        You can modify slides, sections, and text before final generation.
+                      </p>
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          try {
+                            // Create a review session with the generated content
+                            const contentType = selectedFormat as "pptx" | "docx";
+
+                            // Build content from sections
+                            if (contentType === "pptx") {
+                              const presentationContent = {
+                                title: documentTitle,
+                                subtitle: context || undefined,
+                                slides: job.sections.map((s, i) => {
+                                  // Split content into bullets and limit to 8 max
+                                  const allBullets = (s.content || "").split("\n").filter(Boolean);
+                                  const limitedBullets = allBullets.slice(0, 8);
+                                  return {
+                                    slide_number: i + 1,
+                                    layout: "title_content",
+                                    title: s.title,
+                                    bullets: limitedBullets.map((text: string) => ({ text, sub_bullets: [] as string[] })),
+                                    status: "draft" as const,
+                                  };
+                                }),
+                              };
+                              const result = await api.createContentReviewSession({
+                                content_type: contentType,
+                                job_id: currentJobId || undefined,
+                                presentation: presentationContent,
+                              });
+                              window.location.href = `/dashboard/create/review?session=${result.session_id}&type=${contentType}&job=${currentJobId}`;
+                            } else {
+                              const documentContent = {
+                                title: documentTitle,
+                                sections: job.sections.map((s, i) => ({
+                                  section_number: i + 1,
+                                  title: s.title,
+                                  content: s.content || "",
+                                  level: 1,
+                                  status: "draft" as const,
+                                })),
+                              };
+                              const result = await api.createContentReviewSession({
+                                content_type: contentType,
+                                job_id: currentJobId || undefined,
+                                document: documentContent,
+                              });
+                              window.location.href = `/dashboard/create/review?session=${result.session_id}&type=${contentType}&job=${currentJobId}`;
+                            }
+                          } catch (error) {
+                            console.error("Failed to create review session:", error);
+                            toast.error("Failed to start review session");
+                          }
+                        }}
+                      >
+                        <Edit3 className="h-4 w-4 mr-2" />
+                        Review & Edit Before Download
+                      </Button>
+                    </div>
+                  )}
                 </>
               ) : job?.status === "failed" ? (
                 <>
@@ -1793,7 +2195,37 @@ export default function CreatePage() {
                     Try Again
                   </Button>
                 </>
-              ) : null}
+              ) : jobError ? (
+                // Error state - job not found (e.g., after server restart)
+                <>
+                  <AlertCircle className="h-16 w-16 text-yellow-500" />
+                  <div className="text-center">
+                    <h2 className="text-xl font-semibold">Session Expired</h2>
+                    <p className="text-muted-foreground mt-2">
+                      The generation job was not found. This may happen after a server restart.
+                    </p>
+                  </div>
+                  <Button onClick={handleStartNew}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Start New Document
+                  </Button>
+                </>
+              ) : (
+                // Unknown state - shouldn't happen but handle gracefully
+                <>
+                  <AlertCircle className="h-16 w-16 text-muted-foreground" />
+                  <div className="text-center">
+                    <h2 className="text-xl font-semibold">No Active Generation</h2>
+                    <p className="text-muted-foreground mt-2">
+                      Start a new document to continue.
+                    </p>
+                  </div>
+                  <Button onClick={handleStartNew}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Start New Document
+                  </Button>
+                </>
+              )}
             </div>
           )}
 
@@ -1975,6 +2407,7 @@ export default function CreatePage() {
             disabled={
               (currentStep === "format" && !selectedFormat) ||
               (currentStep === "topic" && !topic) ||
+              (currentStep === "outline" && (outline.filter(s => s.approved).length === 0 || isGenerating)) ||
               (currentStep === "content" && isGenerating) ||
               isLoading
             }
@@ -1988,7 +2421,7 @@ export default function CreatePage() {
               </>
             ) : (
               <>
-                {currentStep === "topic" ? "Generate Outline" : "Next"}
+                {currentStep === "topic" ? "Generate Outline" : currentStep === "outline" ? "Generate Content" : "Next"}
                 <ChevronRight className="h-4 w-4 ml-2" />
               </>
             )}

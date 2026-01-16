@@ -1,0 +1,14 @@
+{
+  "id": "xlsx-gantt-chart",
+  "name": "Gantt Chart",
+  "description": "Gantt chart for project scheduling",
+  "category": "project",
+  "file_type": "xlsx",
+  "tags": [
+    "gantt",
+    "schedule",
+    "timeline",
+    "project"
+  ],
+  "primary_color": "#DC2626"
+}

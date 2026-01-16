@@ -1,0 +1,1392 @@
+#!/usr/bin/env python3
+"""
+Cross-platform setup script for AIDocumentIndexer.
+Detects OS and handles dependencies, services, and configuration accordingly.
+
+This script will:
+1. Check system dependencies (python3, node, npm)
+2. Stop any existing services on ports 8000, 3000
+3. Install Python dependencies with UV (or pip fallback)
+4. Install Node.js/frontend dependencies with npm
+5. Setup Ollama and pull required models
+6. Create environment files if missing
+7. Run database migrations
+8. Start backend and frontend services
+
+Usage:
+    python scripts/setup.py [options]
+
+Options:
+    --skip-services     Skip starting backend/frontend services
+    --skip-ollama       Skip Ollama installation and model pulling
+    --skip-redis        Skip Redis installation and startup
+    --skip-celery       Skip Celery worker startup
+    --pull-optional     Also pull optional Ollama models (mistral, codellama, llama3.3:70b)
+    --install-optional  Auto-install optional system deps (ffmpeg, libreoffice, tesseract, etc.)
+    --verbose, -v       Enable verbose/debug output
+    --log-file PATH     Write logs to specified file
+
+Examples:
+    python scripts/setup.py                      # Full setup with all services
+    python scripts/setup.py --skip-services     # Setup without starting services
+    python scripts/setup.py --skip-redis        # Skip Redis (disables Celery too)
+    python scripts/setup.py --pull-optional     # Include optional Ollama models
+    python scripts/setup.py --install-optional  # Install ffmpeg, libreoffice, etc.
+    python scripts/setup.py --verbose           # Verbose output for debugging
+
+Platform Support:
+    - macOS: Uses Homebrew for package installation
+    - Linux: Supports apt (Debian/Ubuntu), dnf (Fedora/RHEL), yum (CentOS)
+    - Windows: Uses winget for package installation
+
+How it works:
+    - Python runs npm/node via subprocess to install frontend packages
+    - Python runs uv/pip via subprocess to install backend packages
+    - Services are started as background processes
+"""
+
+import argparse
+import json
+import logging
+import os
+import platform
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
+
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with colors for terminal output."""
+
+    COLORS = {
+        'DEBUG': '\033[0;36m',     # Cyan
+        'INFO': '\033[0;32m',      # Green
+        'WARNING': '\033[1;33m',   # Yellow
+        'ERROR': '\033[0;31m',     # Red
+        'CRITICAL': '\033[1;31m',  # Bold Red
+    }
+    RESET = '\033[0m'
+
+    SYMBOLS = {
+        'DEBUG': '•',
+        'INFO': '✓',
+        'WARNING': '⚠',
+        'ERROR': '✗',
+        'CRITICAL': '✗✗',
+    }
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelname, self.RESET)
+        symbol = self.SYMBOLS.get(record.levelname, '→')
+
+        # Format: [TIMESTAMP] SYMBOL MESSAGE
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        formatted = f"{color}[{timestamp}] {symbol} {record.getMessage()}{self.RESET}"
+        return formatted
+
+
+class FileFormatter(logging.Formatter):
+    """Formatter for log files (no colors)."""
+
+    def format(self, record):
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        return f"[{timestamp}] [{record.levelname}] {record.getMessage()}"
+
+
+def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> logging.Logger:
+    """Setup logging with both console and file handlers."""
+    logger = logging.getLogger('setup')
+    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+
+    # Clear existing handlers
+    logger.handlers.clear()
+
+    # Console handler with colors
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console_handler.setFormatter(ColoredFormatter())
+    logger.addHandler(console_handler)
+
+    # File handler if specified
+    if log_file:
+        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(FileFormatter())
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+# Global logger instance
+logger: logging.Logger = None
+
+# ============================================================================
+# PLATFORM DETECTION
+# ============================================================================
+
+def get_platform() -> str:
+    """Detect the current platform."""
+    system = platform.system().lower()
+    if system == 'darwin':
+        return 'macos'
+    elif system == 'windows':
+        return 'windows'
+    elif system == 'linux':
+        return 'linux'
+    return 'unknown'
+
+
+def enable_windows_colors():
+    """Enable ANSI color codes on Windows."""
+    if platform.system() == 'Windows':
+        os.system('color')
+        # Also try to enable VT100 support
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+        except Exception:
+            pass
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def load_dependencies(deps_file: str = 'scripts/dependencies.json') -> Dict:
+    """Load dependency configuration from JSON file."""
+    try:
+        with open(deps_file, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.error(f"Dependencies file not found: {deps_file}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in dependencies file: {e}")
+        sys.exit(1)
+
+
+def check_command_exists(command: str) -> bool:
+    """Check if a command exists in PATH."""
+    return shutil.which(command) is not None
+
+
+def run_command(
+    cmd: List[str],
+    capture: bool = False,
+    check: bool = True,
+    cwd: Optional[str] = None,
+    timeout: Optional[int] = None
+) -> Tuple[int, str, str]:
+    """
+    Run a shell command with proper error handling.
+
+    Returns:
+        Tuple of (return_code, stdout, stderr)
+    """
+    logger.debug(f"Running command: {' '.join(cmd)}")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=check,
+            cwd=cwd,
+            timeout=timeout
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.CalledProcessError as e:
+        logger.debug(f"Command failed with code {e.returncode}: {e.stderr}")
+        return e.returncode, e.stdout or '', e.stderr or ''
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Command timed out: {' '.join(cmd)}")
+        return -1, '', 'Timeout expired'
+    except FileNotFoundError:
+        logger.debug(f"Command not found: {cmd[0]}")
+        return 1, '', f"Command not found: {cmd[0]}"
+
+
+def get_version(command: str) -> Optional[str]:
+    """Get version string for a command."""
+    version_flags = ['--version', '-v', '-V', 'version']
+
+    for flag in version_flags:
+        code, stdout, _ = run_command([command, flag], check=False, timeout=10)
+        if code == 0 and stdout:
+            # Extract first line containing version info
+            for line in stdout.strip().split('\n'):
+                if any(c.isdigit() for c in line):
+                    return line.strip()
+    return None
+
+
+# ============================================================================
+# SERVICE MANAGEMENT
+# ============================================================================
+
+def kill_process_on_port(port: int) -> bool:
+    """Kill process running on a specific port (cross-platform)."""
+    system = get_platform()
+    killed = False
+
+    logger.debug(f"Checking for processes on port {port}")
+
+    if system == 'windows':
+        # Windows: Use netstat and taskkill
+        code, stdout, _ = run_command(
+            ['cmd', '/c', f'netstat -ano | findstr :{port}'],
+            check=False
+        )
+        if code == 0 and stdout:
+            for line in stdout.splitlines():
+                if f':{port}' in line and 'LISTENING' in line:
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        pid = parts[-1]
+                        logger.info(f"Killing process {pid} on port {port}")
+                        run_command(['taskkill', '/F', '/PID', pid], check=False)
+                        killed = True
+    else:
+        # macOS/Linux: Use lsof
+        code, stdout, _ = run_command(['lsof', '-ti', f':{port}'], check=False)
+        if code == 0 and stdout.strip():
+            pids = stdout.strip().split('\n')
+            for pid in pids:
+                if pid.strip():
+                    logger.info(f"Killing process {pid} on port {port}")
+                    run_command(['kill', '-9', pid.strip()], check=False)
+                    killed = True
+
+    return killed
+
+
+def is_service_running(port: int) -> bool:
+    """Check if a service is running on a port."""
+    system = get_platform()
+
+    if system == 'windows':
+        code, stdout, _ = run_command(
+            ['cmd', '/c', f'netstat -ano | findstr :{port}'],
+            check=False
+        )
+        return code == 0 and f':{port}' in stdout
+    else:
+        code, _, _ = run_command(['lsof', '-ti', f':{port}'], check=False)
+        return code == 0
+
+
+# ============================================================================
+# DEPENDENCY CHECKING
+# ============================================================================
+
+def check_system_dependencies(deps: Dict) -> Tuple[bool, List[str]]:
+    """
+    Check system dependencies.
+
+    Returns:
+        Tuple of (all_required_found, list_of_missing_required)
+    """
+    logger.info("Checking system dependencies...")
+    missing_required = []
+    system = get_platform()
+
+    # Check required dependencies
+    for dep in deps['system']['required']:
+        if check_command_exists(dep):
+            version = get_version(dep)
+            version_str = f" ({version})" if version else ""
+            logger.info(f"Found: {dep}{version_str}")
+        else:
+            logger.error(f"Missing required: {dep}")
+            missing_required.append(dep)
+
+    # Check optional dependencies (new nested structure)
+    optional_deps = deps['system'].get('optional', {})
+    descriptions = deps['system'].get('description', {})
+    install_commands = deps['system'].get('install_commands', {})
+
+    # Get platform-specific install commands
+    if system == 'macos':
+        platform_cmds = install_commands.get('macos', {})
+    elif system == 'linux':
+        # Try to detect apt vs dnf
+        if check_command_exists('apt'):
+            platform_cmds = install_commands.get('linux_apt', {})
+        else:
+            platform_cmds = install_commands.get('linux_dnf', {})
+    else:
+        platform_cmds = install_commands.get('windows', {})
+
+    # Flatten optional deps from categories
+    all_optional = []
+    if isinstance(optional_deps, dict):
+        for category, dep_list in optional_deps.items():
+            if isinstance(dep_list, list):
+                all_optional.extend(dep_list)
+    elif isinstance(optional_deps, list):
+        all_optional = optional_deps
+
+    for dep in all_optional:
+        # Handle special cases for dependency checking
+        check_cmd = dep
+        is_python_pkg = False
+
+        if dep == 'poppler':
+            check_cmd = 'pdftotext'  # Check for pdftotext which is part of poppler
+        elif dep == 'redis-server':
+            check_cmd = 'redis-server'
+        elif dep == 'ray':
+            # Ray is a Python package, check via pip/uv
+            is_python_pkg = True
+
+        # Check Python packages differently
+        if is_python_pkg:
+            # Try to import the package
+            code, _, _ = run_command(['python3', '-c', f'import {dep}'], check=False, timeout=10)
+            found = (code == 0)
+        else:
+            found = check_command_exists(check_cmd)
+
+        if found:
+            if is_python_pkg:
+                # Get version for Python package
+                code, stdout, _ = run_command(
+                    ['python3', '-c', f'import {dep}; print({dep}.__version__)'],
+                    check=False, timeout=10
+                )
+                version_str = f" ({stdout.strip()})" if code == 0 and stdout.strip() else ""
+            else:
+                version = get_version(check_cmd)
+                version_str = f" ({version})" if version else ""
+            logger.info(f"Found: {dep}{version_str}")
+        else:
+            desc = descriptions.get(dep, "")
+            install_cmd = platform_cmds.get(dep, "")
+            msg = f"Missing optional: {dep}"
+            if desc:
+                msg += f" - {desc}"
+            logger.warning(msg)
+            if install_cmd:
+                logger.debug(f"  Install with: {install_cmd}")
+
+    return len(missing_required) == 0, missing_required
+
+
+def install_optional_dependencies(deps: Dict) -> Dict[str, bool]:
+    """
+    Install optional system dependencies based on platform.
+
+    Args:
+        deps: Dependencies configuration from dependencies.json
+
+    Returns:
+        Dict mapping dependency name to success status
+    """
+    logger.info("Installing optional system dependencies...")
+    system = get_platform()
+    results = {}
+
+    optional_deps = deps['system'].get('optional', {})
+    descriptions = deps['system'].get('description', {})
+    install_commands = deps['system'].get('install_commands', {})
+
+    # Get platform-specific install commands
+    if system == 'macos':
+        platform_cmds = install_commands.get('macos', {})
+        pkg_manager = 'brew'
+        sudo_prefix = []
+    elif system == 'linux':
+        if check_command_exists('apt'):
+            platform_cmds = install_commands.get('linux_apt', {})
+            pkg_manager = 'apt'
+            sudo_prefix = ['sudo']
+        elif check_command_exists('dnf'):
+            platform_cmds = install_commands.get('linux_dnf', {})
+            pkg_manager = 'dnf'
+            sudo_prefix = ['sudo']
+        elif check_command_exists('yum'):
+            platform_cmds = install_commands.get('linux_dnf', {})  # yum syntax similar to dnf
+            pkg_manager = 'yum'
+            sudo_prefix = ['sudo']
+        else:
+            logger.warning("No supported package manager found (apt/dnf/yum)")
+            return results
+    else:  # Windows
+        platform_cmds = install_commands.get('windows', {})
+        pkg_manager = 'winget'
+        sudo_prefix = []
+
+    # Flatten optional deps from categories
+    all_optional = []
+    if isinstance(optional_deps, dict):
+        for category, dep_list in optional_deps.items():
+            if isinstance(dep_list, list):
+                all_optional.extend(dep_list)
+    elif isinstance(optional_deps, list):
+        all_optional = optional_deps
+
+    for dep in all_optional:
+        # Check if already installed
+        check_cmd = dep
+        if dep == 'poppler':
+            check_cmd = 'pdftotext'
+        elif dep == 'ray':
+            # Ray is a Python package, skip system install
+            continue
+
+        if check_command_exists(check_cmd):
+            logger.info(f"Already installed: {dep}")
+            results[dep] = True
+            continue
+
+        install_cmd_str = platform_cmds.get(dep, "")
+        if not install_cmd_str:
+            logger.warning(f"No install command for {dep} on {system}")
+            results[dep] = False
+            continue
+
+        desc = descriptions.get(dep, "")
+        logger.info(f"Installing {dep}" + (f" ({desc})" if desc else ""))
+
+        # Parse and execute the install command
+        try:
+            if system == 'windows':
+                if install_cmd_str.startswith('winget'):
+                    # Winget command
+                    parts = install_cmd_str.split()
+                    code, stdout, stderr = run_command(parts, check=False, timeout=300)
+                elif install_cmd_str.startswith('Download'):
+                    # Manual download required
+                    logger.warning(f"  Manual installation required for {dep} on Windows:")
+                    logger.warning(f"  {install_cmd_str}")
+                    results[dep] = False
+                    continue
+                else:
+                    code, stdout, stderr = run_command(
+                        ['cmd', '/c', install_cmd_str],
+                        check=False,
+                        timeout=300
+                    )
+            elif system == 'macos':
+                if install_cmd_str.startswith('brew install --cask'):
+                    # Cask install (GUI apps like LibreOffice)
+                    parts = install_cmd_str.split()
+                    code, stdout, stderr = run_command(parts, check=False, timeout=600)
+                elif install_cmd_str.startswith('brew'):
+                    parts = install_cmd_str.split()
+                    code, stdout, stderr = run_command(parts, check=False, timeout=300)
+                else:
+                    code, stdout, stderr = run_command(
+                        ['bash', '-c', install_cmd_str],
+                        check=False,
+                        timeout=300
+                    )
+            else:  # Linux
+                if install_cmd_str.startswith(('apt', 'dnf', 'yum')):
+                    # Add sudo and -y flag for non-interactive install
+                    parts = install_cmd_str.split()
+                    if parts[0] in ('apt', 'dnf', 'yum'):
+                        # Insert sudo at beginning
+                        cmd = sudo_prefix + parts
+                        # Add -y flag if not present
+                        if '-y' not in cmd:
+                            cmd.insert(cmd.index('install') + 1 if 'install' in cmd else 2, '-y')
+                        code, stdout, stderr = run_command(cmd, check=False, timeout=300)
+                    else:
+                        code, stdout, stderr = run_command(
+                            ['bash', '-c', install_cmd_str],
+                            check=False,
+                            timeout=300
+                        )
+                else:
+                    code, stdout, stderr = run_command(
+                        ['bash', '-c', install_cmd_str],
+                        check=False,
+                        timeout=300
+                    )
+
+            if code == 0:
+                logger.info(f"Successfully installed {dep}")
+                results[dep] = True
+            else:
+                logger.error(f"Failed to install {dep}: {stderr}")
+                results[dep] = False
+
+        except Exception as e:
+            logger.error(f"Error installing {dep}: {e}")
+            results[dep] = False
+
+    # Install WeasyPrint dependencies for PDF generation
+    weasyprint_deps = deps['system'].get('weasyprint_deps', {})
+    weasyprint_cmd = None
+    if system == 'macos':
+        weasyprint_cmd = weasyprint_deps.get('macos')
+    elif system == 'linux':
+        if check_command_exists('apt'):
+            weasyprint_cmd = weasyprint_deps.get('linux_apt')
+        else:
+            weasyprint_cmd = weasyprint_deps.get('linux_dnf')
+
+    if weasyprint_cmd and not weasyprint_cmd.startswith('Use'):
+        logger.info("Installing WeasyPrint dependencies (for PDF generation)...")
+        try:
+            if system == 'linux':
+                parts = weasyprint_cmd.split()
+                cmd = sudo_prefix + parts
+                if '-y' not in cmd and 'install' in cmd:
+                    cmd.insert(cmd.index('install') + 1, '-y')
+                code, _, stderr = run_command(cmd, check=False, timeout=120)
+            else:
+                code, _, stderr = run_command(
+                    ['bash', '-c', weasyprint_cmd] if system != 'windows' else weasyprint_cmd.split(),
+                    check=False,
+                    timeout=120
+                )
+            if code == 0:
+                logger.info("WeasyPrint dependencies installed")
+            else:
+                logger.warning(f"WeasyPrint deps install failed: {stderr}")
+        except Exception as e:
+            logger.warning(f"Could not install WeasyPrint deps: {e}")
+
+    return results
+
+
+# ============================================================================
+# OLLAMA SETUP
+# ============================================================================
+
+def install_ollama() -> bool:
+    """Install Ollama based on platform."""
+    system = get_platform()
+
+    if check_command_exists('ollama'):
+        version = get_version('ollama')
+        logger.info(f"Ollama already installed ({version})")
+        return True
+
+    logger.info("Installing Ollama...")
+
+    if system == 'macos':
+        if check_command_exists('brew'):
+            code, _, stderr = run_command(['brew', 'install', 'ollama'], check=False)
+            if code != 0:
+                logger.error(f"Failed to install Ollama via Homebrew: {stderr}")
+                return False
+        else:
+            logger.warning("Homebrew not found. Please install Ollama manually from https://ollama.com/download")
+            return False
+    elif system == 'linux':
+        logger.info("Running Ollama install script...")
+        code, _, stderr = run_command(
+            ['bash', '-c', 'curl -fsSL https://ollama.com/install.sh | sh'],
+            check=False
+        )
+        if code != 0:
+            logger.error(f"Failed to install Ollama: {stderr}")
+            return False
+    elif system == 'windows':
+        # Try winget first
+        if check_command_exists('winget'):
+            logger.info("Installing Ollama via winget...")
+            code, _, stderr = run_command(
+                ['winget', 'install', '--id', 'Ollama.Ollama', '-e', '--accept-package-agreements', '--accept-source-agreements'],
+                check=False,
+                timeout=300
+            )
+            if code == 0:
+                logger.info("Ollama installed via winget")
+            else:
+                logger.warning(f"winget install failed: {stderr}")
+                logger.warning("Please install Ollama manually from https://ollama.com/download")
+                return False
+        else:
+            logger.warning("winget not found. Please install Ollama manually from https://ollama.com/download")
+            return False
+
+    return check_command_exists('ollama')
+
+
+def start_ollama_service() -> bool:
+    """Start Ollama service if not running."""
+    system = get_platform()
+
+    # Check if Ollama is already running by trying to list models
+    code, _, _ = run_command(['ollama', 'list'], check=False, timeout=10)
+    if code == 0:
+        logger.info("Ollama service is already running")
+        return True
+
+    logger.info("Starting Ollama service...")
+
+    try:
+        if system == 'windows':
+            # Windows: Start as background process
+            subprocess.Popen(
+                ['ollama', 'serve'],
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        else:
+            # macOS/Linux: Start in background
+            subprocess.Popen(
+                ['ollama', 'serve'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+
+        # Wait for service to start
+        logger.debug("Waiting for Ollama service to start...")
+        for i in range(10):
+            time.sleep(1)
+            code, _, _ = run_command(['ollama', 'list'], check=False, timeout=5)
+            if code == 0:
+                logger.info("Ollama service started successfully")
+                return True
+            logger.debug(f"Waiting... ({i+1}/10)")
+
+        logger.error("Ollama service failed to start within timeout")
+        return False
+
+    except Exception as e:
+        logger.error(f"Failed to start Ollama service: {e}")
+        return False
+
+
+def get_installed_ollama_models() -> List[str]:
+    """Get list of already installed Ollama models."""
+    code, stdout, _ = run_command(['ollama', 'list'], check=False, timeout=10)
+    if code != 0:
+        return []
+
+    models = []
+    for line in stdout.strip().split('\n')[1:]:  # Skip header line
+        if line.strip():
+            # Format: NAME    ID    SIZE    MODIFIED
+            parts = line.split()
+            if parts:
+                models.append(parts[0])  # Model name is first column
+    return models
+
+
+def pull_ollama_models(deps: Dict, include_optional: bool = False) -> Dict[str, bool]:
+    """
+    Pull required Ollama models, skipping those already installed.
+
+    Args:
+        deps: Dependencies configuration
+        include_optional: If True, also pull optional models
+
+    Returns:
+        Dict mapping model name to success status
+    """
+    models_config = deps.get('ollama', {}).get('models', {})
+    optional_models = deps.get('ollama', {}).get('optional_models', {})
+    descriptions = deps.get('ollama', {}).get('description', {})
+    results = {}
+
+    # Get already installed models to skip re-pulling
+    installed_models = get_installed_ollama_models()
+    logger.debug(f"Already installed models: {installed_models}")
+
+    def is_model_installed(model_name: str) -> bool:
+        """Check if model is installed (handles version tags)."""
+        # Model name might be 'llama3.2:latest' or just 'llama3.2'
+        base_name = model_name.split(':')[0]
+        for installed in installed_models:
+            if installed.startswith(base_name):
+                return True
+        return False
+
+    # Required models (text and embedding - these must succeed)
+    for category in ['text', 'embedding']:
+        for model in models_config.get(category, []):
+            if is_model_installed(model):
+                logger.info(f"Model already installed: {model}")
+                results[model] = True
+                continue
+
+            desc = descriptions.get(model, "")
+            logger.info(f"Pulling {category} model: {model}")
+            if desc:
+                logger.debug(f"  Purpose: {desc}")
+            code, stdout, stderr = run_command(
+                ['ollama', 'pull', model],
+                check=False,
+                timeout=600  # 10 minutes for large models
+            )
+            if code == 0:
+                logger.info(f"Successfully pulled: {model}")
+                results[model] = True
+            else:
+                logger.error(f"Failed to pull {model}: {stderr}")
+                results[model] = False
+
+    # Vision models (optional - graceful failure)
+    for model in models_config.get('vision', []):
+        if is_model_installed(model):
+            logger.info(f"Vision model already installed: {model}")
+            results[model] = True
+            continue
+
+        desc = descriptions.get(model, "")
+        logger.info(f"Pulling vision model: {model}")
+        if desc:
+            logger.debug(f"  Purpose: {desc}")
+        code, stdout, stderr = run_command(
+            ['ollama', 'pull', model],
+            check=False,
+            timeout=600
+        )
+        if code == 0:
+            logger.info(f"Successfully pulled: {model}")
+            results[model] = True
+        else:
+            logger.warning(f"Vision model {model} not available - will use cloud fallback")
+            results[model] = False
+
+    # Optional models (only if requested)
+    if include_optional:
+        logger.info("Pulling optional models...")
+        for category, models in optional_models.items():
+            if isinstance(models, list):
+                for model in models:
+                    if is_model_installed(model):
+                        logger.info(f"Optional model already installed: {model}")
+                        results[model] = True
+                        continue
+
+                    desc = descriptions.get(model, "")
+                    logger.info(f"Pulling optional {category} model: {model}")
+                    if desc:
+                        logger.debug(f"  Purpose: {desc}")
+                    code, stdout, stderr = run_command(
+                        ['ollama', 'pull', model],
+                        check=False,
+                        timeout=1200  # 20 minutes for large models like 70b
+                    )
+                    if code == 0:
+                        logger.info(f"Successfully pulled: {model}")
+                        results[model] = True
+                    else:
+                        logger.warning(f"Optional model {model} not available")
+                        results[model] = False
+
+    return results
+
+
+# ============================================================================
+# ENVIRONMENT SETUP
+# ============================================================================
+
+def setup_python_environment(project_root: Path) -> bool:
+    """Setup Python environment with UV or pip."""
+    backend_dir = project_root / 'backend'
+
+    if not backend_dir.exists():
+        logger.error(f"Backend directory not found: {backend_dir}")
+        return False
+
+    # Check for UV first (preferred)
+    if check_command_exists('uv'):
+        logger.info("Using UV for Python dependency management")
+        code, stdout, stderr = run_command(
+            ['uv', 'sync'],
+            cwd=str(backend_dir),
+            check=False,
+            timeout=300
+        )
+        if code != 0:
+            logger.error(f"UV sync failed: {stderr}")
+            return False
+        logger.info("Python dependencies synced successfully")
+        return True
+
+    # Install UV if not found
+    logger.info("UV not found, installing...")
+    system = get_platform()
+
+    if system == 'windows':
+        code, _, stderr = run_command(
+            ['powershell', '-c', 'irm https://astral.sh/uv/install.ps1 | iex'],
+            check=False
+        )
+    else:
+        code, _, stderr = run_command(
+            ['bash', '-c', 'curl -LsSf https://astral.sh/uv/install.sh | sh'],
+            check=False
+        )
+
+    if code != 0:
+        logger.error(f"Failed to install UV: {stderr}")
+        logger.info("Trying pip as fallback...")
+
+        # Fallback to pip
+        code, _, stderr = run_command(
+            ['pip', 'install', '-r', 'requirements.txt'],
+            cwd=str(backend_dir),
+            check=False
+        )
+        if code != 0:
+            logger.error(f"Pip install failed: {stderr}")
+            return False
+        return True
+
+    # Retry with UV after installation
+    # Need to reload PATH
+    if system != 'windows':
+        os.environ['PATH'] = f"{os.environ['HOME']}/.cargo/bin:" + os.environ['PATH']
+
+    code, stdout, stderr = run_command(
+        ['uv', 'sync'],
+        cwd=str(backend_dir),
+        check=False,
+        timeout=300
+    )
+    if code != 0:
+        logger.error(f"UV sync failed: {stderr}")
+        return False
+
+    logger.info("Python dependencies synced successfully")
+    return True
+
+
+def setup_node_environment(project_root: Path) -> bool:
+    """Setup Node.js environment."""
+    frontend_dir = project_root / 'frontend'
+
+    if not frontend_dir.exists():
+        logger.error(f"Frontend directory not found: {frontend_dir}")
+        return False
+
+    logger.info("Installing Node.js dependencies...")
+    code, stdout, stderr = run_command(
+        ['npm', 'install'],
+        cwd=str(frontend_dir),
+        check=False,
+        timeout=300
+    )
+
+    if code != 0:
+        logger.error(f"npm install failed: {stderr}")
+        return False
+
+    logger.info("Node.js dependencies installed successfully")
+    return True
+
+
+def setup_environment_files(project_root: Path, deps: Dict) -> bool:
+    """Create environment files if they don't exist."""
+    env_config = deps.get('environment', {})
+
+    # Backend .env
+    backend_env = project_root / env_config.get('backend_env_file', 'backend/.env')
+    example_env = project_root / env_config.get('example_file', '.env.example')
+
+    if not backend_env.exists():
+        if example_env.exists():
+            shutil.copy(example_env, backend_env)
+            logger.info(f"Created {backend_env} from {example_env}")
+        else:
+            logger.warning(f"No example env file found at {example_env}")
+    else:
+        logger.debug(f"Backend env file already exists: {backend_env}")
+
+    # Frontend .env.local
+    frontend_env = project_root / env_config.get('frontend_env_file', 'frontend/.env.local')
+
+    if not frontend_env.exists():
+        secret = secrets.token_urlsafe(32)
+        env_content = f"""# Auto-generated by setup script
+NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXTAUTH_URL=http://localhost:3000
+NEXTAUTH_SECRET={secret}
+"""
+        frontend_env.write_text(env_content)
+        logger.info(f"Created {frontend_env}")
+    else:
+        logger.debug(f"Frontend env file already exists: {frontend_env}")
+
+    return True
+
+
+# ============================================================================
+# DATABASE MIGRATIONS
+# ============================================================================
+
+def run_migrations(project_root: Path) -> bool:
+    """
+    Run database migrations.
+
+    Handles common scenarios:
+    - Fresh database: runs all migrations
+    - Tables already exist: stamps to head (marks as up-to-date)
+    - Partial migration state: attempts recovery
+    """
+    logger.info("Running database migrations...")
+
+    # Determine the alembic command prefix
+    # Note: alembic.ini is in project root, so run from there
+    if check_command_exists('uv'):
+        alembic_cmd = ['uv', 'run', 'alembic']
+    else:
+        alembic_cmd = ['python', '-m', 'alembic']
+
+    # First, try to run migrations normally
+    code, stdout, stderr = run_command(
+        alembic_cmd + ['upgrade', 'head'],
+        cwd=str(project_root),
+        check=False,
+        timeout=120
+    )
+
+    if code == 0:
+        logger.info("Database migrations completed successfully")
+        return True
+
+    # Check if error is due to tables already existing
+    if 'already exists' in stderr.lower():
+        logger.warning("Tables already exist - stamping database to head")
+
+        # Stamp to head to mark all migrations as applied
+        stamp_code, stamp_stdout, stamp_stderr = run_command(
+            alembic_cmd + ['stamp', 'head'],
+            cwd=str(project_root),
+            check=False,
+            timeout=30
+        )
+
+        if stamp_code == 0:
+            logger.info("Database stamped to head successfully")
+            return True
+        else:
+            logger.error(f"Failed to stamp database: {stamp_stderr}")
+            return False
+
+    # Check for missing revision errors (broken migration chain)
+    if 'keyerror' in stderr.lower() or 'not present' in stderr.lower():
+        logger.warning("Migration chain issue detected - attempting to check current state")
+
+        # Check current migration state
+        current_code, current_stdout, current_stderr = run_command(
+            alembic_cmd + ['current'],
+            cwd=str(project_root),
+            check=False,
+            timeout=30
+        )
+
+        if current_code == 0 and 'head' in current_stdout.lower():
+            logger.info("Database is already at head")
+            return True
+
+        logger.error(f"Migration chain broken. Manual intervention may be required.")
+        logger.error(f"Try: cd backend && uv run alembic stamp head")
+
+    logger.error(f"Migration failed: {stderr}")
+    return False
+
+
+# ============================================================================
+# SERVICE STARTUP
+# ============================================================================
+
+def start_services(project_root: Path, deps: Dict) -> bool:
+    """Start backend and frontend services."""
+    system = get_platform()
+    services_config = deps.get('services', {})
+
+    frontend_dir = project_root / 'frontend'
+
+    # Create log directory
+    log_dir = project_root / 'logs'
+    log_dir.mkdir(exist_ok=True)
+
+    # Start backend from project root with PYTHONPATH set
+    # The module path is 'backend.api.main:app' which requires project root in PYTHONPATH
+    logger.info("Starting backend service...")
+    backend_log = log_dir / 'backend.log'
+
+    # Set up environment with PYTHONPATH
+    backend_env = os.environ.copy()
+    backend_env['PYTHONPATH'] = str(project_root)
+
+    try:
+        if system == 'windows':
+            subprocess.Popen(
+                ['uv', 'run', '--project', 'backend', 'uvicorn', 'backend.api.main:app', '--reload', '--port', '8000'],
+                cwd=str(project_root),
+                env=backend_env,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        else:
+            with open(backend_log, 'w') as log_file:
+                subprocess.Popen(
+                    ['uv', 'run', '--project', 'backend', 'uvicorn', 'backend.api.main:app', '--reload', '--port', '8000'],
+                    cwd=str(project_root),
+                    env=backend_env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True
+                )
+        logger.info(f"Backend started (logs: {backend_log})")
+    except Exception as e:
+        logger.error(f"Failed to start backend: {e}")
+        return False
+
+    # Start frontend
+    logger.info("Starting frontend service...")
+    frontend_log = log_dir / 'frontend.log'
+
+    try:
+        if system == 'windows':
+            subprocess.Popen(
+                ['npm', 'run', 'dev'],
+                cwd=str(frontend_dir),
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        else:
+            with open(frontend_log, 'w') as log_file:
+                subprocess.Popen(
+                    ['npm', 'run', 'dev'],
+                    cwd=str(frontend_dir),
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True
+                )
+        logger.info(f"Frontend started (logs: {frontend_log})")
+    except Exception as e:
+        logger.error(f"Failed to start frontend: {e}")
+        return False
+
+    # Wait a moment for services to start
+    logger.info("Waiting for services to initialize...")
+    time.sleep(5)
+
+    # Check if services are running
+    backend_running = is_service_running(services_config.get('backend', {}).get('port', 8000))
+    frontend_running = is_service_running(services_config.get('frontend', {}).get('port', 3000))
+
+    if backend_running:
+        logger.info("Backend is running on http://localhost:8000")
+    else:
+        logger.warning("Backend may not have started correctly - check logs")
+
+    if frontend_running:
+        logger.info("Frontend is running on http://localhost:3000")
+    else:
+        logger.warning("Frontend may not have started correctly - check logs")
+
+    return True
+
+
+# ============================================================================
+# REDIS AND CELERY SERVICES
+# ============================================================================
+
+def is_redis_running() -> bool:
+    """Check if Redis server is running."""
+    code, _, _ = run_command(['redis-cli', 'ping'], check=False, timeout=5)
+    return code == 0
+
+
+def start_redis(project_root: Path) -> bool:
+    """Start Redis server if not already running."""
+    if not check_command_exists('redis-server'):
+        logger.warning("Redis not installed - async task processing will be disabled")
+        return False
+
+    if is_redis_running():
+        logger.info("Redis is already running")
+        return True
+
+    logger.info("Starting Redis server...")
+    system = get_platform()
+    log_dir = project_root / 'logs'
+    log_dir.mkdir(exist_ok=True)
+    redis_log = log_dir / 'redis.log'
+
+    try:
+        if system == 'windows':
+            subprocess.Popen(
+                ['redis-server'],
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        else:
+            with open(redis_log, 'w') as log_file:
+                subprocess.Popen(
+                    ['redis-server'],
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True
+                )
+
+        # Wait for Redis to start
+        for i in range(10):
+            time.sleep(0.5)
+            if is_redis_running():
+                logger.info(f"Redis started successfully (logs: {redis_log})")
+                return True
+            logger.debug(f"Waiting for Redis... ({i+1}/10)")
+
+        logger.error("Redis failed to start within timeout")
+        return False
+
+    except Exception as e:
+        logger.error(f"Failed to start Redis: {e}")
+        return False
+
+
+def start_celery(project_root: Path, deps: Dict) -> bool:
+    """Start Celery worker if Redis is available."""
+    if not is_redis_running():
+        logger.warning("Redis not running - cannot start Celery worker")
+        return False
+
+    if not check_command_exists('uv'):
+        logger.warning("UV not available - cannot start Celery worker")
+        return False
+
+    logger.info("Starting Celery worker...")
+    system = get_platform()
+    log_dir = project_root / 'logs'
+    log_dir.mkdir(exist_ok=True)
+    celery_log = log_dir / 'celery.log'
+
+    # Get celery start command from deps or use default
+    celery_config = deps.get('services', {}).get('celery', {})
+    start_cmd = celery_config.get('start_command', 'uv run celery -A backend.services.task_queue worker --loglevel=info')
+    cmd_parts = start_cmd.split()
+
+    # Set up environment with PYTHONPATH
+    celery_env = os.environ.copy()
+    celery_env['PYTHONPATH'] = str(project_root)
+
+    try:
+        if system == 'windows':
+            subprocess.Popen(
+                cmd_parts,
+                cwd=str(project_root),
+                env=celery_env,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        else:
+            with open(celery_log, 'w') as log_file:
+                subprocess.Popen(
+                    cmd_parts,
+                    cwd=str(project_root),
+                    env=celery_env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True
+                )
+
+        logger.info(f"Celery worker started (logs: {celery_log})")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to start Celery: {e}")
+        return False
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+def print_banner():
+    """Print setup script banner."""
+    banner = """
+╔════════════════════════════════════════════════════════════╗
+║             AIDocumentIndexer Setup Script                 ║
+╠════════════════════════════════════════════════════════════╣
+║  Platform: {platform:<46} ║
+║  Time: {time:<50} ║
+╚════════════════════════════════════════════════════════════╝
+""".format(
+        platform=get_platform().upper(),
+        time=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    )
+    print(banner)
+
+
+def print_summary(results: Dict, args=None):
+    """Print setup summary."""
+    print("\n" + "=" * 60)
+    print("SETUP SUMMARY")
+    print("=" * 60)
+
+    for step, status in results.items():
+        symbol = "✓" if status else "✗"
+        color = "\033[0;32m" if status else "\033[0;31m"
+        reset = "\033[0m"
+        print(f"{color}{symbol}{reset} {step}")
+
+    print("=" * 60)
+
+    all_success = all(results.values())
+    if all_success:
+        print("\n\033[0;32mSetup completed successfully!\033[0m")
+        print("\nServices running:")
+        print("  - Backend:  http://localhost:8000")
+        print("  - Frontend: http://localhost:3000")
+        if not (args and args.skip_ollama):
+            print("  - Ollama:   http://localhost:11434")
+        if not (args and args.skip_redis):
+            print("  - Redis:    localhost:6379")
+        if not (args and args.skip_celery):
+            print("  - Celery:   Worker running")
+        print("\nLogs available in: logs/")
+    else:
+        print("\n\033[0;31mSetup completed with errors. Check the log for details.\033[0m")
+
+    print()
+
+
+def main():
+    """Main setup function."""
+    global logger
+
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='AIDocumentIndexer Setup Script')
+    parser.add_argument('--skip-services', action='store_true', help='Skip starting services')
+    parser.add_argument('--skip-ollama', action='store_true', help='Skip Ollama setup')
+    parser.add_argument('--skip-redis', action='store_true', help='Skip Redis installation and startup')
+    parser.add_argument('--skip-celery', action='store_true', help='Skip Celery worker startup (requires Redis)')
+    parser.add_argument('--pull-optional', action='store_true', help='Also pull optional Ollama models (mistral, codellama, etc.)')
+    parser.add_argument('--install-optional', action='store_true', help='Auto-install optional system dependencies (ffmpeg, libreoffice, etc.)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output')
+    parser.add_argument('--log-file', type=str, help='Path to log file')
+    args = parser.parse_args()
+
+    # If skip-redis, also skip celery (celery requires redis)
+    if args.skip_redis:
+        args.skip_celery = True
+
+    # Enable Windows colors
+    enable_windows_colors()
+
+    # Determine project root (assuming script is in scripts/ directory)
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent
+
+    # Setup logging
+    log_file = args.log_file or str(project_root / 'logs' / 'setup.log')
+    Path(log_file).parent.mkdir(exist_ok=True)
+    logger = setup_logging(verbose=args.verbose, log_file=log_file)
+
+    # Print banner
+    print_banner()
+
+    logger.info(f"Project root: {project_root}")
+    logger.info(f"Log file: {log_file}")
+
+    # Track results
+    results = {}
+
+    # Load dependencies
+    deps_file = project_root / 'scripts' / 'dependencies.json'
+    deps = load_dependencies(str(deps_file))
+    logger.debug(f"Loaded dependencies from {deps_file}")
+
+    # 1. Check system dependencies
+    deps_ok, missing = check_system_dependencies(deps)
+    results['System dependencies'] = deps_ok
+    if not deps_ok:
+        logger.error(f"Missing required dependencies: {', '.join(missing)}")
+        logger.error("Please install missing dependencies and re-run setup")
+        print_summary(results)
+        sys.exit(1)
+
+    # 1.5 Install optional dependencies if requested
+    if args.install_optional:
+        optional_results = install_optional_dependencies(deps)
+        success_count = sum(1 for v in optional_results.values() if v)
+        total_count = len(optional_results)
+        results['Optional dependencies'] = success_count == total_count
+        if success_count < total_count:
+            failed = [k for k, v in optional_results.items() if not v]
+            logger.warning(f"Some optional dependencies failed to install: {', '.join(failed)}")
+
+    # 2. Kill existing services
+    logger.info("Stopping existing services...")
+    services_config = deps.get('services', {})
+    for service_name, config in services_config.items():
+        port = config.get('port')
+        if port:
+            if kill_process_on_port(port):
+                logger.debug(f"Stopped {service_name} on port {port}")
+    results['Stop existing services'] = True
+
+    # 3. Setup Python environment
+    results['Python environment'] = setup_python_environment(project_root)
+
+    # 4. Setup Node environment
+    results['Node.js environment'] = setup_node_environment(project_root)
+
+    # 5. Setup Ollama (unless skipped)
+    if args.skip_ollama:
+        logger.info("Skipping Ollama setup (--skip-ollama)")
+        results['Ollama setup'] = True
+    else:
+        ollama_installed = install_ollama()
+        if ollama_installed:
+            ollama_started = start_ollama_service()
+            if ollama_started:
+                model_results = pull_ollama_models(deps, include_optional=args.pull_optional)
+                # Consider success if at least text and embedding models are available
+                text_models = deps.get('ollama', {}).get('models', {}).get('text', [])
+                embed_models = deps.get('ollama', {}).get('models', {}).get('embedding', [])
+                required_models = text_models + embed_models
+                results['Ollama setup'] = all(model_results.get(m, False) for m in required_models)
+            else:
+                results['Ollama setup'] = False
+        else:
+            logger.warning("Ollama not installed - LLM features will use cloud providers")
+            results['Ollama setup'] = False
+
+    # 6. Setup environment files
+    results['Environment files'] = setup_environment_files(project_root, deps)
+
+    # 7. Run migrations
+    results['Database migrations'] = run_migrations(project_root)
+
+    # 8. Start Redis (unless skipped)
+    if args.skip_redis:
+        logger.info("Skipping Redis (--skip-redis)")
+        results['Redis'] = True
+    else:
+        results['Redis'] = start_redis(project_root)
+
+    # 9. Start Celery (unless skipped, requires Redis)
+    if args.skip_celery:
+        logger.info("Skipping Celery worker (--skip-celery)")
+        results['Celery worker'] = True
+    else:
+        results['Celery worker'] = start_celery(project_root, deps)
+
+    # 10. Start services (unless skipped)
+    if args.skip_services:
+        logger.info("Skipping service startup (--skip-services)")
+        results['Start services'] = True
+    else:
+        results['Start services'] = start_services(project_root, deps)
+
+    # Print summary
+    print_summary(results, args)
+
+    # Exit with appropriate code
+    sys.exit(0 if all(results.values()) else 1)
+
+
+if __name__ == '__main__':
+    main()

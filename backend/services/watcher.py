@@ -99,6 +99,7 @@ class WatchedDirectory:
     auto_process: bool = True
     access_tier: int = 1
     collection: Optional[str] = None
+    folder_id: Optional[str] = None
     enabled: bool = True
     created_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -353,6 +354,7 @@ class FileWatcherService:
         auto_process: bool = True,
         access_tier: int = 1,
         collection: Optional[str] = None,
+        folder_id: Optional[str] = None,
     ) -> WatchedDirectory:
         """Add a directory to watch."""
         # Validate path
@@ -370,6 +372,7 @@ class FileWatcherService:
             auto_process=auto_process,
             access_tier=access_tier,
             collection=collection,
+            folder_id=folder_id,
         )
 
         self._watch_dirs[watch_dir.id] = watch_dir

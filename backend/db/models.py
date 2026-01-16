@@ -3633,6 +3633,133 @@ class GeneratedImage(Base, UUIDMixin, TimestampMixin):
 
 
 # =============================================================================
+# File Watcher Models
+# =============================================================================
+
+class WatchedDirectory(Base, UUIDMixin, TimestampMixin):
+    """
+    Persisted configuration for file watcher directories.
+    Allows directories to be watched across server restarts.
+    """
+    __tablename__ = "watched_directories"
+
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    recursive: Mapped[bool] = mapped_column(Boolean, default=True)
+    auto_process: Mapped[bool] = mapped_column(Boolean, default=True)
+    access_tier_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("access_tiers.id", ondelete="SET NULL"), nullable=True
+    )
+    collection: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # Target folder for uploaded documents
+    folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("folders.id", ondelete="SET NULL"), nullable=True
+    )
+
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Organization isolation
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True
+    )
+
+    # Who created this watch config
+    created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # Stats
+    files_processed: Mapped[int] = mapped_column(Integer, default=0)
+    last_scan_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_event_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    access_tier: Mapped[Optional["AccessTier"]] = relationship("AccessTier")
+    folder: Mapped[Optional["Folder"]] = relationship("Folder")
+    organization: Mapped[Optional["Organization"]] = relationship("Organization")
+    created_by: Mapped[Optional["User"]] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_watched_dir_org", "organization_id"),
+        Index("idx_watched_dir_enabled", "enabled"),
+        Index("idx_watched_dir_path", "path"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WatchedDirectory(path='{self.path}', enabled={self.enabled})>"
+
+
+class FileWatcherEvent(Base, UUIDMixin):
+    """
+    Persisted file watcher events for tracking and retry.
+    """
+    __tablename__ = "file_watcher_events"
+
+    watch_dir_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("watched_directories.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)  # created, modified, deleted, moved
+    file_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    file_name: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_extension: Mapped[str] = mapped_column(String(32), nullable=False)
+    file_size: Mapped[int] = mapped_column(BigInteger, default=0)
+    file_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # Processing status
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, processing, completed, failed
+    processing_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Timestamps
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Link to created document (if successful)
+    document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # Relationships
+    watch_dir: Mapped["WatchedDirectory"] = relationship("WatchedDirectory")
+    document: Mapped[Optional["Document"]] = relationship("Document")
+
+    __table_args__ = (
+        Index("idx_watcher_event_dir", "watch_dir_id"),
+        Index("idx_watcher_event_status", "status"),
+        Index("idx_watcher_event_detected", "detected_at"),
+        Index("idx_watcher_event_hash", "file_hash"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<FileWatcherEvent(file='{self.file_name}', type='{self.event_type}', status='{self.status}')>"
+
+
+class FileWatcherConfig(Base, UUIDMixin, TimestampMixin):
+    """
+    Global file watcher configuration and state.
+    Single row table for watcher settings.
+    """
+    __tablename__ = "file_watcher_config"
+
+    # Service state
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_start: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Processing settings
+    batch_size: Mapped[int] = mapped_column(Integer, default=10)
+    poll_interval_seconds: Mapped[int] = mapped_column(Integer, default=5)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3)
+
+    # Organization (if watcher is org-specific, otherwise null for global)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<FileWatcherConfig(enabled={self.enabled}, auto_start={self.auto_start})>"
+
+
+# =============================================================================
 # Indexes (defined after models)
 # =============================================================================
 

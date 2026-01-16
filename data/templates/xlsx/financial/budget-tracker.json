@@ -1,0 +1,14 @@
+{
+  "id": "xlsx-budget-tracker",
+  "name": "Budget Tracker",
+  "description": "Track budget vs actual expenses",
+  "category": "financial",
+  "file_type": "xlsx",
+  "tags": [
+    "budget",
+    "finance",
+    "tracking",
+    "expenses"
+  ],
+  "primary_color": "#1D4ED8"
+}

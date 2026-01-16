@@ -184,6 +184,9 @@ class ChromaVectorStore:
             collection=collection_name,
         )
 
+        # Health check on startup - detect corruption early
+        self._verify_health()
+
     # =========================================================================
     # Storage Operations
     # =========================================================================
@@ -1225,6 +1228,51 @@ class ChromaVectorStore:
             metadata={"hnsw:space": self.chroma_config.distance_function},
         )
         logger.info("ChromaDB collection reset", collection=collection_name)
+
+    def _verify_health(self) -> bool:
+        """
+        Verify ChromaDB health on startup.
+
+        Detects corruption early by running a test query.
+        If corrupted, logs an error with instructions to rebuild.
+
+        Returns:
+            True if healthy, False if corrupted
+        """
+        try:
+            # Try to count - this will fail if index is corrupted
+            count = self._collection.count()
+
+            if count > 0:
+                # Try a simple query to verify search works
+                # Use a dummy embedding of correct dimension (768 for nomic-embed-text)
+                test_embedding = [0.0] * 768
+                self._collection.query(
+                    query_embeddings=[test_embedding],
+                    n_results=1,
+                )
+
+            logger.info(
+                "ChromaDB health check passed",
+                chunk_count=count,
+            )
+            return True
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(
+                "ChromaDB CORRUPTED - search will not work!",
+                error=error_msg,
+                fix="Run: python scripts/rebuild_chroma.py",
+            )
+            # Don't raise - let the app start but log the error prominently
+            print(f"\n{'='*60}")
+            print("WARNING: ChromaDB index is CORRUPTED!")
+            print(f"Error: {error_msg[:100]}...")
+            print("RAG search will NOT work until you run:")
+            print("  python scripts/rebuild_chroma.py")
+            print(f"{'='*60}\n")
+            return False
 
 
 # =============================================================================

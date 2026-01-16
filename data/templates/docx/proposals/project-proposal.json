@@ -1,0 +1,16 @@
+{
+  "id": "docx-project-proposal",
+  "name": "Project Proposal",
+  "description": "Project proposal template with sections for scope, timeline, budget",
+  "category": "proposals",
+  "file_type": "docx",
+  "tags": [
+    "project",
+    "proposal",
+    "planning",
+    "business"
+  ],
+  "primary_color": "#059669",
+  "style": "professional",
+  "tone": "formal"
+}

@@ -6,11 +6,67 @@ This guide covers all installation methods for AIDocumentIndexer.
 
 ## Table of Contents
 
-1. [Quick Start (Docker)](#quick-start-docker)
-2. [Manual Installation (No Docker)](#manual-installation-no-docker)
-3. [Hybrid Setup](#hybrid-setup)
-4. [Cloud Deployment](#cloud-deployment)
-5. [Development Setup](#development-setup)
+1. [Quick Start (Automated Script)](#quick-start-automated-script)
+2. [Quick Start (Docker)](#quick-start-docker)
+3. [Manual Installation (No Docker)](#manual-installation-no-docker)
+4. [Hybrid Setup](#hybrid-setup)
+5. [Cloud Deployment](#cloud-deployment)
+6. [Development Setup](#development-setup)
+
+---
+
+## Quick Start (Automated Script)
+
+**Recommended for most users.** The setup script handles everything automatically.
+
+### Prerequisites
+- Python 3.11+
+- Node.js 18+
+- 8GB RAM minimum
+
+### Steps
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/yourusername/AIDocumentIndexer.git
+cd AIDocumentIndexer
+
+# 2. Run the automated setup script
+python scripts/setup.py
+
+# The script will:
+# - Check system dependencies
+# - Install Python packages (via UV)
+# - Install Node.js packages (via npm)
+# - Setup Ollama and pull required models
+# - Create environment files
+# - Run database migrations
+# - Start Redis and Celery
+# - Start backend and frontend services
+```
+
+After setup completes:
+- **Frontend**: http://localhost:3000
+- **Backend API**: http://localhost:8000
+- **Ollama**: http://localhost:11434
+
+### Setup Script Options
+
+```bash
+# Skip Ollama (use cloud LLM providers instead)
+python scripts/setup.py --skip-ollama
+
+# Skip Redis/Celery (disable async processing)
+python scripts/setup.py --skip-redis
+
+# Include optional models (mistral, codellama, llama3.3:70b)
+python scripts/setup.py --pull-optional
+
+# Verbose output for debugging
+python scripts/setup.py --verbose
+```
+
+For detailed setup script documentation, see [SETUP.md](SETUP.md).
 
 ---
 

@@ -1236,6 +1236,196 @@ async def reset_settings(
 
 
 # =============================================================================
+# Settings Presets
+# =============================================================================
+
+# Pre-defined presets for quick configuration
+SETTINGS_PRESETS = {
+    "speed": {
+        "name": "Speed",
+        "description": "Optimized for fast responses - reduces quality checks and features",
+        "settings": {
+            "rag.top_k": 5,
+            "rag.rerank_results": False,
+            "rag.query_expansion_count": 0,
+            "rag.verification_enabled": False,
+            "rag.graphrag_enabled": False,
+            "rag.agentic_enabled": False,
+            "rag.hyde_enabled": False,
+            "generation.include_images": False,
+            "generation.auto_charts": False,
+        },
+    },
+    "quality": {
+        "name": "Quality",
+        "description": "Optimized for best results - enables all quality features",
+        "settings": {
+            "rag.top_k": 15,
+            "rag.rerank_results": True,
+            "rag.query_expansion_count": 3,
+            "rag.verification_enabled": True,
+            "rag.verification_level": "thorough",
+            "rag.graphrag_enabled": True,
+            "rag.agentic_enabled": True,
+            "rag.hyde_enabled": True,
+            "generation.include_images": True,
+            "generation.include_sources": True,
+        },
+    },
+    "balanced": {
+        "name": "Balanced",
+        "description": "Default balanced configuration - good quality with reasonable speed",
+        "settings": {
+            "rag.top_k": 10,
+            "rag.rerank_results": True,
+            "rag.query_expansion_count": 2,
+            "rag.verification_enabled": True,
+            "rag.verification_level": "quick",
+            "rag.graphrag_enabled": True,
+            "rag.agentic_enabled": False,
+            "rag.hyde_enabled": False,
+            "generation.include_images": True,
+            "generation.include_sources": True,
+        },
+    },
+    "offline": {
+        "name": "Offline/Local",
+        "description": "Optimized for offline/local-only operation using Ollama",
+        "settings": {
+            "rag.top_k": 8,
+            "rag.rerank_results": False,  # Reranking often needs cloud API
+            "rag.query_expansion_count": 1,
+            "rag.verification_enabled": False,
+            "rag.graphrag_enabled": True,
+            "rag.agentic_enabled": False,
+            "rag.hyde_enabled": False,
+            "generation.include_images": True,
+            "generation.image_backend": "picsum",  # Doesn't need API key
+        },
+    },
+}
+
+
+class PresetInfo(BaseModel):
+    """Information about a settings preset."""
+    id: str
+    name: str
+    description: str
+    settings: Dict[str, Any]
+
+
+class PresetsListResponse(BaseModel):
+    """List of available presets."""
+    presets: List[PresetInfo]
+
+
+class ApplyPresetResponse(BaseModel):
+    """Response after applying a preset."""
+    message: str
+    preset_id: str
+    preset_name: str
+    applied_settings: Dict[str, Any]
+
+
+@router.get("/settings/presets", response_model=PresetsListResponse)
+async def list_settings_presets(
+    admin: AdminUser,
+):
+    """
+    List all available settings presets.
+
+    Presets are pre-configured bundles of settings optimized for different use cases:
+    - speed: Fast responses, minimal processing
+    - quality: Best results, all features enabled
+    - balanced: Good quality with reasonable speed (default)
+    - offline: Optimized for local-only operation
+
+    Admin only endpoint.
+    """
+    logger.info("Listing settings presets", admin_id=admin.user_id)
+
+    presets = [
+        PresetInfo(
+            id=preset_id,
+            name=preset_data["name"],
+            description=preset_data["description"],
+            settings=preset_data["settings"],
+        )
+        for preset_id, preset_data in SETTINGS_PRESETS.items()
+    ]
+
+    return PresetsListResponse(presets=presets)
+
+
+@router.post("/settings/presets/{preset_id}", response_model=ApplyPresetResponse)
+async def apply_settings_preset(
+    preset_id: str,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Apply a settings preset.
+
+    This updates multiple settings at once to match the preset configuration.
+
+    Available presets:
+    - speed: Optimized for fast responses
+    - quality: Optimized for best results
+    - balanced: Default balanced configuration
+    - offline: Optimized for local/offline operation
+
+    Admin only endpoint.
+    """
+    if preset_id not in SETTINGS_PRESETS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown preset: {preset_id}. Available: {list(SETTINGS_PRESETS.keys())}",
+        )
+
+    preset = SETTINGS_PRESETS[preset_id]
+    logger.info(
+        "Applying settings preset",
+        admin_id=admin.user_id,
+        preset_id=preset_id,
+        preset_name=preset["name"],
+    )
+
+    settings_service = get_settings_service()
+
+    # Get old values for audit
+    old_settings = await settings_service.get_all_settings(db)
+
+    # Apply preset settings
+    await settings_service.update_settings(preset["settings"], db)
+
+    # Log changes for audit
+    changes = {}
+    for key, new_value in preset["settings"].items():
+        old_value = old_settings.get(key)
+        if old_value != new_value:
+            changes[key] = {"old": old_value, "new": new_value}
+
+    if changes:
+        audit_service = get_audit_service()
+        await audit_service.log_admin_action(
+            action=AuditAction.SYSTEM_CONFIG_CHANGE,
+            admin_user_id=admin.user_id,
+            target_resource_type="system_settings",
+            changes={"preset_applied": preset_id, "settings_changed": changes},
+            ip_address=get_client_ip(request),
+            session=db,
+        )
+
+    return ApplyPresetResponse(
+        message=f"Applied '{preset['name']}' preset successfully",
+        preset_id=preset_id,
+        preset_name=preset["name"],
+        applied_settings=preset["settings"],
+    )
+
+
+# =============================================================================
 # OCR Settings Endpoints
 # =============================================================================
 

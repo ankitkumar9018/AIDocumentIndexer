@@ -1,0 +1,16 @@
+{
+  "id": "docx-formal-letter",
+  "name": "Formal Letter",
+  "description": "Formal business letter template",
+  "category": "letters",
+  "file_type": "docx",
+  "tags": [
+    "letter",
+    "formal",
+    "business",
+    "correspondence"
+  ],
+  "primary_color": "#1E3A5F",
+  "style": "classic",
+  "tone": "formal"
+}

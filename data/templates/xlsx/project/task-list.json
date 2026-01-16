@@ -1,0 +1,14 @@
+{
+  "id": "xlsx-task-list",
+  "name": "Task List",
+  "description": "Simple task tracking list",
+  "category": "project",
+  "file_type": "xlsx",
+  "tags": [
+    "tasks",
+    "todo",
+    "list",
+    "tracking"
+  ],
+  "primary_color": "#F59E0B"
+}

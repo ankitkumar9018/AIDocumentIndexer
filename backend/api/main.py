@@ -123,6 +123,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # await init_llm()
         logger.info("LLM services initialized")
 
+        # Check Ollama availability for local LLM inference
+        try:
+            from backend.services.llm import list_ollama_models
+            ollama_result = await list_ollama_models()
+            if ollama_result.get("success"):
+                models = ollama_result.get("models", [])
+                model_names = [m.get("name", m.get("model", "unknown")) for m in models[:5]]
+                logger.info(
+                    "Ollama connected",
+                    model_count=len(models),
+                    available_models=model_names,
+                )
+            else:
+                logger.warning(
+                    "Ollama not available - system will use cloud LLM providers as fallback",
+                    error=ollama_result.get("error", "Unknown error"),
+                )
+        except Exception as ollama_error:
+            logger.warning(
+                "Ollama health check failed - system will use cloud LLM providers as fallback",
+                error=str(ollama_error),
+            )
+
         # Auto-download OCR models if enabled
         try:
             from backend.services.settings import SettingsService
@@ -287,6 +310,9 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.privacy import router as privacy_router
     from backend.api.routes.llm_config import router as llm_config_router
     from backend.api.routes.organizations import router as organizations_router
+    from backend.api.routes.downloads import router as downloads_router
+    from backend.api.routes.content_review import router as content_review_router
+    from backend.api.routes.document_templates import router as document_templates_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
@@ -305,6 +331,9 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(privacy_router, prefix="/api/v1/privacy", tags=["Privacy Controls"])
     app.include_router(llm_config_router, prefix="/api/v1/llm", tags=["LLM Configuration"])
     app.include_router(organizations_router, prefix="/api/v1/organizations", tags=["Organizations"])
+    app.include_router(downloads_router, prefix="/api/v1", tags=["Downloads"])
+    app.include_router(content_review_router, prefix="/api/v1/content-review", tags=["Content Review"])
+    app.include_router(document_templates_router, prefix="/api/v1", tags=["Document Templates"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

@@ -1,0 +1,19 @@
+{
+  "id": "pitch-startup-pitch",
+  "name": "Startup Pitch",
+  "description": "Modern pitch deck for startups and entrepreneurs",
+  "category": "pitch",
+  "file_type": "pptx",
+  "tags": [
+    "startup",
+    "pitch",
+    "entrepreneur",
+    "modern"
+  ],
+  "primary_color": "#7C3AED",
+  "style": "modern",
+  "tone": "professional",
+  "recommended_slides": 12,
+  "max_bullet_chars": 60,
+  "supports_images": true
+}

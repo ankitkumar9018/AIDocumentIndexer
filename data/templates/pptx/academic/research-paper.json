@@ -1,0 +1,19 @@
+{
+  "id": "academic-research-paper",
+  "name": "Research Paper",
+  "description": "Academic style for research presentations and conferences",
+  "category": "academic",
+  "file_type": "pptx",
+  "tags": [
+    "academic",
+    "research",
+    "scientific",
+    "formal"
+  ],
+  "primary_color": "#1E3A5F",
+  "style": "academic",
+  "tone": "formal",
+  "recommended_slides": 15,
+  "max_bullet_chars": 80,
+  "supports_images": true
+}

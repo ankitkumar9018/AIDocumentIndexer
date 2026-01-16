@@ -1,0 +1,14 @@
+{
+  "id": "xlsx-dashboard",
+  "name": "Dashboard",
+  "description": "Dashboard template for KPIs and metrics",
+  "category": "data",
+  "file_type": "xlsx",
+  "tags": [
+    "dashboard",
+    "kpi",
+    "metrics",
+    "visualization"
+  ],
+  "primary_color": "#EC4899"
+}

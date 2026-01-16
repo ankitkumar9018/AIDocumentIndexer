@@ -14,6 +14,27 @@ Guide for setting up and contributing to AIDocumentIndexer.
 
 ## Quick Start
 
+### Option A: Automated Setup (Recommended)
+
+The setup script handles everything automatically:
+
+```bash
+git clone https://github.com/yourusername/AIDocumentIndexer.git
+cd AIDocumentIndexer
+
+# Run automated setup
+python scripts/setup.py --verbose
+
+# For development without Ollama (uses cloud providers)
+python scripts/setup.py --skip-ollama
+```
+
+This will install all dependencies, set up Ollama with models, run migrations, and start services.
+
+See [SETUP.md](./SETUP.md) for detailed script options.
+
+### Option B: Manual Setup
+
 ### 1. Clone and Setup
 
 ```bash

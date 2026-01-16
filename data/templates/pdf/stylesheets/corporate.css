@@ -1,0 +1,181 @@
+/* Corporate PDF Stylesheet */
+/* For use with WeasyPrint + Jinja2 */
+
+:root {
+    --primary-color: #2563EB;
+    --secondary-color: #1E40AF;
+    --text-color: #1F2937;
+    --background-color: #FFFFFF;
+    --accent-color: #F59E0B;
+    --border-color: #E5E7EB;
+    --light-bg: #F9FAFB;
+}
+
+@page {
+    size: A4;
+    margin: 1in;
+
+    @top-center {
+        content: element(header);
+    }
+
+    @bottom-center {
+        content: element(footer);
+    }
+}
+
+@page:first {
+    margin-top: 0;
+    @top-center {
+        content: none;
+    }
+}
+
+/* Running header/footer */
+.header {
+    position: running(header);
+    font-size: 10pt;
+    color: var(--text-color);
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.25in;
+}
+
+.footer {
+    position: running(footer);
+    font-size: 9pt;
+    color: #6B7280;
+    border-top: 1px solid var(--border-color);
+    padding-top: 0.25in;
+    text-align: center;
+}
+
+.footer .page-number::after {
+    content: counter(page);
+}
+
+/* Typography */
+body {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: var(--text-color);
+}
+
+h1 {
+    font-size: 24pt;
+    font-weight: bold;
+    color: var(--primary-color);
+    margin-top: 0;
+    margin-bottom: 0.5in;
+}
+
+h2 {
+    font-size: 18pt;
+    font-weight: bold;
+    color: var(--secondary-color);
+    margin-top: 0.5in;
+    margin-bottom: 0.25in;
+    border-bottom: 2px solid var(--primary-color);
+    padding-bottom: 0.1in;
+}
+
+h3 {
+    font-size: 14pt;
+    font-weight: bold;
+    color: var(--text-color);
+    margin-top: 0.3in;
+    margin-bottom: 0.15in;
+}
+
+h4 {
+    font-size: 12pt;
+    font-weight: bold;
+    color: var(--text-color);
+}
+
+p {
+    margin-bottom: 0.15in;
+    text-align: justify;
+}
+
+/* Lists */
+ul, ol {
+    margin-left: 0.25in;
+    margin-bottom: 0.15in;
+}
+
+li {
+    margin-bottom: 0.05in;
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.25in 0;
+}
+
+th {
+    background-color: var(--primary-color);
+    color: white;
+    font-weight: bold;
+    text-align: left;
+    padding: 0.1in;
+}
+
+td {
+    padding: 0.1in;
+    border-bottom: 1px solid var(--border-color);
+}
+
+tr:nth-child(even) {
+    background-color: var(--light-bg);
+}
+
+/* Callouts */
+.callout {
+    background-color: var(--light-bg);
+    border-left: 4px solid var(--primary-color);
+    padding: 0.15in;
+    margin: 0.2in 0;
+}
+
+.callout.warning {
+    border-left-color: var(--accent-color);
+}
+
+/* Title page */
+.title-page {
+    page-break-after: always;
+    text-align: center;
+    padding-top: 2in;
+}
+
+.title-page h1 {
+    font-size: 36pt;
+    margin-bottom: 0.5in;
+}
+
+.title-page .subtitle {
+    font-size: 18pt;
+    color: #6B7280;
+    margin-bottom: 1in;
+}
+
+.title-page .meta {
+    font-size: 12pt;
+    color: #6B7280;
+}
+
+/* Page breaks */
+.page-break {
+    page-break-before: always;
+}
+
+/* Executive summary */
+.executive-summary {
+    background-color: var(--light-bg);
+    padding: 0.25in;
+    margin-bottom: 0.5in;
+    border-radius: 4px;
+}

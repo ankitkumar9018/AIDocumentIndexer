@@ -1,0 +1,130 @@
+{
+  "system": {
+    "required": ["python3", "node", "npm"],
+    "optional": {
+      "document_conversion": ["soffice"],
+      "ocr": ["tesseract"],
+      "media": ["ffmpeg"],
+      "pdf": ["poppler"],
+      "utilities": ["jq", "redis-server"],
+      "distributed": ["ray"]
+    },
+    "description": {
+      "soffice": "LibreOffice - Convert PPTX to images for visual slide review",
+      "tesseract": "OCR engine - Extract text from scanned documents/images",
+      "ffmpeg": "Audio/video processing - Required for audio overview generation",
+      "poppler": "PDF utilities (pdfinfo, pdftotext) - PDF preview and text extraction via pdf2image",
+      "jq": "JSON processor - Useful for debugging API responses",
+      "redis-server": "In-memory cache - Speeds up embedding caching and session storage",
+      "ray": "Distributed processing - Enables parallel document processing across workers"
+    },
+    "install_commands": {
+      "macos": {
+        "soffice": "brew install --cask libreoffice",
+        "tesseract": "brew install tesseract",
+        "ffmpeg": "brew install ffmpeg",
+        "poppler": "brew install poppler",
+        "jq": "brew install jq",
+        "redis-server": "brew install redis",
+        "ray": "pip install ray[default]"
+      },
+      "linux_apt": {
+        "soffice": "apt install libreoffice",
+        "tesseract": "apt install tesseract-ocr",
+        "ffmpeg": "apt install ffmpeg",
+        "poppler": "apt install poppler-utils",
+        "jq": "apt install jq",
+        "redis-server": "apt install redis-server",
+        "ray": "pip install ray[default]"
+      },
+      "linux_dnf": {
+        "soffice": "dnf install libreoffice",
+        "tesseract": "dnf install tesseract",
+        "ffmpeg": "dnf install ffmpeg",
+        "poppler": "dnf install poppler-utils",
+        "jq": "dnf install jq",
+        "redis-server": "dnf install redis",
+        "ray": "pip install ray[default]"
+      },
+      "windows": {
+        "soffice": "winget install LibreOffice.LibreOffice",
+        "tesseract": "winget install UB-Mannheim.TesseractOCR",
+        "ffmpeg": "winget install Gyan.FFmpeg",
+        "poppler": "Download from https://github.com/oschwartz10612/poppler-windows/releases",
+        "jq": "winget install jqlang.jq",
+        "redis-server": "Download from https://github.com/microsoftarchive/redis/releases",
+        "ray": "pip install ray[default]"
+      }
+    },
+    "weasyprint_deps": {
+      "_comment": "WeasyPrint (PDF generation) requires these system libraries",
+      "macos": "brew install pango",
+      "linux_apt": "apt install libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0",
+      "linux_dnf": "dnf install pango",
+      "windows": "Use MSYS2: pacman -S mingw-w64-x86_64-pango"
+    }
+  },
+  "python": {
+    "min_version": "3.11",
+    "package_manager": "uv"
+  },
+  "node": {
+    "min_version": "18.0.0"
+  },
+  "ollama": {
+    "models": {
+      "text": ["llama3.2:latest"],
+      "embedding": ["nomic-embed-text:latest"],
+      "vision": ["llava:latest"]
+    },
+    "optional_models": {
+      "text": ["llama3.1:8b", "mistral:latest", "codellama:latest"],
+      "vision": ["llava:13b", "bakllava:latest", "llama3.2-vision:latest"],
+      "large": ["llama3.3:70b"]
+    },
+    "description": {
+      "llama3.2:latest": "Primary text model for chat, entity extraction, content generation",
+      "nomic-embed-text:latest": "Primary embedding model for RAG and vector search",
+      "llava:latest": "Vision model for image captioning, slide review, multimodal RAG",
+      "llama3.1:8b": "Alternative text model with larger context",
+      "mistral:latest": "Fast inference alternative text model",
+      "codellama:latest": "Code-focused model for technical content",
+      "llama3.2-vision:latest": "Alternative vision model",
+      "llama3.3:70b": "High-quality large model (requires 48GB+ RAM)"
+    }
+  },
+  "services": {
+    "backend": {
+      "port": 8000,
+      "process_name": "uvicorn",
+      "required": true
+    },
+    "frontend": {
+      "port": 3000,
+      "process_name": "node",
+      "required": true
+    },
+    "ollama": {
+      "port": 11434,
+      "process_name": "ollama",
+      "required": false
+    },
+    "redis": {
+      "port": 6379,
+      "process_name": "redis-server",
+      "required": false,
+      "description": "Required for Celery async tasks and caching"
+    },
+    "celery": {
+      "process_name": "celery",
+      "required": false,
+      "description": "Async document processing (requires Redis)",
+      "start_command": "uv run celery -A backend.services.task_queue worker --loglevel=info"
+    }
+  },
+  "environment": {
+    "backend_env_file": "backend/.env",
+    "frontend_env_file": "frontend/.env.local",
+    "example_file": ".env.example"
+  }
+}

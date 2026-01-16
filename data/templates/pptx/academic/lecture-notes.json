@@ -1,0 +1,19 @@
+{
+  "id": "academic-lecture-notes",
+  "name": "Lecture Notes",
+  "description": "Educational format for classroom lectures and tutorials",
+  "category": "academic",
+  "file_type": "pptx",
+  "tags": [
+    "lecture",
+    "education",
+    "teaching",
+    "tutorial"
+  ],
+  "primary_color": "#059669",
+  "style": "educational",
+  "tone": "professional",
+  "recommended_slides": 20,
+  "max_bullet_chars": 75,
+  "supports_images": true
+}

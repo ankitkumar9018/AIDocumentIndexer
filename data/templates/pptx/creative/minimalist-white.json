@@ -1,0 +1,19 @@
+{
+  "id": "creative-minimalist-white",
+  "name": "Minimalist White",
+  "description": "Ultra-clean black and white minimalist design",
+  "category": "creative",
+  "file_type": "pptx",
+  "tags": [
+    "minimalist",
+    "white",
+    "clean",
+    "simple"
+  ],
+  "primary_color": "#18181B",
+  "style": "minimal",
+  "tone": "professional",
+  "recommended_slides": 8,
+  "max_bullet_chars": 60,
+  "supports_images": true
+}

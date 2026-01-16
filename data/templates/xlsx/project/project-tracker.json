@@ -1,0 +1,14 @@
+{
+  "id": "xlsx-project-tracker",
+  "name": "Project Tracker",
+  "description": "Track project tasks and progress",
+  "category": "project",
+  "file_type": "xlsx",
+  "tags": [
+    "project",
+    "tasks",
+    "tracking",
+    "management"
+  ],
+  "primary_color": "#0F766E"
+}

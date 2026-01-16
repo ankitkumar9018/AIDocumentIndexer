@@ -1,0 +1,14 @@
+{
+  "id": "xlsx-profit-loss",
+  "name": "Profit & Loss",
+  "description": "P&L statement template",
+  "category": "financial",
+  "file_type": "xlsx",
+  "tags": [
+    "profit",
+    "loss",
+    "financial",
+    "statement"
+  ],
+  "primary_color": "#059669"
+}

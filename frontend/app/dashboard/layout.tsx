@@ -30,6 +30,7 @@ import {
   Key,
   Building2,
   Lock,
+  Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -64,6 +65,7 @@ const navigation = [
   { name: "Costs", href: "/dashboard/costs", icon: DollarSign },
   { name: "LLM Gateway", href: "/dashboard/gateway", icon: Key },
   { name: "Privacy", href: "/dashboard/privacy", icon: Lock },
+  { name: "Sync Clients", href: "/dashboard/sync", icon: Download },
 ];
 
 const adminNavigation = [
@@ -94,6 +96,7 @@ const pageTitles: Record<string, string> = {
   "/dashboard/admin/audit-logs": "Audit Logs",
   "/dashboard/admin/settings": "Settings",
   "/dashboard/admin/organizations": "Organizations",
+  "/dashboard/sync": "Sync Clients",
 };
 
 export default function DashboardLayout({

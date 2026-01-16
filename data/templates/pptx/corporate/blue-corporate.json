@@ -1,0 +1,19 @@
+{
+  "id": "corporate-blue-corporate",
+  "name": "Blue Corporate",
+  "description": "Classic corporate blue theme for business presentations",
+  "category": "corporate",
+  "file_type": "pptx",
+  "tags": [
+    "blue",
+    "corporate",
+    "classic",
+    "business"
+  ],
+  "primary_color": "#1D4ED8",
+  "style": "classic",
+  "tone": "formal",
+  "recommended_slides": 15,
+  "max_bullet_chars": 70,
+  "supports_images": true
+}

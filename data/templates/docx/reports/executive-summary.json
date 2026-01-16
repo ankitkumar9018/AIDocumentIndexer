@@ -1,0 +1,16 @@
+{
+  "id": "docx-executive-summary",
+  "name": "Executive Summary",
+  "description": "One-page executive summary template",
+  "category": "reports",
+  "file_type": "docx",
+  "tags": [
+    "executive",
+    "summary",
+    "brief",
+    "professional"
+  ],
+  "primary_color": "#7C3AED",
+  "style": "minimal",
+  "tone": "formal"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "docx-business-proposal",
+  "name": "Business Proposal",
+  "description": "Business proposal template for partnerships and deals",
+  "category": "proposals",
+  "file_type": "docx",
+  "tags": [
+    "business",
+    "proposal",
+    "partnership",
+    "deal"
+  ],
+  "primary_color": "#DC2626",
+  "style": "professional",
+  "tone": "formal"
+}

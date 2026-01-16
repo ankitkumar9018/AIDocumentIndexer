@@ -1,0 +1,14 @@
+{
+  "id": "xlsx-data-analysis",
+  "name": "Data Analysis",
+  "description": "Template for data analysis and metrics",
+  "category": "data",
+  "file_type": "xlsx",
+  "tags": [
+    "data",
+    "analysis",
+    "metrics",
+    "reporting"
+  ],
+  "primary_color": "#6366F1"
+}

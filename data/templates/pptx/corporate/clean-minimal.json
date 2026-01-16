@@ -1,0 +1,20 @@
+{
+  "id": "corporate-clean-minimal",
+  "name": "Clean Minimal",
+  "description": "Professional minimal design with subtle blue accents",
+  "category": "corporate",
+  "file_type": "pptx",
+  "tags": [
+    "minimal",
+    "professional",
+    "clean",
+    "business",
+    "blue"
+  ],
+  "primary_color": "#1E40AF",
+  "style": "minimal",
+  "tone": "professional",
+  "recommended_slides": 10,
+  "max_bullet_chars": 70,
+  "supports_images": true
+}

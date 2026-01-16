@@ -276,17 +276,27 @@ class KnowledgeGraphService:
 
     async def _get_llm(self):
         """
-        Get or initialize LLM service.
+        Get or initialize LLM service with graceful fallback.
 
         Uses the configured provider from environment or database.
         Supports FREE (Ollama) and PAID (OpenAI, Anthropic) providers.
+
+        Returns:
+            LLM instance or None if unavailable
         """
         if not self.llm:
-            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
-                operation="chat",  # Use chat operation for entity extraction
-                db_session=self.db,
-            )
-            self.llm = llm
+            try:
+                llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                    operation="chat",  # Use chat operation for entity extraction
+                    db_session=self.db,
+                )
+                self.llm = llm
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize LLM for knowledge graph",
+                    error=str(e),
+                )
+                return None
         return self.llm
 
     async def _get_embeddings(self):
@@ -319,6 +329,14 @@ class KnowledgeGraphService:
             Tuple of (entities, relations)
         """
         llm = await self._get_llm()
+
+        # Graceful fallback: Return empty if LLM unavailable
+        if not llm:
+            logger.warning(
+                "LLM not available for entity extraction - skipping",
+                document_id=str(document_id) if document_id else None,
+            )
+            return [], []
 
         # Get human-readable language name for the prompt
         language_name = LANGUAGE_NAMES.get(document_language, "English")
@@ -389,20 +407,179 @@ class KnowledgeGraphService:
             logger.error("Entity extraction failed", error=str(e))
             return [], []
 
+    async def extract_entities_batch(
+        self,
+        chunks: List[str],
+        document_id: Optional[uuid.UUID] = None,
+        document_language: str = "en",
+        batch_size: int = 3,
+    ) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
+        """
+        Extract entities from multiple text chunks in batches for better performance.
+
+        Instead of making one LLM call per chunk, this method combines multiple
+        chunks into single prompts, reducing LLM calls by ~3-5x.
+
+        Args:
+            chunks: List of text chunks to process
+            document_id: Source document ID
+            document_language: Language code of the source document
+            batch_size: Number of chunks to combine per LLM call
+
+        Returns:
+            Tuple of (all_entities, all_relations) from all chunks
+        """
+        llm = await self._get_llm()
+
+        # Graceful fallback: Return empty if LLM unavailable
+        if not llm:
+            logger.warning(
+                "LLM not available for batch entity extraction - skipping",
+                document_id=str(document_id) if document_id else None,
+                chunk_count=len(chunks),
+            )
+            return [], []
+
+        all_entities: List[ExtractedEntity] = []
+        all_relations: List[ExtractedRelation] = []
+        language_name = LANGUAGE_NAMES.get(document_language, "English")
+
+        # Process in batches
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+
+            # Combine chunks with separators
+            combined_text = "\n\n---CHUNK_BOUNDARY---\n\n".join(
+                f"[Chunk {j+1}]\n{chunk[:2500]}" for j, chunk in enumerate(batch)
+            )
+
+            prompt = f"""Extract named entities and relationships from the following text chunks.
+
+SOURCE DOCUMENT LANGUAGE: {language_name}
+
+The text is divided into {len(batch)} chunks separated by ---CHUNK_BOUNDARY---.
+Extract entities from ALL chunks.
+
+Text:
+{combined_text}
+
+Extract entities of these types:
+- PERSON: People, individuals
+- ORGANIZATION: Companies, institutions, groups
+- LOCATION: Places, cities, countries
+- CONCEPT: Abstract ideas, methodologies, theories
+- EVENT: Occurrences, meetings, incidents
+- PRODUCT: Products, services, offerings
+- TECHNOLOGY: Technologies, tools, systems
+- DATE: Dates, time periods
+- METRIC: Numbers, statistics, KPIs
+- OTHER: Any other notable entities
+
+For each entity, provide:
+1. name: The entity name AS IT APPEARS in the source text
+2. type: One of the types above
+3. description: Brief description if available from context
+4. canonical_name: The ENGLISH name for this entity (for cross-language linking)
+
+Return JSON in this exact format:
+{{
+  "entities": [
+    {{"name": "...", "type": "...", "description": "...", "canonical_name": "..."}}
+  ],
+  "relations": [
+    {{"source": "entity_name", "target": "entity_name", "type": "WORKS_FOR|LOCATED_IN|RELATED_TO|PART_OF|...", "label": "optional"}}
+  ]
+}}
+
+Only include entities and relations clearly supported by the text."""
+
+            try:
+                result = await llm.ainvoke(prompt)
+                response = result.content if hasattr(result, 'content') else str(result)
+
+                data = _extract_json_from_response(response)
+                if not data:
+                    logger.warning(
+                        "No valid JSON in batch extraction response",
+                        batch_index=i // batch_size,
+                    )
+                    continue
+
+                # Parse entities
+                for e in data.get("entities", []):
+                    try:
+                        entity_type = EntityType(e.get("type", "other").lower())
+                    except ValueError:
+                        entity_type = EntityType.OTHER
+
+                    canonical_name = e.get("canonical_name") or e.get("name", "")
+
+                    all_entities.append(ExtractedEntity(
+                        name=e.get("name", ""),
+                        entity_type=entity_type,
+                        description=e.get("description"),
+                        aliases=e.get("aliases", []),
+                        language=document_language,
+                        canonical_name=canonical_name,
+                        language_variants={document_language: e.get("name", "")} if document_language else {},
+                    ))
+
+                # Parse relations
+                for r in data.get("relations", []):
+                    try:
+                        relation_type = RelationType(r.get("type", "related_to").lower())
+                    except ValueError:
+                        relation_type = RelationType.OTHER
+
+                    all_relations.append(ExtractedRelation(
+                        source_entity=r.get("source", ""),
+                        target_entity=r.get("target", ""),
+                        relation_type=relation_type,
+                        relation_label=r.get("label"),
+                    ))
+
+                logger.debug(
+                    "Batch extraction completed",
+                    batch_index=i // batch_size,
+                    chunks_in_batch=len(batch),
+                    entities_found=len(data.get("entities", [])),
+                )
+
+            except Exception as e:
+                logger.error(
+                    "Batch entity extraction failed",
+                    batch_index=i // batch_size,
+                    error=str(e),
+                )
+                continue
+
+        logger.info(
+            "Batch entity extraction completed",
+            total_chunks=len(chunks),
+            total_entities=len(all_entities),
+            total_relations=len(all_relations),
+            batches_processed=(len(chunks) + batch_size - 1) // batch_size,
+        )
+
+        return all_entities, all_relations
+
     async def process_document_for_graph(
         self,
         document_id: uuid.UUID,
         chunks: Optional[List[Chunk]] = None,
+        use_batch_extraction: bool = True,
     ) -> Dict[str, int]:
         """
         Process a document to extract entities and build graph with language context.
 
         Loads the document language and passes it to entity extraction for
-        cross-language entity linking support.
+        cross-language entity linking support. Uses batch extraction by default
+        for 3-5x faster processing.
 
         Args:
             document_id: Document to process
             chunks: Optional pre-loaded chunks
+            use_batch_extraction: Use batch extraction for better performance (default True)
 
         Returns:
             Stats dict with counts
@@ -436,26 +613,46 @@ class KnowledgeGraphService:
         all_entities: Dict[str, ExtractedEntity] = {}
         all_relations: List[ExtractedRelation] = []
 
-        # Extract from each chunk with document language context
-        for chunk in chunks:
-            entities, relations = await self.extract_entities_from_text(
-                chunk.content,
+        # Use batch extraction for better performance (3-5x faster)
+        if use_batch_extraction and len(chunks) > 1:
+            chunk_texts = [chunk.content for chunk in chunks]
+            entities, relations = await self.extract_entities_batch(
+                chunks=chunk_texts,
                 document_id=document_id,
-                chunk_id=chunk.id,
                 document_language=document_language,
+                batch_size=3,  # Process 3 chunks per LLM call
             )
 
             # Merge entities (by normalized name)
             for entity in entities:
                 norm_name = self._normalize_entity_name(entity.name)
                 if norm_name in all_entities:
-                    # Merge aliases
                     existing = all_entities[norm_name]
                     existing.aliases = list(set(existing.aliases + entity.aliases))
                 else:
                     all_entities[norm_name] = entity
 
             all_relations.extend(relations)
+        else:
+            # Fallback to sequential extraction for single chunk or when batch disabled
+            for chunk in chunks:
+                entities, relations = await self.extract_entities_from_text(
+                    chunk.content,
+                    document_id=document_id,
+                    chunk_id=chunk.id,
+                    document_language=document_language,
+                )
+
+                # Merge entities (by normalized name)
+                for entity in entities:
+                    norm_name = self._normalize_entity_name(entity.name)
+                    if norm_name in all_entities:
+                        existing = all_entities[norm_name]
+                        existing.aliases = list(set(existing.aliases + entity.aliases))
+                    else:
+                        all_entities[norm_name] = entity
+
+                all_relations.extend(relations)
 
         # Store entities in database
         entity_map = {}  # norm_name -> Entity model

@@ -638,3 +638,87 @@ Never commit sensitive variables to version control:
 - `ANTHROPIC_API_KEY`
 
 Use environment-specific `.env` files or secrets management (HashiCorp Vault, AWS Secrets Manager, etc.).
+
+---
+
+## Automated Setup Configuration
+
+The setup script (`scripts/setup.py`) reads from `scripts/dependencies.json` to determine:
+- Required system dependencies
+- Optional dependencies with descriptions and install commands
+- Ollama models to pull
+- Service ports and configuration
+
+### Dependencies Configuration File
+
+```json
+{
+  "system": {
+    "required": ["python3", "node", "npm"],
+    "optional": {
+      "document_conversion": ["soffice"],
+      "ocr": ["tesseract"],
+      "media": ["ffmpeg"],
+      "pdf": ["poppler"],
+      "utilities": ["jq", "redis-server"],
+      "distributed": ["ray"]
+    }
+  },
+  "ollama": {
+    "models": {
+      "text": ["llama3.2:latest"],
+      "embedding": ["nomic-embed-text:latest"],
+      "vision": ["llava:latest"]
+    }
+  },
+  "services": {
+    "backend": {"port": 8000},
+    "frontend": {"port": 3000},
+    "redis": {"port": 6379},
+    "ollama": {"port": 11434}
+  }
+}
+```
+
+### Graceful Service Fallbacks
+
+The system handles missing optional services gracefully:
+
+| Service | Fallback Behavior |
+|---------|-------------------|
+| **Ollama** | Uses cloud LLM providers (OpenAI, Anthropic) |
+| **Redis** | Disables caching and Celery async tasks |
+| **Celery** | Processing runs synchronously |
+| **Vision Models** | Falls back to cloud vision APIs |
+| **Ray** | Uses standard multiprocessing |
+
+See [SETUP.md](./SETUP.md) for complete setup script documentation.
+
+---
+
+## Settings Presets API
+
+Apply configuration presets programmatically:
+
+```bash
+# Speed preset (fast responses)
+curl -X POST http://localhost:8000/api/v1/settings/apply-preset/speed
+
+# Quality preset (best accuracy)
+curl -X POST http://localhost:8000/api/v1/settings/apply-preset/quality
+
+# Balanced preset (default)
+curl -X POST http://localhost:8000/api/v1/settings/apply-preset/balanced
+
+# Offline preset (local Ollama only)
+curl -X POST http://localhost:8000/api/v1/settings/apply-preset/offline
+```
+
+### Preset Configurations
+
+| Preset | top_k | rerank | query_expansion | images |
+|--------|-------|--------|-----------------|--------|
+| Speed | 5 | false | false | false |
+| Quality | 15 | true | true | true |
+| Balanced | 10 | true | true | true |
+| Offline | 10 | false | false | false |

@@ -1,0 +1,16 @@
+{
+  "id": "docx-business-report",
+  "name": "Business Report",
+  "description": "Standard business report template with professional formatting",
+  "category": "reports",
+  "file_type": "docx",
+  "tags": [
+    "business",
+    "report",
+    "professional",
+    "formal"
+  ],
+  "primary_color": "#1D4ED8",
+  "style": "professional",
+  "tone": "formal"
+}
