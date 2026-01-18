@@ -919,6 +919,16 @@ EVALUATE THE FOLLOWING (based on PPTEval framework):
    - Elements are aligned properly
    - Professional appearance overall
 
+4. CRITICAL POSITIONING CHECKS (PHASE 10 - Report as HIGH severity issues):
+   - FOOTER POSITION: The date (left) and page number (right) MUST appear at the VERY BOTTOM
+     of the slide, within the bottom 10% of the slide height. If footer elements appear in the
+     middle or upper portion of the slide, this is a CRITICAL positioning error.
+   - TITLE-BODY GAP: There must be visible vertical spacing between where the title text ends
+     and where the body/bullet content begins. If text appears crowded against the title with
+     minimal gap (less than approximately 1cm visual gap), flag as HIGH severity spacing issue.
+   - CONTENT BOUNDS: Body text and bullets must NOT extend into the bottom 15% of the slide
+     (the footer zone). If content appears to overlap or crowd the footer area, flag as HIGH severity.
+
 Return your analysis as JSON (no markdown blocks):
 {{
     "issues": [

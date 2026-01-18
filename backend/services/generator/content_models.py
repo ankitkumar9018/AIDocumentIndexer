@@ -509,7 +509,7 @@ class ContentConstraints(BaseModel):
     # PPTX constraints
     title_max_chars: int = Field(default=60)
     subtitle_max_chars: int = Field(default=100)
-    bullet_max_chars: int = Field(default=70)
+    bullet_max_chars: int = Field(default=120)  # PHASE 11: Increased from 70
     bullets_per_slide: int = Field(default=7)
     body_max_chars: int = Field(default=500)
     speaker_notes_max_chars: int = Field(default=300)

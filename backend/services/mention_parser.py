@@ -260,10 +260,17 @@ class MentionParser:
                 query = select(Folder).where(
                     Folder.name.ilike(f"%{folder_name}%")
                 )
+                # PHASE 12 FIX: Include items from user's org AND items without org (legacy/shared)
                 if organization_id:
                     try:
+                        from sqlalchemy import or_
                         org_uuid = UUID(organization_id)
-                        query = query.where(Folder.organization_id == org_uuid)
+                        query = query.where(
+                            or_(
+                                Folder.organization_id == org_uuid,
+                                Folder.organization_id.is_(None),
+                            )
+                        )
                     except ValueError:
                         pass
 
@@ -285,10 +292,17 @@ class MentionParser:
                 query = select(Document).where(
                     Document.file_name.ilike(f"%{doc_name}%")
                 )
+                # PHASE 12 FIX: Include items from user's org AND items without org (legacy/shared)
                 if organization_id:
                     try:
+                        from sqlalchemy import or_
                         org_uuid = UUID(organization_id)
-                        query = query.where(Document.organization_id == org_uuid)
+                        query = query.where(
+                            or_(
+                                Document.organization_id == org_uuid,
+                                Document.organization_id.is_(None),
+                            )
+                        )
                     except ValueError:
                         pass
 
@@ -503,10 +517,17 @@ class MentionAutocomplete:
             Folder.name.ilike(f"%{prefix}%")
         ).limit(limit)
 
+        # PHASE 12 FIX: Include items from user's org AND items without org (legacy/shared)
         if organization_id:
             try:
+                from sqlalchemy import or_
                 org_uuid = UUID(organization_id)
-                query = query.where(Folder.organization_id == org_uuid)
+                query = query.where(
+                    or_(
+                        Folder.organization_id == org_uuid,
+                        Folder.organization_id.is_(None),
+                    )
+                )
             except ValueError:
                 pass
 
@@ -538,10 +559,17 @@ class MentionAutocomplete:
             Document.file_name.ilike(f"%{prefix}%")
         ).limit(limit)
 
+        # PHASE 12 FIX: Include items from user's org AND items without org (legacy/shared)
         if organization_id:
             try:
+                from sqlalchemy import or_
                 org_uuid = UUID(organization_id)
-                query = query.where(Document.organization_id == org_uuid)
+                query = query.where(
+                    or_(
+                        Document.organization_id == org_uuid,
+                        Document.organization_id.is_(None),
+                    )
+                )
             except ValueError:
                 pass
 
@@ -575,10 +603,17 @@ class MentionAutocomplete:
             Document.collection.ilike(f"%{prefix}%")
         ).group_by(Document.collection).limit(limit)
 
+        # PHASE 12 FIX: Include items from user's org AND items without org (legacy/shared)
         if organization_id:
             try:
+                from sqlalchemy import or_
                 org_uuid = UUID(organization_id)
-                query = query.where(Document.organization_id == org_uuid)
+                query = query.where(
+                    or_(
+                        Document.organization_id == org_uuid,
+                        Document.organization_id.is_(None),
+                    )
+                )
             except ValueError:
                 pass
 

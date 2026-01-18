@@ -516,6 +516,17 @@ class Document(Base, UUIDMixin, TimestampMixin):
         uselist=False,
     )
 
+    # Knowledge Graph extraction status
+    # Tracks whether entities have been extracted from this document
+    kg_extraction_status: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        default="pending",
+        index=True,
+    )  # pending, processing, completed, failed, skipped
+    kg_extracted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    kg_entity_count: Mapped[int] = mapped_column(Integer, default=0)
+    kg_relation_count: Mapped[int] = mapped_column(Integer, default=0)
+
     def __repr__(self) -> str:
         return f"<Document(filename='{self.filename}', status='{self.processing_status}')>"
 
@@ -2247,6 +2258,104 @@ class EntityRelation(Base, UUIDMixin):
 
     def __repr__(self) -> str:
         return f"<EntityRelation('{self.source_entity_id}' --{self.relation_type}--> '{self.target_entity_id}')>"
+
+
+class KGExtractionJob(Base, UUIDMixin):
+    """
+    Background job for knowledge graph entity extraction.
+
+    Tracks progress of entity extraction across multiple documents,
+    allowing users to start a job, leave the page, and return to
+    check progress or cancel.
+    """
+    __tablename__ = "kg_extraction_jobs"
+
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # User who started the job
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Job status: queued, running, paused, completed, failed, cancelled
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="queued",
+        index=True,
+    )
+
+    # Progress tracking
+    total_documents: Mapped[int] = mapped_column(Integer, default=0)
+    processed_documents: Mapped[int] = mapped_column(Integer, default=0)
+    failed_documents: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Extracted counts
+    total_entities: Mapped[int] = mapped_column(Integer, default=0)
+    total_relations: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Current document being processed
+    current_document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    current_document_name: Mapped[Optional[str]] = mapped_column(String(500))
+
+    # Timing
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # For ETA calculation
+    avg_doc_processing_time: Mapped[Optional[float]] = mapped_column(Float)
+
+    # Error tracking (list of {doc_id: str, error: str})
+    error_log: Mapped[Optional[dict]] = mapped_column(JSONType())
+
+    # Job configuration
+    only_new_documents: Mapped[bool] = mapped_column(Boolean, default=True)
+    document_ids: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User")
+    current_document: Mapped[Optional["Document"]] = relationship("Document")
+
+    def __repr__(self) -> str:
+        return f"<KGExtractionJob(status='{self.status}', progress={self.processed_documents}/{self.total_documents})>"
+
+    def get_progress_percent(self) -> float:
+        """Get completion percentage."""
+        if self.total_documents == 0:
+            return 0.0
+        return (self.processed_documents / self.total_documents) * 100
+
+    def get_estimated_remaining_seconds(self) -> Optional[float]:
+        """Estimate remaining time based on average processing time."""
+        if not self.avg_doc_processing_time or self.status != "running":
+            return None
+        remaining = self.total_documents - self.processed_documents
+        return remaining * self.avg_doc_processing_time
 
 
 # =============================================================================

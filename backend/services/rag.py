@@ -697,13 +697,28 @@ class RAGService:
         if top_k is None:
             top_k = runtime_settings.get("top_k", self.config.top_k)
 
+        # PHASE 12: Enhanced debug logging for RAG search troubleshooting
+        # Get vectorstore stats to help diagnose "no results" issues
+        vectorstore_stats = None
+        try:
+            if self._custom_vectorstore is not None:
+                vectorstore_stats = await self._custom_vectorstore.get_stats()
+        except Exception as e:
+            logger.debug("Could not get vectorstore stats", error=str(e))
+
         logger.info(
             "Processing RAG query",
             question_length=len(question),
+            question_preview=question[:100],
             session_id=session_id,
             collection_filter=collection_filter,
             top_k=top_k,
             language=language,
+            folder_id=folder_id,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
+            vectorstore_stats=vectorstore_stats,
         )
 
         # Check if this is an aggregation query (e.g., "total spending by Company A")
@@ -825,7 +840,23 @@ class RAGService:
                 user_id=user_id,
                 is_superadmin=is_superadmin,
             )
-            logger.debug("Retrieved documents from vectorstore", count=len(retrieved_docs))
+            # PHASE 12: Enhanced logging for RAG search troubleshooting
+            if not retrieved_docs:
+                logger.warning(
+                    "RAG retrieval returned NO documents - user may see 'no info' response",
+                    question=question[:100],
+                    collection_filter=collection_filter,
+                    folder_document_ids_count=len(folder_document_ids) if folder_document_ids else 0,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                )
+            else:
+                logger.info(
+                    "RAG retrieval successful",
+                    count=len(retrieved_docs),
+                    top_doc_score=retrieved_docs[0][1] if retrieved_docs else None,
+                    top_doc_name=retrieved_docs[0][0].metadata.get("document_name", "unknown")[:50] if retrieved_docs else None,
+                )
 
         # Verify retrieved documents if enabled
         verification_result = None
@@ -1756,8 +1787,28 @@ class RAGService:
             List of (Document, score) tuples
         """
         try:
+            # PHASE 12: Verbose logging for RAG debugging
+            logger.info(
+                "RAG _retrieve_with_custom_store ENTRY",
+                query_preview=query[:80],
+                collection_filter=collection_filter,
+                access_tier=access_tier,
+                top_k=top_k,
+                document_ids_count=len(document_ids) if document_ids else 0,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
+            )
+
             # Generate query embedding
             query_embedding = await self.embeddings.embed_query(query)
+
+            # PHASE 12: Log embedding generation success
+            logger.info(
+                "Query embedding generated",
+                embedding_dims=len(query_embedding) if query_embedding else 0,
+                embedding_sample=query_embedding[:3] if query_embedding else None,
+            )
 
             # Determine search type
             search_type = SearchType.HYBRID if self.config.use_hybrid_search else SearchType.VECTOR

@@ -252,3 +252,8 @@ checkpoints/
 
 # Runtime files
 *.pid.lock
+
+# Stray database files
+backend/data/*.db
+data/*.db
+!data/chroma/

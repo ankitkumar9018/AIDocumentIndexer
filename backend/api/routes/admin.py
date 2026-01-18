@@ -5032,3 +5032,332 @@ async def invalidate_redis_settings_cache(
     logger.info("Redis settings cache invalidated", admin_id=admin.user_id)
 
     return {"message": "Redis settings cache invalidated. Changes will take effect on next request."}
+
+
+# =============================================================================
+# Document Organization Management (Superadmin)
+# =============================================================================
+
+
+class DocumentOrgInfo(BaseModel):
+    """Document organization info response."""
+    id: str
+    filename: str
+    original_filename: Optional[str] = None
+    organization_id: Optional[str] = None
+    organization_name: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class DocumentOrgUpdate(BaseModel):
+    """Update document organization_id request."""
+    organization_id: str = Field(..., description="Organization ID to assign")
+
+
+class BulkDocumentOrgUpdate(BaseModel):
+    """Bulk update documents organization_id."""
+    document_ids: Optional[List[str]] = Field(None, description="Specific document IDs to update. If not provided, updates all documents without org_id")
+    organization_id: str = Field(..., description="Organization ID to assign")
+
+
+@router.get("/documents/organization-status")
+async def get_documents_organization_status(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    filter_missing_org: bool = Query(False, description="Only show documents missing organization_id"),
+):
+    """
+    Get all documents with their organization_id status.
+
+    Superadmin only endpoint.
+    """
+    from backend.db.models import Document, Organization
+    from sqlalchemy import or_
+
+    logger.info("Getting documents organization status", admin_id=admin.user_id)
+
+    # Build query
+    query = select(Document).order_by(desc(Document.created_at))
+
+    if filter_missing_org:
+        query = query.where(
+            or_(
+                Document.organization_id.is_(None),
+                Document.organization_id == "",
+            )
+        )
+
+    # Count total
+    count_query = select(func.count()).select_from(query.subquery())
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    # Paginate
+    offset = (page - 1) * page_size
+    query = query.offset(offset).limit(page_size)
+
+    result = await db.execute(query)
+    documents = result.scalars().all()
+
+    # Get organization names
+    org_ids = {str(d.organization_id) for d in documents if d.organization_id}
+    org_names = {}
+    if org_ids:
+        org_result = await db.execute(
+            select(Organization).where(Organization.id.in_([UUID(oid) for oid in org_ids]))
+        )
+        for org in org_result.scalars().all():
+            org_names[str(org.id)] = org.name
+
+    return {
+        "documents": [
+            DocumentOrgInfo(
+                id=str(doc.id),
+                filename=doc.filename,
+                original_filename=doc.original_filename,
+                organization_id=str(doc.organization_id) if doc.organization_id else None,
+                organization_name=org_names.get(str(doc.organization_id)) if doc.organization_id else None,
+                created_at=doc.created_at,
+            )
+            for doc in documents
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "missing_org_count": await _count_docs_missing_org(db),
+    }
+
+
+async def _count_docs_missing_org(db: AsyncSession) -> int:
+    """Count documents missing organization_id."""
+    from backend.db.models import Document
+    from sqlalchemy import or_
+
+    result = await db.execute(
+        select(func.count(Document.id)).where(
+            or_(
+                Document.organization_id.is_(None),
+                Document.organization_id == "",
+            )
+        )
+    )
+    return result.scalar() or 0
+
+
+@router.put("/documents/{document_id}/organization")
+async def update_document_organization(
+    document_id: str,
+    update_data: DocumentOrgUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update a document's organization_id.
+
+    Superadmin only endpoint.
+    """
+    from backend.db.models import Document, Organization
+
+    logger.info(
+        "Updating document organization",
+        admin_id=admin.user_id,
+        document_id=document_id,
+        new_org_id=update_data.organization_id,
+    )
+
+    # Verify organization exists
+    org_result = await db.execute(
+        select(Organization).where(Organization.id == UUID(update_data.organization_id))
+    )
+    org = org_result.scalar_one_or_none()
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    # Get document
+    doc_result = await db.execute(
+        select(Document).where(Document.id == UUID(document_id))
+    )
+    doc = doc_result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    old_org_id = str(doc.organization_id) if doc.organization_id else None
+    doc.organization_id = UUID(update_data.organization_id)
+    await db.commit()
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="document",
+        target_resource_id=document_id,
+        changes={
+            "action": "update_organization",
+            "old_organization_id": old_org_id,
+            "new_organization_id": update_data.organization_id,
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {
+        "message": "Document organization updated",
+        "document_id": document_id,
+        "organization_id": update_data.organization_id,
+        "organization_name": org.name,
+    }
+
+
+@router.post("/documents/bulk-update-organization")
+async def bulk_update_documents_organization(
+    update_data: BulkDocumentOrgUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Bulk update organization_id for multiple documents.
+
+    If document_ids is not provided, updates all documents without organization_id.
+
+    Superadmin only endpoint.
+    """
+    from backend.db.models import Document, Organization, Chunk
+    from sqlalchemy import or_, update
+
+    logger.info(
+        "Bulk updating documents organization",
+        admin_id=admin.user_id,
+        new_org_id=update_data.organization_id,
+        specific_docs=len(update_data.document_ids) if update_data.document_ids else "all_missing",
+    )
+
+    # Verify organization exists
+    org_result = await db.execute(
+        select(Organization).where(Organization.id == UUID(update_data.organization_id))
+    )
+    org = org_result.scalar_one_or_none()
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    org_uuid = UUID(update_data.organization_id)
+
+    if update_data.document_ids:
+        # Update specific documents
+        doc_uuids = [UUID(did) for did in update_data.document_ids]
+
+        # Update documents
+        doc_update_stmt = (
+            update(Document)
+            .where(Document.id.in_(doc_uuids))
+            .values(organization_id=org_uuid)
+        )
+        doc_result = await db.execute(doc_update_stmt)
+        docs_updated = doc_result.rowcount
+
+        # Update chunks for these documents
+        chunk_update_stmt = (
+            update(Chunk)
+            .where(Chunk.document_id.in_(doc_uuids))
+            .values(organization_id=org_uuid)
+        )
+        chunk_result = await db.execute(chunk_update_stmt)
+        chunks_updated = chunk_result.rowcount
+    else:
+        # Update all documents without organization_id
+        doc_update_stmt = (
+            update(Document)
+            .where(
+                or_(
+                    Document.organization_id.is_(None),
+                    Document.organization_id == "",
+                )
+            )
+            .values(organization_id=org_uuid)
+        )
+        doc_result = await db.execute(doc_update_stmt)
+        docs_updated = doc_result.rowcount
+
+        # Update all chunks without organization_id
+        chunk_update_stmt = (
+            update(Chunk)
+            .where(
+                or_(
+                    Chunk.organization_id.is_(None),
+                    Chunk.organization_id == "",
+                )
+            )
+            .values(organization_id=org_uuid)
+        )
+        chunk_result = await db.execute(chunk_update_stmt)
+        chunks_updated = chunk_result.rowcount
+
+    await db.commit()
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="documents_bulk",
+        changes={
+            "action": "bulk_update_organization",
+            "organization_id": update_data.organization_id,
+            "documents_updated": docs_updated,
+            "chunks_updated": chunks_updated,
+            "specific_ids": update_data.document_ids,
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {
+        "message": "Documents organization updated",
+        "documents_updated": docs_updated,
+        "chunks_updated": chunks_updated,
+        "organization_id": update_data.organization_id,
+        "organization_name": org.name,
+    }
+
+
+@router.get("/organizations/list")
+async def list_organizations_for_admin(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List all organizations.
+
+    Superadmin only endpoint.
+    """
+    from backend.db.models import Organization
+
+    result = await db.execute(
+        select(Organization).order_by(Organization.name)
+    )
+    orgs = result.scalars().all()
+
+    return {
+        "organizations": [
+            {
+                "id": str(org.id),
+                "name": org.name,
+                "description": org.description,
+                "created_at": org.created_at,
+            }
+            for org in orgs
+        ]
+    }

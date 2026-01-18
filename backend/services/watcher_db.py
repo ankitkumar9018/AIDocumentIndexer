@@ -162,8 +162,17 @@ async def load_watched_directories_from_db(
     """Load all watched directories from database."""
     query = select(WatchedDirectoryModel).where(WatchedDirectoryModel.enabled == True)
 
+    # PHASE 12 FIX: Include items from user's org AND items without org (legacy/shared)
     if organization_id:
-        query = query.where(WatchedDirectoryModel.organization_id == organization_id)
+        from sqlalchemy import or_
+        import uuid
+        org_uuid = uuid.UUID(organization_id) if isinstance(organization_id, str) else organization_id
+        query = query.where(
+            or_(
+                WatchedDirectoryModel.organization_id == org_uuid,
+                WatchedDirectoryModel.organization_id.is_(None),
+            )
+        )
 
     result = await db.execute(query)
     db_dirs = result.scalars().all()

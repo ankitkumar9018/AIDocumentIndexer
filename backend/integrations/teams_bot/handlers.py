@@ -340,8 +340,13 @@ class TeamsActivityHandler:
 
             async with async_session_context() as session:
                 # Try to find document by name
+                # PHASE 12 FIX: Include docs from user's org AND docs without org (legacy/shared)
+                from sqlalchemy import or_
                 query = select(Document).where(
-                    Document.organization_id == self.organization_id,
+                    or_(
+                        Document.organization_id == self.organization_id,
+                        Document.organization_id.is_(None),
+                    ),
                     Document.filename.ilike(f"%{doc_identifier}%"),
                 )
                 result = await session.execute(query)
@@ -364,9 +369,16 @@ class TeamsActivityHandler:
             from sqlalchemy import select
 
             async with async_session_context() as session:
+                # PHASE 12 FIX: Include docs from user's org AND docs without org (legacy/shared)
+                from sqlalchemy import or_
                 query = (
                     select(Document)
-                    .where(Document.organization_id == self.organization_id)
+                    .where(
+                        or_(
+                            Document.organization_id == self.organization_id,
+                            Document.organization_id.is_(None),
+                        )
+                    )
                     .order_by(Document.created_at.desc())
                     .limit(10)
                 )

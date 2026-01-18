@@ -263,15 +263,29 @@ class AudioOverviewService(CRUDService[AudioOverview]):
             host1_voice = host_config.get("host1_voice", "alloy")
             host2_voice = host_config.get("host2_voice", "echo")
 
+            # PHASE 12: Debug logging for voice selection troubleshooting
+            logger.info(
+                "Voice configuration for audio generation",
+                overview_id=str(overview.id),
+                format=str(overview.format),
+                host_config=host_config,
+                host1_voice=host1_voice,
+                host2_voice=host2_voice,
+                script_speakers=[s["id"] for s in script.speakers],
+            )
+
             speaker_voices = {}
             for speaker in script.speakers:
                 # Map speaker ID to user-selected voice
-                if speaker["id"] == "host1":
+                # PHASE 12 FIX: Handle both standard (host1/host2) and interview (interviewer/expert) formats
+                if speaker["id"] in ["host1", "interviewer"]:
                     voice_id = host1_voice
-                elif speaker["id"] == "host2":
+                elif speaker["id"] in ["host2", "expert"]:
                     voice_id = host2_voice
                 else:
                     voice_id = speaker.get("voice", "alloy")
+
+                logger.debug(f"Mapping speaker {speaker['id']} to voice {voice_id}")
 
                 speaker_voices[speaker["id"]] = VoiceConfig(
                     provider=tts_provider,
@@ -388,15 +402,39 @@ class AudioOverviewService(CRUDService[AudioOverview]):
             host1_voice = host_config.get("host1_voice", "alloy")
             host2_voice = host_config.get("host2_voice", "echo")
 
+            # PHASE 12 FIX: Build speakers list based on format type
+            # Interview format uses "interviewer" and "expert" as speaker IDs
+            from backend.db.models import AudioOverviewFormat
+            if overview.format == AudioOverviewFormat.INTERVIEW:
+                speakers = [
+                    {"id": "interviewer", "name": host1_name, "voice": host1_voice},
+                    {"id": "expert", "name": host2_name, "voice": host2_voice},
+                ]
+            elif overview.format == AudioOverviewFormat.LECTURE:
+                speakers = [
+                    {"id": "lecturer", "name": host1_name, "voice": host1_voice},
+                ]
+            else:
+                # Standard two-host formats (deep_dive, brief, critique, debate)
+                speakers = [
+                    {"id": "host1", "name": host1_name, "voice": host1_voice},
+                    {"id": "host2", "name": host2_name, "voice": host2_voice},
+                ]
+
+            logger.info(
+                "Building script with speakers",
+                format=str(overview.format),
+                speakers=[s["id"] for s in speakers],
+                host1_name=host1_name,
+                host2_name=host2_name,
+            )
+
             # Build final script with custom names
             script = DialogueScript(
                 title=overview.title or "Audio Overview",
                 format=overview.format.value,
                 estimated_duration_seconds=int(sum(len(t.text.split()) for t in turns) / 150 * 60),
-                speakers=[
-                    {"id": "host1", "name": host1_name, "voice": host1_voice},
-                    {"id": "host2", "name": host2_name, "voice": host2_voice},
-                ],
+                speakers=speakers,
                 turns=turns,
             )
 
@@ -415,10 +453,24 @@ class AudioOverviewService(CRUDService[AudioOverview]):
                 default_provider=tts_provider,
             )
 
-            speaker_voices = {
-                "host1": VoiceConfig(provider=tts_provider, voice_id=host1_voice, name="Alex"),
-                "host2": VoiceConfig(provider=tts_provider, voice_id=host2_voice, name="Jordan"),
-            }
+            # PHASE 12 FIX: Build speaker_voices dynamically from script.speakers
+            # This handles all formats including interview (interviewer/expert)
+            speaker_voices = {}
+            for speaker in script.speakers:
+                speaker_id = speaker["id"]
+                # Map to user-selected voice based on speaker position
+                if speaker_id in ["host1", "interviewer"]:
+                    voice_id = host1_voice
+                elif speaker_id in ["host2", "expert"]:
+                    voice_id = host2_voice
+                else:
+                    voice_id = speaker.get("voice", "alloy")
+
+                speaker_voices[speaker_id] = VoiceConfig(
+                    provider=tts_provider,
+                    voice_id=voice_id,
+                    name=speaker["name"],
+                )
 
             output_filename = f"{overview.id}.mp3"
             output_path = self.storage_path / output_filename

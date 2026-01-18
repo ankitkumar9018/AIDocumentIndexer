@@ -679,7 +679,7 @@ If no documents are relevant: {{"selected_indices": [], "reasoning": {{}}, "reje
         """
         # Priority: slide_constraints > template_analysis > defaults
         max_bullets = 7
-        max_bullet_chars = 70
+        max_bullet_chars = 120  # PHASE 11: Increased from 70 to allow complete sentences
         max_title_chars = 50
         layout_type = "content"
 
@@ -789,36 +789,45 @@ TEMPLATE THEME CONTEXT:
         return f"""FORMAT REQUIREMENTS FOR PRESENTATION SLIDES:
 {slide_type_guidance}
 
-- Write {max_bullets-2} to {max_bullets} bullet points maximum
-- Each bullet MUST be a COMPLETE sentence under {max_bullet_chars} characters
-- If a point is too long, split it into two shorter points
-- Use simple, concise language - avoid complex sentences
+BULLET POINT REQUIREMENTS:
+- Write {max_bullets-2} to {max_bullets} bullet points
+- Each bullet MUST be a COMPLETE, grammatically correct sentence
+- Typical length: 60-{max_bullet_chars} characters per bullet
+- NEVER truncate or cut off a sentence mid-thought
+- If a point needs more than {max_bullet_chars} chars, SPLIT into two complete bullets
+- Start each bullet with an action verb or key noun
+- Use "• " for main points, "  ◦ " (2-space indent) for sub-points
 - NO markdown formatting (no **, no ##, no _)
-- Focus on key takeaways, not detailed explanations
-- Start each point with an action verb or key noun
-- NEVER leave a sentence incomplete or cut off
-- Use "• " (bullet) for main points, "  ◦ " (2-space indent + open circle) for sub-points
 {theme_context}
-CRITICAL CONSTRAINTS:
-- Section titles: max {max_title_chars} characters
-- Bullet points: max {max_bullet_chars} characters EACH
-- Total bullets: max {max_bullets} per slide
+
+CONTENT QUALITY REQUIREMENTS (CRITICAL):
+- Include SPECIFIC details: names, numbers, percentages, dates from sources
+- Avoid vague phrases like "enhances experience" or "improves performance"
+- Be CONCRETE: "Real Madrid partnership reached 2M fans in 2025"
+- Each bullet = one complete idea that stands alone
+- Use data from the provided context whenever possible
 
 CRITICAL OUTPUT RULES:
 1. Start DIRECTLY with the first bullet point - NO introductory text
-2. Do NOT include phrases like "Here are the bullet points", "Let me provide", "I'll create"
-3. Do NOT include closing remarks like "Let me know if you need adjustments"
-4. ONLY output the bullet points themselves - nothing else
+2. Do NOT include phrases like "Here are the bullet points" or "Let me provide"
+3. Do NOT include closing remarks
+4. ONLY output the bullet points themselves
 
-Every bullet point must be a complete, standalone thought.
-If you cannot express an idea in under {max_bullet_chars} characters, break it into multiple shorter points.
+CONSTRAINTS:
+- Section titles: max {max_title_chars} characters
+- Bullet points: 60-{max_bullet_chars} characters EACH (complete sentences only)
+- Total bullets: {max_bullets-2} to {max_bullets} per slide
 
-Example format (each is a complete sentence):
-• Revenue increased 25% year-over-year across all regions.
-  ◦ North America led with 32% growth.
-  ◦ Europe showed steady 18% improvement.
-• Customer acquisition cost reduced by 15% through optimization.
-• New market expansion in Q3 shows promising early results."""
+Example of GOOD bullets (complete, specific):
+• Real Madrid partnership drove 25% increase in brand awareness among fans.
+  ◦ Social media engagement grew 150% during campaign period.
+• Stadium activation at Santiago Bernabéu reached 80,000 attendees.
+• Product sampling achieved 35% conversion rate at match day events.
+
+Example of BAD bullets (incomplete, vague - DO NOT WRITE LIKE THIS):
+• Partner with popular football (INCOMPLETE - cut off)
+• Campaign objective is (INCOMPLETE - cut off)
+• Enhances brand experience (VAGUE - no specifics)"""
 
     def _get_docx_pdf_instructions(
         self,

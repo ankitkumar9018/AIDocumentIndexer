@@ -340,8 +340,15 @@ class CRUDService(BaseService, Generic[T]):
         query = select(self.model_class).where(self.model_class.id == id)
 
         # Add organization filter for multi-tenant
+        # PHASE 12 FIX: Include items from user's org AND items without org (legacy/shared)
         if self._organization_id and hasattr(self.model_class, "organization_id"):
-            query = query.where(self.model_class.organization_id == self._organization_id)
+            from sqlalchemy import or_
+            query = query.where(
+                or_(
+                    self.model_class.organization_id == self._organization_id,
+                    self.model_class.organization_id.is_(None),
+                )
+            )
 
         result = await session.execute(query)
         return result.scalar_one_or_none()
@@ -393,8 +400,15 @@ class CRUDService(BaseService, Generic[T]):
         query = select(self.model_class)
 
         # Add organization filter
+        # PHASE 12 FIX: Include items from user's org AND items without org (legacy/shared)
         if self._organization_id and hasattr(self.model_class, "organization_id"):
-            query = query.where(self.model_class.organization_id == self._organization_id)
+            from sqlalchemy import or_
+            query = query.where(
+                or_(
+                    self.model_class.organization_id == self._organization_id,
+                    self.model_class.organization_id.is_(None),
+                )
+            )
 
         # Apply filters
         if filters:

@@ -142,6 +142,18 @@ def is_sentence_complete(text: str) -> bool:
         'real', 'nivea',
         # Hyphenated compound words that are often incomplete
         'in-stadium', 'in-store', 'on-site', 'off-site', 'co-branded',
+        # PHASE 9 FIX: Additional incomplete endings found in generated content
+        # Verbs commonly truncated
+        'tap', 'create', 'develop', 'build', 'enhance', 'leverage', 'drive', 'increase',
+        'boost', 'reach', 'engage', 'connect', 'promote', 'deliver', 'transform',
+        'maximize', 'optimize', 'establish', 'strengthen', 'generate', 'foster',
+        # Present participles commonly truncated
+        'tapping', 'reaching', 'engaging', 'connecting', 'promoting', 'delivering',
+        'transforming', 'maximizing', 'optimizing', 'establishing', 'strengthening',
+        'generating', 'fostering', 'targeting', 'expanding', 'increasing',
+        # More adjectives
+        'global', 'local', 'premium', 'authentic', 'memorable', 'impactful',
+        'significant', 'powerful', 'extensive', 'notable', 'key', 'major', 'primary',
     }
 
     if last_word in incomplete_endings:
@@ -705,9 +717,9 @@ def get_layout_placeholder_mapping(layout) -> dict:
 
 def enforce_bullet_constraints(
     content: str,
-    max_bullet_chars: int = 70,
+    max_bullet_chars: int = 120,  # PHASE 11: Increased from 70 to allow complete sentences
     max_bullets: int = 6,  # ENTERPRISE STANDARD: 6x6 rule
-    max_words_per_bullet: int = 8,  # ENTERPRISE STANDARD: ~6 words, allow 8 for flexibility
+    max_words_per_bullet: int = 12,  # PHASE 11: Increased from 8 to allow complete thoughts
     max_sub_bullets_per_main: int = 2,  # ENTERPRISE STANDARD: limit sub-bullets
 ) -> str:
     """
@@ -1692,6 +1704,11 @@ async def _run_vision_review(
                 total_issues=len(all_issues),
                 high_severity=sum(1 for i in all_issues if i.severity == "high"),
             )
+
+            # PHASE 9 FIX: Apply auto-fixes for detected visual issues
+            fixes_applied = await _apply_vision_review_fixes(output_path, all_issues)
+            if fixes_applied > 0:
+                logger.info(f"Vision review auto-fixes applied: {fixes_applied} fixes")
         else:
             logger.info("Vision review completed: no visual issues detected")
 
@@ -1699,6 +1716,88 @@ async def _run_vision_review(
         logger.warning(f"Vision review not available: {e}")
     except Exception as e:
         logger.error(f"Vision review failed: {e}")
+
+
+async def _apply_vision_review_fixes(pptx_path: str, issues: list) -> int:
+    """
+    PHASE 9 FIX: Apply auto-fixes for visual issues detected by vision review.
+
+    This function opens the PPTX, applies fixes for issues that can be auto-corrected,
+    and saves the modified file.
+
+    Args:
+        pptx_path: Path to the PPTX file to fix
+        issues: List of ReviewIssue objects from vision review
+
+    Returns:
+        Number of fixes applied
+    """
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+
+    try:
+        prs = Presentation(pptx_path)
+        fixes_applied = 0
+
+        # Group issues by slide (issue should have slide_index if available)
+        # The issues come from ReviewIssue dataclass which has issue_type, description, severity, suggestion
+        for issue in issues:
+            try:
+                issue_type = issue.issue_type
+                description = issue.description.lower() if hasattr(issue, 'description') else ""
+
+                # Fix 1: Empty placeholders / empty text shapes
+                if 'empty' in description and 'placeholder' in description:
+                    # Remove empty shapes from all slides
+                    for slide in prs.slides:
+                        shapes_to_remove = []
+                        for shape in slide.shapes:
+                            if hasattr(shape, 'text_frame') and hasattr(shape.text_frame, 'text'):
+                                if not shape.text_frame.text.strip():
+                                    shapes_to_remove.append(shape)
+
+                        for shape in shapes_to_remove[:3]:  # Limit removals per slide
+                            try:
+                                sp = shape._element
+                                sp.getparent().remove(sp)
+                                fixes_applied += 1
+                                logger.debug(f"Removed empty shape from slide")
+                            except Exception:
+                                pass
+
+                # Fix 2: Font size too small - increase minimum font
+                elif 'font' in description and 'small' in description:
+                    for slide in prs.slides:
+                        for shape in slide.shapes:
+                            if hasattr(shape, 'text_frame'):
+                                for para in shape.text_frame.paragraphs:
+                                    if para.font.size and para.font.size < Pt(14):
+                                        para.font.size = Pt(14)
+                                        fixes_applied += 1
+                                        logger.debug("Increased small font size to 14pt")
+
+                # Fix 3: Overlap issues - adjust spacing (limited auto-fix capability)
+                elif 'overlap' in description:
+                    # Log for manual review - overlap is complex to auto-fix
+                    logger.info(f"Overlap issue detected - consider manual review: {description}")
+                    # Could add position adjustments here if we had specific slide/shape info
+
+                # Fix 4: Truncated text - already handled by pre-render review
+                elif 'truncat' in description:
+                    logger.info(f"Truncation issue detected - content was likely too long: {description}")
+
+            except Exception as fix_err:
+                logger.debug(f"Could not apply fix for issue '{issue.issue_type}': {fix_err}")
+
+        if fixes_applied > 0:
+            prs.save(pptx_path)
+            logger.info(f"Saved PPTX with {fixes_applied} vision review fixes")
+
+        return fixes_applied
+
+    except Exception as e:
+        logger.error(f"Failed to apply vision review fixes: {e}")
+        return 0
 
 
 async def _create_vision_llm_func(vision_model: str = "auto"):
@@ -3246,7 +3345,12 @@ class PPTXGenerator(BaseFormatGenerator):
                 """
                 from pptx.enum.shapes import PP_PLACEHOLDER
 
-                footer_y = prs.slide_height - Inches(0.35)
+                # PHASE 12 FIX: Always position footer at very bottom of slide
+                # This prevents overlap with template branding bars that may extend into footer area
+                # Standard slide height is 5.625" (5143500 EMU), footer at 5.45" gives 0.175" margin
+                footer_y = prs.slide_height - Inches(0.20)  # 0.20" from absolute bottom
+                logger.debug(f"Footer position: y={footer_y / 914400:.2f}in (slide height={prs.slide_height / 914400:.2f}in)")
+
                 footer_height = Inches(0.25)
                 footer_font_size = Pt(9)  # Enterprise standard: 8-10pt for footers
 
@@ -3408,10 +3512,12 @@ class PPTXGenerator(BaseFormatGenerator):
             p.font.size = Pt(14)
             p.font.color.rgb = title_text_color
 
-            # Title slide notes
+            # Title slide notes - PHASE 10: Include template filename
             output_language = job.metadata.get("output_language", "en")
             user_info = job.metadata.get("user_email") or job.user_id
             llm_model = job.metadata.get("llm_model") or config.model
+            template_filename = job.metadata.get("template_pptx_filename", "")
+
             title_notes = f"""Generated by AIDocumentIndexer
 
 Model: {llm_model}
@@ -3422,6 +3528,10 @@ Theme: {theme_key}
 Font: {font_family_key}
 Total sections: {len(job.sections)}
 """
+            # Add template source if a template file was used
+            if template_filename:
+                title_notes += f"Template Source: {template_filename}\n"
+
             add_slide_notes(slide, title_notes)
 
             # TOC tracking
@@ -3955,7 +4065,7 @@ Presenter guidance:
                 # Get per-slide constraints if available
                 # ALWAYS use planner constraints when available (regardless of reviewer status)
                 max_title_chars_for_slide = 50  # Default
-                max_bullet_chars_for_slide = 70  # Default
+                max_bullet_chars_for_slide = 120  # PHASE 11: Increased from 70
                 max_bullets_for_slide = 7 if has_image else 12  # Default
 
                 if slide_content_planner:
@@ -3967,7 +4077,7 @@ Presenter guidance:
                         section_title=section.title or "",
                     )
                     max_title_chars_for_slide = slide_plan.title_constraints.get('max_chars', 50)
-                    max_bullet_chars_for_slide = slide_plan.content_constraints.get('max_bullet_chars', 70)
+                    max_bullet_chars_for_slide = slide_plan.content_constraints.get('max_bullet_chars', 120)
                     max_bullets_for_slide = slide_plan.content_constraints.get('max_bullets', 7 if has_image else 12)
 
                     # Apply visual style adjustments from vision analysis
@@ -4021,14 +4131,26 @@ Presenter guidance:
                     title_text = await llm_rewrite_for_slide(title_text, max_title_chars_for_slide, text_type="title")
 
                 # Calculate dynamic title height based on estimated lines
-                # 32pt bold Calibri: actual rendering shows ~6 chars per inch (not 10)
-                # This accounts for letter spacing, bold weight, and slight margin
-                chars_per_inch_at_32pt = 6  # Conservative estimate for bold 32pt
+                # 32pt bold Calibri: empirical testing shows ~5.5 chars per inch
+                # This accounts for letter spacing, bold weight, and character width variance
+                # Example: "Real Madrid Partnership Activation Ideas" (44 chars) wraps at ~7" width
+                chars_per_inch_at_32pt = 5.5  # Empirical estimate for bold 32pt Calibri
                 safe_width_inches = safe_title_width / 914400  # Convert EMU to inches
-                title_char_width = max(25, int(safe_width_inches * chars_per_inch_at_32pt))
-                estimated_lines = max(1, (len(title_text) // title_char_width) + 1)
-                # Use 1.5" for 2+ lines, 1.0" for single line titles
-                dynamic_title_height = 1.5 if estimated_lines >= 2 else 1.0
+                title_char_width = max(20, int(safe_width_inches * chars_per_inch_at_32pt))
+                estimated_lines = max(1, (len(title_text) + title_char_width - 1) // title_char_width)  # Ceiling division
+
+                # PHASE 9 FIX: More generous height per line for breathing room
+                # 32pt font = 0.44" height, with 1.2x line spacing = 0.53" per line
+                # Add 0.3" padding for safety (text rendering can be larger than font metric)
+                line_height_at_32pt = 0.55  # Height per line including spacing
+                dynamic_title_height = (estimated_lines * line_height_at_32pt) + 0.3
+                # Clamp to reasonable bounds
+                dynamic_title_height = max(0.85, min(dynamic_title_height, 2.0))
+
+                logger.debug(
+                    f"Dynamic title height: text='{title_text[:30]}...', "
+                    f"chars={len(title_text)}, est_lines={estimated_lines}, height={dynamic_title_height:.2f}in"
+                )
 
                 section_title_box = slide.shapes.add_textbox(
                     title_left_pos, title_y,
@@ -4046,8 +4168,12 @@ Presenter guidance:
 
                 # Calculate title_box_bottom - this is used for content positioning
                 # regardless of whether we add an underline
-                underline_offset = dynamic_title_height + 0.15  # Title height + small gap
-                title_box_bottom = title_y + scaled_inches(underline_offset, "h")
+                # PHASE 11 FIX: Use actual title box bottom + consistent gap
+                # The title textbox bottom is title_y + actual box height
+                actual_title_box_bottom = title_y + section_title_box.height
+                # Add breathing room gap below title (0.15" is ~14 points, good visual spacing)
+                underline_gap = Inches(0.15)
+                title_box_bottom = actual_title_box_bottom + underline_gap
 
                 # Add accent underline for section title when using template
                 if use_template_styling and template_theme:
@@ -4150,11 +4276,11 @@ Presenter guidance:
 
                 image_left = Inches(8.5)
                 image_width = Inches(4.3)
-                # CRITICAL: Content must start BELOW the underline
-                # Use the actual underline position (title_box_bottom) + gap
-                # title_box_bottom was calculated above as: title_y + scaled_inches(underline_offset, "h")
-                # Add 0.1" gap after the underline (4pt height) for clean separation
-                content_top = title_box_bottom + Inches(0.15)  # 0.15" below the underline
+                # PHASE 10 FIX: Content must start with adequate gap below title/underline
+                # title_box_bottom is where underline is placed
+                # We need at least 0.35" gap AFTER the underline for proper visual separation
+                # This accounts for the underline height (0.04") plus breathing room
+                content_top = title_box_bottom + Inches(0.35)  # Increased from 0.15" to 0.35"
 
                 if has_image:
                     image_pos = layout_config.get("image_position", "right")
@@ -4192,7 +4318,10 @@ Presenter guidance:
                     # Enable autofit for image-layout content boxes too
                     tf_temp = content_box.text_frame
                     tf_temp.word_wrap = True
-                    enable_text_autofit(tf_temp, min_font_scale=60, max_line_reduction=15)
+                    # PHASE 9 FIX: Use 75% minimum font scale instead of 60%
+                    # 60% was too aggressive and made text unreadable
+                    # 75% maintains readability at presentation distance
+                    enable_text_autofit(tf_temp, min_font_scale=75, max_line_reduction=10)
                 else:
                     if layout_key == "minimal":
                         content_width = Inches(slide_content_width * 0.7)
@@ -4218,7 +4347,8 @@ Presenter guidance:
 
                 # Enable text auto-fit to prevent overflow (instead of truncation)
                 # This uses PowerPoint's native font scaling when content is too long
-                enable_text_autofit(tf, min_font_scale=60, max_line_reduction=15)
+                # PHASE 9 FIX: Use 75% minimum to maintain readability (was 60%)
+                enable_text_autofit(tf, min_font_scale=75, max_line_reduction=10)
 
                 # Parse bullet hierarchy
                 paragraphs = content.split('\n')
@@ -4298,6 +4428,44 @@ Presenter guidance:
                     slide_title=section.title or "",
                     doc_title=job.title or ""
                 )
+
+                # PHASE 9 FIX: Filter out empty/placeholder bullets
+                # Remove bullets that are just labels without actual content (e.g., "Idea:", "Ideas", "Key Points:")
+                def filter_empty_bullets(bullets: list) -> list:
+                    """Remove bullets that are just labels/placeholders without real content."""
+                    # Pattern for label-only bullets: ends with colon or is a short generic word
+                    label_patterns = [
+                        r'^ideas?:?$',           # "Idea:", "Ideas:", "Idea", "Ideas"
+                        r'^key\s*points?:?$',    # "Key Points:", "Key Point:"
+                        r'^overview:?$',         # "Overview:"
+                        r'^summary:?$',          # "Summary:"
+                        r'^highlights?:?$',      # "Highlight:", "Highlights:"
+                        r'^benefits?:?$',        # "Benefit:", "Benefits:"
+                        r'^features?:?$',        # "Feature:", "Features:"
+                        r'^objectives?:?$',      # "Objective:", "Objectives:"
+                        r'^goals?:?$',           # "Goal:", "Goals:"
+                        r'^actions?:?$',         # "Action:", "Actions:"
+                        r'^steps?:?$',           # "Step:", "Steps:"
+                        r'^notes?:?$',           # "Note:", "Notes:"
+                    ]
+
+                    filtered = []
+                    for text, level in bullets:
+                        text_clean = text.lower().strip()
+                        # Skip bullets shorter than 15 chars that match label patterns
+                        is_label_only = False
+                        if len(text_clean) < 20:
+                            for pattern in label_patterns:
+                                if re.match(pattern, text_clean, re.IGNORECASE):
+                                    is_label_only = True
+                                    logger.debug(f"Filtered label-only bullet: '{text}'")
+                                    break
+                        if not is_label_only and len(text.strip()) > 5:
+                            filtered.append((text, level))
+
+                    return filtered
+
+                valid_paragraphs = filter_empty_bullets(valid_paragraphs)
 
                 # Use learned constraints or defaults for max bullets
                 if slide_content_planner:
@@ -4547,9 +4715,25 @@ Presenter guidance:
 
                 add_footer(slide, current_slide, total_slides)
 
-                # Speaker notes
-                include_notes_explanation = job.metadata.get("include_notes_explanation", False)
+                # Speaker notes - PHASE 10: Include section explanations when enabled
+                include_notes_explanation = job.metadata.get("include_notes_explanation", True)  # Default True
                 notes_parts = [f"SECTION: {section.title or f'Section {section_idx + 1}'}", ""]
+
+                # Add section description/explanation if enabled
+                if include_notes_explanation:
+                    section_desc = getattr(section, 'description', '') or getattr(section, 'revised_content', '') or ''
+                    # Use the original content summary if no description available
+                    if not section_desc and hasattr(section, 'content') and section.content:
+                        # PHASE 12: Increased from 500 to 1500 chars for better content coverage
+                        section_desc = section.content[:1500].strip()
+                        if len(section.content) > 1500:
+                            section_desc += "..."
+
+                    if section_desc:
+                        notes_parts.append("SLIDE EXPLANATION:")
+                        # PHASE 12: Increased from 800 to 2000 chars to prevent truncation
+                        notes_parts.append(f"  {section_desc[:2000]}")
+                        notes_parts.append("")
 
                 section_sources = section.sources or []
                 if not section_sources and job.sources_used:
@@ -4851,11 +5035,11 @@ Presenter guidance:
 
             logger.info("PPTX generated", path=output_path)
 
-            # ========== OPTIONAL VISION-BASED SLIDE REVIEW ==========
-            # This is optional and disabled by default as it's resource-intensive
+            # ========== VISION-BASED SLIDE REVIEW ==========
+            # PHASE 10: Enabled by default to catch positioning and quality issues
             enable_vision_review = job.metadata.get(
                 "enable_vision_review",
-                getattr(config, 'enable_vision_review', False)
+                getattr(config, 'enable_vision_review', True)  # Changed to True by default
             )
             if enable_vision_review:
                 try:

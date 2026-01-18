@@ -753,15 +753,18 @@ Only include entities and relations clearly supported by the text."""
         entity = None
 
         # Strategy 1: Try exact normalized match (most precise)
+        # Use .first() instead of scalar_one_or_none() to handle duplicates gracefully
+        # Order by created_at to consistently pick the oldest entity
         result = await self.db.execute(
             select(Entity).where(
                 Entity.name_normalized == norm_name,
                 Entity.entity_type == extracted.entity_type,
-            )
+            ).order_by(Entity.created_at.asc()).limit(1)
         )
         entity = result.scalar_one_or_none()
 
         # Strategy 2: Try canonical name match (cross-language linking)
+        # Use limit(1) to handle duplicates gracefully
         if not entity and canonical_norm != norm_name:
             result = await self.db.execute(
                 select(Entity).where(
@@ -770,18 +773,19 @@ Only include entities and relations clearly supported by the text."""
                         Entity.name_normalized == canonical_norm,
                     ),
                     Entity.entity_type == extracted.entity_type,
-                )
+                ).order_by(Entity.created_at.asc()).limit(1)
             )
             entity = result.scalar_one_or_none()
 
         # Strategy 3: Try ASCII-normalized match (cross-script)
+        # Use limit(1) to handle duplicates gracefully
         if not entity:
             ascii_canonical = self._get_ascii_normalized(canonical)
             result = await self.db.execute(
                 select(Entity).where(
                     func.lower(Entity.canonical_name) == ascii_canonical,
                     Entity.entity_type == extracted.entity_type,
-                )
+                ).order_by(Entity.created_at.asc()).limit(1)
             )
             entity = result.scalar_one_or_none()
 
@@ -855,13 +859,13 @@ Only include entities and relations clearly supported by the text."""
         document_id: Optional[uuid.UUID] = None,
     ) -> EntityRelation:
         """Create or update relationship."""
-        # Check if exists
+        # Check if exists - use limit(1) to handle duplicates gracefully
         result = await self.db.execute(
             select(EntityRelation).where(
                 EntityRelation.source_entity_id == source_entity_id,
                 EntityRelation.target_entity_id == target_entity_id,
                 EntityRelation.relation_type == relation_type,
-            )
+            ).order_by(EntityRelation.created_at.asc()).limit(1)
         )
         relation = result.scalar_one_or_none()
 
@@ -939,9 +943,15 @@ Only include entities and relations clearly supported by the text."""
         base_query = select(Entity).where(or_(*conditions))
 
         # Filter by organization for multi-tenant isolation
+        # PHASE 12 FIX: Include entities from user's org AND entities without org (legacy/shared)
         if organization_id:
             org_uuid = uuid.UUID(organization_id)
-            base_query = base_query.where(Entity.organization_id == org_uuid)
+            base_query = base_query.where(
+                or_(
+                    Entity.organization_id == org_uuid,
+                    Entity.organization_id.is_(None),  # Include entities without org
+                )
+            )
 
         # Optional entity type filter
         if entity_types:
@@ -1015,9 +1025,15 @@ Only include entities and relations clearly supported by the text."""
         base_query = select(Entity).where(Entity.embedding.isnot(None))
 
         # Filter by organization for multi-tenant isolation
+        # PHASE 12 FIX: Include entities from user's org AND entities without org (legacy/shared)
         if organization_id:
             org_uuid = uuid.UUID(organization_id)
-            base_query = base_query.where(Entity.organization_id == org_uuid)
+            base_query = base_query.where(
+                or_(
+                    Entity.organization_id == org_uuid,
+                    Entity.organization_id.is_(None),  # Include entities without org
+                )
+            )
 
         if entity_types:
             base_query = base_query.where(Entity.entity_type.in_(entity_types))
@@ -1245,9 +1261,15 @@ Only include entities and relations clearly supported by the text."""
             )
 
             # Filter by organization for multi-tenant isolation
+            # PHASE 12 FIX: Include relations from user's org AND relations without org (legacy/shared)
             if organization_id:
                 org_uuid = uuid.UUID(organization_id)
-                relation_query = relation_query.where(EntityRelation.organization_id == org_uuid)
+                relation_query = relation_query.where(
+                    or_(
+                        EntityRelation.organization_id == org_uuid,
+                        EntityRelation.organization_id.is_(None),  # Include relations without org
+                    )
+                )
 
             relation_query = relation_query.order_by(EntityRelation.weight.desc()).limit(max_neighbors)
 
@@ -1361,9 +1383,15 @@ Only include entities and relations clearly supported by the text."""
         )
 
         # Filter by organization for multi-tenant isolation
+        # PHASE 12 FIX: Include chunks from user's org AND chunks without org (legacy/shared)
         if organization_id:
             org_uuid = uuid.UUID(organization_id)
-            chunk_query = chunk_query.where(Chunk.organization_id == org_uuid)
+            chunk_query = chunk_query.where(
+                or_(
+                    Chunk.organization_id == org_uuid,
+                    Chunk.organization_id.is_(None),  # Include chunks without org
+                )
+            )
 
         # Filter private documents (only owner or superadmin can access)
         if not is_superadmin:

@@ -90,6 +90,8 @@ dependencies = [
     "langchain-anthropic>=0.3.22",
     "bcrypt<4.1",
     "unidecode>=1.4.0",
+    "edge-tts>=7.2.7",
+    "hnswlib>=0.8.0",
 ]
 
 [project.optional-dependencies]

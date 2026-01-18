@@ -4,6 +4,15 @@ import { useRef, useEffect, useCallback, useMemo } from "react";
 import dynamic from "next/dynamic";
 import type { ForceGraphMethods, NodeObject, LinkObject } from "react-force-graph-3d";
 
+// Import THREE statically to ensure single instance
+// This prevents the "Multiple instances of Three.js" warning
+import * as THREE from "three";
+
+// Ensure THREE is available globally for react-force-graph-3d
+if (typeof window !== "undefined") {
+  (window as unknown as { THREE?: typeof THREE }).THREE = THREE;
+}
+
 // Entity type colors matching the main knowledge graph page
 const entityTypeColors: Record<string, string> = {
   PERSON: "#3b82f6",
@@ -123,7 +132,7 @@ export default function WebGLGraph({
   // Custom node rendering with Three.js
   const nodeThreeObject = useCallback(
     (node: NodeObject) => {
-      const THREE = require("three");
+      // Use the globally imported THREE instance (not require)
       const fgNode = node as FGNode;
       const isSelected = fgNode.id === selectedNodeId;
 

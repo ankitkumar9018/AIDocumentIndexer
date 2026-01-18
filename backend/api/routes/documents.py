@@ -30,6 +30,7 @@ from backend.api.middleware.auth import (
     require_admin,
     AuthenticatedUser,
     AdminUser,
+    get_org_filter,
 )
 from backend.services.permissions import (
     UserContext,
@@ -307,6 +308,17 @@ async def list_documents(
         )
     )
 
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    # Users can only see documents from their organization (or shared docs without org)
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        base_query = base_query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
+
     # Apply filters
     if collection:
         base_query = base_query.where(Document.tags.contains([collection]))
@@ -425,7 +437,7 @@ async def get_document(
         user_id=user.user_id,
     )
 
-    # Query with access tier check
+    # Query with access tier check and organization filtering
     query = (
         select(Document)
         .join(AccessTier, Document.access_tier_id == AccessTier.id)
@@ -437,6 +449,16 @@ async def get_document(
         )
         .options(selectinload(Document.access_tier))
     )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
 
     result = await db.execute(query)
     document = result.scalar_one_or_none()
@@ -496,6 +518,17 @@ async def update_document(
         .where(Document.id == document_id)
         .options(selectinload(Document.access_tier))
     )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
+
     result = await db.execute(query)
     document = result.scalar_one_or_none()
 
@@ -603,8 +636,19 @@ async def delete_document(
         hard_delete=hard_delete,
     )
 
-    # Get document
+    # Get document with organization filtering
     query = select(Document).where(Document.id == document_id)
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
+
     result = await db.execute(query)
     document = result.scalar_one_or_none()
 
@@ -860,6 +904,17 @@ async def get_document_chunks(
             )
         )
     )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        doc_query = doc_query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
+
     doc_result = await db.execute(doc_query)
     if not doc_result.scalar_one_or_none():
         raise HTTPException(
@@ -1083,6 +1138,10 @@ async def list_collections(
     # Exclude soft-deleted documents (those marked as failed with "Deleted by user" error)
     # to match the filtering behavior of list_documents
     # Note: Empty arrays are filtered in Python (if tags:) since SQLite lacks array_length
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+
     query = (
         select(Document.tags)
         .join(AccessTier, Document.access_tier_id == AccessTier.id)
@@ -1098,6 +1157,14 @@ async def list_collections(
             )
         )
     )
+
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
 
     result = await db.execute(query)
     all_tags = result.scalars().all()
@@ -1144,6 +1211,16 @@ async def list_collections(
             )
         )
     )
+
+    # PHASE 12 FIX: Apply organization filtering
+    if org_id and not user.is_superadmin:
+        untagged_query = untagged_query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),
+            )
+        )
+
     untagged_result = await db.execute(untagged_query)
     untagged_count = untagged_result.scalar() or 0
 
@@ -1166,6 +1243,16 @@ async def list_collections(
             )
         )
     )
+
+    # PHASE 12 FIX: Apply organization filtering
+    if org_id and not user.is_superadmin:
+        total_query = total_query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),
+            )
+        )
+
     total_result = await db.execute(total_query)
     total_documents = total_result.scalar() or 0
 
@@ -1189,8 +1276,19 @@ async def download_document(
         user_id=user.user_id,
     )
 
-    # Get document
+    # Get document with organization filtering
     query = select(Document).where(Document.id == document_id)
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
+
     result = await db.execute(query)
     document = result.scalar_one_or_none()
 
@@ -1269,6 +1367,16 @@ async def bulk_download_documents(
             )
         )
     )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
 
     result = await db.execute(query)
     documents = result.scalars().all()
@@ -1788,12 +1896,24 @@ async def move_document(
     from backend.services.folder_service import get_folder_service
     import uuid as uuid_module
 
-    # Get document
-    result = await db.execute(
+    # Get document with organization filtering
+    query = (
         select(Document)
         .options(selectinload(Document.access_tier))
         .where(Document.id == document_id)
     )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
+
+    result = await db.execute(query)
     document = result.scalar_one_or_none()
 
     if not document:
@@ -1871,12 +1991,24 @@ async def bulk_move_documents(
 
         folder_name = target_folder.name
 
-    # Get all documents
-    result = await db.execute(
+    # Get all documents with organization filtering
+    query = (
         select(Document)
         .options(selectinload(Document.access_tier))
         .where(Document.id.in_(request.document_ids))
     )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
+
+    result = await db.execute(query)
     documents = result.scalars().all()
 
     moved = 0
@@ -1966,7 +2098,7 @@ async def bulk_delete_documents(
 
     user_tier = user.access_tier_level
 
-    # Get all documents
+    # Get all documents with organization filtering
     doc_uuids = []
     for doc_id in request.document_ids:
         try:
@@ -1974,11 +2106,23 @@ async def bulk_delete_documents(
         except ValueError:
             pass
 
-    result = await db.execute(
+    query = (
         select(Document)
         .options(selectinload(Document.access_tier))
         .where(Document.id.in_(doc_uuids))
     )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
+
+    result = await db.execute(query)
     documents = result.scalars().all()
 
     deleted = 0
@@ -2074,7 +2218,7 @@ async def bulk_update_tags(
 
     user_tier = user.access_tier_level
 
-    # Get all documents
+    # Get all documents with organization filtering
     doc_uuids = []
     for doc_id in request.document_ids:
         try:
@@ -2082,11 +2226,23 @@ async def bulk_update_tags(
         except ValueError:
             pass
 
-    result = await db.execute(
+    query = (
         select(Document)
         .options(selectinload(Document.access_tier))
         .where(Document.id.in_(doc_uuids))
     )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),  # Include legacy/shared docs
+            )
+        )
+
+    result = await db.execute(query)
     documents = result.scalars().all()
 
     updated = 0

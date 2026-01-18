@@ -4751,6 +4751,111 @@ function JobQueueSettings({
           )}
         </CardContent>
       </Card>
+
+      {/* Ray Parallel Processing Configuration */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Zap className="h-5 w-5" />
+            Ray Parallel Processing
+          </CardTitle>
+          <CardDescription>
+            Distributed computing for large-scale document processing using Ray
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Enable Ray Toggle */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Enable Ray Cluster</p>
+              <p className="text-sm text-muted-foreground">
+                Use Ray for parallel processing of large document batches
+              </p>
+            </div>
+            <Switch
+              checked={(localSettings["processing.ray_enabled"] as boolean) ?? false}
+              onCheckedChange={(checked) =>
+                handleSettingChange("processing.ray_enabled", checked)
+              }
+            />
+          </div>
+
+          {/* Ray Configuration - only show if enabled */}
+          {Boolean(localSettings["processing.ray_enabled"]) && (
+            <>
+              {/* Ray Address */}
+              <div className="space-y-2">
+                <Label htmlFor="ray-address">Ray Cluster Address</Label>
+                <Input
+                  id="ray-address"
+                  value={(localSettings["processing.ray_address"] as string) ?? "auto"}
+                  onChange={(e) =>
+                    handleSettingChange("processing.ray_address", e.target.value)
+                  }
+                  placeholder="auto or ray://cluster:10001"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Use &quot;auto&quot; for local cluster or specify remote address
+                </p>
+              </div>
+
+              {/* CPU/GPU Configuration */}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="ray-cpus">Max CPUs</Label>
+                  <Input
+                    id="ray-cpus"
+                    type="number"
+                    min={0}
+                    max={64}
+                    value={(localSettings["processing.ray_num_cpus"] as number) ?? 4}
+                    onChange={(e) =>
+                      handleSettingChange("processing.ray_num_cpus", parseInt(e.target.value) || 4)
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    0 = use all available
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="ray-gpus">Max GPUs</Label>
+                  <Input
+                    id="ray-gpus"
+                    type="number"
+                    min={0}
+                    max={8}
+                    value={(localSettings["processing.ray_num_gpus"] as number) ?? 0}
+                    onChange={(e) =>
+                      handleSettingChange("processing.ray_num_gpus", parseInt(e.target.value) || 0)
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    For GPU-accelerated operations
+                  </p>
+                </div>
+              </div>
+
+              {/* Memory Limit */}
+              <div className="space-y-2">
+                <Label htmlFor="ray-memory">Memory Limit (GB)</Label>
+                <Input
+                  id="ray-memory"
+                  type="number"
+                  min={1}
+                  max={128}
+                  value={(localSettings["processing.ray_memory_limit_gb"] as number) ?? 8}
+                  onChange={(e) =>
+                    handleSettingChange("processing.ray_memory_limit_gb", parseInt(e.target.value) || 8)
+                  }
+                />
+                <p className="text-xs text-muted-foreground">
+                  Memory limit per Ray worker
+                </p>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
     </>
   );
 }

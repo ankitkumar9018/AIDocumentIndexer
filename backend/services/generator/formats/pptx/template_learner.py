@@ -78,6 +78,18 @@ class TemplateLayoutLearner:
         # Used to calculate safe title width to avoid overlap
         self.detected_logo_x: Optional[int] = None
 
+        # PHASE 10 FIX: Footer and content bottom positioning
+        # detected_content_bottom_y: Y coordinate (in EMU) where content should stop
+        # safe_footer_y: Y coordinate where our footer elements should be placed
+        # footer_placeholder_y: Actual Y position from template's footer placeholder (if found)
+        self.detected_content_bottom_y: Optional[int] = None
+        self.footer_placeholder_y: Optional[int] = None  # Read from template master
+        # Default footer position: 0.35" from bottom of slide (standard PowerPoint position)
+        self.safe_footer_y: int = int(self.slide_height - (0.35 * EMU_PER_INCH))
+
+        # Analyze slide master for footer placeholder position
+        self._extract_footer_position_from_master()
+
     async def learn_from_template(self, template_path: Optional[str] = None) -> Dict[str, LearnedLayout]:
         """Analyze template with XML parsing + optional vision enhancement.
 
@@ -242,7 +254,7 @@ class TemplateLayoutLearner:
         }
 
     def _is_branding_element(self, shape) -> bool:
-        """Detect if shape is a branding element (logo, footer)."""
+        """Detect if shape is a branding element (logo, footer, branding bar)."""
         from pptx.enum.shapes import MSO_SHAPE_TYPE
 
         # Images in corners are likely logos
@@ -254,7 +266,92 @@ class TemplateLayoutLearner:
             if shape.top > self.slide_height * 0.9:
                 return True
 
+        # PHASE 10 FIX: Detect branding bars at bottom of slide
+        # These are typically rectangles with solid fills in the bottom 30% of the slide
+        # that span most of the slide width (template branding zone)
+        # NOTE: This sets content_bottom, but NO LONGER overrides safe_footer_y
+        # Footer position should come from template master or stay at slide bottom
+        if hasattr(shape, 'shape_type'):
+            shape_bottom = shape.top + shape.height
+
+            # Check if shape is in bottom 30% of slide
+            if shape.top > self.slide_height * 0.7:
+                # Wide shape (spans >60% of slide) - likely a branding bar
+                if shape.width > self.slide_width * 0.6:
+                    # Update safe content bottom to be above this branding element
+                    # BUT don't change footer position - footer goes AT THE BOTTOM
+                    safe_y = shape.top - int(0.1 * EMU_PER_INCH)  # 0.1" margin above branding
+                    if self.detected_content_bottom_y is None or safe_y < self.detected_content_bottom_y:
+                        self.detected_content_bottom_y = safe_y
+                        # PHASE 10: Do NOT override safe_footer_y here
+                        # Footer should be at bottom of slide, not above branding bar
+                        logger.debug(
+                            f"Detected branding bar at y={shape.top / EMU_PER_INCH:.2f}in, "
+                            f"setting content_bottom_y={safe_y / EMU_PER_INCH:.2f}in (footer unchanged)"
+                        )
+                    return True
+
         return False
+
+    def _extract_footer_position_from_master(self) -> None:
+        """PHASE 10: Extract footer placeholder position from slide master.
+
+        Reads the actual footer/slide number placeholder positions from the
+        template's slide master to ensure our generated footers match the
+        template's intended positioning.
+        """
+        from pptx.enum.shapes import PP_PLACEHOLDER
+
+        try:
+            # Get the slide master (first one, which is the main master)
+            if not self.prs.slide_masters:
+                logger.debug("No slide master found, using default footer position")
+                return
+
+            slide_master = self.prs.slide_masters[0]
+
+            # Look for footer and slide number placeholders in the master
+            footer_types = [
+                PP_PLACEHOLDER.FOOTER,
+                PP_PLACEHOLDER.SLIDE_NUMBER,
+                PP_PLACEHOLDER.DATE_TIME,
+            ]
+
+            for shape in slide_master.shapes:
+                # Check if it's a placeholder
+                if not hasattr(shape, 'placeholder_format') or shape.placeholder_format is None:
+                    continue
+
+                ph_type = shape.placeholder_format.type
+                if ph_type in footer_types:
+                    # Found a footer-related placeholder
+                    if self.footer_placeholder_y is None or shape.top > self.footer_placeholder_y:
+                        self.footer_placeholder_y = shape.top
+                        # Use this as the safe footer Y position
+                        self.safe_footer_y = shape.top
+                        logger.info(
+                            f"Found footer placeholder in master at y={shape.top / EMU_PER_INCH:.2f}in, "
+                            f"type={ph_type}"
+                        )
+
+            # If we found footer placeholders, use them; otherwise check for text at bottom
+            if self.footer_placeholder_y is None:
+                # Look for any small text boxes at bottom of master (custom footer positioning)
+                for shape in slide_master.shapes:
+                    if hasattr(shape, 'has_text_frame') and shape.has_text_frame:
+                        # Text in bottom 10% of slide that's small (likely footer)
+                        if shape.top > self.slide_height * 0.9:
+                            if shape.height < self.slide_height * 0.1:  # Less than 10% of slide height
+                                self.footer_placeholder_y = shape.top
+                                self.safe_footer_y = shape.top
+                                logger.info(
+                                    f"Found footer-like text in master at y={shape.top / EMU_PER_INCH:.2f}in"
+                                )
+                                break
+
+        except Exception as e:
+            logger.warning(f"Failed to extract footer position from master: {e}")
+            # Keep using default position
 
     def _is_likely_logo(self, shape) -> bool:
         """Check if a picture shape is likely a logo.
@@ -900,7 +997,7 @@ class SlideContentPlanner:
         """
         layout_type = plan.layout.layout_type.upper()
         title_max = plan.title_constraints.get('max_chars', 50)
-        bullet_max = plan.content_constraints.get('max_bullet_chars', 70)
+        bullet_max = plan.content_constraints.get('max_bullet_chars', 120)  # PHASE 11: Increased
         max_bullets = plan.content_constraints.get('max_bullets', 6)
 
         base_instructions = f"""
@@ -980,7 +1077,7 @@ STANDARD CONTENT SLIDE:
             issues.append(f"title_too_long:{len(title)}/{title_max}")
 
         # Check bullet lengths
-        bullet_max = plan.content_constraints.get('max_bullet_chars', 70)
+        bullet_max = plan.content_constraints.get('max_bullet_chars', 120)  # PHASE 11: Increased
         for i, bullet in enumerate(bullets):
             # Strip bullet markers for length check
             clean_bullet = bullet.lstrip('•◦*- ')

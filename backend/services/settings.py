@@ -38,6 +38,7 @@ class SettingCategory(str, Enum):
     OCR = "ocr"  # OCR configuration
     GENERATION = "generation"  # Document generation settings
     SCRAPING = "scraping"  # Web scraping configuration
+    PROCESSING = "processing"  # Parallel processing configuration
 
 
 class ValueType(str, Enum):
@@ -622,6 +623,45 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=7,
         value_type=ValueType.NUMBER,
         description="Embedding cache TTL in days"
+    ),
+
+    # ==========================================================================
+    # Parallel Processing Configuration (Ray)
+    # ==========================================================================
+    SettingDefinition(
+        key="processing.ray_enabled",
+        category=SettingCategory.PROCESSING,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable Ray for distributed parallel processing of large document batches"
+    ),
+    SettingDefinition(
+        key="processing.ray_address",
+        category=SettingCategory.PROCESSING,
+        default_value="auto",
+        value_type=ValueType.STRING,
+        description="Ray cluster address ('auto' for local, or 'ray://host:10001' for remote cluster)"
+    ),
+    SettingDefinition(
+        key="processing.ray_num_cpus",
+        category=SettingCategory.PROCESSING,
+        default_value=4,
+        value_type=ValueType.NUMBER,
+        description="Maximum CPUs for Ray tasks (0 for all available)"
+    ),
+    SettingDefinition(
+        key="processing.ray_num_gpus",
+        category=SettingCategory.PROCESSING,
+        default_value=0,
+        value_type=ValueType.NUMBER,
+        description="Maximum GPUs for Ray tasks (for GPU-accelerated operations)"
+    ),
+    SettingDefinition(
+        key="processing.ray_memory_limit_gb",
+        category=SettingCategory.PROCESSING,
+        default_value=8,
+        value_type=ValueType.NUMBER,
+        description="Memory limit per Ray worker in GB"
     ),
 
     # ==========================================================================

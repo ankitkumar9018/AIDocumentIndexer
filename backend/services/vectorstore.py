@@ -188,7 +188,7 @@ class VectorStoreConfig:
     """Configuration for vector store."""
     # Search settings
     default_top_k: int = 10
-    similarity_threshold: float = 0.55  # Balanced threshold (0.4 was too permissive, 0.7 too strict for OCR)
+    similarity_threshold: float = 0.40  # PHASE 12: Lowered for better semantic recall (was 0.55)
     search_type: SearchType = SearchType.HYBRID
 
     # Context expansion (surrounding chunks)
@@ -451,9 +451,15 @@ class VectorStore:
             )
 
             # Filter by organization for multi-tenant isolation
-            if organization_id:
+            # PHASE 12 FIX: Include docs from user's org AND docs without org (legacy/shared)
+            if organization_id and not is_superadmin:
                 org_uuid = uuid.UUID(organization_id)
-                query = query.where(Chunk.organization_id == org_uuid)
+                query = query.where(
+                    or_(
+                        Chunk.organization_id == org_uuid,
+                        Chunk.organization_id.is_(None),  # Include docs without org
+                    )
+                )
 
             # Filter private documents (only owner or superadmin can access)
             # Superadmins can see all private documents
@@ -593,9 +599,15 @@ class VectorStore:
             )
 
             # Filter by organization for multi-tenant isolation
-            if organization_id:
+            # PHASE 12 FIX: Include docs from user's org AND docs without org (legacy/shared)
+            if organization_id and not is_superadmin:
                 org_uuid = uuid.UUID(organization_id)
-                base_query = base_query.where(Chunk.organization_id == org_uuid)
+                base_query = base_query.where(
+                    or_(
+                        Chunk.organization_id == org_uuid,
+                        Chunk.organization_id.is_(None),  # Include docs without org
+                    )
+                )
 
             # Filter private documents (only owner or superadmin can access)
             if not is_superadmin:
@@ -701,9 +713,15 @@ class VectorStore:
             )
 
             # Filter by organization for multi-tenant isolation
-            if organization_id:
+            # PHASE 12 FIX: Include docs from user's org AND docs without org (legacy/shared)
+            if organization_id and not is_superadmin:
                 org_uuid = uuid.UUID(organization_id)
-                base_query = base_query.where(Document.organization_id == org_uuid)
+                base_query = base_query.where(
+                    or_(
+                        Document.organization_id == org_uuid,
+                        Document.organization_id.is_(None),  # Include docs without org
+                    )
+                )
 
             # Filter private documents (only owner or superadmin can access)
             if not is_superadmin:

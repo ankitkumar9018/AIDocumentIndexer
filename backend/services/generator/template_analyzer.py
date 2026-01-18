@@ -272,7 +272,7 @@ class TemplateAnalyzer:
         capacity = {
             'title_chars': 60,
             'bullet_count': 7,
-            'chars_per_bullet': 70,
+            'chars_per_bullet': 120,  # PHASE 11: Increased from 70 to allow complete sentences
             'has_image_placeholder': False,
             'has_chart_placeholder': False,
             'body_chars': 500,

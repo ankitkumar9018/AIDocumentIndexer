@@ -457,8 +457,16 @@ class ChromaVectorStore:
             conditions.append({"document_id": {"$in": document_ids}})
 
         # Organization filtering (unless superadmin)
+        # PHASE 12 FIX: Include documents from user's org AND documents without org context
+        # Documents uploaded without organization_id are stored with "" (empty string)
+        # We need to include these "shared/legacy" documents in search results
         if organization_id and not is_superadmin:
-            conditions.append({"organization_id": organization_id})
+            conditions.append({
+                "$or": [
+                    {"organization_id": organization_id},
+                    {"organization_id": ""},  # Include docs without org (legacy/shared)
+                ]
+            })
 
         # Private document filtering:
         # Show public docs OR private docs owned by the user

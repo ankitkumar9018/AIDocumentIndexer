@@ -73,7 +73,7 @@ GENERATION REQUIREMENTS:
 - Generate exactly {num_slides} slides
 - Style: {style}
 - Each slide must have a clear, concise title (max 60 chars)
-- Bullet points should be 1-2 lines each (max 70 chars per bullet)
+- Bullet points must be complete sentences (80-150 chars per bullet)
 - Include speaker notes for each slide (2-3 sentences)
 - First slide should be a title slide
 - Last slide should be a summary/conclusion
@@ -377,7 +377,7 @@ Ensure the update addresses the feedback while maintaining quality."""
         return {
             "title_max_chars": 60,
             "subtitle_max_chars": 100,
-            "bullet_max_chars": 70,
+            "bullet_max_chars": 150,  # PHASE 12: Increased from 120 for more complete points
             "bullets_per_slide": 7,
             "body_max_chars": 500,
             "speaker_notes_max_chars": 300,

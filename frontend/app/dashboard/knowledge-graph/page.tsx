@@ -27,6 +27,11 @@ import {
   Trash2,
   Box,
   Square,
+  Pause,
+  Play,
+  StopCircle,
+  Clock,
+  AlertCircle,
 } from "lucide-react";
 
 // Dynamically import WebGL graph to avoid SSR issues
@@ -66,11 +71,22 @@ import {
   useSearchEntities,
   useEntityNeighborhood,
   useEntityTypes,
+  useCurrentExtractionJob,
+  usePendingExtractionCount,
+  useStartExtractionJob,
+  useCancelExtractionJob,
+  usePauseExtractionJob,
+  useResumeExtractionJob,
+  knowledgeGraphQueryKeys,
   api,
   type EntityResponse,
   type GraphNode,
   type GraphEdge,
+  type ExtractionJobProgress,
 } from "@/lib/api";
+import { Progress } from "@/components/ui/progress";
+import { Checkbox } from "@/components/ui/checkbox";
+import { useQueryClient } from "@tanstack/react-query";
 
 // Entity type colors and icons
 const entityTypeConfig: Record<string, { color: string; icon: React.ElementType; bgColor: string }> = {
@@ -488,19 +504,176 @@ function EntityDetailsPanel({
   );
 }
 
+// Extraction Job Panel Component
+function ExtractionJobPanel({
+  job,
+  onCancel,
+  onPause,
+  onResume,
+  isCancelling,
+  isPausing,
+  isResuming,
+}: {
+  job: ExtractionJobProgress;
+  onCancel: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  isCancelling: boolean;
+  isPausing: boolean;
+  isResuming: boolean;
+}) {
+  const formatTime = (seconds: number | null) => {
+    if (!seconds) return null;
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    return `${Math.round(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "running":
+        return "bg-blue-500";
+      case "paused":
+        return "bg-yellow-500";
+      case "completed":
+        return "bg-green-500";
+      case "cancelled":
+        return "bg-gray-500";
+      case "failed":
+        return "bg-red-500";
+      default:
+        return "bg-gray-400";
+    }
+  };
+
+  return (
+    <Card className="border-primary/20 bg-primary/5">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm font-medium flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-primary" />
+            Entity Extraction
+          </CardTitle>
+          <Badge
+            variant="outline"
+            className={`${getStatusColor(job.status)} text-white border-0`}
+          >
+            {job.status}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="space-y-1">
+          <div className="flex justify-between text-sm">
+            <span>Progress</span>
+            <span className="font-medium">
+              {job.processed_documents}/{job.total_documents} documents
+            </span>
+          </div>
+          <Progress value={job.progress_percent} className="h-2" />
+        </div>
+
+        {job.current_document && job.status === "running" && (
+          <div className="text-xs text-muted-foreground flex items-center gap-1">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Processing: {job.current_document}
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">Entities:</span>
+            <span className="font-medium">{job.total_entities}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">Relations:</span>
+            <span className="font-medium">{job.total_relations}</span>
+          </div>
+          {job.failed_documents > 0 && (
+            <div className="flex items-center gap-1 text-red-500">
+              <AlertCircle className="h-3 w-3" />
+              <span>{job.failed_documents} failed</span>
+            </div>
+          )}
+          {job.estimated_remaining_seconds && job.status === "running" && (
+            <div className="flex items-center gap-1">
+              <Clock className="h-3 w-3 text-muted-foreground" />
+              <span>~{formatTime(job.estimated_remaining_seconds)} remaining</span>
+            </div>
+          )}
+        </div>
+
+        {(job.can_cancel || job.can_pause || job.can_resume) && (
+          <div className="flex gap-2 pt-2">
+            {job.can_pause && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onPause}
+                disabled={isPausing}
+                className="flex-1"
+              >
+                {isPausing ? (
+                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                ) : (
+                  <Pause className="h-3 w-3 mr-1" />
+                )}
+                Pause
+              </Button>
+            )}
+            {job.can_resume && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onResume}
+                disabled={isResuming}
+                className="flex-1"
+              >
+                {isResuming ? (
+                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                ) : (
+                  <Play className="h-3 w-3 mr-1" />
+                )}
+                Resume
+              </Button>
+            )}
+            {job.can_cancel && (
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={onCancel}
+                disabled={isCancelling}
+                className="flex-1"
+              >
+                {isCancelling ? (
+                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                ) : (
+                  <StopCircle className="h-3 w-3 mr-1" />
+                )}
+                Cancel
+              </Button>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function KnowledgeGraphPage() {
   const { status } = useSession();
   const isAuthenticated = status === "authenticated";
+  const queryClient = useQueryClient();
 
   const [searchQuery, setSearchQuery] = useState("");
   const [entityTypeFilter, setEntityTypeFilter] = useState<string>("all");
   const [nodeLimit, setNodeLimit] = useState(100);
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
-  const [isExtracting, setIsExtracting] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
-  const [use3DView, setUse3DView] = useState(false); // Toggle between 2D canvas and 3D WebGL
+  const [use3DView, setUse3DView] = useState(false);
+  const [onlyNewDocs, setOnlyNewDocs] = useState(true);
 
-  // Queries
+  // Knowledge Graph Queries
   const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useKnowledgeGraphStats({
     enabled: isAuthenticated,
   });
@@ -524,6 +697,33 @@ export default function KnowledgeGraphPage() {
     { enabled: isAuthenticated && searchQuery.length > 0 }
   );
 
+  // Extraction Job Queries
+  const {
+    data: currentJob,
+    refetch: refetchCurrentJob,
+  } = useCurrentExtractionJob({
+    enabled: isAuthenticated,
+    refetchInterval: 2000, // Poll every 2 seconds when job is running
+  });
+
+  const { data: pendingInfo } = usePendingExtractionCount({
+    enabled: isAuthenticated,
+  });
+
+  // Extraction Job Mutations
+  const startExtractionMutation = useStartExtractionJob();
+  const cancelExtractionMutation = useCancelExtractionJob();
+  const pauseExtractionMutation = usePauseExtractionJob();
+  const resumeExtractionMutation = useResumeExtractionJob();
+
+  // Refresh stats when job completes
+  useEffect(() => {
+    if (currentJob?.status === "completed" || currentJob?.status === "completed_with_errors") {
+      refetchStats();
+      refetchGraph();
+    }
+  }, [currentJob?.status, refetchStats, refetchGraph]);
+
   const handleRefresh = () => {
     refetchStats();
     refetchGraph();
@@ -533,21 +733,57 @@ export default function KnowledgeGraphPage() {
     setSelectedEntityId(nodeId);
   };
 
-  const handleExtractAll = async () => {
-    setIsExtracting(true);
+  const handleStartExtraction = async () => {
     try {
-      const result = await api.extractEntitiesFromAllDocuments();
-      toast.success(result.message || "Entity extraction completed");
-      // Refresh the stats and graph after extraction
-      setTimeout(() => {
-        refetchStats();
-        refetchGraph();
-      }, 1000);
+      const result = await startExtractionMutation.mutateAsync({
+        only_new_documents: onlyNewDocs,
+      });
+
+      if (result.status === "already_running") {
+        toast.info(result.message);
+      } else {
+        toast.success("Extraction job started! You can navigate away and check progress later.");
+      }
+      refetchCurrentJob();
     } catch (error) {
-      console.error("Entity extraction error:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to extract entities");
-    } finally {
-      setIsExtracting(false);
+      console.error("Failed to start extraction:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to start extraction");
+    }
+  };
+
+  const handleCancelExtraction = async () => {
+    if (!currentJob) return;
+    try {
+      await cancelExtractionMutation.mutateAsync(currentJob.job_id);
+      toast.success("Extraction job cancelled");
+      refetchCurrentJob();
+    } catch (error) {
+      console.error("Failed to cancel extraction:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to cancel extraction");
+    }
+  };
+
+  const handlePauseExtraction = async () => {
+    if (!currentJob) return;
+    try {
+      await pauseExtractionMutation.mutateAsync(currentJob.job_id);
+      toast.success("Extraction job paused");
+      refetchCurrentJob();
+    } catch (error) {
+      console.error("Failed to pause extraction:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to pause extraction");
+    }
+  };
+
+  const handleResumeExtraction = async () => {
+    if (!currentJob) return;
+    try {
+      await resumeExtractionMutation.mutateAsync(currentJob.job_id);
+      toast.success("Extraction job resumed");
+      refetchCurrentJob();
+    } catch (error) {
+      console.error("Failed to resume extraction:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to resume extraction");
     }
   };
 
@@ -589,6 +825,8 @@ export default function KnowledgeGraphPage() {
     );
   }
 
+  const hasActiveJob = !!(currentJob && ["queued", "running", "paused"].includes(currentJob.status));
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -600,26 +838,45 @@ export default function KnowledgeGraphPage() {
           </h1>
           <p className="text-muted-foreground">
             Explore entities and relationships extracted from your documents
+            {pendingInfo && pendingInfo.pending_count > 0 && !hasActiveJob && (
+              <span className="ml-2 text-primary">
+                ({pendingInfo.pending_count} documents pending extraction)
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            variant="default"
-            onClick={handleExtractAll}
-            disabled={isExtracting}
-            className="gap-2"
-          >
-            {isExtracting ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Sparkles className="h-4 w-4" />
-            )}
-            {isExtracting ? "Extracting..." : "Extract Entities"}
-          </Button>
+          {!hasActiveJob && (
+            <>
+              <div className="flex items-center gap-2 mr-2">
+                <Checkbox
+                  id="only-new"
+                  checked={onlyNewDocs}
+                  onCheckedChange={(checked) => setOnlyNewDocs(checked as boolean)}
+                />
+                <label htmlFor="only-new" className="text-sm cursor-pointer">
+                  Only new documents
+                </label>
+              </div>
+              <Button
+                variant="default"
+                onClick={handleStartExtraction}
+                disabled={startExtractionMutation.isPending}
+                className="gap-2"
+              >
+                {startExtractionMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4" />
+                )}
+                {startExtractionMutation.isPending ? "Starting..." : "Extract Entities"}
+              </Button>
+            </>
+          )}
           <Button
             variant="outline"
             onClick={handleCleanup}
-            disabled={isCleaning}
+            disabled={isCleaning || hasActiveJob}
             className="gap-2"
             title="Remove orphan entities (entities with no document references)"
           >
@@ -636,6 +893,19 @@ export default function KnowledgeGraphPage() {
           </Button>
         </div>
       </div>
+
+      {/* Extraction Job Progress Panel */}
+      {currentJob && ["queued", "running", "paused", "completed", "completed_with_errors"].includes(currentJob.status) && (
+        <ExtractionJobPanel
+          job={currentJob}
+          onCancel={handleCancelExtraction}
+          onPause={handlePauseExtraction}
+          onResume={handleResumeExtraction}
+          isCancelling={cancelExtractionMutation.isPending}
+          isPausing={pauseExtractionMutation.isPending}
+          isResuming={resumeExtractionMutation.isPending}
+        />
+      )}
 
       {/* Stats Cards */}
       <div className="grid gap-4 md:grid-cols-4">
@@ -934,16 +1204,16 @@ export default function KnowledgeGraphPage() {
                   <p className="font-medium">No entities found in the knowledge graph</p>
                   <p className="text-sm mb-4">Extract entities from your uploaded documents to populate the graph</p>
                   <Button
-                    onClick={handleExtractAll}
-                    disabled={isExtracting}
+                    onClick={handleStartExtraction}
+                    disabled={startExtractionMutation.isPending || hasActiveJob}
                     className="gap-2"
                   >
-                    {isExtracting ? (
+                    {startExtractionMutation.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       <Sparkles className="h-4 w-4" />
                     )}
-                    {isExtracting ? "Extracting..." : "Extract Entities from Documents"}
+                    {startExtractionMutation.isPending ? "Starting..." : "Extract Entities from Documents"}
                   </Button>
                 </div>
               )}
