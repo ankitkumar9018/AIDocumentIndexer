@@ -5,6 +5,12 @@ AIDocumentIndexer - Query Intent Classifier
 Classifies search queries by intent to optimize retrieval strategy.
 Different query types benefit from different vector vs keyword weights.
 
+Enhanced with:
+- MMR (Maximal Marginal Relevance) for source diversity
+- Chain-of-Thought prompting for complex queries
+- Prompt template selection based on intent
+- Knowledge graph enhancement recommendations
+
 Query Types:
 - FACTUAL: Looking for specific facts, names, dates, numbers → favor keyword
 - CONCEPTUAL: Abstract concepts, explanations, understanding → favor vector
@@ -16,9 +22,9 @@ Research shows dynamic weighting can improve retrieval precision by 10-15%.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -45,6 +51,16 @@ class QueryClassification:
     vector_weight: float  # Recommended vector weight (0-1)
     keyword_weight: float  # Recommended keyword weight (0-1)
     reasoning: str  # Brief explanation of classification
+
+    # Enhanced retrieval options
+    use_mmr: bool = False  # Use Maximal Marginal Relevance for diversity
+    diversity_weight: float = 0.0  # MMR diversity weight (0.0 to 0.5)
+    use_cot: bool = False  # Use Chain-of-Thought prompting
+    suggested_top_k: int = 8  # Suggested number of results
+    similarity_threshold: float = 0.40  # Minimum similarity score
+    use_kg_enhancement: bool = False  # Use knowledge graph enrichment
+    prompt_template: str = "default"  # Template to use (factual, comparison, etc.)
+    matched_patterns: List[str] = field(default_factory=list)  # Patterns that matched
 
 
 # Pattern-based classification rules
@@ -128,6 +144,90 @@ INTENT_WEIGHTS = {
     QueryIntent.UNKNOWN: (0.7, 0.3),       # Default: slight vector preference
 }
 
+# Enhanced retrieval configuration for each intent
+INTENT_RETRIEVAL_CONFIG = {
+    QueryIntent.FACTUAL: {
+        "use_mmr": False,
+        "diversity_weight": 0.0,
+        "use_cot": False,
+        "suggested_top_k": 8,
+        "similarity_threshold": 0.40,
+        "prompt_template": "factual",
+    },
+    QueryIntent.CONCEPTUAL: {
+        "use_mmr": True,
+        "diversity_weight": 0.2,
+        "use_cot": True,  # Complex concepts benefit from step-by-step reasoning
+        "suggested_top_k": 10,
+        "similarity_threshold": 0.35,
+        "prompt_template": "analytical",
+    },
+    QueryIntent.COMPARATIVE: {
+        "use_mmr": True,  # Need diverse sources for comparison
+        "diversity_weight": 0.4,
+        "use_cot": False,
+        "suggested_top_k": 12,
+        "similarity_threshold": 0.35,
+        "prompt_template": "comparison",
+    },
+    QueryIntent.NAVIGATIONAL: {
+        "use_mmr": False,
+        "diversity_weight": 0.0,
+        "use_cot": False,
+        "suggested_top_k": 5,
+        "similarity_threshold": 0.45,
+        "prompt_template": "factual",
+    },
+    QueryIntent.PROCEDURAL: {
+        "use_mmr": True,
+        "diversity_weight": 0.2,
+        "use_cot": True,  # Step-by-step processes benefit from CoT
+        "suggested_top_k": 10,
+        "similarity_threshold": 0.35,
+        "prompt_template": "analytical",
+    },
+    QueryIntent.EXPLORATORY: {
+        "use_mmr": True,  # Need diverse sources for overview
+        "diversity_weight": 0.3,
+        "use_cot": False,
+        "suggested_top_k": 15,
+        "similarity_threshold": 0.30,
+        "prompt_template": "summary",
+    },
+    QueryIntent.AGGREGATION: {
+        "use_mmr": False,
+        "diversity_weight": 0.0,
+        "use_cot": False,
+        "suggested_top_k": 20,  # Need many sources for aggregation
+        "similarity_threshold": 0.30,
+        "prompt_template": "list",
+    },
+    QueryIntent.UNKNOWN: {
+        "use_mmr": False,
+        "diversity_weight": 0.0,
+        "use_cot": False,
+        "suggested_top_k": 8,
+        "similarity_threshold": 0.40,
+        "prompt_template": "default",
+    },
+}
+
+# Patterns that suggest knowledge graph enhancement would help
+KG_ENHANCEMENT_PATTERNS = [
+    r"\brelat(?:ed|ionship)\b",
+    r"\bconnect(?:ed|ion)\b",
+    r"\bwork(?:ed|s)?\s+(?:with|for|at|on)\b",
+    r"\bwho\s+(?:is|are|was|were)\b.*\b(?:at|in|from)\b",
+    r"\binvolv(?:ed|es)\b",
+    r"\bassociat(?:ed|ion)\b",
+    r"\baffili(?:ated|ation)\b",
+    r"\bpartner(?:ed|ship)?\b",
+    r"\bcollaborat(?:ed|ion|or)\b",
+    r"\bmentioned\b.*\bwith\b",
+    r"\bpeople\b.*\b(?:at|in|from)\b",
+    r"\bteam\b.*\b(?:at|in|from)\b",
+]
+
 
 class QueryClassifier:
     """
@@ -176,11 +276,12 @@ class QueryClassifier:
             query: The search query to classify
 
         Returns:
-            QueryClassification with intent and recommended weights
+            QueryClassification with intent, weights, and enhanced retrieval config
         """
         query = query.strip()
 
         if not query:
+            config = INTENT_RETRIEVAL_CONFIG[QueryIntent.UNKNOWN]
             return QueryClassification(
                 query=query,
                 intent=QueryIntent.UNKNOWN,
@@ -188,11 +289,19 @@ class QueryClassifier:
                 vector_weight=0.7,
                 keyword_weight=0.3,
                 reasoning="Empty query",
+                use_mmr=config["use_mmr"],
+                diversity_weight=config["diversity_weight"],
+                use_cot=config["use_cot"],
+                suggested_top_k=config["suggested_top_k"],
+                similarity_threshold=config["similarity_threshold"],
+                use_kg_enhancement=False,
+                prompt_template=config["prompt_template"],
+                matched_patterns=[],
             )
 
         # Count pattern matches for each intent
         intent_scores = {}
-        matched_patterns = {}
+        matched_patterns_dict = {}
 
         for intent, patterns in self._compiled_patterns.items():
             matches = []
@@ -202,13 +311,12 @@ class QueryClassifier:
 
             if matches:
                 intent_scores[intent] = len(matches)
-                matched_patterns[intent] = matches
+                matched_patterns_dict[intent] = matches
 
         # Determine best intent
         if intent_scores:
             best_intent = max(intent_scores.keys(), key=lambda k: intent_scores[k])
             max_score = intent_scores[best_intent]
-            total_patterns = len(self._compiled_patterns[best_intent])
 
             # Calculate confidence based on match ratio and uniqueness
             confidence = min(1.0, max_score / 3)  # Cap at 1.0, 3+ matches = high confidence
@@ -227,6 +335,14 @@ class QueryClassifier:
 
             reasoning = f"Matched {max_score} pattern(s) for {best_intent.value}"
 
+            # Get enhanced retrieval config
+            config = INTENT_RETRIEVAL_CONFIG.get(
+                best_intent, INTENT_RETRIEVAL_CONFIG[QueryIntent.UNKNOWN]
+            )
+
+            # Check if KG enhancement would help
+            use_kg = self._should_use_kg_enhancement(query)
+
             return QueryClassification(
                 query=query,
                 intent=best_intent,
@@ -234,10 +350,33 @@ class QueryClassifier:
                 vector_weight=vec_weight,
                 keyword_weight=kw_weight,
                 reasoning=reasoning,
+                use_mmr=config["use_mmr"],
+                diversity_weight=config["diversity_weight"],
+                use_cot=config["use_cot"],
+                suggested_top_k=config["suggested_top_k"],
+                similarity_threshold=config["similarity_threshold"],
+                use_kg_enhancement=use_kg,
+                prompt_template=config["prompt_template"],
+                matched_patterns=matched_patterns_dict.get(best_intent, []),
             )
 
         # No patterns matched - use heuristics
         return self._classify_by_heuristics(query)
+
+    def _should_use_kg_enhancement(self, query: str) -> bool:
+        """
+        Determine if knowledge graph enhancement would help this query.
+
+        Args:
+            query: The query string
+
+        Returns:
+            True if KG enhancement is recommended
+        """
+        for pattern in KG_ENHANCEMENT_PATTERNS:
+            if re.search(pattern, query, re.IGNORECASE):
+                return True
+        return False
 
     def _adjust_weights_for_query(
         self,
@@ -310,9 +449,11 @@ class QueryClassifier:
         """
         query_lower = query.lower()
         word_count = len(query.split())
+        use_kg = self._should_use_kg_enhancement(query)
 
         # Very short queries are often navigational or factual
         if word_count <= 2:
+            config = INTENT_RETRIEVAL_CONFIG[QueryIntent.FACTUAL]
             return QueryClassification(
                 query=query,
                 intent=QueryIntent.FACTUAL,
@@ -320,6 +461,14 @@ class QueryClassifier:
                 vector_weight=0.5,
                 keyword_weight=0.5,
                 reasoning="Short query, defaulting to balanced approach",
+                use_mmr=config["use_mmr"],
+                diversity_weight=config["diversity_weight"],
+                use_cot=config["use_cot"],
+                suggested_top_k=config["suggested_top_k"],
+                similarity_threshold=config["similarity_threshold"],
+                use_kg_enhancement=use_kg,
+                prompt_template=config["prompt_template"],
+                matched_patterns=[],
             )
 
         # Questions are often conceptual or procedural
@@ -332,6 +481,7 @@ class QueryClassifier:
                 intent = QueryIntent.FACTUAL
 
             vec_weight, kw_weight = INTENT_WEIGHTS[intent]
+            config = INTENT_RETRIEVAL_CONFIG[intent]
             return QueryClassification(
                 query=query,
                 intent=intent,
@@ -339,10 +489,19 @@ class QueryClassifier:
                 vector_weight=vec_weight,
                 keyword_weight=kw_weight,
                 reasoning="Question format detected",
+                use_mmr=config["use_mmr"],
+                diversity_weight=config["diversity_weight"],
+                use_cot=config["use_cot"],
+                suggested_top_k=config["suggested_top_k"],
+                similarity_threshold=config["similarity_threshold"],
+                use_kg_enhancement=use_kg,
+                prompt_template=config["prompt_template"],
+                matched_patterns=[],
             )
 
         # Default to exploratory for longer queries
         if word_count >= 5:
+            config = INTENT_RETRIEVAL_CONFIG[QueryIntent.EXPLORATORY]
             return QueryClassification(
                 query=query,
                 intent=QueryIntent.EXPLORATORY,
@@ -350,9 +509,18 @@ class QueryClassifier:
                 vector_weight=0.7,
                 keyword_weight=0.3,
                 reasoning="Longer query, defaulting to exploratory",
+                use_mmr=config["use_mmr"],
+                diversity_weight=config["diversity_weight"],
+                use_cot=config["use_cot"],
+                suggested_top_k=config["suggested_top_k"],
+                similarity_threshold=config["similarity_threshold"],
+                use_kg_enhancement=use_kg,
+                prompt_template=config["prompt_template"],
+                matched_patterns=[],
             )
 
         # Fallback
+        config = INTENT_RETRIEVAL_CONFIG[QueryIntent.UNKNOWN]
         return QueryClassification(
             query=query,
             intent=QueryIntent.UNKNOWN,
@@ -360,6 +528,14 @@ class QueryClassifier:
             vector_weight=0.7,
             keyword_weight=0.3,
             reasoning="No clear intent detected, using defaults",
+            use_mmr=config["use_mmr"],
+            diversity_weight=config["diversity_weight"],
+            use_cot=config["use_cot"],
+            suggested_top_k=config["suggested_top_k"],
+            similarity_threshold=config["similarity_threshold"],
+            use_kg_enhancement=use_kg,
+            prompt_template=config["prompt_template"],
+            matched_patterns=[],
         )
 
     def get_weights_for_query(self, query: str) -> Tuple[float, float]:

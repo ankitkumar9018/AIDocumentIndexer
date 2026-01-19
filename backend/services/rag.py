@@ -109,6 +109,19 @@ from backend.services.rag_module.prompts import (
     LANGUAGE_NAMES,
     get_language_instruction as _get_language_instruction,
     parse_suggested_questions as _parse_suggested_questions,
+    # Phase 14: Enhanced prompt selection
+    get_template_for_intent as _get_template_for_intent,
+    get_system_prompt_for_model as _get_system_prompt_for_model,
+    get_template_for_model as _get_template_for_model,
+    is_tiny_model as _is_tiny_model,
+    is_llama_model as _is_llama_model,
+    is_llama_small as _is_llama_small,
+    get_recommended_temperature as _get_recommended_temperature,
+    SMALL_MODEL_SYSTEM_PROMPT,
+    TINY_MODEL_SYSTEM_PROMPT,
+    TINY_MODEL_TEMPLATE,
+    LLAMA_SMALL_SYSTEM_PROMPT,
+    LLAMA_SMALL_TEMPLATE,
 )
 
 logger = structlog.get_logger(__name__)
@@ -721,6 +734,33 @@ class RAGService:
             vectorstore_stats=vectorstore_stats,
         )
 
+        # PHASE 14: Query classification for adaptive retrieval and prompt selection
+        # Classify query intent to optimize retrieval settings and prompt templates
+        query_classification: Optional[QueryClassification] = None
+        try:
+            classifier = get_query_classifier()
+            query_classification = classifier.classify(question)
+
+            # Apply classification to retrieval settings
+            if query_classification:
+                # Override top_k if classification suggests different value
+                if query_classification.suggested_top_k and top_k is None:
+                    top_k = query_classification.suggested_top_k
+
+                logger.info(
+                    "Query classified for adaptive retrieval",
+                    intent=query_classification.intent.value,
+                    confidence=query_classification.confidence,
+                    use_mmr=query_classification.use_mmr,
+                    use_cot=query_classification.use_cot,
+                    use_kg_enhancement=query_classification.use_kg_enhancement,
+                    suggested_top_k=query_classification.suggested_top_k,
+                    prompt_template=query_classification.prompt_template,
+                )
+        except Exception as e:
+            logger.warning("Query classification failed, using defaults", error=str(e))
+            query_classification = None
+
         # Check if this is an aggregation query (e.g., "total spending by Company A")
         # Route to specialized handler for numerical extraction and calculation
         aggregation_enabled = runtime_settings.get("aggregation_query_enabled", True)
@@ -829,6 +869,7 @@ class RAGService:
                 total_docs=len(retrieved_docs),
             )
         else:
+            # PHASE 14: Pass query classification for adaptive retrieval (MMR, KG enhancement)
             retrieved_docs = await self._retrieve(
                 question,
                 collection_filter=collection_filter,
@@ -839,6 +880,7 @@ class RAGService:
                 organization_id=organization_id,
                 user_id=user_id,
                 is_superadmin=is_superadmin,
+                query_classification=query_classification,
             )
             # PHASE 12: Enhanced logging for RAG search troubleshooting
             if not retrieved_docs:
@@ -895,9 +937,52 @@ class RAGService:
         auto_detect = (language == "auto")
         effective_language = "en" if auto_detect else language
         language_instruction = _get_language_instruction(effective_language, auto_detect=auto_detect)
-        system_prompt = RAG_SYSTEM_PROMPT
+
+        # PHASE 14: Adaptive system prompt and template selection
+        # Select system prompt based on model size (tiny/small models need more explicit instructions)
+        model_name = llm_config.model if llm_config else None
+        system_prompt = _get_system_prompt_for_model(model_name)
+        is_tiny = _is_tiny_model(model_name) if model_name else False
+        is_llama = _is_llama_model(model_name) if model_name else False
+        is_llama_sm = _is_llama_small(model_name) if model_name else False
+        recommended_temp = _get_recommended_temperature(model_name)
+
+        # For tiny models (<3B), always use the structured template
+        # This provides ultra-explicit format that reduces hallucination
+        if is_tiny:
+            # Llama 3.2 1B/3B uses step-by-step template, others use fixed-format
+            prompt_template = _get_template_for_model(model_name)
+            logger.info(
+                "Using optimized template for small model",
+                model=model_name,
+                is_llama=is_llama,
+                recommended_temperature=recommended_temp,
+            )
+        # Small Llama models (7B-8B) benefit from step-by-step reasoning
+        elif is_llama_sm:
+            prompt_template = LLAMA_SMALL_TEMPLATE
+            logger.info(
+                "Using Llama small model template with step-by-step reasoning",
+                model=model_name,
+                recommended_temperature=recommended_temp,
+            )
+        # For larger models, select prompt template based on query classification
+        elif query_classification:
+            use_cot = query_classification.use_cot
+            intent_str = query_classification.intent.value if query_classification.intent else "factual"
+            prompt_template = _get_template_for_intent(intent_str, use_cot=use_cot)
+            logger.debug(
+                "Selected adaptive prompt template",
+                intent=intent_str,
+                use_cot=use_cot,
+                template_type=query_classification.prompt_template,
+            )
+        else:
+            # Default template
+            prompt_template = _get_template_for_model(model_name)
+
         if language_instruction:
-            system_prompt = f"{RAG_SYSTEM_PROMPT}\n{language_instruction}"
+            system_prompt = f"{system_prompt}\n{language_instruction}"
 
         if session_id:
             # Use conversational prompt with history
@@ -910,10 +995,10 @@ class RAGService:
                 HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
             ]
         else:
-            # Single-turn query
+            # Single-turn query with adaptive template
             messages = [
                 SystemMessage(content=system_prompt),
-                HumanMessage(content=RAG_PROMPT_TEMPLATE.format(context=context, question=question)),
+                HumanMessage(content=prompt_template.format(context=context, question=question)),
             ]
 
         # Generate response
@@ -1554,6 +1639,7 @@ class RAGService:
         organization_id: Optional[str] = None,
         user_id: Optional[str] = None,
         is_superadmin: bool = False,
+        query_classification: Optional[QueryClassification] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve relevant documents for query.
@@ -1569,6 +1655,8 @@ class RAGService:
             organization_id: Optional organization ID for multi-tenant isolation
             user_id: Optional user ID for private document access
             is_superadmin: Whether user is a superadmin (can access all private docs)
+            query_classification: Optional query classification for adaptive retrieval
+                                  (MMR diversity, KG enhancement, etc.)
 
         Returns:
             List of (document, score) tuples
@@ -1656,6 +1744,7 @@ class RAGService:
                     organization_id=organization_id,
                     user_id=user_id,
                     is_superadmin=is_superadmin,
+                    query_classification=query_classification,  # PHASE 14: Pass classification
                 )
             elif self._vector_store is not None:
                 return await self._retrieve_with_langchain_store(
@@ -1717,6 +1806,7 @@ class RAGService:
                     organization_id=organization_id,
                     user_id=user_id,
                     is_superadmin=is_superadmin,
+                    query_classification=query_classification,  # PHASE 14: Pass classification
                 )
             elif self._vector_store is not None:
                 results = await self._retrieve_with_langchain_store(
@@ -1769,6 +1859,7 @@ class RAGService:
         organization_id: Optional[str] = None,
         user_id: Optional[str] = None,
         is_superadmin: bool = False,
+        query_classification: Optional[QueryClassification] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve using our custom VectorStore service.
@@ -1782,6 +1873,8 @@ class RAGService:
             organization_id: Optional organization ID for multi-tenant isolation
             user_id: Optional user ID for private document access
             is_superadmin: Whether user is a superadmin (can access all private docs)
+            query_classification: Optional query classification for adaptive retrieval
+                                  (MMR diversity, KG enhancement, etc.)
 
         Returns:
             List of (Document, score) tuples
@@ -1813,16 +1906,30 @@ class RAGService:
             # Determine search type
             search_type = SearchType.HYBRID if self.config.use_hybrid_search else SearchType.VECTOR
 
-            # Classify query intent for dynamic weighting (if enabled)
+            # PHASE 14: Use passed query classification or classify if not provided
+            # Extract dynamic weights for hybrid search
             vector_weight = None
             keyword_weight = None
-            query_classification = None
-            if self._query_classifier is not None and search_type == SearchType.HYBRID:
+
+            # If classification was passed from caller, use it
+            if query_classification is not None:
+                vector_weight = query_classification.vector_weight
+                keyword_weight = query_classification.keyword_weight
+                logger.debug(
+                    "Using passed query classification for adaptive retrieval",
+                    intent=query_classification.intent.value,
+                    vector_weight=vector_weight,
+                    keyword_weight=keyword_weight,
+                    use_mmr=query_classification.use_mmr,
+                    use_kg=query_classification.use_kg_enhancement,
+                )
+            # Otherwise classify locally (for direct calls to this method)
+            elif self._query_classifier is not None and search_type == SearchType.HYBRID:
                 query_classification = self._query_classifier.classify(query)
                 vector_weight = query_classification.vector_weight
                 keyword_weight = query_classification.keyword_weight
                 logger.debug(
-                    "Query classified for dynamic weighting",
+                    "Query classified locally for dynamic weighting",
                     query=query[:50],
                     intent=query_classification.intent.value,
                     vector_weight=vector_weight,
@@ -2034,8 +2141,20 @@ class RAGService:
                 keyword_weight=keyword_weight,
             )
 
-            # Enhance with knowledge graph if enabled
-            if self._enable_knowledge_graph:
+            # PHASE 14: Conditionally enhance with knowledge graph based on query classification
+            # If classification suggests KG would help (entity queries, relationship queries)
+            # or if KG is always enabled, apply enhancement
+            should_use_kg = self._enable_knowledge_graph
+            if query_classification is not None:
+                # Use KG if classification indicates it would help OR if globally enabled
+                should_use_kg = should_use_kg or query_classification.use_kg_enhancement
+                if query_classification.use_kg_enhancement:
+                    logger.debug(
+                        "Query classification recommends KG enhancement",
+                        intent=query_classification.intent.value,
+                    )
+
+            if should_use_kg:
                 langchain_results = await self._enhance_with_knowledge_graph(
                     query=query,
                     existing_results=langchain_results,
@@ -2046,11 +2165,132 @@ class RAGService:
                     is_superadmin=is_superadmin,
                 )
 
+            # PHASE 14: Apply MMR for diversity if query classification recommends it
+            # MMR helps with comparison queries, summary queries where diverse sources are valuable
+            if (
+                query_classification is not None
+                and query_classification.use_mmr
+                and len(langchain_results) > top_k
+            ):
+                diversity_weight = query_classification.diversity_weight
+                langchain_results = self._apply_mmr_to_results(
+                    results=langchain_results,
+                    query_embedding=query_embedding,
+                    top_k=top_k,
+                    lambda_param=1.0 - diversity_weight,  # Convert diversity to lambda (1=pure relevance)
+                )
+                logger.info(
+                    "Applied MMR for result diversity",
+                    diversity_weight=diversity_weight,
+                    original_count=len(langchain_results),
+                    final_count=min(top_k, len(langchain_results)),
+                )
+
             return langchain_results
 
         except Exception as e:
             logger.error("Custom vectorstore retrieval failed", error=str(e), exc_info=True)
             return []
+
+    def _apply_mmr_to_results(
+        self,
+        results: List[Tuple[Document, float]],
+        query_embedding: List[float],
+        top_k: int,
+        lambda_param: float = 0.7,
+    ) -> List[Tuple[Document, float]]:
+        """
+        Apply Maximal Marginal Relevance (MMR) to diversify search results.
+
+        MMR balances relevance to the query with diversity among selected results.
+        Formula: MMR = λ * Relevance(doc, query) - (1-λ) * max(Similarity(doc, selected_docs))
+
+        This is useful for:
+        - Comparison queries: Need diverse sources to compare
+        - Summary queries: Need broad coverage across documents
+        - List queries: Need comprehensive enumeration from different sources
+
+        Args:
+            results: List of (Document, score) tuples
+            query_embedding: Query embedding vector for relevance calculation
+            top_k: Number of results to return
+            lambda_param: Balance parameter (0=max diversity, 1=max relevance)
+
+        Returns:
+            Diversified list of (Document, score) tuples
+        """
+        if not results or len(results) <= top_k:
+            return results
+
+        def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+            """Calculate cosine similarity between two vectors."""
+            if not vec1 or not vec2 or len(vec1) != len(vec2):
+                return 0.0
+            dot_product = sum(a * b for a, b in zip(vec1, vec2))
+            norm1 = sum(a * a for a in vec1) ** 0.5
+            norm2 = sum(b * b for b in vec2) ** 0.5
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            return dot_product / (norm1 * norm2)
+
+        # Try to get embeddings from document metadata
+        doc_embeddings = []
+        for doc, score in results:
+            emb = doc.metadata.get("embedding")
+            doc_embeddings.append(emb)
+
+        # If no embeddings available, fall back to simple truncation
+        if all(e is None for e in doc_embeddings):
+            logger.debug("No embeddings in results for MMR, using original order")
+            return results[:top_k]
+
+        # Calculate relevance scores (similarity to query)
+        relevance_scores = []
+        for i, (doc, score) in enumerate(results):
+            if doc_embeddings[i] is not None:
+                rel = cosine_similarity(query_embedding, doc_embeddings[i])
+            else:
+                # Use the original score as fallback
+                rel = score
+            relevance_scores.append(rel)
+
+        # MMR selection
+        selected_indices = []
+        remaining_indices = list(range(len(results)))
+
+        while len(selected_indices) < top_k and remaining_indices:
+            best_idx = None
+            best_mmr = float("-inf")
+
+            for idx in remaining_indices:
+                # Relevance term
+                relevance = relevance_scores[idx]
+
+                # Diversity term: max similarity to already selected docs
+                if selected_indices and doc_embeddings[idx] is not None:
+                    max_sim = 0.0
+                    for sel_idx in selected_indices:
+                        if doc_embeddings[sel_idx] is not None:
+                            sim = cosine_similarity(doc_embeddings[idx], doc_embeddings[sel_idx])
+                            max_sim = max(max_sim, sim)
+                else:
+                    max_sim = 0.0
+
+                # MMR score
+                mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
+
+                if mmr_score > best_mmr:
+                    best_mmr = mmr_score
+                    best_idx = idx
+
+            if best_idx is not None:
+                selected_indices.append(best_idx)
+                remaining_indices.remove(best_idx)
+            else:
+                break
+
+        # Return selected results in MMR order
+        return [results[i] for i in selected_indices]
 
     async def _retrieve_with_langchain_store(
         self,
