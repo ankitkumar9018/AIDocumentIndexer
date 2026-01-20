@@ -116,12 +116,30 @@ from backend.services.rag_module.prompts import (
     is_tiny_model as _is_tiny_model,
     is_llama_model as _is_llama_model,
     is_llama_small as _is_llama_small,
+    is_llama_weak as _is_llama_weak,
     get_recommended_temperature as _get_recommended_temperature,
+    # Phase 15: Model-specific optimizations and sampling config
+    get_sampling_config as _get_sampling_config,
+    get_adaptive_sampling_config as _get_adaptive_sampling_config,
+    optimize_chunk_count_for_model as _optimize_chunk_count_for_model,
+    is_qwen_model as _is_qwen_model,
+    is_phi_model as _is_phi_model,
+    is_gemma_model as _is_gemma_model,
+    is_deepseek_model as _is_deepseek_model,
     SMALL_MODEL_SYSTEM_PROMPT,
     TINY_MODEL_SYSTEM_PROMPT,
     TINY_MODEL_TEMPLATE,
     LLAMA_SMALL_SYSTEM_PROMPT,
     LLAMA_SMALL_TEMPLATE,
+    LLAMA_WEAK_SYSTEM_PROMPT,
+    QWEN_SMALL_SYSTEM_PROMPT,
+    QWEN_SMALL_TEMPLATE,
+    PHI_SMALL_SYSTEM_PROMPT,
+    PHI_SMALL_TEMPLATE,
+    GEMMA_SMALL_SYSTEM_PROMPT,
+    GEMMA_SMALL_TEMPLATE,
+    DEEPSEEK_SMALL_SYSTEM_PROMPT,
+    DEEPSEEK_SMALL_TEMPLATE,
 )
 
 logger = structlog.get_logger(__name__)
@@ -812,6 +830,23 @@ class RAGService:
             user_id=user_id,
         )
 
+        # PHASE 15: Dynamic chunk capping based on model capabilities
+        # Research shows tiny models struggle with long context even if they support it
+        # Cap chunks to prevent context overload while maintaining scalability
+        if top_k is not None:
+            original_top_k = top_k
+            top_k = _optimize_chunk_count_for_model(
+                intent_top_k=top_k,
+                model_name=llm_config.model if llm_config else None,
+            )
+            if top_k != original_top_k:
+                logger.info(
+                    "Dynamic chunk capping applied for model capability",
+                    original_top_k=original_top_k,
+                    optimized_top_k=top_k,
+                    model=llm_config.model if llm_config else None,
+                )
+
         # Get folder-scoped document IDs if folder_id is specified
         folder_document_ids = None
         if folder_id:
@@ -938,14 +973,48 @@ class RAGService:
         effective_language = "en" if auto_detect else language
         language_instruction = _get_language_instruction(effective_language, auto_detect=auto_detect)
 
-        # PHASE 14: Adaptive system prompt and template selection
+        # PHASE 14/15: Adaptive system prompt and template selection + sampling config
         # Select system prompt based on model size (tiny/small models need more explicit instructions)
         model_name = llm_config.model if llm_config else None
         system_prompt = _get_system_prompt_for_model(model_name)
         is_tiny = _is_tiny_model(model_name) if model_name else False
         is_llama = _is_llama_model(model_name) if model_name else False
         is_llama_sm = _is_llama_small(model_name) if model_name else False
-        recommended_temp = _get_recommended_temperature(model_name)
+
+        # Get research-backed sampling configuration (temperature, top_p, top_k, repeat_penalty)
+        # Intent-based scaling: factual queries get lower temp, exploratory slightly higher
+        # PHASE 15: Model-based + intent-based temperature optimization
+        # This provides optimal temperature by default, but user can override via session config
+        query_intent = query_classification.intent.value if query_classification else None
+        sampling_config = _get_adaptive_sampling_config(model_name, query_intent)
+        recommended_temp = sampling_config["temperature"]
+
+        # Check if user has manually overridden temperature via session config
+        has_manual_override = (
+            llm_config
+            and hasattr(llm_config, 'temperature')
+            and llm_config.temperature != 0.7  # 0.7 is default, anything else is manual
+        )
+
+        if has_manual_override:
+            # User has set manual temperature - respect their choice but log it
+            logger.info(
+                "Using manual temperature override (Phase 15 optimization available)",
+                manual_temp=llm_config.temperature,
+                optimized_temp=recommended_temp,
+                model=model_name,
+                intent=query_intent,
+            )
+            # Keep the manual override in sampling_config
+            sampling_config["temperature"] = llm_config.temperature
+        else:
+            # Use Phase 15 optimized temperature
+            logger.debug(
+                "Using Phase 15 optimized temperature",
+                optimized_temp=recommended_temp,
+                model=model_name,
+                intent=query_intent,
+            )
 
         # For tiny models (<3B), always use the structured template
         # This provides ultra-explicit format that reduces hallucination
@@ -1001,9 +1070,69 @@ class RAGService:
                 HumanMessage(content=prompt_template.format(context=context, question=question)),
             ]
 
-        # Generate response
-        response = await llm.ainvoke(messages)
-        raw_content = response.content if hasattr(response, 'content') else str(response)
+        # Generate response with research-backed sampling parameters
+        # Apply temperature, top_p, top_k, repeat_penalty based on model characteristics
+        # Research shows this dramatically reduces hallucinations in small models
+
+        # PHASE 15 OPTIONAL ENHANCEMENTS: Advanced optimizations
+        from backend.services.rag_module.advanced_optimizations import (
+            should_use_json_mode,
+            invoke_with_json_mode,
+            invoke_with_multi_sampling,
+            get_telemetry,
+        )
+        from backend.services.rag_module.prompts import is_tiny_model
+
+        # Determine which advanced optimizations to apply
+        use_json_mode = should_use_json_mode(model_name, question)
+        use_multi_sampling = is_tiny_model(model_name) and not use_json_mode  # Don't combine both
+
+        try:
+            # Try to apply sampling config if LLM supports it (most modern LLMs do)
+            invoke_kwargs = {
+                "temperature": sampling_config["temperature"],
+            }
+            if sampling_config.get("top_p") is not None:
+                invoke_kwargs["top_p"] = sampling_config["top_p"]
+            if sampling_config.get("top_k") is not None:
+                invoke_kwargs["top_k"] = sampling_config["top_k"]
+            if sampling_config.get("repeat_penalty") is not None and sampling_config["repeat_penalty"] != 1.0:
+                invoke_kwargs["repeat_penalty"] = sampling_config["repeat_penalty"]
+
+            # Apply advanced optimizations if appropriate
+            if use_json_mode:
+                # Qwen model with structured query - use JSON mode
+                logger.info(
+                    "Using JSON mode for structured output",
+                    model=model_name,
+                    query_preview=question[:50]
+                )
+                raw_content = await invoke_with_json_mode(
+                    llm, messages, model_name, **invoke_kwargs
+                )
+            elif use_multi_sampling:
+                # Tiny model - use multi-sampling for quality
+                logger.info(
+                    "Using multi-sampling for tiny model",
+                    model=model_name,
+                    num_samples=3
+                )
+                raw_content = await invoke_with_multi_sampling(
+                    llm, messages, model_name, num_samples=3, **invoke_kwargs
+                )
+            else:
+                # Standard invocation
+                response = await llm.ainvoke(messages, **invoke_kwargs)
+                raw_content = response.content if hasattr(response, 'content') else str(response)
+
+        except TypeError:
+            # Fallback if LLM doesn't support these parameters
+            logger.warning(
+                "LLM does not support sampling parameters, using defaults",
+                model=model_name,
+            )
+            response = await llm.ainvoke(messages)
+            raw_content = response.content if hasattr(response, 'content') else str(response)
 
         # Parse suggested questions from the response
         content, suggested_questions = _parse_suggested_questions(raw_content)
@@ -1198,6 +1327,17 @@ class RAGService:
             except Exception as e:
                 logger.warning("Self-RAG verification failed", error=str(e))
 
+        # PHASE 15 OPTIONAL ENHANCEMENTS: Record telemetry
+        telemetry = get_telemetry()
+        telemetry.record_query(
+            model_name=model_name,
+            query=question,
+            response=content,
+            has_phase15=True,  # Phase 15 optimizations are always applied in this codebase
+            used_json_mode=use_json_mode,
+            used_multi_sampling=use_multi_sampling,
+        )
+
         return RAGResponse(
             content=content,
             sources=sources if self.config.include_sources else [],
@@ -1319,9 +1459,44 @@ class RAGService:
         auto_detect = (language == "auto")
         effective_language = "en" if auto_detect else language
         language_instruction = _get_language_instruction(effective_language, auto_detect=auto_detect)
-        system_prompt = RAG_SYSTEM_PROMPT
+
+        # PHASE 15: Apply model-specific prompts and sampling for streaming too
+        model_name = llm_config.model if llm_config else None
+        system_prompt = _get_system_prompt_for_model(model_name)
         if language_instruction:
-            system_prompt = f"{RAG_SYSTEM_PROMPT}\n{language_instruction}"
+            system_prompt = f"{system_prompt}\n{language_instruction}"
+
+        # Get research-backed sampling configuration (temperature, top_p, top_k, repeat_penalty)
+        # Note: streaming doesn't have query_classification, so intent will be None (uses base config)
+        # PHASE 15: Model-based temperature optimization for streaming
+        sampling_config = _get_adaptive_sampling_config(model_name, query_intent=None)
+
+        # Check if user has manually overridden temperature via session config
+        has_manual_override = (
+            llm_config
+            and hasattr(llm_config, 'temperature')
+            and llm_config.temperature != 0.7  # 0.7 is default
+        )
+
+        if has_manual_override:
+            # User has set manual temperature - respect their choice
+            logger.info(
+                "Streaming: Using manual temperature override",
+                manual_temp=llm_config.temperature,
+                optimized_temp=sampling_config["temperature"],
+                model=model_name,
+            )
+            sampling_config["temperature"] = llm_config.temperature
+        else:
+            # Use Phase 15 optimized temperature
+            logger.debug(
+                "Streaming: Using Phase 15 optimized temperature",
+                optimized_temp=sampling_config["temperature"],
+                model=model_name,
+            )
+
+        # Select template based on model
+        prompt_template = _get_template_for_model(model_name)
 
         if session_id:
             memory = self._get_memory(session_id)
@@ -1335,13 +1510,34 @@ class RAGService:
         else:
             messages = [
                 SystemMessage(content=system_prompt),
-                HumanMessage(content=RAG_PROMPT_TEMPLATE.format(context=context, question=question)),
+                HumanMessage(content=prompt_template.format(context=context, question=question)),
             ]
 
-        # Stream response - use StringIO for efficient string accumulation (O(n) vs O(n²))
+        # Stream response with sampling configuration - use StringIO for efficient string accumulation (O(n) vs O(n²))
         response_buffer = io.StringIO()
         try:
-            async for chunk in llm.astream(messages):
+            # Apply sampling config if supported
+            stream_kwargs = {
+                "temperature": sampling_config["temperature"],
+            }
+            if sampling_config.get("top_p") is not None:
+                stream_kwargs["top_p"] = sampling_config["top_p"]
+            if sampling_config.get("top_k") is not None:
+                stream_kwargs["top_k"] = sampling_config["top_k"]
+            if sampling_config.get("repeat_penalty") is not None and sampling_config["repeat_penalty"] != 1.0:
+                stream_kwargs["repeat_penalty"] = sampling_config["repeat_penalty"]
+
+            try:
+                stream = llm.astream(messages, **stream_kwargs)
+            except TypeError:
+                # Fallback if LLM doesn't support these parameters
+                logger.warning(
+                    "LLM does not support sampling parameters in streaming, using defaults",
+                    model=model_name,
+                )
+                stream = llm.astream(messages)
+
+            async for chunk in stream:
                 content = chunk.content if hasattr(chunk, 'content') else str(chunk)
                 if content:
                     response_buffer.write(content)
@@ -2155,6 +2351,14 @@ class RAGService:
                     )
 
             if should_use_kg:
+                # PHASE 15: First, rerank existing results based on entity overlap
+                langchain_results = await self._rerank_with_graph_augmentation(
+                    query=query,
+                    results=langchain_results,
+                    organization_id=organization_id,
+                )
+
+                # Then, add additional KG-enhanced chunks
                 langchain_results = await self._enhance_with_knowledge_graph(
                     query=query,
                     existing_results=langchain_results,
@@ -2387,6 +2591,153 @@ class RAGService:
         ]
 
         return [(doc, 0.85 - i * 0.05) for i, doc in enumerate(mock_docs[:top_k])]
+
+    async def _rerank_with_graph_augmentation(
+        self,
+        query: str,
+        results: List[Tuple[Document, float]],
+        organization_id: Optional[str] = None,
+    ) -> List[Tuple[Document, float]]:
+        """
+        Rerank chunks by boosting those with high entity overlap with query.
+
+        Scoring formula:
+        - Base score: vector similarity (unchanged)
+        - Entity overlap: +0.2 per matching entity
+        - Relationship bonus: +0.3 if entities are connected in graph
+
+        This improves relevance scoring for entity-centric queries by:
+        1. Extracting entities from the query
+        2. Finding entities mentioned in each chunk
+        3. Computing entity overlap and relationship scores
+        4. Boosting chunk scores accordingly
+
+        Args:
+            query: Search query
+            results: List of (document, score) tuples from vector search
+            organization_id: Optional organization ID for multi-tenant isolation
+
+        Returns:
+            Reranked list of (document, augmented_score) tuples
+        """
+        if not results:
+            return results
+
+        try:
+            # Import lazily to avoid circular import
+            from backend.services.knowledge_graph import (
+                get_knowledge_graph_service,
+                EntityType,
+            )
+
+            async with async_session_context() as db:
+                kg_service = await get_knowledge_graph_service(db)
+
+                # Extract entities from query
+                query_entities = await kg_service.find_entities_by_query(
+                    query=query,
+                    entity_types=None,
+                    limit=20,  # Get top entities from query
+                    query_language=None,
+                    organization_id=organization_id,
+                )
+                query_entity_ids = {e.id for e in query_entities}
+
+                if not query_entity_ids:
+                    # No entities in query, return original results
+                    return results
+
+                # Process each chunk and compute augmented scores
+                augmented_results = []
+                for doc, base_score in results:
+                    # Get chunk ID from metadata
+                    chunk_id_str = doc.metadata.get("chunk_id")
+                    if not chunk_id_str:
+                        # No chunk ID, keep original score
+                        augmented_results.append((doc, base_score))
+                        continue
+
+                    try:
+                        chunk_id = uuid.UUID(chunk_id_str)
+
+                        # Find entities mentioned in this chunk
+                        chunk_entities_result = await db.execute(
+                            select(Entity)
+                            .join(EntityMention, EntityMention.entity_id == Entity.id)
+                            .where(EntityMention.chunk_id == chunk_id)
+                        )
+                        chunk_entities = list(chunk_entities_result.scalars().all())
+                        chunk_entity_ids = {e.id for e in chunk_entities}
+
+                        # Compute entity overlap
+                        overlap_count = len(query_entity_ids & chunk_entity_ids)
+                        overlap_score = overlap_count * 0.2
+
+                        # Compute relationship bonus (check if entities are connected)
+                        relationship_bonus = 0.0
+                        if overlap_count > 0:
+                            # Check for relationships between query entities and chunk entities
+                            for query_entity_id in query_entity_ids:
+                                for chunk_entity_id in chunk_entity_ids:
+                                    if query_entity_id != chunk_entity_id:
+                                        # Check if these entities have a relationship
+                                        relation_result = await db.execute(
+                                            select(EntityRelation).where(
+                                                or_(
+                                                    and_(
+                                                        EntityRelation.source_entity_id == query_entity_id,
+                                                        EntityRelation.target_entity_id == chunk_entity_id,
+                                                    ),
+                                                    and_(
+                                                        EntityRelation.source_entity_id == chunk_entity_id,
+                                                        EntityRelation.target_entity_id == query_entity_id,
+                                                    ),
+                                                )
+                                            ).limit(1)
+                                        )
+                                        if relation_result.scalar_one_or_none():
+                                            relationship_bonus = 0.3
+                                            break  # Only count once per chunk
+                                    if relationship_bonus > 0:
+                                        break
+
+                        # Boost chunk score
+                        augmented_score = base_score + overlap_score + relationship_bonus
+
+                        # Update metadata to track augmentation
+                        doc.metadata["graph_augmented"] = True
+                        doc.metadata["entity_overlap_count"] = overlap_count
+                        doc.metadata["has_relationship_bonus"] = relationship_bonus > 0
+
+                        augmented_results.append((doc, augmented_score))
+
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to augment chunk with graph data",
+                            chunk_id=chunk_id_str,
+                            error=str(e)
+                        )
+                        # Keep original score if augmentation fails
+                        augmented_results.append((doc, base_score))
+
+                # Re-sort by augmented score (descending)
+                augmented_results.sort(key=lambda x: x[1], reverse=True)
+
+                logger.debug(
+                    "Graph-augmented reranking complete",
+                    query_entities=len(query_entity_ids),
+                    chunks_processed=len(results),
+                    chunks_boosted=sum(1 for doc, _ in augmented_results if doc.metadata.get("graph_augmented")),
+                )
+
+                return augmented_results
+
+        except Exception as e:
+            logger.warning(
+                "Graph-augmented reranking failed, returning original results",
+                error=str(e),
+            )
+            return results
 
     async def _enhance_with_knowledge_graph(
         self,

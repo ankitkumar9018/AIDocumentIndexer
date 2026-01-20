@@ -2101,23 +2101,39 @@ class NodeExecutor:
     async def _run_inline_llm(self, agent_input: Dict, config: Dict, context: "ExecutionContext") -> Dict:
         """Run an inline LLM call without a predefined agent."""
         try:
-            from backend.services.llm import LLMService
-            llm = LLMService()
+            from backend.services.llm import EnhancedLLMFactory
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from backend.services.rag_module.prompts import enhance_agent_system_prompt
 
             prompt = agent_input.get("prompt", "")
             model = config.get("model", "gpt-4")
             temperature = config.get("temperature", 0.7)
+            max_tokens = config.get("max_tokens", 2000)
 
-            response = await llm.generate(
-                prompt=prompt,
-                model=model,
+            # Get LLM using EnhancedLLMFactory
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="workflow",
+                user_id=None,
+                track_usage=True,
+            )
+
+            # PHASE 15: Apply model-specific enhancements for small models
+            # Enhance the prompt with model-specific base instructions
+            enhanced_prompt = enhance_agent_system_prompt(prompt, model)
+
+            # Build messages
+            messages = [HumanMessage(content=enhanced_prompt)]
+
+            # Invoke LLM with configured parameters
+            response = await llm.ainvoke(
+                messages,
                 temperature=temperature,
-                max_tokens=config.get("max_tokens", 2000),
+                max_tokens=max_tokens,
             )
 
             return {
                 "status": "success",
-                "response": response.get("content", response),
+                "response": response.content if hasattr(response, 'content') else str(response),
                 "model": model,
             }
         except Exception as e:
@@ -2147,23 +2163,37 @@ class NodeExecutor:
     async def _run_chat_agent(self, agent_def, agent_input: Dict, context: "ExecutionContext") -> Dict:
         """Run a chat-based agent."""
         try:
-            from backend.services.llm import LLMService
-            llm = LLMService()
+            from backend.services.llm import EnhancedLLMFactory
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from backend.services.rag_module.prompts import enhance_agent_system_prompt
 
             system_prompt = agent_def.system_prompt or "You are a helpful assistant."
             user_prompt = agent_input.get("prompt", "")
+            model = agent_def.model or "gpt-4"
 
-            response = await llm.chat(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                model=agent_def.model or "gpt-4",
+            # Get LLM using EnhancedLLMFactory
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="workflow",
+                user_id=None,
+                track_usage=True,
             )
+
+            # PHASE 15: Apply model-specific enhancements for small models
+            # Enhance the system prompt with model-specific base instructions
+            enhanced_system_prompt = enhance_agent_system_prompt(system_prompt, model)
+
+            # Build messages
+            messages = [
+                SystemMessage(content=enhanced_system_prompt),
+                HumanMessage(content=user_prompt),
+            ]
+
+            # Invoke LLM
+            response = await llm.ainvoke(messages)
 
             return {
                 "status": "success",
-                "response": response.get("content", response),
+                "response": response.content if hasattr(response, 'content') else str(response),
                 "agent_type": "chat",
             }
         except Exception as e:
@@ -2181,18 +2211,33 @@ class NodeExecutor:
     async def _run_general_agent(self, agent_def, agent_input: Dict, context: "ExecutionContext") -> Dict:
         """Run a general-purpose agent."""
         try:
-            from backend.services.llm import LLMService
-            llm = LLMService()
+            from backend.services.llm import EnhancedLLMFactory
+            from langchain_core.messages import HumanMessage
+            from backend.services.rag_module.prompts import enhance_agent_system_prompt
 
             prompt = agent_input.get("prompt", "")
-            response = await llm.generate(
-                prompt=prompt,
-                model=agent_def.model or "gpt-4",
+            model = agent_def.model or "gpt-4"
+
+            # Get LLM using EnhancedLLMFactory
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="workflow",
+                user_id=None,
+                track_usage=True,
             )
+
+            # PHASE 15: Apply model-specific enhancements for small models
+            # Enhance the prompt with model-specific base instructions
+            enhanced_prompt = enhance_agent_system_prompt(prompt, model)
+
+            # Build messages
+            messages = [HumanMessage(content=enhanced_prompt)]
+
+            # Invoke LLM
+            response = await llm.ainvoke(messages)
 
             return {
                 "status": "success",
-                "response": response.get("content", response),
+                "response": response.content if hasattr(response, 'content') else str(response),
                 "agent_type": "general",
             }
         except Exception as e:

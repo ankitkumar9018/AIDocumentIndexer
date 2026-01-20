@@ -131,7 +131,33 @@ class ContentGenerator:
 
         try:
             llm = await self._get_llm()
-            response = await llm.ainvoke(prompt)
+
+            # PHASE 15: Apply model-specific enhancements for small models
+            # Extract model name and enhance prompt if using small model
+            model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None)
+            enhanced_prompt = prompt
+            if model_name:
+                from backend.services.rag_module.prompts import enhance_agent_system_prompt
+                # If prompt is a string, enhance it directly
+                if isinstance(prompt, str):
+                    enhanced_prompt = enhance_agent_system_prompt(prompt, model_name)
+                # If prompt is a list of messages, enhance the SystemMessage
+                elif isinstance(prompt, list):
+                    from langchain_core.messages import SystemMessage
+                    enhanced_prompt = []
+                    for msg in prompt:
+                        if isinstance(msg, SystemMessage):
+                            enhanced_content = enhance_agent_system_prompt(msg.content, model_name)
+                            enhanced_prompt.append(SystemMessage(content=enhanced_content))
+                        else:
+                            enhanced_prompt.append(msg)
+
+            # Phase 15 LLM Optimization - apply temperature override if specified
+            invoke_kwargs = {}
+            if "temperature_override" in job.metadata:
+                invoke_kwargs["temperature"] = job.metadata["temperature_override"]
+
+            response = await llm.ainvoke(enhanced_prompt, **invoke_kwargs)
             content = response.content
 
             # Filter out LLM conversational artifacts (meta-text)

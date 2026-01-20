@@ -80,7 +80,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { cn } from "@/lib/utils";
+import { cn, calculateOptimizedTemperature } from "@/lib/utils";
 import {
   useAgentStatus,
   useOptimizationJobs,
@@ -148,6 +148,8 @@ export default function AgentsAdminPage() {
   const [configMaxTokens, setConfigMaxTokens] = useState(2048);
   const [configProviderId, setConfigProviderId] = useState<string>("");
   const [configModel, setConfigModel] = useState<string>("");
+  const [configOptimizedTemperature, setConfigOptimizedTemperature] = useState<number | null>(null);
+  const [configIsManualTemperature, setConfigIsManualTemperature] = useState(false);
 
   // Create Agent dialog state
   const [showCreateDialog, setShowCreateDialog] = useState(false);
@@ -164,6 +166,8 @@ export default function AgentsAdminPage() {
   const [editAgentDescription, setEditAgentDescription] = useState("");
   const [editAgentTemperature, setEditAgentTemperature] = useState(0.7);
   const [editAgentMaxTokens, setEditAgentMaxTokens] = useState(2048);
+  const [editOptimizedTemperature, setEditOptimizedTemperature] = useState<number | null>(null);
+  const [editIsManualTemperature, setEditIsManualTemperature] = useState(false);
 
   // Delete Agent dialog state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -226,6 +230,32 @@ export default function AgentsAdminPage() {
   const updateSettingsMutation = useUpdateAgentSettings();
   const testExternalMutation = useTestExternalAgent();
 
+  // Auto-adjust temperature when model changes in configure dialog
+  useEffect(() => {
+    if (!showConfigureDialog || !configModel) return;
+
+    const optimized = calculateOptimizedTemperature(configModel);
+    setConfigOptimizedTemperature(optimized);
+
+    // If current temperature matches optimized (or is very close), auto-adjust
+    if (!configIsManualTemperature) {
+      setConfigTemperature(optimized);
+    }
+  }, [configModel, showConfigureDialog]);
+
+  // Auto-adjust temperature when model changes in edit dialog
+  useEffect(() => {
+    if (!showEditDialog || !editingAgent) return;
+
+    const optimized = calculateOptimizedTemperature(editingAgent.default_model || null);
+    setEditOptimizedTemperature(optimized);
+
+    // Check if current is manual override
+    if (Math.abs(editAgentTemperature - optimized) < 0.01) {
+      setEditIsManualTemperature(false);
+    }
+  }, [editingAgent?.default_model, showEditDialog]);
+
   const agents = statusData?.agents || [];
   const jobs = jobsData?.jobs || [];
   const trajectories = trajectoriesData?.trajectories || [];
@@ -287,10 +317,20 @@ export default function AgentsAdminPage() {
   // Configure dialog handlers
   const handleOpenConfigure = (agent: AgentDefinition) => {
     setConfiguringAgent(agent);
-    setConfigTemperature(agent.default_temperature ?? 0.7);
+    const agentModel = agent.default_model ?? "";
+    const agentTemp = agent.default_temperature ?? 0.7;
+
+    // Calculate optimized temperature for the agent's model
+    const optimized = calculateOptimizedTemperature(agentModel || null);
+    setConfigOptimizedTemperature(optimized);
+
+    // Check if current temperature is manual override
+    setConfigIsManualTemperature(Math.abs(agentTemp - optimized) > 0.01);
+
+    setConfigTemperature(agentTemp);
     setConfigMaxTokens(agent.max_tokens ?? 2048);
     setConfigProviderId(agent.default_provider_id ?? "");
-    setConfigModel(agent.default_model ?? "");
+    setConfigModel(agentModel);
     setShowConfigureDialog(true);
   };
 
@@ -356,7 +396,18 @@ export default function AgentsAdminPage() {
     setEditingAgent(agent);
     setEditAgentName(agent.name);
     setEditAgentDescription(agent.description || "");
-    setEditAgentTemperature(agent.default_temperature ?? 0.7);
+
+    const agentTemp = agent.default_temperature ?? 0.7;
+    const agentModel = agent.default_model || null;
+
+    // Calculate optimized temperature for the agent's model
+    const optimized = calculateOptimizedTemperature(agentModel);
+    setEditOptimizedTemperature(optimized);
+
+    // Check if current temperature is manual override
+    setEditIsManualTemperature(Math.abs(agentTemp - optimized) > 0.01);
+
+    setEditAgentTemperature(agentTemp);
     setEditAgentMaxTokens(agent.max_tokens ?? 2048);
     setShowEditDialog(true);
   };
@@ -1193,17 +1244,59 @@ export default function AgentsAdminPage() {
                 </div>
                 <Slider
                   value={[configTemperature]}
-                  onValueChange={([value]) => setConfigTemperature(value)}
+                  onValueChange={([value]) => {
+                    setConfigTemperature(value);
+                    // Mark as manual if different from optimized
+                    if (configOptimizedTemperature !== null) {
+                      setConfigIsManualTemperature(Math.abs(value - configOptimizedTemperature) > 0.01);
+                    }
+                  }}
                   min={0}
-                  max={2}
+                  max={1}
                   step={0.05}
                   className="w-full"
                 />
                 <div className="flex justify-between text-xs text-muted-foreground">
                   <span>Precise (0)</span>
                   <span>Balanced (0.7)</span>
-                  <span>Creative (2)</span>
+                  <span>Creative (1)</span>
                 </div>
+                {configOptimizedTemperature !== null && (
+                  <div className="pt-2 border-t space-y-2">
+                    <div className="flex justify-between text-xs items-center">
+                      <span className="text-muted-foreground">Optimized for model:</span>
+                      <span className="font-medium text-blue-600 dark:text-blue-400">
+                        {configOptimizedTemperature.toFixed(2)}
+                      </span>
+                    </div>
+                    {!configIsManualTemperature ? (
+                      <div className="text-xs text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/30 p-2 rounded">
+                        <p className="font-medium">✨ Smart Temperature Active</p>
+                        <p className="text-muted-foreground">Using AI-optimized temperature. Adjust slider to override.</p>
+                      </div>
+                    ) : (
+                      <div className="text-xs space-y-2">
+                        <div className="text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 p-2 rounded">
+                          <p className="font-medium">Manual Override Active</p>
+                          <p className="text-muted-foreground">
+                            Using {configTemperature.toFixed(2)} instead of optimized {configOptimizedTemperature.toFixed(2)}
+                          </p>
+                        </div>
+                        <Button
+                          onClick={() => {
+                            setConfigTemperature(configOptimizedTemperature);
+                            setConfigIsManualTemperature(false);
+                          }}
+                          variant="outline"
+                          size="sm"
+                          className="w-full"
+                        >
+                          Reset to Optimized ({configOptimizedTemperature.toFixed(2)})
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Max Tokens */}
@@ -1359,11 +1452,53 @@ export default function AgentsAdminPage() {
                 </div>
                 <Slider
                   value={[editAgentTemperature]}
-                  onValueChange={([value]) => setEditAgentTemperature(value)}
+                  onValueChange={([value]) => {
+                    setEditAgentTemperature(value);
+                    // Mark as manual if different from optimized
+                    if (editOptimizedTemperature !== null) {
+                      setEditIsManualTemperature(Math.abs(value - editOptimizedTemperature) > 0.01);
+                    }
+                  }}
                   min={0}
-                  max={2}
+                  max={1}
                   step={0.05}
                 />
+                {editOptimizedTemperature !== null && (
+                  <div className="pt-2 border-t space-y-2">
+                    <div className="flex justify-between text-xs items-center">
+                      <span className="text-muted-foreground">Optimized for model:</span>
+                      <span className="font-medium text-blue-600 dark:text-blue-400">
+                        {editOptimizedTemperature.toFixed(2)}
+                      </span>
+                    </div>
+                    {!editIsManualTemperature ? (
+                      <div className="text-xs text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/30 p-2 rounded">
+                        <p className="font-medium">✨ Smart Temperature Active</p>
+                        <p className="text-muted-foreground">Using AI-optimized temperature. Adjust slider to override.</p>
+                      </div>
+                    ) : (
+                      <div className="text-xs space-y-2">
+                        <div className="text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 p-2 rounded">
+                          <p className="font-medium">Manual Override Active</p>
+                          <p className="text-muted-foreground">
+                            Using {editAgentTemperature.toFixed(2)} instead of optimized {editOptimizedTemperature.toFixed(2)}
+                          </p>
+                        </div>
+                        <Button
+                          onClick={() => {
+                            setEditAgentTemperature(editOptimizedTemperature);
+                            setEditIsManualTemperature(false);
+                          }}
+                          variant="outline"
+                          size="sm"
+                          className="w-full"
+                        >
+                          Reset to Optimized ({editOptimizedTemperature.toFixed(2)})
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="editAgentMaxTokens">Max Tokens</Label>

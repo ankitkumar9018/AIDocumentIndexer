@@ -249,6 +249,7 @@ class DocumentGenerationService:
         include_subfolders: bool = True,
         metadata: Optional[Dict[str, Any]] = None,
         include_images: Optional[bool] = None,
+        temperature_override: Optional[float] = None,
     ) -> GenerationJob:
         """Create a new document generation job."""
         await self.reload_settings()
@@ -276,6 +277,10 @@ class DocumentGenerationService:
         job.metadata["image_backend"] = self.config.image_backend
         job.metadata["default_tone"] = self.config.default_tone
         job.metadata["default_style"] = self.config.default_style
+
+        # Phase 15 LLM Optimization - store temperature override
+        if temperature_override is not None:
+            job.metadata["temperature_override"] = temperature_override
 
         try:
             from backend.services.llm import LLMConfigManager

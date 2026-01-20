@@ -188,6 +188,13 @@ class CreateJobRequest(BaseModel):
         default=None,
         description="Vision model for slide review. 'auto' uses the system default."
     )
+    # Phase 15 LLM Optimization - Advanced per-document overrides
+    temperature_override: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Override content generation temperature for this document (0.0-1.0). None = use system default/optimized temperature."
+    )
 
     @property
     def effective_collection_filter(self) -> Optional[str]:
@@ -558,6 +565,7 @@ async def create_generation_job(
         include_subfolders=request.include_subfolders,
         metadata=metadata,
         include_images=request.include_images,  # Pass through to override admin setting
+        temperature_override=request.temperature_override,  # Phase 15 LLM optimization
     )
 
     return job_to_response(job)

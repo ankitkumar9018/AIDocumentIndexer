@@ -222,6 +222,13 @@ class GeneralChatService:
         language_instruction = _get_language_instruction(effective_language, auto_detect=auto_detect)
         prompt = f"{base_prompt}\n{language_instruction}" if language_instruction else base_prompt
 
+        # PHASE 15: Apply model-specific enhancements for small models
+        # This wraps the system prompt with foundational behavioral hints
+        model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None)
+        if model_name:
+            from backend.services.rag_module.prompts import enhance_agent_system_prompt
+            prompt = enhance_agent_system_prompt(prompt, model_name)
+
         # Build messages
         if session_id:
             # Use conversational prompt with history

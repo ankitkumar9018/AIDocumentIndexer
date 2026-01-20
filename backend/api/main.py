@@ -313,6 +313,8 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.downloads import router as downloads_router
     from backend.api.routes.content_review import router as content_review_router
     from backend.api.routes.document_templates import router as document_templates_router
+    from backend.api.routes.telemetry import router as telemetry_router
+    from backend.api.routes.embeddings import router as embeddings_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
@@ -334,6 +336,8 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(downloads_router, prefix="/api/v1", tags=["Downloads"])
     app.include_router(content_review_router, prefix="/api/v1/content-review", tags=["Content Review"])
     app.include_router(document_templates_router, prefix="/api/v1", tags=["Document Templates"])
+    app.include_router(telemetry_router, prefix="/api/v1/telemetry", tags=["Phase 15 Telemetry"])
+    app.include_router(embeddings_router, prefix="/api/v1", tags=["Embeddings"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

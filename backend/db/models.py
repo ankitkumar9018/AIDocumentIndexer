@@ -46,6 +46,102 @@ DATABASE_TYPE = os.getenv("DATABASE_TYPE", "postgresql")
 IS_SQLITE = DATABASE_TYPE == "sqlite" or "sqlite" in os.getenv("DATABASE_URL", "")
 
 
+# Determine embedding dimension based on provider
+def get_embedding_dimension() -> int:
+    """
+    Get embedding dimension based on configured provider and model.
+
+    Supports explicit dimension override via EMBEDDING_DIMENSION env var.
+
+    Provider-specific dimensions:
+    - OpenAI text-embedding-3-small: 1536 (default) or 512-1536 (flexible)
+    - OpenAI text-embedding-3-large: 3072 (default) or 256-3072 (flexible)
+    - OpenAI text-embedding-ada-002: 1536 (fixed)
+    - Ollama nomic-embed-text: 768
+    - Ollama mxbai-embed-large: 1024
+    - HuggingFace all-MiniLM-L6-v2: 384
+    - HuggingFace all-mpnet-base-v2: 768
+    - Cohere embed-english-v3.0: 1024
+    - Voyage voyage-2: 1024
+    - Mistral mistral-embed: 1024
+
+    Returns:
+        Embedding dimension (default: 768 for local models)
+
+    Example .env configurations:
+        # Explicit dimension override (any provider)
+        EMBEDDING_DIMENSION=512
+
+        # OpenAI with reduced dimension (saves storage/cost)
+        DEFAULT_LLM_PROVIDER=openai
+        DEFAULT_EMBEDDING_MODEL=text-embedding-3-small
+        EMBEDDING_DIMENSION=512
+
+        # Ollama with specific model
+        DEFAULT_LLM_PROVIDER=ollama
+        OLLAMA_EMBEDDING_MODEL=nomic-embed-text  # 768D
+
+        # HuggingFace with specific model
+        DEFAULT_LLM_PROVIDER=huggingface
+        DEFAULT_EMBEDDING_MODEL=all-MiniLM-L6-v2  # 384D
+    """
+    # Check for explicit dimension override first
+    explicit_dim = os.getenv("EMBEDDING_DIMENSION")
+    if explicit_dim:
+        try:
+            return int(explicit_dim)
+        except ValueError:
+            pass  # Fall through to provider detection
+
+    provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai").lower()
+
+    # Provider-specific defaults
+    if provider == "openai":
+        model = os.getenv("DEFAULT_EMBEDDING_MODEL", "text-embedding-3-small").lower()
+        if "text-embedding-3-large" in model:
+            return 3072  # Can be reduced to 256-3072
+        elif "text-embedding-3-small" in model:
+            return 1536  # Can be reduced to 512-1536
+        elif "ada-002" in model:
+            return 1536  # Fixed dimension
+        return 1536  # Safe default for OpenAI
+
+    elif provider == "ollama":
+        model = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text").lower()
+        if "nomic" in model:
+            return 768
+        elif "mxbai" in model:
+            return 1024
+        elif "snowflake" in model:
+            return 768
+        return 768  # Safe default for most Ollama models
+
+    elif provider == "huggingface":
+        model = os.getenv("DEFAULT_EMBEDDING_MODEL", "").lower()
+        if "minilm" in model or "l6" in model:
+            return 384
+        elif "mpnet" in model or "bge" in model:
+            return 768
+        return 768  # Safe default
+
+    elif provider == "cohere":
+        return 1024
+
+    elif provider == "voyage":
+        return 1024
+
+    elif provider == "mistral":
+        return 1024
+
+    else:
+        # Safe default for unknown providers (most local models use 768)
+        return 768
+
+
+# Cache the dimension to avoid repeated env lookups
+EMBEDDING_DIMENSION = get_embedding_dimension()
+
+
 # =============================================================================
 # Database-agnostic Type Decorators
 # =============================================================================
@@ -557,12 +653,31 @@ class Chunk(Base, UUIDMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 
-    # Embedding - using dynamic column type based on database
+    # Primary embedding - using dynamic column type based on database
     # For PostgreSQL with pgvector, this will be a Vector type
     # For other databases, we'll store as JSON or binary
+    # Dimension is auto-detected from DEFAULT_LLM_PROVIDER env var (768 for Ollama, 1536 for OpenAI)
+    # This is the "primary" embedding used for fast queries (no joins required)
     embedding: Mapped[Optional[List[float]]] = mapped_column(
-        Vector(1536) if HAS_PGVECTOR else Text,  # Fallback to Text for non-pgvector
+        Vector(EMBEDDING_DIMENSION) if HAS_PGVECTOR else Text,  # Fallback to Text for non-pgvector
         nullable=True,
+    )
+
+    # Metadata for primary embedding (which provider/model/dimension it uses)
+    embedding_provider: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="Provider for primary embedding: ollama, openai, etc."
+    )
+    embedding_model: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Model for primary embedding: nomic-embed-text, text-embedding-3-small, etc."
+    )
+    embedding_dimension: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Dimension of primary embedding: 384, 768, 1536, 3072, etc."
     )
 
     # Position info
@@ -612,6 +727,15 @@ class Chunk(Base, UUIDMixin):
         backref="child_chunks",
     )
 
+    # Multi-embedding support: store embeddings from multiple providers
+    # This enables instant provider switching without re-indexing
+    # Will be populated via migration from models_multi_embedding.py
+    # multi_embeddings: Mapped[List["ChunkEmbedding"]] = relationship(
+    #     "ChunkEmbedding",
+    #     back_populates="chunk",
+    #     cascade="all, delete-orphan",
+    # )
+
     def __repr__(self) -> str:
         return f"<Chunk(document_id='{self.document_id}', index={self.chunk_index}, level={self.chunk_level})>"
 
@@ -639,9 +763,9 @@ class ScrapedContent(Base, UUIDMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 
-    # Embedding
+    # Embedding (dimension auto-detected from provider: 768D for Ollama, 1536D for OpenAI)
     embedding: Mapped[Optional[List[float]]] = mapped_column(
-        Vector(1536) if HAS_PGVECTOR else Text,
+        Vector(EMBEDDING_DIMENSION) if HAS_PGVECTOR else Text,
         nullable=True,
     )
 
@@ -1429,8 +1553,9 @@ class ResponseCache(Base, UUIDMixin, TimestampMixin):
 
     # Semantic caching: store query embedding for similarity matching
     # Uses pgvector for efficient similarity search (fallback to Text for SQLite)
+    # Dimension auto-detected from provider (768D for Ollama, 1536D for OpenAI)
     query_embedding: Mapped[Optional[List[float]]] = mapped_column(
-        Vector(1536) if HAS_PGVECTOR else Text,
+        Vector(EMBEDDING_DIMENSION) if HAS_PGVECTOR else Text,
         nullable=True,
     )
     # Original query text (for debugging/display)
@@ -2068,9 +2193,9 @@ class Entity(Base, UUIDMixin):
     description: Mapped[Optional[str]] = mapped_column(Text)
     aliases: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
 
-    # Embedding for semantic search
+    # Embedding for semantic search (dimension auto-detected: 768D for Ollama, 1536D for OpenAI)
     embedding: Mapped[Optional[List[float]]] = mapped_column(
-        Vector(1536) if HAS_PGVECTOR else Text,
+        Vector(EMBEDDING_DIMENSION) if HAS_PGVECTOR else Text,
         nullable=True,
     )
 

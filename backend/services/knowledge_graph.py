@@ -24,7 +24,7 @@ from typing import List, Dict, Any, Optional, Tuple, Set
 from collections import defaultdict
 
 import structlog
-from sqlalchemy import select, func, and_, or_, case
+from sqlalchemy import select, func, and_, or_, case, String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from unidecode import unidecode  # Unicode to ASCII transliteration
@@ -174,6 +174,134 @@ Return JSON in this exact format:
 Only include entities and relations clearly supported by the text. Be precise and avoid speculation."""
 
 
+# Simplified prompt for small models (<3B parameters)
+ENTITY_EXTRACTION_PROMPT_SMALL = """Extract entities and relationships from this text. Output ONLY valid JSON.
+
+Text:
+{text}
+
+ENTITY TYPES (pick one for each entity):
+- PERSON: Names of people (e.g., "John Smith", "Dr. Jane Doe")
+- ORGANIZATION: Companies, institutions (e.g., "Microsoft", "Harvard University")
+- LOCATION: Places, cities, countries (e.g., "New York", "United States")
+- CONCEPT: Abstract ideas (e.g., "Democracy", "Machine Learning")
+- EVENT: Occurrences, meetings (e.g., "World War II", "Annual Meeting")
+- PRODUCT: Products, services (e.g., "iPhone", "Azure Cloud")
+- TECHNOLOGY: Technologies, tools (e.g., "Python", "Neural Networks")
+- DATE: Dates, time periods (e.g., "2024", "January 1st")
+- METRIC: Numbers, statistics (e.g., "50%", "$1.2M revenue")
+- OTHER: Other important entities
+
+RELATIONSHIP TYPES (if entities are related):
+- WORKS_FOR: Person works for organization
+- LOCATED_IN: Entity is located in a place
+- PART_OF: Entity is part of another entity
+- RELATED_TO: General relationship between entities
+- CREATED_BY: Entity was created by another
+- USES: Entity uses another entity
+
+OUTPUT FORMAT (must be valid JSON):
+{{
+  "entities": [
+    {{"name": "Microsoft", "type": "ORGANIZATION", "description": "Tech company", "aliases": ["MS"]}},
+    {{"name": "Seattle", "type": "LOCATION", "description": "City in Washington", "aliases": []}}
+  ],
+  "relations": [
+    {{"source": "Microsoft", "target": "Seattle", "type": "LOCATED_IN"}}
+  ]
+}}
+
+IMPORTANT:
+1. Output ONLY the JSON object, no other text
+2. Use exact entity names from the text
+3. Only include entities actually mentioned
+4. "name" and "type" are required, others optional
+
+JSON OUTPUT:"""
+
+
+def _get_extraction_prompt_for_model(
+    text: str,
+    document_language: str,
+    model_name: Optional[str] = None
+) -> str:
+    """
+    Get entity extraction prompt optimized for model size.
+
+    Small models (<3B) need simpler instructions with explicit JSON schema.
+    Large models can handle detailed, nuanced prompts.
+
+    Args:
+        text: Text to extract from
+        document_language: Human-readable language name
+        model_name: Optional model name for optimization
+
+    Returns:
+        Formatted extraction prompt
+    """
+    # Check if this is a small model
+    is_small = False
+    if model_name:
+        try:
+            from backend.services.rag_module.prompts import is_tiny_model
+            is_small = is_tiny_model(model_name)
+        except ImportError:
+            pass
+
+    if is_small:
+        # Use simplified prompt for small models
+        return ENTITY_EXTRACTION_PROMPT_SMALL.format(text=text[:4000])  # Shorter context for small models
+    else:
+        # Use full prompt for large models
+        return ENTITY_EXTRACTION_PROMPT.format(
+            text=text[:8000],
+            document_language=document_language,
+        )
+
+
+def _calculate_optimal_batch_size(model_name: Optional[str] = None) -> int:
+    """
+    Calculate optimal batch size for entity extraction based on model context window.
+
+    Rules (based on typical model context windows and performance):
+    - Tiny models (<3B): batch size 2 (smaller context ~8K tokens)
+    - Small models (7B-13B): batch size 3 (standard context ~8-16K tokens)
+    - Medium models (30B-70B): batch size 5 (larger context ~32K tokens)
+    - Large models (>70B, 128K+ context): batch size 8 (huge context)
+
+    Args:
+        model_name: Optional model name for detection
+
+    Returns:
+        Optimal batch size (2-8)
+    """
+    if not model_name:
+        return 3  # Safe default
+
+    model_lower = model_name.lower()
+
+    # Detect model size from name patterns
+    # Tiny models (<3B)
+    if any(size in model_lower for size in ["1b", "3b", "tiny", "mini"]):
+        return 2
+
+    # Small models (7B-13B)
+    elif any(size in model_lower for size in ["7b", "8b", "9b", "13b"]):
+        return 3
+
+    # Medium models (30B-70B)
+    elif any(size in model_lower for size in ["30b", "34b", "70b"]):
+        return 5
+
+    # Large models (identified by name, have huge context windows)
+    elif any(model in model_lower for model in ["gpt-4", "gpt4", "claude-3", "claude-opus", "claude-sonnet", "gemini-pro", "gemini-ultra"]):
+        return 8
+
+    # Default for unknown models
+    else:
+        return 3
+
+
 def _extract_json_from_response(response: str) -> Optional[dict]:
     """
     Extract JSON from LLM response with multiple fallback strategies.
@@ -317,7 +445,7 @@ class KnowledgeGraphService:
         document_language: str = "en",
     ) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
         """
-        Extract entities and relationships from text using LLM.
+        Extract entities and relationships from text using LLM with Phase 15 optimizations.
 
         Args:
             text: Text to extract from
@@ -338,18 +466,54 @@ class KnowledgeGraphService:
             )
             return [], []
 
+        # Get model name for optimization
+        model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None)
+
         # Get human-readable language name for the prompt
         language_name = LANGUAGE_NAMES.get(document_language, "English")
 
-        prompt = ENTITY_EXTRACTION_PROMPT.format(
-            text=text[:8000],
+        # Get model-specific prompt (simplified for small models)
+        prompt = _get_extraction_prompt_for_model(
+            text=text,
             document_language=language_name,
+            model_name=model_name
         )
 
         try:
-            # Use langchain model interface
-            result = await llm.ainvoke(prompt)
-            response = result.content if hasattr(result, 'content') else str(result)
+            # Apply Phase 15 optimizations for small models
+            response = None
+            is_small = False
+            if model_name:
+                try:
+                    from backend.services.rag_module.prompts import is_tiny_model, get_sampling_config
+                    is_small = is_tiny_model(model_name)
+
+                    if is_small:
+                        # Use Phase 15 optimized parameters for small models
+                        config = get_sampling_config(model_name)
+                        invoke_kwargs = {
+                            "temperature": config.get("temperature", 0.3),
+                            "top_p": config.get("top_p"),
+                            "top_k": config.get("top_k"),
+                        }
+                        # Remove None values
+                        invoke_kwargs = {k: v for k, v in invoke_kwargs.items() if v is not None}
+
+                        result = await llm.ainvoke(prompt, **invoke_kwargs)
+                        response = result.content if hasattr(result, 'content') else str(result)
+
+                        logger.debug(
+                            "Entity extraction using Phase 15 optimizations",
+                            model=model_name,
+                            temperature=config.get("temperature"),
+                        )
+                except ImportError:
+                    pass
+
+            # Fallback to standard invocation if not small model or Phase 15 unavailable
+            if response is None:
+                result = await llm.ainvoke(prompt)
+                response = result.content if hasattr(result, 'content') else str(result)
 
             # Parse JSON response using robust extraction
             data = _extract_json_from_response(response)
@@ -412,19 +576,25 @@ class KnowledgeGraphService:
         chunks: List[str],
         document_id: Optional[uuid.UUID] = None,
         document_language: str = "en",
-        batch_size: int = 3,
+        batch_size: Optional[int] = None,
     ) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
         """
-        Extract entities from multiple text chunks in batches for better performance.
+        Extract entities from multiple text chunks in batches for better performance with adaptive batch sizing.
 
         Instead of making one LLM call per chunk, this method combines multiple
         chunks into single prompts, reducing LLM calls by ~3-5x.
+
+        Batch size is automatically optimized based on model context window:
+        - Tiny models (<3B): 2 chunks per batch
+        - Small models (7B-13B): 3 chunks per batch
+        - Medium models (30B-70B): 5 chunks per batch
+        - Large models (GPT-4, Claude): 8 chunks per batch
 
         Args:
             chunks: List of text chunks to process
             document_id: Source document ID
             document_language: Language code of the source document
-            batch_size: Number of chunks to combine per LLM call
+            batch_size: Optional batch size override (if None, calculates optimal size)
 
         Returns:
             Tuple of (all_entities, all_relations) from all chunks
@@ -443,6 +613,17 @@ class KnowledgeGraphService:
         all_entities: List[ExtractedEntity] = []
         all_relations: List[ExtractedRelation] = []
         language_name = LANGUAGE_NAMES.get(document_language, "English")
+
+        # Calculate optimal batch size if not provided
+        if batch_size is None:
+            model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None)
+            batch_size = _calculate_optimal_batch_size(model_name)
+            logger.info(
+                "Using adaptive batch sizing for entity extraction",
+                model=model_name,
+                batch_size=batch_size,
+                chunks=len(chunks),
+            )
 
         # Process in batches
         for i in range(0, len(chunks), batch_size):
@@ -812,7 +993,45 @@ Only include entities and relations clearly supported by the text."""
             if extracted.canonical_name and not entity.canonical_name:
                 entity.canonical_name = extracted.canonical_name
         else:
-            # Create new entity with language support
+            # Create new entity with language support and embedding
+            # Generate embedding inline for semantic search
+            embedding = None
+            try:
+                from backend.services.embeddings import EmbeddingService
+                import os
+
+                # Use configured embedding provider (supports Ollama, HuggingFace, OpenAI)
+                embedding_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+                embedding_model = None
+                if embedding_provider.lower() == "ollama":
+                    embedding_model = os.getenv("OLLAMA_EMBEDDING_MODEL", None)
+                if not embedding_model:
+                    embedding_model = os.getenv("DEFAULT_EMBEDDING_MODEL", None)
+
+                embedding_service = EmbeddingService(
+                    provider=embedding_provider,
+                    model=embedding_model
+                )
+
+                # Build entity text for embedding (name + description + aliases)
+                text_parts = [extracted.name]
+                if extracted.description:
+                    text_parts.append(extracted.description)
+                if extracted.aliases:
+                    text_parts.extend(extracted.aliases[:3])  # Limit aliases
+                entity_text = " ".join(text_parts)
+
+                # Generate embedding
+                embeddings = embedding_service.embed_texts([entity_text])
+                if embeddings and len(embeddings) > 0:
+                    embedding = embeddings[0]
+            except Exception as e:
+                logger.warning(
+                    "Failed to generate entity embedding during creation",
+                    entity_name=extracted.name,
+                    error=str(e)
+                )
+
             entity = Entity(
                 name=extracted.name,
                 name_normalized=norm_name,
@@ -823,6 +1042,7 @@ Only include entities and relations clearly supported by the text."""
                 canonical_name=canonical,
                 language_variants={extracted.language: extracted.name} if extracted.language else None,
                 mention_count=1,
+                embedding=embedding,  # Store embedding
             )
             self.db.add(entity)
             await self.db.flush()
@@ -929,8 +1149,9 @@ Only include entities and relations clearly supported by the text."""
             func.lower(Entity.canonical_name) == query_ascii,
             # Strategy 4: Name contains query (substring)
             Entity.name_normalized.ilike(f"%{query_norm}%"),
-            # Strategy 5: Query in aliases (if PostgreSQL array)
-            Entity.aliases.any(query),
+            # Strategy 5: Query in aliases - use cast to text for database-agnostic search
+            # This works for both PostgreSQL arrays and SQLite JSON arrays
+            func.cast(Entity.aliases, String).ilike(f"%{query}%"),
         ]
 
         # Add language variant search if query_language specified
@@ -1175,6 +1396,7 @@ Only include entities and relations clearly supported by the text."""
             Number of entities updated with embeddings
         """
         from backend.services.embeddings import EmbeddingService
+        import os
 
         # Find entities without embeddings
         result = await self.db.execute(
@@ -1186,7 +1408,18 @@ Only include entities and relations clearly supported by the text."""
             logger.debug("All entities have embeddings")
             return 0
 
-        embedding_service = EmbeddingService()
+        # Use configured embedding provider (supports Ollama, HuggingFace, OpenAI)
+        embedding_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+        embedding_model = None
+        if embedding_provider.lower() == "ollama":
+            embedding_model = os.getenv("OLLAMA_EMBEDDING_MODEL", None)
+        if not embedding_model:
+            embedding_model = os.getenv("DEFAULT_EMBEDDING_MODEL", None)
+
+        embedding_service = EmbeddingService(
+            provider=embedding_provider,
+            model=embedding_model
+        )
 
         # Generate text for embedding (name + description + aliases)
         texts = []

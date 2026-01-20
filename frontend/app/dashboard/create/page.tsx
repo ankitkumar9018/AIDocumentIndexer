@@ -31,9 +31,14 @@ import {
   Info,
   BarChart3,
   Eye,
+  Cog,
+  CheckCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Slider } from "@/components/ui/slider";
+import { Label } from "@/components/ui/label";
+import { calculateOptimizedTemperature } from "@/lib/utils";
 import { TemplateSelector, SaveTemplateDialog, BuiltInTemplateSelector } from "@/components/generation";
 import {
   Card,
@@ -165,6 +170,9 @@ export default function CreatePage() {
   const [templateVisionModel, setTemplateVisionModel] = useState<string>("auto");
   const [enableVisionReview, setEnableVisionReview] = useState<boolean | null>(null);
   const [visionReviewModel, setVisionReviewModel] = useState<string>("auto");
+
+  // Advanced LLM Settings - Phase 15 Optimization (Optional per-document overrides)
+  const [overrideTemperature, setOverrideTemperature] = useState<number | null>(null);
 
   const [availableFonts, setAvailableFonts] = useState<Record<string, any>>({});
   const [availableLayouts, setAvailableLayouts] = useState<Record<string, any>>({});
@@ -1781,6 +1789,89 @@ export default function CreatePage() {
                     </div>
                   </div>
                 )}
+
+                {/* Advanced LLM Settings - Phase 15 Optimization */}
+                <div className="mt-4 pt-4 border-t space-y-4">
+                  <div>
+                    <h3 className="text-sm font-medium flex items-center gap-2">
+                      <Cog className="h-4 w-4" />
+                      Advanced LLM Settings (Optional)
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      Override content generation temperature for this document
+                    </p>
+                  </div>
+
+                  <div className="space-y-3 bg-muted/30 p-3 rounded-lg">
+                    {(() => {
+                      // Calculate optimized temperature (use default model for now since we don't expose provider selection)
+                      const optimizedTemp = 0.7; // Default for large models, will be calculated by backend
+                      const currentTemp = overrideTemperature ?? optimizedTemp;
+                      const isManualOverride = overrideTemperature !== null;
+
+                      return (
+                        <>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <Label className="text-sm">Content Quality Temperature</Label>
+                              <span className="text-sm font-medium">{currentTemp.toFixed(2)}</span>
+                            </div>
+                            <Slider
+                              value={[currentTemp]}
+                              onValueChange={([value]) => setOverrideTemperature(value)}
+                              min={0}
+                              max={1}
+                              step={0.05}
+                              className="w-full"
+                            />
+                            <div className="flex justify-between text-xs text-muted-foreground">
+                              <span>Precise (0.0)</span>
+                              <span>Balanced (0.7)</span>
+                              <span>Creative (1.0)</span>
+                            </div>
+                          </div>
+
+                          <div className="text-xs space-y-2">
+                            {!isManualOverride ? (
+                              <div className="flex items-center gap-2 text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/30 p-2 rounded">
+                                <CheckCircle className="h-3 w-3 flex-shrink-0" />
+                                <span>Using system default temperature (optimized per model type)</span>
+                              </div>
+                            ) : (
+                              <div className="space-y-2">
+                                <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/30 p-2 rounded">
+                                  <Info className="h-3 w-3 flex-shrink-0" />
+                                  <span>Custom temperature override active: {currentTemp.toFixed(2)}</span>
+                                </div>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="w-full h-8 text-xs"
+                                  onClick={() => setOverrideTemperature(null)}
+                                >
+                                  Reset to System Default
+                                </Button>
+                              </div>
+                            )}
+
+                            <div className="text-muted-foreground space-y-1 pt-2 border-t">
+                              <p className="font-medium">Temperature Guide:</p>
+                              <ul className="list-disc list-inside space-y-0.5 ml-2">
+                                <li><strong>0.2-0.4:</strong> Precise, factual content (legal, medical, technical docs)</li>
+                                <li><strong>0.5-0.7:</strong> Balanced, professional content (reports, presentations)</li>
+                                <li><strong>0.8-1.0:</strong> Creative, varied content (marketing, brainstorming)</li>
+                              </ul>
+                              <p className="pt-1 text-xs">
+                                <strong>Note:</strong> System automatically optimizes temperature based on your selected LLM provider.
+                                Small models (Llama, Qwen) use lower temperature to reduce hallucinations.
+                              </p>
+                            </div>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                </div>
 
                 {/* Built-in Templates (PPTX/DOCX/XLSX) */}
                 {(selectedFormat === "pptx" || selectedFormat === "docx" || selectedFormat === "xlsx") && (

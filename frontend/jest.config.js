@@ -11,9 +11,17 @@ const config = {
   testPathIgnorePatterns: [
     '<rootDir>/node_modules/',
     '<rootDir>/.next/',
+    '/__tests__/.*/utils\\.tsx$',
   ],
   transform: {
-    '^.+\\.(ts|tsx)$': ['babel-jest', { presets: ['next/babel'] }],
+    '^.+\\.(ts|tsx)$': [
+      'babel-jest',
+      {
+        presets: [
+          ['next/babel', { 'preset-react': { runtime: 'automatic' } }],
+        ],
+      },
+    ],
   },
   collectCoverageFrom: [
     'components/**/*.{ts,tsx}',

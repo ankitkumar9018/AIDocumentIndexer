@@ -43,7 +43,7 @@ import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { cn } from "@/lib/utils";
+import { cn, calculateOptimizedTemperature } from "@/lib/utils";
 import { getErrorMessage } from "@/lib/errors";
 import {
   useChatSessions,
@@ -263,7 +263,10 @@ export default function ChatPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [temperature, setTemperature] = useState<number>(0.7);
+  // Temperature starts at null and will be set by useEffect based on detected model
+  const [temperature, setTemperature] = useState<number | null>(null);
+  const [optimizedTemperature, setOptimizedTemperature] = useState<number | null>(null);
+  const [isManualTemperature, setIsManualTemperature] = useState(false);
   const [agentExecutionMode, setAgentExecutionMode] = useState<ExecutionMode>("agent");
   // Source mode: documents (RAG search) vs general (no document search)
   const [sourceMode, setSourceMode] = useState<"documents" | "general">("documents");
@@ -426,12 +429,70 @@ export default function ChatPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [input, isLoading]);
 
-  // Sync temperature with session config
+  // Sync temperature with session config and calculate optimized temp
   useEffect(() => {
-    if (sessionLLMConfig?.temperature !== null && sessionLLMConfig?.temperature !== undefined) {
-      setTemperature(sessionLLMConfig.temperature);
+    console.log('[Chat Temperature] useEffect triggered', {
+      hasProviders: !!providersData?.providers,
+      hasSession: !!sessionLLMConfig,
+      sessionModel: sessionLLMConfig?.model,
+      sessionTemp: sessionLLMConfig?.temperature,
+    });
+
+    // Don't set temperature until we have provider data or session data
+    if (!providersData?.providers && !sessionLLMConfig) {
+      console.log('[Chat Temperature] No data available yet, skipping');
+      return;
     }
-  }, [sessionLLMConfig?.temperature]);
+
+    // Get the effective model being used
+    // Priority: session override > default provider model
+    let effectiveModel = sessionLLMConfig?.model;
+
+    // If no session override, get the default provider's model
+    if (!effectiveModel && providersData?.providers) {
+      // Find the provider being used (session override or default)
+      let effectiveProvider;
+      if (sessionLLMConfig?.provider_id) {
+        effectiveProvider = providersData.providers.find(p => p.id === sessionLLMConfig.provider_id);
+      } else {
+        // Use default provider (first in list or marked as default)
+        effectiveProvider = providersData.providers.find(p => p.is_default) || providersData.providers[0];
+      }
+      console.log('[Chat Temperature] Default provider found:', effectiveProvider);
+      console.log('[Chat Temperature] Provider keys:', effectiveProvider ? Object.keys(effectiveProvider) : 'none');
+
+      // Try to get model from various possible field names
+      // Check default_chat_model first (used by Ollama and other providers)
+      effectiveModel = effectiveProvider?.default_chat_model || undefined;
+
+      console.log('[Chat Temperature] Using default provider model:', effectiveModel);
+
+      // If still no model and it's Ollama, suggest setting a default
+      if (!effectiveModel && effectiveProvider?.provider_type === 'ollama') {
+        console.log('[Chat Temperature] Ollama provider has no default_chat_model set. Using fallback temperature 0.7');
+        console.log('[Chat Temperature] Tip: Set a default model in provider settings for automatic temperature optimization');
+      }
+    }
+
+    const sessionTemp = sessionLLMConfig?.temperature;
+
+    // Calculate optimized temperature for current model
+    const optimized = calculateOptimizedTemperature(effectiveModel);
+    setOptimizedTemperature(optimized);
+    console.log('[Chat Temperature] Optimized temp calculated:', optimized);
+
+    // If session has a temperature set, use it (manual override)
+    if (sessionTemp !== null && sessionTemp !== undefined) {
+      setTemperature(sessionTemp);
+      setIsManualTemperature(Math.abs(sessionTemp - optimized) > 0.01);
+      console.log('[Chat Temperature] Using session temperature:', sessionTemp, 'Manual?', Math.abs(sessionTemp - optimized) > 0.01);
+    } else {
+      // No session override, use optimized
+      setTemperature(optimized);
+      setIsManualTemperature(false);
+      console.log('[Chat Temperature] Using optimized temperature:', optimized);
+    }
+  }, [sessionLLMConfig?.temperature, sessionLLMConfig?.model, sessionLLMConfig?.provider_id, providersData?.providers, sessionLLMConfig]);
 
   // Load query enhancement preference from localStorage
   useEffect(() => {
@@ -488,6 +549,11 @@ export default function ChatPage() {
     const newTemp = value[0];
     setTemperature(newTemp);
 
+    // Mark as manual if different from optimized
+    if (optimizedTemperature !== null) {
+      setIsManualTemperature(Math.abs(newTemp - optimizedTemperature) > 0.01);
+    }
+
     // Update session config if we have a session
     if (currentSessionId && sessionLLMConfig?.provider_id) {
       try {
@@ -502,6 +568,13 @@ export default function ChatPage() {
       } catch (error) {
         console.error("Failed to update temperature:", error);
       }
+    }
+  };
+
+  // Reset to optimized temperature
+  const resetToOptimizedTemperature = () => {
+    if (optimizedTemperature !== null) {
+      handleTemperatureChange([optimizedTemperature]);
     }
   };
 
@@ -1167,7 +1240,7 @@ export default function ChatPage() {
               <PopoverTrigger asChild>
                 <Button variant="outline" size="sm" className="gap-2">
                   <Thermometer className="h-4 w-4" />
-                  <span className="hidden sm:inline">{temperature.toFixed(1)}</span>
+                  <span className="hidden sm:inline">{temperature?.toFixed(1) ?? '...'}</span>
                 </Button>
               </PopoverTrigger>
               <PopoverContent className="w-72" align="end">
@@ -1176,32 +1249,70 @@ export default function ChatPage() {
                     <div className="flex items-center justify-between">
                       <Label className="text-sm font-medium">Temperature</Label>
                       <span className="text-sm text-muted-foreground">
-                        {getTemperatureLabel(temperature)}
+                        {temperature !== null ? getTemperatureLabel(temperature) : 'Loading...'}
                       </span>
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="text-xs text-muted-foreground w-6">0</span>
                       <Slider
-                        value={[temperature]}
+                        value={[temperature ?? 0.7]}
                         onValueChange={handleTemperatureChange}
                         min={0}
-                        max={2}
-                        step={0.1}
+                        max={1}
+                        step={0.05}
                         className="flex-1"
+                        disabled={temperature === null}
                       />
-                      <span className="text-xs text-muted-foreground w-6">2</span>
+                      <span className="text-xs text-muted-foreground w-6">1</span>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Lower values make responses more focused and deterministic.
-                      Higher values make responses more creative and varied.
+                      Lower values (0.0-0.3) make responses precise and focused.
+                      Higher values (0.7-1.0) make responses more creative.
                     </p>
                   </div>
-                  <div className="pt-2 border-t">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-muted-foreground">Current value:</span>
-                      <span className="font-medium">{temperature.toFixed(2)}</span>
+                  {temperature !== null && (
+                    <div className="pt-2 border-t space-y-2">
+                      <div className="flex justify-between text-xs items-center">
+                        <span className="text-muted-foreground">Current:</span>
+                        <span className="font-medium">{temperature.toFixed(2)}</span>
+                      </div>
+                      {optimizedTemperature !== null && (
+                        <div className="flex justify-between text-xs items-center">
+                          <span className="text-muted-foreground">Optimized for model:</span>
+                          <span className="font-medium text-blue-600 dark:text-blue-400">
+                            {optimizedTemperature.toFixed(2)}
+                          </span>
+                        </div>
+                      )}
+                      {!isManualTemperature && optimizedTemperature !== null && (
+                        <div className="text-xs text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/30 p-2 rounded">
+                          <p className="font-medium mb-1">✨ Smart Temperature Active</p>
+                          <p className="text-muted-foreground">
+                            Using AI-optimized temperature for {sessionLLMConfig?.model || "your model"}.
+                            Adjust slider to override.
+                          </p>
+                        </div>
+                      )}
+                      {isManualTemperature && optimizedTemperature !== null && (
+                        <div className="text-xs space-y-2">
+                          <div className="text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 p-2 rounded">
+                            <p className="font-medium mb-1">Manual Override Active</p>
+                            <p className="text-muted-foreground">
+                              Using {temperature.toFixed(2)} instead of optimized {optimizedTemperature.toFixed(2)}
+                            </p>
+                          </div>
+                          <Button
+                            onClick={resetToOptimizedTemperature}
+                            variant="outline"
+                            size="sm"
+                            className="w-full"
+                          >
+                            Reset to Optimized ({optimizedTemperature.toFixed(2)})
+                          </Button>
+                        </div>
+                      )}
                     </div>
-                  </div>
+                  )}
                 </div>
               </PopoverContent>
             </Popover>

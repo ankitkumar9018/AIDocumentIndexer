@@ -136,6 +136,23 @@ class EmbeddingService:
     def _create_embeddings(self) -> Embeddings:
         """Create embeddings instance based on provider."""
         if self.provider == "openai":
+            # Check for explicit dimension override (OpenAI v3 models support flexible dimensions)
+            import os
+            explicit_dim = os.getenv("EMBEDDING_DIMENSION")
+
+            # OpenAI text-embedding-3-* models support dimension parameter
+            if explicit_dim and ("text-embedding-3" in self.model.lower()):
+                try:
+                    dim = int(explicit_dim)
+                    logger.info(f"Using OpenAI with reduced dimension: {dim}D")
+                    return OpenAIEmbeddings(
+                        model=self.model,
+                        openai_api_key=self.config.openai_api_key,
+                        dimensions=dim,  # OpenAI v3 supports dimension reduction
+                    )
+                except ValueError:
+                    pass
+
             return OpenAIEmbeddings(
                 model=self.model,
                 openai_api_key=self.config.openai_api_key,

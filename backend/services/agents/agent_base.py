@@ -816,6 +816,51 @@ class BaseAgent(ABC):
         """Clear current trajectory for new execution."""
         self._current_trajectory = []
 
+    def _enhance_messages_for_model(
+        self,
+        messages: List[Any],
+        llm: BaseChatModel,
+    ) -> List[Any]:
+        """
+        Enhance messages with model-specific base instructions for small models.
+
+        Wraps user's custom prompts with foundational behavioral hints that help
+        small models produce better output. The user's prompt remains the core
+        instruction - base instructions just provide grounding.
+
+        Args:
+            messages: Original messages list
+            llm: LLM instance to get model name from
+
+        Returns:
+            Enhanced messages list (original if large model or no model name)
+        """
+        # Import here to avoid circular dependencies
+        from backend.services.rag_module.prompts import enhance_agent_system_prompt
+
+        # Get model name from LLM
+        model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None)
+
+        if not model_name or not messages:
+            return messages
+
+        # Find SystemMessage and enhance it
+        enhanced_messages = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                # Enhance system prompt with model-specific base instructions
+                original_content = msg.content
+                enhanced_content = enhance_agent_system_prompt(original_content, model_name)
+
+                # Create new SystemMessage with enhanced content
+                enhanced_msg = SystemMessage(content=enhanced_content)
+                enhanced_messages.append(enhanced_msg)
+            else:
+                # Keep other messages unchanged
+                enhanced_messages.append(msg)
+
+        return enhanced_messages
+
     async def invoke_llm(
         self,
         messages: List[Any],
@@ -823,6 +868,11 @@ class BaseAgent(ABC):
     ) -> tuple[str, int, int]:
         """
         Invoke LLM with messages and optionally record the step.
+
+        Automatically applies model-specific optimizations:
+        - Enhances system prompt with model-specific base instructions for small models
+        - Preserves user's custom prompts (they take precedence)
+        - Adds foundational behavioral hints for better small model performance
 
         Args:
             messages: LangChain messages to send
@@ -836,7 +886,12 @@ class BaseAgent(ABC):
         try:
             # Get LLM using admin-configured provider
             llm = await self.get_llm()
-            response = await llm.ainvoke(messages)
+
+            # PHASE 15: Apply model-specific enhancements to system prompt
+            # This preserves user's custom prompts while adding foundational hints for small models
+            enhanced_messages = self._enhance_messages_for_model(messages, llm)
+
+            response = await llm.ainvoke(enhanced_messages)
 
             # Extract response text
             if hasattr(response, "content"):
@@ -899,6 +954,10 @@ class BaseAgent(ABC):
         Enables agents to dynamically select and call tools using LLM function calling.
         Compatible with OpenAI, Anthropic, and other providers that support tool calling.
 
+        Automatically applies model-specific optimizations:
+        - Enhances system prompt with model-specific base instructions for small models
+        - Preserves user's custom prompts (they take precedence)
+
         Args:
             messages: LangChain messages to send
             tools: List of tool schemas (OpenAI function calling format)
@@ -918,6 +977,10 @@ class BaseAgent(ABC):
             # Get LLM using admin-configured provider
             llm = await self.get_llm()
 
+            # PHASE 15: Apply model-specific enhancements to system prompt
+            # This preserves user's custom prompts while adding foundational hints for small models
+            enhanced_messages = self._enhance_messages_for_model(messages, llm)
+
             # Bind tools to LLM if supported
             if tools and hasattr(llm, "bind_tools"):
                 llm_with_tools = llm.bind_tools(tools, tool_choice=tool_choice)
@@ -927,7 +990,7 @@ class BaseAgent(ABC):
             else:
                 llm_with_tools = llm
 
-            response = await llm_with_tools.ainvoke(messages)
+            response = await llm_with_tools.ainvoke(enhanced_messages)
 
             # Extract response text
             response_text = ""

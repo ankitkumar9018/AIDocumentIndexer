@@ -813,6 +813,102 @@ async def delete_agent(
 # Prompt Optimization Endpoints (Admin)
 # =============================================================================
 
+async def process_optimization_job_background(job_id: str, agent_id: str):
+    """
+    Background task to process optimization job.
+    Runs asynchronously after API returns.
+
+    Phase 15 Integration: This ensures optimization jobs complete properly.
+
+    Steps:
+    1. pending → analyzing: Analyze failed trajectories with LLM
+    2. analyzing → generating: Generate 3 prompt variants
+    3. generating → awaiting_approval: Request user approval
+    """
+    from backend.services.prompt_optimization.prompt_builder_agent import PromptBuilderAgent
+    from backend.services.agents.agent_base import AgentConfig
+    from backend.db.database import get_async_session
+    from sqlalchemy import select
+
+    async with get_async_session() as db:
+        try:
+            logger.info(f"Starting background processing for optimization job {job_id}")
+
+            # Get agent
+            result = await db.execute(
+                select(AgentDefinition)
+                .where(AgentDefinition.id == uuid.UUID(agent_id))
+            )
+            agent = result.scalar_one_or_none()
+
+            if not agent:
+                logger.error(f"Agent {agent_id} not found for job {job_id}")
+                return
+
+            # Get job
+            result = await db.execute(
+                select(PromptOptimizationJob)
+                .where(PromptOptimizationJob.id == uuid.UUID(job_id))
+            )
+            job = result.scalar_one_or_none()
+
+            if not job:
+                logger.error(f"Job {job_id} not found")
+                return
+
+            # Create builder
+            config = AgentConfig(
+                agent_id=str(uuid.uuid4()),
+                name="Prompt Builder",
+                description="Prompt optimization agent",
+            )
+            builder = PromptBuilderAgent(config, db)
+
+            # Step 1: Analyze failures
+            logger.info(f"Job {job_id}: Starting failure analysis")
+            job.status = "analyzing"
+            await db.commit()
+
+            analysis_result = await builder.analyze_failures(job, agent)
+            job.analysis_result = analysis_result
+            await db.commit()
+
+            logger.info(f"Job {job_id}: Failure analysis complete")
+
+            # Step 2: Generate variants
+            logger.info(f"Job {job_id}: Generating prompt variants")
+            job.status = "generating"
+            await db.commit()
+
+            variants = await builder.generate_prompt_variants(job, agent, analysis_result)
+            job.generated_variants = variants
+            await db.commit()
+
+            logger.info(f"Job {job_id}: Generated {len(variants) if variants else 0} variants")
+
+            # Step 3: Request approval (sets status to awaiting_approval)
+            logger.info(f"Job {job_id}: Requesting approval")
+            await builder.request_approval(job, variants)
+
+            logger.info(f"Optimization job {job_id} completed and awaiting approval")
+
+        except Exception as e:
+            logger.error(f"Error processing optimization job {job_id}: {e}", exc_info=True)
+            try:
+                # Try to update job status to failed
+                result = await db.execute(
+                    select(PromptOptimizationJob)
+                    .where(PromptOptimizationJob.id == uuid.UUID(job_id))
+                )
+                job = result.scalar_one_or_none()
+                if job:
+                    job.status = "failed"
+                    job.error_message = str(e)
+                    await db.commit()
+            except Exception as commit_error:
+                logger.error(f"Failed to update job status to failed: {commit_error}")
+
+
 @router.post("/agents/{agent_id}/optimize")
 async def trigger_optimization(
     agent_id: str,
@@ -843,11 +939,19 @@ async def trigger_optimization(
     builder = PromptBuilderAgent(config, db)
     job = await builder.create_optimization_job(agent)
 
+    # Start background processing
+    background_tasks.add_task(
+        process_optimization_job_background,
+        job_id=str(job.id),
+        agent_id=agent_id
+    )
+
     return {
         "success": True,
         "job_id": str(job.id),
         "agent_id": agent_id,
         "status": job.status,
+        "message": "Optimization started in background. Job will transition through: pending → analyzing → generating → awaiting_approval",
     }
 
 

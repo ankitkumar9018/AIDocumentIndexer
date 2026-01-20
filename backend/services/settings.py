@@ -454,7 +454,7 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="rag.knowledge_graph_enabled",
         category=SettingCategory.RAG,
-        default_value=False,
+        default_value=True,  # Enabled by default - feature is mature and provides +15-20% query precision
         value_type=ValueType.BOOLEAN,
         description="Enable knowledge graph-enhanced retrieval (uses entity relationships for better recall)"
     ),

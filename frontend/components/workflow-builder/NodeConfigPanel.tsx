@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Trash2, Plus, X, ChevronDown, ChevronRight, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,6 +28,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Badge } from "@/components/ui/badge";
+import { calculateOptimizedTemperature } from "@/lib/utils";
 import type { NodeTypeInfo } from "@/lib/api";
 import type { WorkflowNodeData, WorkflowNodeType } from "./WorkflowNode";
 
@@ -155,6 +156,24 @@ export function NodeConfigPanel({
   const normalizedType = node.data?.nodeType?.toUpperCase() || "";
   const nodeTypeInfo = nodeTypes.find((nt) => nt.type.toUpperCase() === normalizedType);
   const isStartOrEnd = ["START", "END"].includes(normalizedType);
+
+  // State for temperature auto-adjustment
+  const [optimizedTemperature, setOptimizedTemperature] = useState<number | null>(null);
+  const [isManualTemperature, setIsManualTemperature] = useState(false);
+
+  // Get config values
+  const currentModel = node.data?.config?.model as string | undefined;
+  const currentTemperature = (node.data?.config?.temperature as number) ?? 0.7;
+
+  // Auto-adjust temperature when model changes
+  useEffect(() => {
+    const modelValue = currentModel === "default" ? null : currentModel;
+    const optimized = calculateOptimizedTemperature(modelValue);
+    setOptimizedTemperature(optimized);
+
+    // Check if current temperature is manual override
+    setIsManualTemperature(Math.abs(currentTemperature - optimized) > 0.01);
+  }, [currentModel, currentTemperature]);
 
   const updateConfig = (key: string, value: unknown) => {
     onUpdate({
@@ -1370,12 +1389,55 @@ Focus on:
               <FieldLabel label="Temperature" />
               <Slider
                 value={[getConfigNumber("temperature", 0.7)]}
-                onValueChange={([value]) => updateConfig("temperature", value)}
+                onValueChange={([value]) => {
+                  updateConfig("temperature", value);
+                  // Mark as manual if different from optimized
+                  if (optimizedTemperature !== null) {
+                    setIsManualTemperature(Math.abs(value - optimizedTemperature) > 0.01);
+                  }
+                }}
                 min={0}
-                max={2}
-                step={0.1}
+                max={1}
+                step={0.05}
               />
-              <p className="text-xs text-muted-foreground text-right">{getConfigNumber("temperature", 0.7)}</p>
+              <p className="text-xs text-muted-foreground text-right">{getConfigNumber("temperature", 0.7).toFixed(2)}</p>
+
+              {optimizedTemperature !== null && (
+                <div className="pt-2 border-t space-y-2">
+                  <div className="flex justify-between text-xs items-center">
+                    <span className="text-muted-foreground">Optimized for model:</span>
+                    <span className="font-medium text-blue-600 dark:text-blue-400">
+                      {optimizedTemperature.toFixed(2)}
+                    </span>
+                  </div>
+                  {!isManualTemperature ? (
+                    <div className="text-xs text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/30 p-2 rounded">
+                      <p className="font-medium">✨ Smart Temperature Active</p>
+                      <p className="text-muted-foreground">Using AI-optimized temperature. Adjust slider to override.</p>
+                    </div>
+                  ) : (
+                    <div className="text-xs space-y-2">
+                      <div className="text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 p-2 rounded">
+                        <p className="font-medium">Manual Override Active</p>
+                        <p className="text-muted-foreground">
+                          Using {getConfigNumber("temperature", 0.7).toFixed(2)} instead of optimized {optimizedTemperature.toFixed(2)}
+                        </p>
+                      </div>
+                      <Button
+                        onClick={() => {
+                          updateConfig("temperature", optimizedTemperature);
+                          setIsManualTemperature(false);
+                        }}
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                      >
+                        Reset to Optimized ({optimizedTemperature.toFixed(2)})
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">

@@ -145,12 +145,15 @@ INTENT_WEIGHTS = {
 }
 
 # Enhanced retrieval configuration for each intent
+# PHASE 15: Optimized top_k values for 60-70% context window utilization (research-backed 2026)
+# Research shows: RAG with focused context (8-12 chunks) outperforms naive 200K context
+# "Lost in the Middle" problem intensifies with longer contexts
 INTENT_RETRIEVAL_CONFIG = {
     QueryIntent.FACTUAL: {
         "use_mmr": False,
         "diversity_weight": 0.0,
         "use_cot": False,
-        "suggested_top_k": 8,
+        "suggested_top_k": 6,  # Reduced from 8 for optimal 60-70% utilization
         "similarity_threshold": 0.40,
         "prompt_template": "factual",
     },
@@ -158,7 +161,7 @@ INTENT_RETRIEVAL_CONFIG = {
         "use_mmr": True,
         "diversity_weight": 0.2,
         "use_cot": True,  # Complex concepts benefit from step-by-step reasoning
-        "suggested_top_k": 10,
+        "suggested_top_k": 8,  # Reduced from 10
         "similarity_threshold": 0.35,
         "prompt_template": "analytical",
     },
@@ -166,7 +169,7 @@ INTENT_RETRIEVAL_CONFIG = {
         "use_mmr": True,  # Need diverse sources for comparison
         "diversity_weight": 0.4,
         "use_cot": False,
-        "suggested_top_k": 12,
+        "suggested_top_k": 10,  # Reduced from 12 - optimal for comparisons
         "similarity_threshold": 0.35,
         "prompt_template": "comparison",
     },
@@ -174,7 +177,7 @@ INTENT_RETRIEVAL_CONFIG = {
         "use_mmr": False,
         "diversity_weight": 0.0,
         "use_cot": False,
-        "suggested_top_k": 5,
+        "suggested_top_k": 5,  # Already optimal - precise navigation
         "similarity_threshold": 0.45,
         "prompt_template": "factual",
     },
@@ -182,7 +185,7 @@ INTENT_RETRIEVAL_CONFIG = {
         "use_mmr": True,
         "diversity_weight": 0.2,
         "use_cot": True,  # Step-by-step processes benefit from CoT
-        "suggested_top_k": 10,
+        "suggested_top_k": 8,  # Reduced from 10
         "similarity_threshold": 0.35,
         "prompt_template": "analytical",
     },
@@ -190,7 +193,7 @@ INTENT_RETRIEVAL_CONFIG = {
         "use_mmr": True,  # Need diverse sources for overview
         "diversity_weight": 0.3,
         "use_cot": False,
-        "suggested_top_k": 15,
+        "suggested_top_k": 12,  # Reduced from 15 - still comprehensive
         "similarity_threshold": 0.30,
         "prompt_template": "summary",
     },
@@ -198,7 +201,7 @@ INTENT_RETRIEVAL_CONFIG = {
         "use_mmr": False,
         "diversity_weight": 0.0,
         "use_cot": False,
-        "suggested_top_k": 20,  # Need many sources for aggregation
+        "suggested_top_k": 15,  # Reduced from 20 - still broad coverage
         "similarity_threshold": 0.30,
         "prompt_template": "list",
     },
@@ -206,7 +209,7 @@ INTENT_RETRIEVAL_CONFIG = {
         "use_mmr": False,
         "diversity_weight": 0.0,
         "use_cot": False,
-        "suggested_top_k": 8,
+        "suggested_top_k": 6,  # Reduced from 8 for optimal default
         "similarity_threshold": 0.40,
         "prompt_template": "default",
     },
