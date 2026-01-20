@@ -621,6 +621,13 @@ Create a scrape job.
 | `collection` | string | null | Collection to store scraped content |
 | `access_tier` | int | 1 | Access tier for stored content (1-100) |
 
+**Storage Modes:**
+
+| Mode | Description |
+|------|-------------|
+| `immediate` | Content is scraped and returned but not indexed. Can be indexed later via `/jobs/{job_id}/index` |
+| `permanent` | Content is automatically indexed into RAG pipeline (embeddings + vector store + Knowledge Graph) |
+
 ### GET /scraper/jobs
 
 List scrape jobs.
@@ -650,9 +657,66 @@ Run a pending scrape job with optional subpage crawling.
 | `max_depth` | int | 2 | Maximum crawl depth (1-5) |
 | `same_domain_only` | boolean | true | Only crawl pages from the same domain |
 
-### POST /scraper/immediate
+### POST /scraper/jobs/{job_id}/index
 
-Scrape a URL immediately.
+Index a completed job's content into the RAG pipeline. This allows content scraped with `immediate` mode to be permanently indexed later.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "documents_indexed": 15,
+  "entities_extracted": 42,
+  "chunks_processed": 15,
+  "error": null
+}
+```
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | `success`, `partial`, or `error` |
+| `documents_indexed` | int | Number of chunks indexed in vector store |
+| `entities_extracted` | int | Number of Knowledge Graph entities extracted |
+| `chunks_processed` | int | Total chunks processed |
+| `error` | string | Error message if any |
+
+**Use Case:** Users can scrape content with "Quick Scrape" (immediate mode), review it, then decide to permanently save it to the knowledge base by calling this endpoint.
+
+### POST /scraper/index-pages
+
+Index scraped pages directly without a job. Useful for indexing content from quick scrapes.
+
+**Request:**
+```json
+{
+  "pages": [
+    {
+      "url": "https://example.com/page1",
+      "title": "Page Title",
+      "content": "Page content in markdown...",
+      "metadata": {},
+      "word_count": 500,
+      "scraped_at": "2025-01-20T10:30:00Z"
+    }
+  ],
+  "source_id": "optional-identifier"
+}
+```
+
+**Request Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pages` | array | Yes | List of scraped page objects to index |
+| `source_id` | string | No | Optional identifier for the source |
+
+**Response:** Same as `/jobs/{job_id}/index`
+
+### POST /scraper/scrape
+
+Scrape a URL immediately (Quick Scrape).
 
 **Request:**
 ```json
@@ -660,18 +724,118 @@ Scrape a URL immediately.
   "url": "https://example.com",
   "config": {
     "wait_for_js": true,
-    "timeout": 30000
+    "timeout": 30,
+    "crawl_subpages": false,
+    "max_depth": 3,
+    "same_domain_only": true
   }
 }
 ```
 
-### POST /scraper/query
+**Response (single page):**
+```json
+{
+  "url": "https://example.com",
+  "title": "Example Page",
+  "content": "Markdown content...",
+  "word_count": 1500,
+  "links_count": 25,
+  "images_count": 5,
+  "scraped_at": "2025-01-20T10:30:00Z",
+  "metadata": {}
+}
+```
 
-Scrape and query a URL.
+**Response (multiple pages when crawl_subpages=true):**
+```json
+{
+  "pages": [...],
+  "total_pages": 10,
+  "total_word_count": 15000
+}
+```
+
+### POST /scraper/scrape-and-query
+
+Scrape a URL and query the content with an LLM.
+
+**Request:**
+```json
+{
+  "url": "https://example.com",
+  "query": "What is the main topic of this page?",
+  "config": {
+    "crawl_subpages": false
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "url": "https://example.com",
+  "title": "Example Page",
+  "content": "Truncated content...",
+  "word_count": 1500,
+  "scraped_at": "2025-01-20T10:30:00Z",
+  "query": "What is the main topic of this page?",
+  "answer": "The main topic is...",
+  "model": "gpt-4o-mini",
+  "processing_time_ms": 2500,
+  "context_ready": true
+}
+```
 
 ### POST /scraper/extract-links
 
-Extract links from a URL.
+Extract links from a URL for discovery.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `url` | string | required | URL to extract links from |
+| `max_depth` | int | 3 | Maximum depth to follow (1-10) |
+| `same_domain_only` | boolean | true | Only extract same-domain links |
+
+**Response:**
+```json
+{
+  "url": "https://example.com",
+  "links": ["https://example.com/page1", "https://example.com/page2"],
+  "count": 25
+}
+```
+
+### GET /scraper/jobs/{job_id}/documents
+
+Get scraped content as RAG-ready chunked documents.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `chunk_size` | int | 1000 | Chunk size in characters (200-4000) |
+
+**Response:**
+```json
+{
+  "job_id": "uuid",
+  "documents": [
+    {
+      "content": "Chunk content...",
+      "metadata": {
+        "source": "web_scrape",
+        "url": "https://example.com",
+        "title": "Page Title",
+        "chunk_index": 0,
+        "total_chunks": 5
+      }
+    }
+  ],
+  "total": 15
+}
+```
 
 ---
 

@@ -18,6 +18,7 @@ import {
   Play,
   RefreshCw,
   Layers,
+  Database,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,6 +40,8 @@ import {
   useScrapeUrlImmediate,
   useScrapeAndQuery,
   useExtractLinks,
+  useIndexScrapeJobContent,
+  useIndexScrapedPages,
 } from "@/lib/api";
 
 type ScrapeMode = "immediate" | "job" | "query" | "links";
@@ -67,9 +70,41 @@ export default function ScraperPage() {
   const scrapeImmediate = useScrapeUrlImmediate();
   const scrapeAndQuery = useScrapeAndQuery();
   const extractLinks = useExtractLinks();
+  const indexJobContent = useIndexScrapeJobContent();
+  const indexScrapedPages = useIndexScrapedPages();
+
+  // Track if immediate scrape result has been indexed
+  const [immediateIndexResult, setImmediateIndexResult] = useState<{
+    status: string;
+    documents_indexed: number;
+    entities_extracted: number;
+  } | null>(null);
+
+  // Handle indexing scraped pages to RAG
+  const handleIndexToRag = async () => {
+    if (!scrapeImmediate.data) return;
+
+    // Get pages from the scrape result
+    const pages = 'pages' in scrapeImmediate.data
+      ? scrapeImmediate.data.pages
+      : [scrapeImmediate.data];
+
+    try {
+      const result = await indexScrapedPages.mutateAsync({
+        pages: pages as any[],
+        sourceId: `scrape_${Date.now()}`,
+      });
+      setImmediateIndexResult(result);
+    } catch (error) {
+      console.error("Failed to index pages:", error);
+    }
+  };
 
   const handleScrape = async () => {
     if (!url) return;
+
+    // Reset index result when starting a new scrape
+    setImmediateIndexResult(null);
 
     const scrapeConfig = crawlSubpages ? {
       crawl_subpages: true,
@@ -128,7 +163,8 @@ export default function ScraperPage() {
     createJob.isPending ||
     runJob.isPending ||
     scrapeAndQuery.isPending ||
-    extractLinks.isPending;
+    extractLinks.isPending ||
+    indexScrapedPages.isPending;
 
   const getStatusIcon = (status: string) => {
     switch (status) {
@@ -428,6 +464,33 @@ export default function ScraperPage() {
                     </div>
                   </>
                 )}
+
+                {/* Save to Index button */}
+                <div className="pt-4 border-t">
+                  {immediateIndexResult ? (
+                    <div className="flex items-center gap-2 text-sm text-green-600">
+                      <CheckCircle className="h-4 w-4" />
+                      <span>
+                        Indexed {immediateIndexResult.documents_indexed} chunks,{" "}
+                        {immediateIndexResult.entities_extracted} entities extracted
+                      </span>
+                    </div>
+                  ) : (
+                    <Button
+                      onClick={handleIndexToRag}
+                      disabled={indexScrapedPages.isPending}
+                      variant="outline"
+                      className="w-full"
+                    >
+                      {indexScrapedPages.isPending ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <Database className="h-4 w-4 mr-2" />
+                      )}
+                      Save to Knowledge Base
+                    </Button>
+                  )}
+                </div>
               </div>
             ) : scrapeAndQuery.data ? (
               <div className="space-y-4">

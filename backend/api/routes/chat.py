@@ -1418,6 +1418,7 @@ class SessionLLMOverrideRequest(BaseModel):
     provider_id: str = Field(..., description="LLM provider ID to use for this session")
     model_override: Optional[str] = Field(None, description="Model to use (overrides provider default)")
     temperature_override: Optional[float] = Field(None, ge=0.0, le=2.0, description="Temperature override")
+    temperature_manual_override: Optional[bool] = Field(None, description="Explicit flag: True if user manually set temperature")
 
 
 class SessionLLMOverrideResponse(BaseModel):
@@ -1428,6 +1429,7 @@ class SessionLLMOverrideResponse(BaseModel):
     provider_type: str
     model: str
     temperature: Optional[float]
+    temperature_manual_override: Optional[bool] = None  # Explicit flag for manual override
 
 
 @router.get("/sessions/{session_id}/llm", response_model=SessionLLMOverrideResponse)
@@ -1470,6 +1472,7 @@ async def get_session_llm_override(
                     provider_type=provider.provider_type if provider else "unknown",
                     model=override.model_override or (provider.default_chat_model if provider else "default"),
                     temperature=override.temperature_override,
+                    temperature_manual_override=override.temperature_manual_override if hasattr(override, 'temperature_manual_override') else None,
                 )
 
         # No override - return default config
@@ -1481,6 +1484,7 @@ async def get_session_llm_override(
             provider_type=config.provider_type,
             model=config.model,
             temperature=config.temperature,
+            temperature_manual_override=False,  # Default config is not a manual override
         )
 
     except Exception as e:
@@ -1534,14 +1538,26 @@ async def set_session_llm_override(
                 existing.provider_id = override_data.provider_id
                 existing.model_override = override_data.model_override
                 existing.temperature_override = override_data.temperature_override
+                # Set manual override flag if temperature is being set
+                if override_data.temperature_manual_override is not None:
+                    existing.temperature_manual_override = override_data.temperature_manual_override
+                elif override_data.temperature_override is not None:
+                    # Auto-set flag if temperature is explicitly provided
+                    existing.temperature_manual_override = True
                 await db.commit()
             else:
                 # Create new
+                # Determine if temperature is manually overridden
+                temp_manual = override_data.temperature_manual_override
+                if temp_manual is None and override_data.temperature_override is not None:
+                    temp_manual = True  # Auto-set flag if temperature is explicitly provided
+
                 new_override = ChatSessionLLMOverride(
                     session_id=session_id,
                     provider_id=override_data.provider_id,
                     model_override=override_data.model_override,
                     temperature_override=override_data.temperature_override,
+                    temperature_manual_override=temp_manual,
                 )
                 db.add(new_override)
                 await db.commit()
@@ -1556,6 +1572,7 @@ async def set_session_llm_override(
                 provider_type=provider.provider_type,
                 model=override_data.model_override or provider.default_chat_model,
                 temperature=override_data.temperature_override,
+                temperature_manual_override=override_data.temperature_manual_override or (override_data.temperature_override is not None),
             )
 
     except HTTPException:

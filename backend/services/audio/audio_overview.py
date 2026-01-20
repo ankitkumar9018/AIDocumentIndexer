@@ -211,9 +211,21 @@ class AudioOverviewService(CRUDService[AudioOverview]):
                     details={"document_ids": [str(d) for d in doc_ids]},
                 )
 
-            document_contents = await self._prepare_document_contents(documents)
+            # Use RAG-enhanced content preparation with format-specific queries
+            document_contents = await self._prepare_document_contents(
+                documents,
+                format_type=overview.format,
+                use_rag=True,
+                use_knowledge_graph=True,
+            )
             total_content_length = sum(len(d.get("content", "")) for d in document_contents)
-            self.log_info("Document contents prepared", doc_count=len(document_contents), total_chars=total_content_length)
+            entity_count = sum(len(d.get("entities", [])) for d in document_contents)
+            self.log_info(
+                "Document contents prepared with RAG/KG",
+                doc_count=len(document_contents),
+                total_chars=total_content_length,
+                entities_found=entity_count,
+            )
 
             if total_content_length == 0:
                 raise ServiceException(
@@ -363,7 +375,14 @@ class AudioOverviewService(CRUDService[AudioOverview]):
             # Get documents (handle both UUID objects and strings)
             doc_ids = [did if isinstance(did, uuid.UUID) else uuid.UUID(did) for did in overview.document_ids]
             documents = await self._get_documents(doc_ids)
-            document_contents = await self._prepare_document_contents(documents)
+
+            # Use RAG-enhanced content preparation with format-specific queries
+            document_contents = await self._prepare_document_contents(
+                documents,
+                format_type=overview.format,
+                use_rag=True,
+                use_knowledge_graph=True,
+            )
 
             # Generate script with streaming
             script_generator = ScriptGenerator(
@@ -533,15 +552,43 @@ class AudioOverviewService(CRUDService[AudioOverview]):
     async def _prepare_document_contents(
         self,
         documents: List[Document],
+        format_type: str = "deep_dive",
+        use_rag: bool = True,
+        use_knowledge_graph: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Prepare document contents for script generation."""
+        """
+        Prepare document contents for script generation using RAG and optionally Knowledge Graph.
+
+        Args:
+            documents: List of documents to process
+            format_type: Audio format type (deep_dive, brief, debate, etc.)
+            use_rag: Use semantic search for content selection
+            use_knowledge_graph: Use knowledge graph for entity context
+        """
         contents = []
 
-        for doc in documents:
-            # Get document content (from chunks or stored content)
-            content = await self._get_document_text(doc)
+        # Format-specific queries for semantic search
+        format_queries = {
+            "deep_dive": ["main findings and key insights", "important details and examples", "implications and conclusions"],
+            "brief": ["executive summary", "key takeaways and highlights", "main conclusions"],
+            "debate": ["arguments supporting this view", "arguments against this view", "contrasting perspectives"],
+            "critique": ["strengths and benefits", "weaknesses and limitations", "recommendations"],
+            "lecture": ["fundamental concepts", "key principles", "practical applications"],
+            "interview": ["expert insights", "key achievements", "future directions"],
+        }
 
-            contents.append({
+        queries = format_queries.get(format_type, ["main content", "key information"])
+
+        for doc in documents:
+            if use_rag:
+                # Use RAG for semantic content selection
+                content, entities = await self._get_document_content_with_rag(doc, queries, use_knowledge_graph)
+            else:
+                # Fallback to sequential chunk reading
+                content = await self._get_document_text(doc)
+                entities = []
+
+            doc_data = {
                 "name": doc.filename or doc.title or "Untitled",
                 "content": content,
                 "summary": doc.enhanced_metadata.get("summary_short", "") if doc.enhanced_metadata else "",
@@ -550,9 +597,114 @@ class AudioOverviewService(CRUDService[AudioOverview]):
                     "word_count": doc.word_count,
                     "page_count": doc.page_count,
                 },
-            })
+            }
+
+            # Add entity context if available
+            if entities:
+                doc_data["entities"] = entities
+                # Add entity summary for script generation
+                entity_names = [e.get("name", "") for e in entities[:10]]
+                doc_data["key_entities"] = ", ".join(entity_names)
+
+            contents.append(doc_data)
 
         return contents
+
+    async def _get_document_content_with_rag(
+        self,
+        document: Document,
+        queries: List[str],
+        use_knowledge_graph: bool = True,
+    ) -> tuple[str, List[Dict[str, Any]]]:
+        """
+        Get document content using RAG semantic search and optional KG.
+
+        Returns:
+            Tuple of (content_string, entities_list)
+        """
+        try:
+            from backend.services.rag import RAGService
+
+            rag = RAGService()
+            all_chunks = []
+            chunk_ids_seen = set()
+
+            # Search for each format-specific query
+            for query in queries:
+                try:
+                    # Use RAG search with document filter
+                    results = await rag.search(
+                        query=query,
+                        top_k=5,
+                        document_ids=[str(document.id)],
+                        organization_id=str(self._organization_id) if self._organization_id else None,
+                    )
+
+                    # Deduplicate and collect chunks
+                    for result in results:
+                        chunk_id = result.get("chunk_id") or result.get("id")
+                        if chunk_id and chunk_id not in chunk_ids_seen:
+                            chunk_ids_seen.add(chunk_id)
+                            all_chunks.append({
+                                "content": result.get("content", ""),
+                                "score": result.get("score", 0.0),
+                                "query": query,
+                            })
+                except Exception as e:
+                    logger.warning(f"RAG search failed for query '{query}': {e}")
+                    continue
+
+            # Sort by relevance score and concatenate
+            all_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
+            content = "\n\n".join([c["content"] for c in all_chunks[:15]])
+
+            # Get entities from Knowledge Graph if enabled
+            entities = []
+            if use_knowledge_graph:
+                try:
+                    entities = await self._get_entities_for_document(document)
+                except Exception as e:
+                    logger.warning(f"Knowledge Graph lookup failed: {e}")
+
+            # If RAG returned nothing, fallback to sequential reading
+            if not content.strip():
+                logger.info("RAG returned no content, falling back to sequential chunks")
+                content = await self._get_document_text(document)
+
+            return content, entities
+
+        except ImportError:
+            logger.warning("RAG service not available, falling back to sequential chunks")
+            return await self._get_document_text(document), []
+        except Exception as e:
+            logger.error(f"Error in RAG content retrieval: {e}")
+            return await self._get_document_text(document), []
+
+    async def _get_entities_for_document(self, document: Document) -> List[Dict[str, Any]]:
+        """Get Knowledge Graph entities associated with a document."""
+        try:
+            from backend.services.knowledge_graph import KnowledgeGraphService
+
+            session = await self.get_session()
+            kg = KnowledgeGraphService(session)
+
+            # Get entities mentioned in this document's chunks
+            entities = await kg.find_entities_for_document(str(document.id))
+
+            return [
+                {
+                    "name": e.canonical_name,
+                    "type": e.entity_type.value if hasattr(e.entity_type, 'value') else str(e.entity_type),
+                    "aliases": e.aliases[:3] if e.aliases else [],
+                }
+                for e in entities[:15]  # Limit to top 15 entities
+            ]
+        except ImportError:
+            logger.debug("Knowledge Graph service not available")
+            return []
+        except Exception as e:
+            logger.warning(f"Error getting entities for document: {e}")
+            return []
 
     async def _get_document_text(self, document: Document) -> str:
         """Extract text content from a document."""

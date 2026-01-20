@@ -995,10 +995,19 @@ class RAGService:
         recommended_temp = sampling_config["temperature"]
 
         # Check if user has manually overridden temperature via session config
+        # Use explicit flag if available, otherwise fall back to value comparison
         has_manual_override = (
             llm_config
-            and hasattr(llm_config, 'temperature')
-            and llm_config.temperature != 0.7  # 0.7 is default, anything else is manual
+            and (
+                # Prefer explicit flag over value comparison
+                getattr(llm_config, 'temperature_manual_override', False)
+                or (
+                    # Fall back to value check (but any value counts as override if explicitly set)
+                    hasattr(llm_config, 'temperature')
+                    and llm_config.temperature is not None
+                    and getattr(llm_config, 'temperature_explicitly_set', False)
+                )
+            )
         )
 
         if has_manual_override:
@@ -1477,10 +1486,19 @@ class RAGService:
         sampling_config = _get_adaptive_sampling_config(model_name, query_intent=None)
 
         # Check if user has manually overridden temperature via session config
+        # Use explicit flag if available, otherwise fall back to value comparison
         has_manual_override = (
             llm_config
-            and hasattr(llm_config, 'temperature')
-            and llm_config.temperature != 0.7  # 0.7 is default
+            and (
+                # Prefer explicit flag over value comparison
+                getattr(llm_config, 'temperature_manual_override', False)
+                or (
+                    # Fall back to value check (but any value counts as override if explicitly set)
+                    hasattr(llm_config, 'temperature')
+                    and llm_config.temperature is not None
+                    and getattr(llm_config, 'temperature_explicitly_set', False)
+                )
+            )
         )
 
         if has_manual_override:

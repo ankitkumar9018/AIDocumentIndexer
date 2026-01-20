@@ -240,6 +240,9 @@ interface Source {
   fullContent?: string;  // Full chunk content for source viewer modal
   similarity: number;
   collection?: string;
+  // Knowledge Graph enhancements
+  fromKnowledgeGraph?: boolean;  // True if source was found via KG traversal
+  kgEntities?: string[];  // Entity names associated with this source
 }
 
 export default function ChatPage() {
@@ -367,6 +370,9 @@ export default function ChatPage() {
           fullContent: src.full_content,
           similarity: src.similarity_score ?? src.relevance_score,
           collection: src.collection,
+          // Knowledge Graph enhancements
+          fromKnowledgeGraph: src.source === "knowledge_graph" || src.from_knowledge_graph,
+          kgEntities: src.kg_entities || [],
         }));
 
         return {
@@ -475,19 +481,27 @@ export default function ChatPage() {
     }
 
     const sessionTemp = sessionLLMConfig?.temperature;
+    // Check explicit manual override flag from backend
+    const sessionManualOverride = (sessionLLMConfig as { temperature_manual_override?: boolean })?.temperature_manual_override;
 
     // Calculate optimized temperature for current model
     const optimized = calculateOptimizedTemperature(effectiveModel);
     setOptimizedTemperature(optimized);
     console.log('[Chat Temperature] Optimized temp calculated:', optimized);
 
-    // If session has a temperature set, use it (manual override)
-    if (sessionTemp !== null && sessionTemp !== undefined) {
+    // Use explicit manual override flag if available, otherwise infer from value
+    if (sessionManualOverride === true && sessionTemp !== null && sessionTemp !== undefined) {
+      // Explicit manual override - user intentionally set this temperature
+      setTemperature(sessionTemp);
+      setIsManualTemperature(true);
+      console.log('[Chat Temperature] Using explicit manual override temperature:', sessionTemp);
+    } else if (sessionTemp !== null && sessionTemp !== undefined && sessionManualOverride !== false) {
+      // Temperature set but no explicit flag - check if different from optimized (legacy behavior)
       setTemperature(sessionTemp);
       setIsManualTemperature(Math.abs(sessionTemp - optimized) > 0.01);
       console.log('[Chat Temperature] Using session temperature:', sessionTemp, 'Manual?', Math.abs(sessionTemp - optimized) > 0.01);
     } else {
-      // No session override, use optimized
+      // No session override or explicit flag is false - use optimized
       setTemperature(optimized);
       setIsManualTemperature(false);
       console.log('[Chat Temperature] Using optimized temperature:', optimized);
@@ -549,10 +563,8 @@ export default function ChatPage() {
     const newTemp = value[0];
     setTemperature(newTemp);
 
-    // Mark as manual if different from optimized
-    if (optimizedTemperature !== null) {
-      setIsManualTemperature(Math.abs(newTemp - optimizedTemperature) > 0.01);
-    }
+    // Always mark as manual override when user explicitly changes temperature
+    setIsManualTemperature(true);
 
     // Update session config if we have a session
     if (currentSessionId && sessionLLMConfig?.provider_id) {
@@ -563,6 +575,7 @@ export default function ChatPage() {
             provider_id: sessionLLMConfig.provider_id,
             model_override: sessionLLMConfig.model || undefined,
             temperature_override: newTemp,
+            temperature_manual_override: true,  // Explicit flag: user manually changed temperature
           },
         });
       } catch (error) {
@@ -571,10 +584,28 @@ export default function ChatPage() {
     }
   };
 
-  // Reset to optimized temperature
-  const resetToOptimizedTemperature = () => {
+  // Reset to optimized temperature (clears manual override)
+  const resetToOptimizedTemperature = async () => {
     if (optimizedTemperature !== null) {
-      handleTemperatureChange([optimizedTemperature]);
+      setTemperature(optimizedTemperature);
+      setIsManualTemperature(false);
+
+      // Update session config if we have a session - clear the manual override flag
+      if (currentSessionId && sessionLLMConfig?.provider_id) {
+        try {
+          await setSessionLLM.mutateAsync({
+            sessionId: currentSessionId,
+            data: {
+              provider_id: sessionLLMConfig.provider_id,
+              model_override: sessionLLMConfig.model || undefined,
+              temperature_override: optimizedTemperature,
+              temperature_manual_override: false,  // Clear manual override flag
+            },
+          });
+        } catch (error) {
+          console.error("Failed to reset temperature:", error);
+        }
+      }
     }
   };
 
@@ -913,6 +944,9 @@ export default function ChatPage() {
                     fullContent: (s.full_content as string) || (s.content as string) || "",
                     similarity: similarityValue,
                     collection: (s.collection as string) || undefined,
+                    // Knowledge Graph enhancements
+                    fromKnowledgeGraph: s.source === "knowledge_graph" || (s.from_knowledge_graph as boolean),
+                    kgEntities: (s.kg_entities as string[]) || [],
                   };
                 });
 
@@ -1070,6 +1104,9 @@ export default function ChatPage() {
             // fallback to relevance_score (RRF score ~0.01-0.03) if not available
             similarity: s.similarity_score ?? s.relevance_score,
             collection: s.collection,
+            // Knowledge Graph enhancements
+            fromKnowledgeGraph: s.source === "knowledge_graph" || s.from_knowledge_graph,
+            kgEntities: s.kg_entities || [],
           })) || [];
 
         // Update message with response including confidence
@@ -2466,14 +2503,26 @@ export default function ChatPage() {
                             return (
                               <div
                                 key={idx}
-                                className="p-3 border-b last:border-b-0 cursor-pointer hover:bg-muted/50 transition-colors"
+                                className="p-3 border-b last:border-b-0 cursor-pointer hover:bg-muted/50 transition-colors relative overflow-hidden"
                                 onClick={() => {
                                   setSourceViewerIndex(globalIndex >= 0 ? globalIndex : 0);
                                   setSourceViewerOpen(true);
                                 }}
                                 title="Click to view full content"
                               >
-                                <div className="flex items-center gap-2 mb-2">
+                                {/* Similarity indicator bar (visual representation) */}
+                                <div
+                                  className={cn(
+                                    "absolute top-0 left-0 h-1 rounded-tl",
+                                    source.similarity >= 0.8
+                                      ? "bg-green-500"
+                                      : source.similarity >= 0.5
+                                      ? "bg-yellow-500"
+                                      : "bg-red-400"
+                                  )}
+                                  style={{ width: `${Math.min(source.similarity * 100, 100)}%` }}
+                                />
+                                <div className="flex items-center gap-2 mb-2 flex-wrap mt-1">
                                   {source.pageNumber && (
                                     <Badge variant="outline" className="text-xs">
                                       Page {source.pageNumber}
@@ -2492,7 +2541,36 @@ export default function ChatPage() {
                                   >
                                     {Math.round(source.similarity * 100)}% match
                                   </Badge>
+                                  {/* Knowledge Graph indicator */}
+                                  {source.fromKnowledgeGraph && (
+                                    <Badge
+                                      variant="secondary"
+                                      className="text-xs bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                                    >
+                                      via Knowledge Graph
+                                    </Badge>
+                                  )}
                                 </div>
+                                {/* KG Entity badges */}
+                                {source.kgEntities && source.kgEntities.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 mb-2">
+                                    <span className="text-xs text-muted-foreground">Entities:</span>
+                                    {source.kgEntities.slice(0, 5).map((entity, i) => (
+                                      <Badge
+                                        key={i}
+                                        variant="outline"
+                                        className="text-xs bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300 border-blue-200 dark:border-blue-800"
+                                      >
+                                        {entity}
+                                      </Badge>
+                                    ))}
+                                    {source.kgEntities.length > 5 && (
+                                      <span className="text-xs text-muted-foreground">
+                                        +{source.kgEntities.length - 5} more
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
                                 {/* Snippet with query term highlighting - show more lines */}
                                 <p className="text-sm text-foreground/80 leading-relaxed">
                                   {highlightQueryTerms(

@@ -1231,6 +1231,7 @@ class ChatSessionLLMOverride(Base, UUIDMixin, TimestampMixin):
     )
     model_override: Mapped[Optional[str]] = mapped_column(String(100))
     temperature_override: Mapped[Optional[float]] = mapped_column(Float)
+    temperature_manual_override: Mapped[Optional[bool]] = mapped_column(Boolean, default=False)
 
     # Relationships
     session: Mapped["ChatSession"] = relationship(

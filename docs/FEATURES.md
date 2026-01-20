@@ -9,9 +9,10 @@ This guide covers the new features introduced in AIDocumentIndexer, including th
 1. [Visual Workflow Builder](#visual-workflow-builder)
 2. [Audio Overviews](#audio-overviews)
 3. [Connectors](#connectors)
-4. [LLM Gateway](#llm-gateway)
-5. [Knowledge Graph](#knowledge-graph)
-6. [Settings Presets](#settings-presets)
+4. [Web Scraper](#web-scraper)
+5. [LLM Gateway](#llm-gateway)
+6. [Knowledge Graph](#knowledge-graph)
+7. [Settings Presets](#settings-presets)
 
 ---
 
@@ -251,6 +252,73 @@ Each connector shows:
 - Last sync time
 - Number of documents synced
 - Errors encountered
+
+---
+
+## Web Scraper
+
+The Web Scraper allows you to extract content from web pages and add it to your knowledge base for RAG queries, document generation, and more.
+
+### Accessing the Web Scraper
+
+Navigate to **Dashboard > Web Scraper** to scrape web content.
+
+### Scraping Modes
+
+| Mode | Description |
+|------|-------------|
+| **Quick Scrape** | Extract content immediately without saving. Review first, then optionally save to knowledge base. |
+| **Save to Index** | Scrape and immediately index content into the RAG pipeline (embeddings + vector store + Knowledge Graph). |
+| **Scrape & Query** | Scrape a URL and immediately ask questions about the content using an LLM. |
+| **Extract Links** | Discover all links from a page for later scraping. |
+
+### Quick Scrape Workflow
+
+1. Enter a URL and click **Scrape** with "Quick Scrape" mode selected
+2. Review the scraped content in the Results panel
+3. If you want to keep the content, click **Save to Knowledge Base**
+4. The content is chunked, embedded, and indexed for future RAG queries
+
+This workflow is useful when you want to review content before committing it to your knowledge base.
+
+### Subpage Crawling
+
+Enable **Crawl Subpages** to automatically follow links and scrape multiple pages:
+
+- **Max Depth**: How many levels deep to follow links (1-10)
+- **Same Domain Only**: Only crawl pages from the same domain (recommended)
+
+### What Happens When Content is Indexed
+
+When you save scraped content (either via "Save to Index" mode or the "Save to Knowledge Base" button):
+
+1. **Chunking**: Content is split into semantic chunks (~1000 characters)
+2. **Embedding**: Each chunk is converted to a vector embedding
+3. **Vector Store**: Embeddings are indexed for semantic search
+4. **Knowledge Graph**: Entities and relationships are extracted and stored
+
+Once indexed, the content becomes searchable in:
+- Chat/RAG queries
+- Document generation (PPTX, DOCX, PDF)
+- Audio overviews
+- Workflow RAG nodes
+
+### Configuration Options
+
+| Option | Description |
+|--------|-------------|
+| `extract_links` | Extract hyperlinks from pages |
+| `extract_images` | Extract image URLs |
+| `extract_metadata` | Extract meta tags (title, description, etc.) |
+| `wait_for_js` | Wait for JavaScript to load before scraping |
+| `timeout` | Request timeout in seconds |
+
+### Best Practices
+
+1. **Review before saving**: Use Quick Scrape to preview content quality
+2. **Use subpage crawling sparingly**: Start with max_depth=2 to avoid scraping too many pages
+3. **Enable same_domain_only**: Prevents accidentally scraping unrelated sites
+4. **Check for duplicates**: The system tracks content hashes to avoid duplicate storage
 
 ---
 

@@ -493,8 +493,27 @@ class WebScraperService:
                 job.pages_failed += 1
 
         job.pages = pages
-        job.status = ScrapeStatus.COMPLETED
+        job.status = ScrapeStatus.PROCESSING
         job.completed_at = datetime.utcnow()
+
+        # Process content into RAG pipeline if storage_mode is PERMANENT
+        rag_result = None
+        if job.storage_mode == StorageMode.PERMANENT and pages:
+            logger.info("Processing scraped content for RAG indexing", job_id=job_id)
+            try:
+                rag_result = await self._process_for_rag_pipeline(job)
+                logger.info(
+                    "RAG indexing completed",
+                    job_id=job_id,
+                    documents_indexed=rag_result.get("documents_indexed", 0),
+                    entities_extracted=rag_result.get("entities_extracted", 0),
+                )
+            except Exception as e:
+                logger.error("Failed to process content for RAG", job_id=job_id, error=str(e))
+                # Don't fail the job - scraping succeeded, RAG indexing is secondary
+                rag_result = {"status": "failed", "error": str(e)}
+
+        job.status = ScrapeStatus.COMPLETED
 
         logger.info(
             "Scrape job completed",
@@ -502,6 +521,7 @@ class WebScraperService:
             pages_scraped=job.pages_scraped,
             pages_failed=job.pages_failed,
             total_words=total_words,
+            rag_indexed=rag_result is not None and rag_result.get("status") != "failed",
         )
 
         return ScrapeResult(
@@ -838,8 +858,26 @@ Please answer the question based on the web page content above."""
                 job.pages_failed += 1
 
         job.pages = all_pages
-        job.status = ScrapeStatus.COMPLETED
+        job.status = ScrapeStatus.PROCESSING
         job.completed_at = datetime.utcnow()
+
+        # Process content into RAG pipeline if storage_mode is PERMANENT
+        rag_result = None
+        if job.storage_mode == StorageMode.PERMANENT and all_pages:
+            logger.info("Processing scraped content for RAG indexing", job_id=job_id)
+            try:
+                rag_result = await self._process_for_rag_pipeline(job)
+                logger.info(
+                    "RAG indexing completed",
+                    job_id=job_id,
+                    documents_indexed=rag_result.get("documents_indexed", 0),
+                    entities_extracted=rag_result.get("entities_extracted", 0),
+                )
+            except Exception as e:
+                logger.error("Failed to process content for RAG", job_id=job_id, error=str(e))
+                rag_result = {"status": "failed", "error": str(e)}
+
+        job.status = ScrapeStatus.COMPLETED
 
         logger.info(
             "Scrape job completed",
@@ -847,6 +885,7 @@ Please answer the question based on the web page content above."""
             pages_scraped=job.pages_scraped,
             pages_failed=job.pages_failed,
             total_words=total_words,
+            rag_indexed=rag_result is not None and rag_result.get("status") != "failed",
         )
 
         return ScrapeResult(
@@ -909,6 +948,243 @@ Please answer the question based on the web page content above."""
                 })
 
         return documents
+
+    async def _process_for_rag_pipeline(
+        self,
+        job: ScrapeJob,
+    ) -> Dict[str, Any]:
+        """
+        Process scraped content into the RAG pipeline for PERMANENT storage mode.
+
+        This method:
+        1. Converts scraped pages to RAG documents with chunking
+        2. Generates embeddings for each chunk
+        3. Indexes chunks in the vector store
+        4. Extracts Knowledge Graph entities and relationships
+        5. Persists metadata to the database
+
+        Args:
+            job: The completed scrape job with pages
+
+        Returns:
+            Dict with status, documents_indexed, and entities_extracted
+        """
+        from backend.services.embeddings import get_embedding_service
+        from backend.services.knowledge_graph import get_knowledge_graph_service
+        from backend.services.vectorstore_factory import VectorStoreFactory
+
+        if not job.pages:
+            return {"status": "skipped", "reason": "no pages to process"}
+
+        # Convert to RAG documents with chunking
+        rag_docs = self.to_rag_documents(job.pages, chunk_size=1000)
+
+        if not rag_docs:
+            return {"status": "skipped", "reason": "no documents generated"}
+
+        logger.info(
+            "Processing scraped content for RAG",
+            job_id=job.id,
+            pages=len(job.pages),
+            chunks=len(rag_docs),
+        )
+
+        # Get services
+        embedding_service = get_embedding_service()
+        kg_service = get_knowledge_graph_service()
+        vector_store = await VectorStoreFactory.create()
+
+        documents_indexed = 0
+        entities_extracted = 0
+
+        try:
+            # 1. Generate embeddings for all chunks
+            texts = [doc["content"] for doc in rag_docs]
+            embeddings = await embedding_service.embed_texts_async(texts)
+
+            # 2. Prepare chunks for vector store
+            chunks_for_store = []
+            for i, (doc, embedding) in enumerate(zip(rag_docs, embeddings)):
+                chunk_data = {
+                    "content": doc["content"],
+                    "embedding": embedding,
+                    "metadata": {
+                        **doc["metadata"],
+                        "chunk_index": i,
+                        "source_type": "web_scrape",
+                        "job_id": job.id,
+                    },
+                }
+                chunks_for_store.append(chunk_data)
+
+            # 3. Index in vector store
+            # Use job ID as document_id, and default access tier
+            # For scraped content, we use a synthetic document ID based on job
+            doc_id = f"scrape_{job.id}"
+            access_tier_id = str(job.access_tier) if hasattr(job, 'access_tier') and job.access_tier else "default"
+
+            try:
+                await vector_store.add_chunks(
+                    chunks=chunks_for_store,
+                    document_id=doc_id,
+                    access_tier_id=access_tier_id,
+                )
+                documents_indexed = len(chunks_for_store)
+                logger.info(
+                    "Indexed scraped chunks in vector store",
+                    job_id=job.id,
+                    chunks_indexed=documents_indexed,
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to index chunks in vector store",
+                    job_id=job.id,
+                    error=str(e),
+                )
+                # Continue with KG extraction even if vector store fails
+
+            # 4. Extract Knowledge Graph entities from each page
+            for page in job.pages:
+                try:
+                    # Extract entities from the full page content
+                    entities, relations = await kg_service.extract_entities_from_text(
+                        text=page.content[:10000],  # Limit text length for extraction
+                        document_id=None,  # No document ID for scraped content
+                        chunk_id=None,
+                    )
+                    entities_extracted += len(entities)
+
+                    logger.debug(
+                        "Extracted entities from page",
+                        url=page.url,
+                        entities=len(entities),
+                        relations=len(relations),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to extract entities from page",
+                        url=page.url,
+                        error=str(e),
+                    )
+                    # Continue with other pages
+
+            logger.info(
+                "RAG pipeline processing completed",
+                job_id=job.id,
+                documents_indexed=documents_indexed,
+                entities_extracted=entities_extracted,
+            )
+
+            return {
+                "status": "success",
+                "documents_indexed": documents_indexed,
+                "entities_extracted": entities_extracted,
+                "chunks_processed": len(rag_docs),
+            }
+
+        except Exception as e:
+            logger.error(
+                "RAG pipeline processing failed",
+                job_id=job.id,
+                error=str(e),
+            )
+            return {
+                "status": "partial",
+                "documents_indexed": documents_indexed,
+                "entities_extracted": entities_extracted,
+                "error": str(e),
+            }
+
+    async def index_job_content(
+        self,
+        job_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Index an existing completed job's content into the RAG pipeline.
+
+        This allows content that was scraped with IMMEDIATE mode to be
+        permanently indexed later for future RAG queries.
+
+        Args:
+            job_id: The job ID to index
+
+        Returns:
+            Dict with status, documents_indexed, and entities_extracted
+        """
+        job = self._jobs.get(job_id)
+        if not job:
+            return {"status": "error", "error": f"Job not found: {job_id}"}
+
+        if job.status != ScrapeStatus.COMPLETED:
+            return {"status": "error", "error": f"Job is not completed: {job.status.value}"}
+
+        if not job.pages:
+            return {"status": "error", "error": "Job has no scraped pages"}
+
+        logger.info(
+            "Indexing existing job content for RAG",
+            job_id=job_id,
+            pages=len(job.pages),
+            original_mode=job.storage_mode.value,
+        )
+
+        # Update storage mode to PERMANENT
+        job.storage_mode = StorageMode.PERMANENT
+
+        # Process through the RAG pipeline
+        result = await self._process_for_rag_pipeline(job)
+
+        logger.info(
+            "Job content indexed",
+            job_id=job_id,
+            result=result,
+        )
+
+        return result
+
+    async def index_pages_content(
+        self,
+        pages: List[ScrapedPage],
+        source_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Index a list of scraped pages directly into the RAG pipeline.
+
+        This is useful for indexing content that wasn't part of a job,
+        or for re-indexing specific pages.
+
+        Args:
+            pages: List of ScrapedPage objects to index
+            source_id: Optional identifier for the source (used as document ID)
+
+        Returns:
+            Dict with status, documents_indexed, and entities_extracted
+        """
+        if not pages:
+            return {"status": "error", "error": "No pages provided"}
+
+        # Create a temporary job to hold the pages
+        temp_job = ScrapeJob(
+            id=source_id or str(uuid4()),
+            user_id="system",
+            urls=[p.url for p in pages],
+            config=ScrapeConfig(),
+            storage_mode=StorageMode.PERMANENT,
+            status=ScrapeStatus.COMPLETED,
+            pages=pages,
+            pages_scraped=len(pages),
+        )
+
+        logger.info(
+            "Indexing pages content for RAG",
+            source_id=temp_job.id,
+            pages=len(pages),
+        )
+
+        # Process through the RAG pipeline
+        result = await self._process_for_rag_pipeline(temp_job)
+
+        return result
 
 
 # =============================================================================

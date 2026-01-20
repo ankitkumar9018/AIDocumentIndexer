@@ -910,16 +910,37 @@ class NodeExecutor:
             return {"status": "error", "error": str(e)}
 
     async def _action_run_query(self, params: Dict, context: "ExecutionContext") -> Dict:
-        """Run a RAG query."""
+        """Run a RAG query with full parameter support."""
         try:
             from backend.services.rag import RAGService
             rag = RAGService()
             query = params.get("query", "")
-            result = await rag.query(
-                query=query,
-                organization_id=str(context.organization_id) if context.organization_id else None,
-            )
-            return {"status": "success", "answer": result.get("answer"), "sources": result.get("sources", [])}
+
+            # Build RAG query kwargs with all supported parameters
+            rag_kwargs = {
+                "query": query,
+                "organization_id": str(context.organization_id) if context.organization_id else None,
+            }
+
+            # Pass through top_k if specified
+            if params.get("top_k"):
+                rag_kwargs["top_k"] = params.get("top_k")
+
+            # Pass through folder_filter if specified
+            if params.get("folder_filter"):
+                rag_kwargs["folder_filter"] = params.get("folder_filter")
+
+            # Pass through enable_knowledge_graph if specified
+            if "enable_kg" in params:
+                rag_kwargs["enable_knowledge_graph"] = params.get("enable_kg", True)
+
+            result = await rag.query(**rag_kwargs)
+            return {
+                "status": "success",
+                "answer": result.get("answer"),
+                "sources": result.get("sources", []),
+                "kg_entities": result.get("kg_entities", []),  # Include KG entities if available
+            }
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -2140,22 +2161,49 @@ class NodeExecutor:
             return {"status": "error", "error": str(e)}
 
     async def _run_rag_agent(self, agent_def, agent_input: Dict, context: "ExecutionContext") -> Dict:
-        """Run a RAG-based agent."""
+        """Run a RAG-based agent with full agent definition support."""
         try:
             from backend.services.rag import RAGService
             rag = RAGService()
 
             query = agent_input.get("prompt") or agent_input.get("query", "")
-            result = await rag.query(
-                query=query,
-                organization_id=str(context.organization_id) if context.organization_id else None,
-            )
+
+            # Extract RAG configuration from agent definition
+            agent_config = agent_def.config if hasattr(agent_def, 'config') and agent_def.config else {}
+
+            # Build RAG query kwargs from agent definition
+            rag_kwargs = {
+                "query": query,
+                "organization_id": str(context.organization_id) if context.organization_id else None,
+            }
+
+            # Apply agent-specific RAG settings
+            if agent_config.get("top_k"):
+                rag_kwargs["top_k"] = agent_config.get("top_k")
+
+            if agent_config.get("folder_filter"):
+                rag_kwargs["folder_filter"] = agent_config.get("folder_filter")
+
+            # KG settings from agent config
+            if "enable_knowledge_graph" in agent_config:
+                rag_kwargs["enable_knowledge_graph"] = agent_config.get("enable_knowledge_graph", True)
+
+            if agent_config.get("kg_max_hops"):
+                rag_kwargs["knowledge_graph_max_hops"] = agent_config.get("kg_max_hops")
+
+            # Query enhancement settings
+            if "enable_query_expansion" in agent_config:
+                rag_kwargs["enable_query_expansion"] = agent_config.get("enable_query_expansion", False)
+
+            result = await rag.query(**rag_kwargs)
 
             return {
                 "status": "success",
                 "answer": result.get("answer"),
                 "sources": result.get("sources", []),
+                "kg_entities": result.get("kg_entities", []),
                 "agent_type": "rag",
+                "agent_name": agent_def.name if hasattr(agent_def, 'name') else None,
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}

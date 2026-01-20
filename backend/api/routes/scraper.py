@@ -412,6 +412,80 @@ async def scrape_url_immediate(
         )
 
 
+class IndexPagesRequest(BaseModel):
+    """Request to index scraped pages directly."""
+    pages: List[dict] = Field(..., description="List of scraped page objects to index")
+    source_id: Optional[str] = Field(None, description="Optional source identifier")
+
+
+@router.post("/index-pages", response_model=IndexJobResponse)
+async def index_pages_directly(
+    request: IndexPagesRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Index scraped pages directly into the RAG pipeline.
+
+    This allows content from a quick scrape (immediate mode) to be
+    permanently indexed without creating a full scrape job first.
+    """
+    from datetime import datetime as dt
+
+    logger.info(
+        "Indexing pages directly",
+        user_id=user.user_id,
+        pages_count=len(request.pages),
+    )
+
+    if not request.pages:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No pages provided",
+        )
+
+    service = get_scraper_service()
+
+    # Convert dict pages to ScrapedPage objects
+    scraped_pages = []
+    for page_data in request.pages:
+        scraped_pages.append(ScrapedPage(
+            url=page_data.get("url", ""),
+            title=page_data.get("title", ""),
+            content=page_data.get("content", ""),
+            metadata=page_data.get("metadata", {}),
+            word_count=page_data.get("word_count", 0),
+            scraped_at=dt.fromisoformat(page_data["scraped_at"]) if page_data.get("scraped_at") else dt.utcnow(),
+        ))
+
+    try:
+        result = await service.index_pages_content(
+            pages=scraped_pages,
+            source_id=request.source_id,
+        )
+
+        if result.get("status") == "error":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.get("error", "Failed to index content"),
+            )
+
+        return IndexJobResponse(
+            status=result.get("status", "success"),
+            documents_indexed=result.get("documents_indexed", 0),
+            entities_extracted=result.get("entities_extracted", 0),
+            chunks_processed=result.get("chunks_processed", 0),
+            error=result.get("error"),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to index pages", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to index content: {str(e)}",
+        )
+
+
 @router.post("/scrape-and-query")
 async def scrape_and_query(
     request: ScrapeAndQueryRequest,
@@ -596,6 +670,80 @@ async def extract_links(
         "links": links,
         "count": len(links),
     }
+
+
+class IndexJobResponse(BaseModel):
+    """Response for indexing a job's content."""
+    status: str
+    documents_indexed: int = 0
+    entities_extracted: int = 0
+    chunks_processed: int = 0
+    error: Optional[str] = None
+
+
+@router.post("/jobs/{job_id}/index", response_model=IndexJobResponse)
+async def index_job_content(
+    job_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Index an existing completed job's content into the RAG pipeline.
+
+    This allows content that was scraped with 'immediate' mode to be
+    permanently indexed later for future RAG queries. The content will be:
+    - Chunked and embedded
+    - Indexed in the vector store
+    - Processed for Knowledge Graph entity extraction
+
+    Use this endpoint when you want to save previously scraped content
+    for future searches.
+    """
+    logger.info(
+        "Indexing job content",
+        job_id=job_id,
+        user_id=user.user_id,
+    )
+
+    service = get_scraper_service()
+
+    job = service.get_job(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job not found: {job_id}",
+        )
+
+    # Verify ownership
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    try:
+        result = await service.index_job_content(job_id)
+
+        if result.get("status") == "error":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.get("error", "Failed to index content"),
+            )
+
+        return IndexJobResponse(
+            status=result.get("status", "success"),
+            documents_indexed=result.get("documents_indexed", 0),
+            entities_extracted=result.get("entities_extracted", 0),
+            chunks_processed=result.get("chunks_processed", 0),
+            error=result.get("error"),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to index job content", job_id=job_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to index content: {str(e)}",
+        )
 
 
 @router.get("/jobs/{job_id}/documents")
