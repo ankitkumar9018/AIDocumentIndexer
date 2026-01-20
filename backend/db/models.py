@@ -872,6 +872,10 @@ class ChatMessage(Base, UUIDMixin):
     tokens_used: Mapped[Optional[int]] = mapped_column(Integer)
     latency_ms: Mapped[Optional[int]] = mapped_column(Integer)
 
+    # Response quality metrics
+    confidence_score: Mapped[Optional[float]] = mapped_column(Float)
+    confidence_level: Mapped[Optional[str]] = mapped_column(String(20))  # high, medium, low
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

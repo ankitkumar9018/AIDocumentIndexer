@@ -115,6 +115,8 @@ async def save_chat_messages(
     sources: Optional[List[dict]] = None,
     model_used: Optional[str] = None,
     tokens_used: Optional[int] = None,
+    confidence_score: Optional[float] = None,
+    confidence_level: Optional[str] = None,
 ):
     """Save user and assistant messages to the database."""
     try:
@@ -138,22 +140,18 @@ async def save_chat_messages(
                 source_chunks=sources,
                 model_used=model_used,
                 tokens_used=tokens_used,
+                confidence_score=confidence_score,
+                confidence_level=confidence_level,
             )
             db.add(assistant_msg)
 
-            # Update session title if it's the first message
+            # Update session title if it's still the default
             session_query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
             result = await db.execute(session_query)
             session = result.scalar_one()
 
-            # Check message count - if this is the first exchange, generate title from user message
-            msg_count_query = select(func.count(ChatMessageModel.id)).where(
-                ChatMessageModel.session_id == session_id
-            )
-            count_result = await db.execute(msg_count_query)
-            msg_count = count_result.scalar() or 0
-
-            if msg_count == 0 and session.title == "New Conversation":
+            # Generate title from first user message if title is still default
+            if session.title in ("New Conversation", "New Chat", None):
                 # Generate title from first user message (truncate to 50 chars)
                 new_title = user_message[:50] + "..." if len(user_message) > 50 else user_message
                 session.title = new_title
@@ -184,6 +182,8 @@ class ChatMessage(BaseModel):
     """Single chat message."""
     role: str = Field(..., pattern="^(user|assistant|system)$")
     content: str
+    confidence_score: Optional[float] = None
+    confidence_level: Optional[str] = None
 
 
 class ChatSource(BaseModel):
@@ -688,6 +688,8 @@ async def create_chat_completion(
                     sources=source_data,
                     model_used=response.model,
                     tokens_used=response.tokens_used,
+                    confidence_score=response.confidence_score,
+                    confidence_level=response.confidence_level,
                 )
 
             return ChatResponse(
@@ -1102,14 +1104,24 @@ async def get_session(
             # Convert messages to response format
             messages = []
             sources = {}
-            for msg in sorted(session.messages, key=lambda m: m.created_at):
+            for index, msg in enumerate(sorted(session.messages, key=lambda m: m.created_at)):
                 messages.append(ChatMessage(
                     role=msg.role.value,
                     content=msg.content,
+                    confidence_score=msg.confidence_score if hasattr(msg, 'confidence_score') else None,
+                    confidence_level=msg.confidence_level if hasattr(msg, 'confidence_level') else None,
                 ))
-                # Include sources if available
+                # Include sources if available (keyed by message index for frontend)
                 if msg.source_chunks:
-                    sources[str(msg.id)] = msg.source_chunks
+                    # Handle both JSON string and parsed list
+                    import json
+                    chunks = msg.source_chunks
+                    if isinstance(chunks, str):
+                        try:
+                            chunks = json.loads(chunks)
+                        except json.JSONDecodeError:
+                            chunks = []
+                    sources[str(index)] = chunks
 
             return SessionMessagesResponse(
                 session_id=session_id,

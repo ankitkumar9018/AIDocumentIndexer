@@ -375,8 +375,8 @@ export default function ChatPage() {
           content: msg.content,
           timestamp: new Date(),
           sources: transformedSources.length > 0 ? transformedSources : undefined,
-          // Note: confidenceScore, isAgentResponse, executionSteps etc. are not persisted
-          // to the database, so they won't be available when loading from history
+          confidenceScore: msg.confidence_score,
+          confidenceLevel: msg.confidence_level as "high" | "medium" | "low" | undefined,
         };
       });
       setMessages(loadedMessages);

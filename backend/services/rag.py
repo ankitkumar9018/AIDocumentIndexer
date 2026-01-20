@@ -213,6 +213,11 @@ class SearchResultCache:
         results: List[Any],
     ) -> None:
         """Cache search results."""
+        # Don't cache empty results - they might be due to temporary issues
+        if not results:
+            logger.debug("Skipping cache for empty results", query_preview=query[:50])
+            return
+
         # Evict oldest entries if at capacity
         if len(self._cache) >= self._max_size:
             # Remove oldest entry
