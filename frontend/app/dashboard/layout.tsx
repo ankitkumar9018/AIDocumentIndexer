@@ -31,6 +31,7 @@ import {
   Building2,
   Lock,
   Download,
+  Database,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -49,6 +50,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useUser, logout } from "@/lib/auth";
+import { ErrorBoundary } from "@/components/ui/error-recovery";
 
 const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
@@ -59,6 +61,7 @@ const navigation = [
   { name: "Workflows", href: "/dashboard/workflows", icon: GitBranch },
   { name: "Audio", href: "/dashboard/audio", icon: Headphones },
   { name: "Connectors", href: "/dashboard/connectors", icon: Link2 },
+  { name: "Database Query", href: "/dashboard/database", icon: Database },
   { name: "Collaboration", href: "/dashboard/collaboration", icon: Sparkles },
   { name: "Knowledge Graph", href: "/dashboard/knowledge-graph", icon: Network },
   { name: "Web Scraper", href: "/dashboard/scraper", icon: Globe },
@@ -85,6 +88,7 @@ const pageTitles: Record<string, string> = {
   "/dashboard/workflows": "Workflows",
   "/dashboard/audio": "Audio Overviews",
   "/dashboard/connectors": "Connectors",
+  "/dashboard/database": "Database Query",
   "/dashboard/collaboration": "Collaboration",
   "/dashboard/knowledge-graph": "Knowledge Graph",
   "/dashboard/scraper": "Web Scraper",
@@ -297,7 +301,14 @@ export default function DashboardLayout({
 
         {/* Page Content */}
         <main className="flex-1 p-4 lg:p-6 overflow-x-hidden">
-          {children}
+          <ErrorBoundary
+            onError={(error, errorInfo) => {
+              console.error("Dashboard Error:", error, errorInfo);
+              // TODO: Send to Sentry when configured
+            }}
+          >
+            {children}
+          </ErrorBoundary>
         </main>
       </div>
 

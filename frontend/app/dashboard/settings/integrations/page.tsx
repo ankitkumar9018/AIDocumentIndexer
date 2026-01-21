@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Plus,
   Trash2,
@@ -133,6 +133,14 @@ export default function IntegrationsSettingsPage() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [selectedConnection, setSelectedConnection] = useState<BotConnection | null>(null);
   const [showToken, setShowToken] = useState(false);
+
+  // SSR-safe origin
+  const [origin, setOrigin] = useState("");
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setOrigin(origin);
+    }
+  }, []);
 
   // Manual setup form state
   const [manualPlatform, setManualPlatform] = useState<BotPlatform>("slack");
@@ -533,7 +541,7 @@ export default function IntegrationsSettingsPage() {
                   <Label>Events Webhook URL</Label>
                   <div className="flex items-center gap-2">
                     <Input
-                      value={`${window.location.origin}/api/v1/bots/slack/events`}
+                      value={`${origin}/api/v1/bots/slack/events`}
                       readOnly
                       className="text-sm"
                     />
@@ -541,7 +549,7 @@ export default function IntegrationsSettingsPage() {
                       variant="outline"
                       size="icon"
                       onClick={() =>
-                        copyToClipboard(`${window.location.origin}/api/v1/bots/slack/events`)
+                        copyToClipboard(`${origin}/api/v1/bots/slack/events`)
                       }
                     >
                       <Copy className="h-4 w-4" />
@@ -555,7 +563,7 @@ export default function IntegrationsSettingsPage() {
                   <Label>Commands Webhook URL</Label>
                   <div className="flex items-center gap-2">
                     <Input
-                      value={`${window.location.origin}/api/v1/bots/slack/commands`}
+                      value={`${origin}/api/v1/bots/slack/commands`}
                       readOnly
                       className="text-sm"
                     />
@@ -563,7 +571,7 @@ export default function IntegrationsSettingsPage() {
                       variant="outline"
                       size="icon"
                       onClick={() =>
-                        copyToClipboard(`${window.location.origin}/api/v1/bots/slack/commands`)
+                        copyToClipboard(`${origin}/api/v1/bots/slack/commands`)
                       }
                     >
                       <Copy className="h-4 w-4" />

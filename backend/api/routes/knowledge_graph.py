@@ -1101,6 +1101,7 @@ class StartExtractionJobRequest(BaseModel):
     """Request to start an extraction job."""
     only_new_documents: bool = True
     document_ids: Optional[List[str]] = None
+    provider_id: Optional[str] = None  # Optional LLM provider override for extraction
 
 
 class ExtractionJobResponse(BaseModel):
@@ -1181,10 +1182,11 @@ async def start_extraction_job(
 
         # Create new job
         job = await service.create_job(
-            user_id=uuid.UUID(user.id),
+            user_id=uuid.UUID(user.user_id),
             organization_id=org_id,
             only_new_documents=request.only_new_documents,
             document_ids=request.document_ids,
+            provider_id=request.provider_id,
         )
 
         # Start the job in background
@@ -1193,7 +1195,7 @@ async def start_extraction_job(
         logger.info(
             "Started KG extraction job",
             job_id=str(job.id),
-            user_id=user.id,
+            user_id=user.user_id,
             only_new=request.only_new_documents,
         )
 

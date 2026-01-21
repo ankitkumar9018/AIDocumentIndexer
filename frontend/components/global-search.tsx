@@ -74,7 +74,7 @@ export function GlobalSearch({ open, onOpenChange }: GlobalSearchProps) {
     const timer = setTimeout(async () => {
       setIsLoading(true);
       try {
-        const token = localStorage.getItem("auth_token");
+        const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
         const response = await fetch(
           `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/documents/search?query=${encodeURIComponent(query)}&limit=10`,
           {

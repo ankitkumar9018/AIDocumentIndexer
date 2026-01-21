@@ -19,12 +19,15 @@ import {
   RefreshCw,
   Layers,
   Database,
+  AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
+import { useValidation } from "@/lib/validations/use-validation";
+import { urlSchema } from "@/lib/validations";
 import {
   Card,
   CardContent,
@@ -59,6 +62,9 @@ export default function ScraperPage() {
   const [crawlSubpages, setCrawlSubpages] = useState(false);
   const [maxDepth, setMaxDepth] = useState(2);
   const [sameDomainOnly, setSameDomainOnly] = useState(true);
+
+  // URL validation
+  const { validate: validateUrl, error: urlError, clearError: clearUrlError } = useValidation(urlSchema);
 
   // Queries - only fetch when authenticated
   const { data: jobs, isLoading: jobsLoading, refetch: refetchJobs } = useScrapeJobs(undefined, 50, { enabled: isAuthenticated });
@@ -101,7 +107,9 @@ export default function ScraperPage() {
   };
 
   const handleScrape = async () => {
-    if (!url) return;
+    // Validate URL before proceeding
+    const urlResult = validateUrl(url);
+    if (!urlResult.success) return;
 
     // Reset index result when starting a new scrape
     setImmediateIndexResult(null);
@@ -244,21 +252,32 @@ export default function ScraperPage() {
           </div>
 
           {/* URL Input */}
-          <div className="flex gap-2">
-            <Input
-              placeholder="https://example.com/page"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              className="flex-1"
-            />
-            <Button onClick={handleScrape} disabled={!url || isLoading}>
-              {isLoading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Play className="h-4 w-4" />
-              )}
-              <span className="ml-2">Scrape</span>
-            </Button>
+          <div className="space-y-2">
+            <div className="flex gap-2">
+              <Input
+                placeholder="https://example.com/page"
+                value={url}
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  clearUrlError();
+                }}
+                className={`flex-1 ${urlError ? "border-red-500 focus-visible:ring-red-500" : ""}`}
+              />
+              <Button onClick={handleScrape} disabled={!url || isLoading}>
+                {isLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
+                <span className="ml-2">Scrape</span>
+              </Button>
+            </div>
+            {urlError && (
+              <p className="text-sm text-red-500 flex items-center gap-1">
+                <AlertCircle className="h-3 w-3" />
+                {urlError}
+              </p>
+            )}
           </div>
 
           {/* Query Input (for query mode) */}

@@ -62,20 +62,14 @@ async def get_db_user_id(db, user_id: str, user_email: str = None) -> UUID:
         if user:
             db_user_id = user.id
 
-    # If still no user, use the user with highest access tier level as fallback
+    # SECURITY: Do NOT fall back to admin user - this would be privilege escalation
+    # If no valid user found, return None and let the caller handle it appropriately
     if not db_user_id:
-        from backend.db.models import AccessTier
-        admin_query = (
-            select(User)
-            .join(AccessTier, User.access_tier_id == AccessTier.id)
-            .where(User.is_active == True)
-            .order_by(AccessTier.level.desc())
-            .limit(1)
+        logger.warning(
+            "Could not find user in database",
+            user_id=user_id,
+            user_email=user_email,
         )
-        admin_result = await db.execute(admin_query)
-        admin_user = admin_result.scalar_one_or_none()
-        if admin_user:
-            db_user_id = admin_user.id
 
     return db_user_id
 
@@ -117,8 +111,13 @@ async def save_chat_messages(
     tokens_used: Optional[int] = None,
     confidence_score: Optional[float] = None,
     confidence_level: Optional[str] = None,
-):
-    """Save user and assistant messages to the database."""
+) -> bool:
+    """
+    Save user and assistant messages to the database.
+
+    Returns:
+        True if messages were saved successfully, False otherwise.
+    """
     try:
         async with async_session_context() as db:
             # Ensure session exists
@@ -148,19 +147,21 @@ async def save_chat_messages(
             # Update session title if it's still the default
             session_query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
             result = await db.execute(session_query)
-            session = result.scalar_one()
+            session = result.scalar_one_or_none()
 
             # Generate title from first user message if title is still default
-            if session.title in ("New Conversation", "New Chat", None):
+            if session and session.title in ("New Conversation", "New Chat", None):
                 # Generate title from first user message (truncate to 50 chars)
                 new_title = user_message[:50] + "..." if len(user_message) > 50 else user_message
                 session.title = new_title
 
             await db.commit()
             logger.info("Saved chat messages", session_id=str(session_id))
+            return True
 
     except Exception as e:
         logger.error("Failed to save chat messages", error=str(e), session_id=str(session_id))
+        return False
 
 # Initialize RAG service
 _rag_service: Optional[RAGService] = None
@@ -218,7 +219,7 @@ class ImageAttachment(BaseModel):
 
 class ChatRequest(BaseModel):
     """Chat completion request."""
-    message: str
+    message: str = Field(..., min_length=1, max_length=100000, description="The user's message (max 100,000 characters)")
     session_id: Optional[UUID] = None
     include_sources: bool = True
     max_sources: int = Field(default=5, ge=1, le=20)
@@ -257,6 +258,16 @@ class ChatRequest(BaseModel):
         return filters[0] if filters else None
 
 
+class ContextSufficiencyInfo(BaseModel):
+    """Context sufficiency check result for UI display."""
+    is_sufficient: bool
+    coverage_score: float  # 0-1
+    has_conflicts: bool
+    missing_aspects: List[str] = []
+    confidence_level: str  # "high", "medium", "low"
+    explanation: str = ""
+
+
 class ChatResponse(BaseModel):
     """Chat completion response."""
     session_id: UUID
@@ -271,6 +282,8 @@ class ChatResponse(BaseModel):
     confidence_warning: Optional[str] = None
     # Suggested follow-up questions
     suggested_questions: Optional[List[str]] = None
+    # Context sufficiency check result (Phase 2 enhancement)
+    context_sufficiency: Optional[ContextSufficiencyInfo] = None
 
 
 class ChatStreamChunk(BaseModel):
@@ -692,6 +705,18 @@ async def create_chat_completion(
                     confidence_level=response.confidence_level,
                 )
 
+            # Convert context sufficiency result to API format
+            context_sufficiency_info = None
+            if response.context_sufficiency:
+                context_sufficiency_info = ContextSufficiencyInfo(
+                    is_sufficient=response.context_sufficiency.is_sufficient,
+                    coverage_score=response.context_sufficiency.coverage_score,
+                    has_conflicts=response.context_sufficiency.has_conflicts,
+                    missing_aspects=response.context_sufficiency.missing_aspects,
+                    confidence_level=response.context_sufficiency.confidence_level,
+                    explanation=response.context_sufficiency.explanation,
+                )
+
             return ChatResponse(
                 session_id=session_id,
                 message_id=message_id,
@@ -702,6 +727,7 @@ async def create_chat_completion(
                 confidence_level=response.confidence_level,
                 confidence_warning=response.confidence_warning if response.confidence_warning else None,
                 suggested_questions=response.suggested_questions if response.suggested_questions else None,
+                context_sufficiency=context_sufficiency_info,
             )
 
     except Exception as e:
@@ -1049,20 +1075,28 @@ async def list_sessions(
             result = await db.execute(sessions_query)
             sessions = result.scalars().all()
 
-            # Build response with message counts
+            # Get message counts for all sessions in a single query (avoid N+1)
+            session_ids = [s.id for s in sessions]
+            msg_counts_dict = {}
+            if session_ids:
+                msg_counts_query = (
+                    select(
+                        ChatMessageModel.session_id,
+                        func.count(ChatMessageModel.id).label("count")
+                    )
+                    .where(ChatMessageModel.session_id.in_(session_ids))
+                    .group_by(ChatMessageModel.session_id)
+                )
+                msg_counts_result = await db.execute(msg_counts_query)
+                msg_counts_dict = {row.session_id: row.count for row in msg_counts_result}
+
+            # Build response with pre-fetched message counts
             session_responses = []
             for session in sessions:
-                # Get message count for this session
-                msg_count_query = select(func.count(ChatMessageModel.id)).where(
-                    ChatMessageModel.session_id == session.id
-                )
-                msg_result = await db.execute(msg_count_query)
-                message_count = msg_result.scalar() or 0
-
                 session_responses.append(SessionResponse(
                     id=session.id,
                     title=session.title or "New Conversation",
-                    message_count=message_count,
+                    message_count=msg_counts_dict.get(session.id, 0),
                     created_at=session.created_at,
                     updated_at=session.updated_at,
                 ))

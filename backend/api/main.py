@@ -250,6 +250,10 @@ def create_app() -> FastAPI:
     # Register exception handlers (standardized error responses)
     register_app_exception_handlers(app)
 
+    # Initialize monitoring (Sentry + Prometheus)
+    from backend.core.monitoring import init_monitoring
+    init_monitoring(app)
+
     return app
 
 
@@ -306,6 +310,7 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.audio import router as audio_router
     from backend.api.routes.bots import router as bots_router
     from backend.api.routes.connectors import router as connectors_router
+    from backend.api.routes.database import router as database_router
     from backend.api.routes.gateway import router as gateway_router
     from backend.api.routes.privacy import router as privacy_router
     from backend.api.routes.llm_config import router as llm_config_router
@@ -329,6 +334,7 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(audio_router, prefix="/api/v1/audio", tags=["Audio Overviews"])
     app.include_router(bots_router, prefix="/api/v1/bots", tags=["Bot Integrations"])
     app.include_router(connectors_router, prefix="/api/v1/connectors", tags=["Connectors"])
+    app.include_router(database_router, prefix="/api/v1/database", tags=["Database Connectors"])
     app.include_router(gateway_router, prefix="/api/v1/gateway", tags=["LLM Gateway"])
     app.include_router(privacy_router, prefix="/api/v1/privacy", tags=["Privacy Controls"])
     app.include_router(llm_config_router, prefix="/api/v1/llm", tags=["LLM Configuration"])

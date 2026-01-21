@@ -100,6 +100,7 @@ import { TempDocumentPanel } from "@/components/chat/temp-document-panel";
 import { ImageUploadCompact, ImagePreviewBar } from "@/components/chat/image-upload";
 import { FolderSelector } from "@/components/folder-selector";
 import { QueryEnhancementToggle } from "@/components/chat/query-enhancement-toggle";
+import { ContextSufficiencyIndicator } from "@/components/chat/context-sufficiency-indicator";
 import { api, type PlanStep, type ExecutionMode } from "@/lib/api/client";
 
 /**
@@ -213,6 +214,16 @@ interface ImageAttachment {
   preview: string;
 }
 
+// Context sufficiency information from the API
+interface ContextSufficiency {
+  is_sufficient: boolean;
+  coverage_score: number;  // 0-1
+  has_conflicts: boolean;
+  missing_aspects: string[];
+  confidence_level: "high" | "medium" | "low";
+  explanation: string;
+}
+
 interface Message {
   id: string;
   role: "user" | "assistant";
@@ -224,6 +235,7 @@ interface Message {
   confidenceScore?: number;  // 0-1 confidence score
   confidenceLevel?: "high" | "medium" | "low";  // Confidence level
   suggestedQuestions?: string[];  // Follow-up question suggestions
+  contextSufficiency?: ContextSufficiency;  // Context sufficiency check result
   // Agent mode specific fields
   isAgentResponse?: boolean;  // Whether this is from agent mode
   planningDetails?: string;  // Planning phase summary
@@ -510,16 +522,20 @@ export default function ChatPage() {
 
   // Load query enhancement preference from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem("chat_enhance_query");
-    if (saved !== null) {
-      setEnhanceQuery(JSON.parse(saved));
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("chat_enhance_query");
+      if (saved !== null) {
+        setEnhanceQuery(JSON.parse(saved));
+      }
     }
   }, []);
 
   // Handler for query enhancement toggle
   const handleEnhanceQueryChange = (enabled: boolean) => {
     setEnhanceQuery(enabled);
-    localStorage.setItem("chat_enhance_query", JSON.stringify(enabled));
+    if (typeof window !== "undefined") {
+      localStorage.setItem("chat_enhance_query", JSON.stringify(enabled));
+    }
   };
 
   // Helper to get temperature description
@@ -645,7 +661,9 @@ export default function ChatPage() {
 
   // Navigate to document detail page
   const handleSourceClick = (documentId: string) => {
-    window.open(`/dashboard/documents/${documentId}`, '_blank');
+    if (typeof window !== "undefined") {
+      window.open(`/dashboard/documents/${documentId}`, '_blank');
+    }
   };
 
   // Temp document handlers
@@ -1109,7 +1127,7 @@ export default function ChatPage() {
             kgEntities: s.kg_entities || [],
           })) || [];
 
-        // Update message with response including confidence
+        // Update message with response including confidence and context sufficiency
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
@@ -1121,6 +1139,7 @@ export default function ChatPage() {
                   isGeneralResponse: response.is_general_response,
                   confidenceScore: response.confidence_score,
                   confidenceLevel: response.confidence_level as "high" | "medium" | "low" | undefined,
+                  contextSufficiency: response.context_sufficiency || undefined,
                 }
               : m
           )
@@ -1980,6 +1999,13 @@ export default function ChatPage() {
                             <Brain className="h-3 w-3 mr-1" />
                             General
                           </Button>
+                        )}
+                        {/* Context Sufficiency Indicator */}
+                        {message.contextSufficiency && (
+                          <ContextSufficiencyIndicator
+                            sufficiency={message.contextSufficiency}
+                            className="ml-1"
+                          />
                         )}
                         {/* Confidence Indicator */}
                         {message.confidenceLevel && (() => {

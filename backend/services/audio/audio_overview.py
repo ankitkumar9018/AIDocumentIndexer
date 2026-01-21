@@ -271,9 +271,10 @@ class AudioOverviewService(CRUDService[AudioOverview]):
             )
 
             # Build voice configs from script speakers, using user-selected voices from host_config
+            # Use 'or' to handle both missing keys AND explicit None values
             host_config = overview.host_config or {}
-            host1_voice = host_config.get("host1_voice", "alloy")
-            host2_voice = host_config.get("host2_voice", "echo")
+            host1_voice = host_config.get("host1_voice") or "alloy"
+            host2_voice = host_config.get("host2_voice") or "echo"
 
             # PHASE 12: Debug logging for voice selection troubleshooting
             logger.info(
@@ -289,13 +290,15 @@ class AudioOverviewService(CRUDService[AudioOverview]):
             speaker_voices = {}
             for speaker in script.speakers:
                 # Map speaker ID to user-selected voice
-                # PHASE 12 FIX: Handle both standard (host1/host2) and interview (interviewer/expert) formats
-                if speaker["id"] in ["host1", "interviewer"]:
+                # Handle all format types: standard (host1/host2), interview (interviewer/expert),
+                # and lecture (lecturer) - all primary speakers should use host1_voice
+                if speaker["id"] in ["host1", "interviewer", "lecturer"]:
                     voice_id = host1_voice
                 elif speaker["id"] in ["host2", "expert"]:
                     voice_id = host2_voice
                 else:
-                    voice_id = speaker.get("voice", "alloy")
+                    # Fallback for any other speaker IDs - use speaker's configured voice or default
+                    voice_id = speaker.get("voice") or "alloy"
 
                 logger.debug(f"Mapping speaker {speaker['id']} to voice {voice_id}")
 
@@ -418,8 +421,9 @@ class AudioOverviewService(CRUDService[AudioOverview]):
                 }
 
             # Get voice configuration from host_config or use defaults
-            host1_voice = host_config.get("host1_voice", "alloy")
-            host2_voice = host_config.get("host2_voice", "echo")
+            # Use 'or' to handle both missing keys AND explicit None values
+            host1_voice = host_config.get("host1_voice") or "alloy"
+            host2_voice = host_config.get("host2_voice") or "echo"
 
             # PHASE 12 FIX: Build speakers list based on format type
             # Interview format uses "interviewer" and "expert" as speaker IDs
@@ -472,18 +476,20 @@ class AudioOverviewService(CRUDService[AudioOverview]):
                 default_provider=tts_provider,
             )
 
-            # PHASE 12 FIX: Build speaker_voices dynamically from script.speakers
-            # This handles all formats including interview (interviewer/expert)
+            # Build speaker_voices dynamically from script.speakers
+            # Handle all format types: standard (host1/host2), interview (interviewer/expert),
+            # and lecture (lecturer) - all primary speakers should use host1_voice
             speaker_voices = {}
             for speaker in script.speakers:
                 speaker_id = speaker["id"]
                 # Map to user-selected voice based on speaker position
-                if speaker_id in ["host1", "interviewer"]:
+                if speaker_id in ["host1", "interviewer", "lecturer"]:
                     voice_id = host1_voice
                 elif speaker_id in ["host2", "expert"]:
                     voice_id = host2_voice
                 else:
-                    voice_id = speaker.get("voice", "alloy")
+                    # Fallback for any other speaker IDs - use speaker's configured voice or default
+                    voice_id = speaker.get("voice") or "alloy"
 
                 speaker_voices[speaker_id] = VoiceConfig(
                     provider=tts_provider,

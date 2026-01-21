@@ -2,6 +2,7 @@
 # AIDocumentIndexer Backend - Dockerfile
 # =============================================================================
 # Multi-stage build for optimized production image
+# Security hardened with non-root user and minimal attack surface
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -18,14 +19,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Install Python dependencies to a dedicated location
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # -----------------------------------------------------------------------------
-# Stage 2: Runtime
+# Stage 2: Runtime (Production)
 # -----------------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
+
+# Security: Create non-root user early
+ARG UID=1000
+ARG GID=1000
+RUN groupadd --gid ${GID} appuser && \
+    useradd --uid ${UID} --gid ${GID} --shell /bin/bash --create-home appuser
 
 WORKDIR /app
 
@@ -44,29 +51,60 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # For file type detection
     file \
     libmagic1 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # Security: Remove unnecessary packages
+    && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false
 
 # Copy Python packages from builder
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+COPY --from=builder /install /usr/local
+ENV PATH=/usr/local/bin:$PATH
 
 # Copy application code
-COPY backend/ /app/backend/
+COPY --chown=appuser:appuser backend/ /app/backend/
 
-# Create storage and model directories
+# Create storage and model directories with correct ownership
 RUN mkdir -p /app/storage /app/data/paddle_models && \
-    chown -R root:root /app/data
+    chown -R appuser:appuser /app
 
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
+# Security: Prevent Python from writing bytecode to disk
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Security: Drop all capabilities except networking
+# Note: This is enforced at runtime via docker-compose or kubernetes
 
 # Expose port
 EXPOSE 8000
+
+# Security: Switch to non-root user
+USER appuser
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application
-CMD ["uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application with limited workers
+CMD ["uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
+# -----------------------------------------------------------------------------
+# Stage 3: Development (with dev tools, still non-root)
+# -----------------------------------------------------------------------------
+FROM runtime AS development
+
+# Switch back to root to install dev dependencies
+USER root
+
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-asyncio \
+    pytest-cov \
+    black \
+    ruff \
+    mypy
+
+# Switch back to non-root
+USER appuser
+
+CMD ["uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

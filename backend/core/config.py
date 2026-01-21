@@ -116,6 +116,14 @@ class Settings(BaseSettings):
     ENABLE_CONNECTORS: bool = Field(default=True, description="Enable external data connectors")
     ENABLE_LLM_GATEWAY: bool = Field(default=True, description="Enable LLM gateway with budget control")
 
+    # ==========================================================================
+    # Monitoring & Observability
+    # ==========================================================================
+    SENTRY_DSN: str = Field(default="", description="Sentry DSN for error tracking")
+    SENTRY_TRACES_SAMPLE_RATE: float = Field(default=0.1, description="Sentry traces sample rate (0.0-1.0)")
+    SENTRY_PROFILES_SAMPLE_RATE: float = Field(default=0.1, description="Sentry profiles sample rate (0.0-1.0)")
+    ENABLE_METRICS: bool = Field(default=True, description="Enable Prometheus metrics endpoint")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

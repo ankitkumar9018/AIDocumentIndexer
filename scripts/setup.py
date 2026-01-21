@@ -870,13 +870,36 @@ def setup_node_environment(project_root: Path) -> bool:
         logger.error(f"Frontend directory not found: {frontend_dir}")
         return False
 
-    logger.info("Installing Node.js dependencies...")
-    code, stdout, stderr = run_command(
-        ['npm', 'install'],
-        cwd=str(frontend_dir),
-        check=False,
-        timeout=300
-    )
+    # Check if node_modules exists and package-lock.json is newer
+    node_modules = frontend_dir / 'node_modules'
+    package_lock = frontend_dir / 'package-lock.json'
+
+    if node_modules.exists() and package_lock.exists():
+        # Use npm ci for faster, cleaner installs when lock file exists
+        logger.info("Installing Node.js dependencies (npm ci)...")
+        code, stdout, stderr = run_command(
+            ['npm', 'ci'],
+            cwd=str(frontend_dir),
+            check=False,
+            timeout=300
+        )
+        if code != 0:
+            # Fallback to npm install if ci fails
+            logger.debug("npm ci failed, falling back to npm install...")
+            code, stdout, stderr = run_command(
+                ['npm', 'install'],
+                cwd=str(frontend_dir),
+                check=False,
+                timeout=300
+            )
+    else:
+        logger.info("Installing Node.js dependencies (npm install)...")
+        code, stdout, stderr = run_command(
+            ['npm', 'install'],
+            cwd=str(frontend_dir),
+            check=False,
+            timeout=300
+        )
 
     if code != 0:
         logger.error(f"npm install failed: {stderr}")

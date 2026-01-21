@@ -262,6 +262,8 @@ class ScriptGenerator(BaseService):
                     speaker["name"] = host1_name
                 elif speaker["id"] == "expert" and host2_name:
                     speaker["name"] = host2_name
+                elif speaker["id"] == "lecturer" and host1_name:
+                    speaker["name"] = host1_name
 
         # Build document context
         doc_context = self._build_document_context(document_contents)
@@ -331,6 +333,8 @@ class ScriptGenerator(BaseService):
                     speaker["name"] = host1_name
                 elif speaker["id"] == "expert" and host2_name:
                     speaker["name"] = host2_name
+                elif speaker["id"] == "lecturer" and host1_name:
+                    speaker["name"] = host1_name
 
         doc_context = self._build_document_context(document_contents)
 

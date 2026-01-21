@@ -523,6 +523,59 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         description="Enable dynamic vector/keyword weighting based on query intent"
     ),
 
+    # Contextual Chunking (Anthropic's contextual retrieval approach)
+    SettingDefinition(
+        key="rag.contextual_chunking_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable contextual chunking (49-67% reduction in failed retrievals)"
+    ),
+    SettingDefinition(
+        key="rag.context_generation_provider",
+        category=SettingCategory.RAG,
+        default_value="ollama",
+        value_type=ValueType.STRING,
+        description="LLM provider for context generation (ollama, openai)"
+    ),
+    SettingDefinition(
+        key="rag.context_generation_model",
+        category=SettingCategory.RAG,
+        default_value="llama3.2",
+        value_type=ValueType.STRING,
+        description="Model for generating chunk contexts"
+    ),
+
+    # Context Sufficiency (Hallucination Prevention)
+    SettingDefinition(
+        key="rag.context_sufficiency_threshold",
+        category=SettingCategory.RAG,
+        default_value=0.5,
+        value_type=ValueType.NUMBER,
+        description="Minimum coverage score to consider context sufficient (0-1)"
+    ),
+    SettingDefinition(
+        key="rag.abstention_threshold",
+        category=SettingCategory.RAG,
+        default_value=0.3,
+        value_type=ValueType.NUMBER,
+        description="Coverage below this triggers 'I don't know' response (0-1)"
+    ),
+    SettingDefinition(
+        key="rag.enable_abstention",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Allow system to say 'I don't know' when context is insufficient"
+    ),
+    SettingDefinition(
+        key="rag.conflict_detection_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Detect conflicting information across sources"
+    ),
+
     # OCR Configuration
     SettingDefinition(
         key="ocr.provider",

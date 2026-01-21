@@ -32,6 +32,8 @@ import {
   StopCircle,
   Clock,
   AlertCircle,
+  AlertTriangle,
+  ChevronDown,
 } from "lucide-react";
 
 // Dynamically import WebGL graph to avoid SSR issues
@@ -77,6 +79,7 @@ import {
   useCancelExtractionJob,
   usePauseExtractionJob,
   useResumeExtractionJob,
+  useLLMProviders,
   knowledgeGraphQueryKeys,
   api,
   type EntityResponse,
@@ -522,6 +525,8 @@ function ExtractionJobPanel({
   isPausing: boolean;
   isResuming: boolean;
 }) {
+  const [showErrors, setShowErrors] = useState(false);
+
   const formatTime = (seconds: number | null) => {
     if (!seconds) return null;
     if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -529,7 +534,31 @@ function ExtractionJobPanel({
     return `${Math.round(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m`;
   };
 
+  const formatRelativeTime = (isoString: string | null | undefined) => {
+    if (!isoString) return null;
+    const date = new Date(isoString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+
+    if (diffSec < 60) return `${diffSec}s ago`;
+    if (diffMin < 60) return `${diffMin}m ago`;
+    return `${Math.floor(diffMin / 60)}h ${diffMin % 60}m ago`;
+  };
+
+  // Detect if job might be stuck (no activity for 5+ minutes while running)
+  const isStuck = (() => {
+    if (job.status !== "running") return false;
+    if (!job.last_activity_at) return false;
+    const lastActivity = new Date(job.last_activity_at).getTime();
+    const now = Date.now();
+    const minutesSinceActivity = (now - lastActivity) / 1000 / 60;
+    return minutesSinceActivity > 5;
+  })();
+
   const getStatusColor = (status: string) => {
+    if (isStuck) return "bg-orange-500"; // Override for stuck jobs
     switch (status) {
       case "running":
         return "bg-blue-500";
@@ -537,6 +566,8 @@ function ExtractionJobPanel({
         return "bg-yellow-500";
       case "completed":
         return "bg-green-500";
+      case "completed_with_errors":
+        return "bg-yellow-600";
       case "cancelled":
         return "bg-gray-500";
       case "failed":
@@ -545,6 +576,9 @@ function ExtractionJobPanel({
         return "bg-gray-400";
     }
   };
+
+  // Calculate total done (processed + failed)
+  const totalDone = job.processed_documents + job.failed_documents;
 
   return (
     <Card className="border-primary/20 bg-primary/5">
@@ -558,7 +592,7 @@ function ExtractionJobPanel({
             variant="outline"
             className={`${getStatusColor(job.status)} text-white border-0`}
           >
-            {job.status}
+            {isStuck ? "stuck?" : job.status}
           </Badge>
         </div>
       </CardHeader>
@@ -567,7 +601,9 @@ function ExtractionJobPanel({
           <div className="flex justify-between text-sm">
             <span>Progress</span>
             <span className="font-medium">
-              {job.processed_documents}/{job.total_documents} documents
+              {job.processed_documents} completed
+              {job.failed_documents > 0 && `, ${job.failed_documents} failed`}
+              {" / "}{job.total_documents} total
             </span>
           </div>
           <Progress value={job.progress_percent} className="h-2" />
@@ -589,19 +625,58 @@ function ExtractionJobPanel({
             <span className="text-muted-foreground">Relations:</span>
             <span className="font-medium">{job.total_relations}</span>
           </div>
-          {job.failed_documents > 0 && (
-            <div className="flex items-center gap-1 text-red-500">
-              <AlertCircle className="h-3 w-3" />
-              <span>{job.failed_documents} failed</span>
+          {job.last_activity_at && (
+            <div className="flex items-center gap-1 col-span-2">
+              <Clock className="h-3 w-3 text-muted-foreground" />
+              <span className="text-muted-foreground">
+                Last activity: {formatRelativeTime(job.last_activity_at)}
+              </span>
             </div>
           )}
-          {job.estimated_remaining_seconds && job.status === "running" && (
-            <div className="flex items-center gap-1">
+          {job.estimated_remaining_seconds && job.status === "running" && !isStuck && (
+            <div className="flex items-center gap-1 col-span-2">
               <Clock className="h-3 w-3 text-muted-foreground" />
               <span>~{formatTime(job.estimated_remaining_seconds)} remaining</span>
             </div>
           )}
         </div>
+
+        {/* Stuck job warning */}
+        {isStuck && (
+          <div className="mt-2 p-2 bg-orange-500/10 rounded text-xs text-orange-600 dark:text-orange-400">
+            <div className="flex items-center gap-1">
+              <AlertTriangle className="h-3 w-3" />
+              <span className="font-medium">Job may be stuck</span>
+            </div>
+            <p className="mt-1 text-muted-foreground">
+              No progress for over 5 minutes. Consider cancelling and restarting.
+            </p>
+          </div>
+        )}
+
+        {/* Error summary with expandable details */}
+        {job.error_count > 0 && (
+          <div className="mt-2">
+            <button
+              onClick={() => setShowErrors(!showErrors)}
+              className="flex items-center gap-1 text-xs text-red-500 hover:text-red-600"
+            >
+              <AlertCircle className="h-3 w-3" />
+              <span>{job.error_count} error{job.error_count > 1 ? "s" : ""}</span>
+              <ChevronDown className={`h-3 w-3 transition-transform ${showErrors ? "rotate-180" : ""}`} />
+            </button>
+            {showErrors && job.errors && job.errors.length > 0 && (
+              <div className="mt-1 p-2 bg-red-500/10 rounded text-xs max-h-24 overflow-y-auto">
+                {job.errors.map((err: { doc_id?: string; doc_name?: string; error: string }, i: number) => (
+                  <div key={i} className="text-red-600 dark:text-red-400 mb-1">
+                    <span className="font-medium">{err.doc_name || err.doc_id}:</span>{" "}
+                    {err.error.length > 100 ? `${err.error.slice(0, 100)}...` : err.error}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {(job.can_cancel || job.can_pause || job.can_resume) && (
           <div className="flex gap-2 pt-2">
@@ -672,6 +747,7 @@ export default function KnowledgeGraphPage() {
   const [isCleaning, setIsCleaning] = useState(false);
   const [use3DView, setUse3DView] = useState(false);
   const [onlyNewDocs, setOnlyNewDocs] = useState(true);
+  const [selectedProvider, setSelectedProvider] = useState<string>("default");
 
   // Knowledge Graph Queries
   const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useKnowledgeGraphStats({
@@ -710,6 +786,11 @@ export default function KnowledgeGraphPage() {
     enabled: isAuthenticated,
   });
 
+  // LLM Providers for extraction
+  const { data: llmProviders } = useLLMProviders({
+    enabled: isAuthenticated,
+  });
+
   // Extraction Job Mutations
   const startExtractionMutation = useStartExtractionJob();
   const cancelExtractionMutation = useCancelExtractionJob();
@@ -737,6 +818,7 @@ export default function KnowledgeGraphPage() {
     try {
       const result = await startExtractionMutation.mutateAsync({
         only_new_documents: onlyNewDocs,
+        provider_id: selectedProvider !== "default" ? selectedProvider : undefined,
       });
 
       if (result.status === "already_running") {
@@ -858,6 +940,23 @@ export default function KnowledgeGraphPage() {
                   Only new documents
                 </label>
               </div>
+              {/* LLM Provider Selector */}
+              <Select value={selectedProvider} onValueChange={setSelectedProvider}>
+                <SelectTrigger className="w-[180px]">
+                  <Cpu className="h-4 w-4 mr-2" />
+                  <SelectValue placeholder="Select LLM" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">Default Provider</SelectItem>
+                  {llmProviders?.providers
+                    ?.filter((p: { is_active: boolean }) => p.is_active)
+                    .map((provider: { id: string; name: string; provider_type: string }) => (
+                      <SelectItem key={provider.id} value={provider.id}>
+                        {provider.name} ({provider.provider_type})
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
               <Button
                 variant="default"
                 onClick={handleStartExtraction}

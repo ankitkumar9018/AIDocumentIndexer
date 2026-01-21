@@ -9,10 +9,12 @@ This guide covers the new features introduced in AIDocumentIndexer, including th
 1. [Visual Workflow Builder](#visual-workflow-builder)
 2. [Audio Overviews](#audio-overviews)
 3. [Connectors](#connectors)
-4. [Web Scraper](#web-scraper)
-5. [LLM Gateway](#llm-gateway)
-6. [Knowledge Graph](#knowledge-graph)
-7. [Settings Presets](#settings-presets)
+4. [Database Connector](#database-connector)
+5. [Web Scraper](#web-scraper)
+6. [LLM Gateway](#llm-gateway)
+7. [Knowledge Graph](#knowledge-graph)
+8. [Contextual Chunking](#contextual-chunking)
+9. [Settings Presets](#settings-presets)
 
 ---
 
@@ -252,6 +254,170 @@ Each connector shows:
 - Last sync time
 - Number of documents synced
 - Errors encountered
+
+---
+
+## Database Connector
+
+The Database Connector allows you to connect to external databases (PostgreSQL, MySQL, MongoDB, SQLite) and query them using natural language. An LLM translates your questions into SQL (or MongoDB aggregations), executes the query safely, and returns results with explanations.
+
+### Accessing Database Connector
+
+Navigate to **Dashboard > Connectors > Database** or use the database page directly.
+
+### Supported Databases
+
+| Database | Driver | Features |
+|----------|--------|----------|
+| PostgreSQL | asyncpg | Full schema introspection, JSON support |
+| MySQL | aiomysql | Full schema introspection |
+| MongoDB | motor | Collection introspection, aggregation pipelines |
+| SQLite | aiosqlite | File-based databases |
+
+### Connecting to a Database
+
+1. Click **Add Connection** in the Database Connector section
+2. Select the database type (PostgreSQL, MySQL, SQLite)
+3. Enter connection details:
+   - **Name**: A friendly name for this connection
+   - **Host**: Database server hostname (e.g., `localhost`, `db.example.com`)
+   - **Port**: Database port (default: 5432 for PostgreSQL, 3306 for MySQL)
+   - **Database**: Database name
+   - **Username**: Database user
+   - **Password**: Database password (stored encrypted)
+   - **SSL Mode** (PostgreSQL): `disable`, `require`, `verify-ca`, `verify-full`
+4. Click **Test Connection** to verify connectivity
+5. Click **Save** to store the connection
+
+### Querying with Natural Language
+
+Once connected, you can ask questions in plain English:
+
+**Example Questions:**
+- "Show me all customers from Germany"
+- "What are the top 10 products by revenue?"
+- "How many orders were placed last month?"
+- "List employees who joined in 2024"
+- "What's the average order value by country?"
+
+**How It Works:**
+
+1. **Schema Introspection**: The system reads your database schema (tables, columns, types, relationships)
+2. **Query Generation**: An LLM generates a SQL query based on your question and schema
+3. **Validation**: The query is validated for safety (only SELECT queries allowed)
+4. **Execution**: The query runs with a timeout and row limit
+5. **Results**: Data is returned in a table format with an explanation
+
+### Query Interface
+
+The query interface shows:
+
+| Tab | Content |
+|-----|---------|
+| **Results** | Data table with sorting and filtering |
+| **SQL** | Generated SQL query with syntax highlighting |
+| **Explanation** | Natural language explanation of what the query does |
+
+### Safety Features
+
+All queries are validated for security:
+
+- **Read-only**: Only SELECT queries are allowed
+- **No DDL**: DROP, CREATE, ALTER statements are blocked
+- **No DML**: INSERT, UPDATE, DELETE statements are blocked
+- **Timeout**: Queries timeout after configurable seconds (default: 30s)
+- **Row Limit**: Maximum rows returned (default: 1000)
+- **Credential Encryption**: Passwords are encrypted at rest
+
+### Query History
+
+Click **History** to see past queries with:
+- Natural language question asked
+- Generated SQL
+- Execution time
+- Row count
+- Feedback rating (if provided)
+
+### Feedback & Few-Shot Learning
+
+You can rate query results with thumbs up/down. Good examples are stored for few-shot learning, improving future query generation accuracy.
+
+### Configuration
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `DATABASE_CONNECTOR_MAX_ROWS` | Maximum rows returned | 1000 |
+| `DATABASE_CONNECTOR_TIMEOUT` | Query timeout in seconds | 30 |
+| `DATABASE_CONNECTOR_CACHE_ENABLED` | Cache repeated queries | true |
+
+### API Endpoints
+
+```
+POST   /api/v1/database/connections           # Create connection
+GET    /api/v1/database/connections           # List connections
+GET    /api/v1/database/connections/{id}      # Get connection details
+DELETE /api/v1/database/connections/{id}      # Delete connection
+POST   /api/v1/database/connections/{id}/test # Test connectivity
+GET    /api/v1/database/connections/{id}/schema # Get database schema
+POST   /api/v1/database/connections/{id}/query  # Natural language query
+GET    /api/v1/database/connections/{id}/history # Query history
+POST   /api/v1/database/history/{id}/feedback   # Submit feedback
+```
+
+### Example: Querying a PostgreSQL Database
+
+```bash
+# 1. Create a connection
+curl -X POST http://localhost:8000/api/v1/database/connections \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Production DB",
+    "connector_type": "postgresql",
+    "host": "db.example.com",
+    "port": 5432,
+    "database": "myapp",
+    "username": "readonly_user",
+    "password": "secret",
+    "ssl_mode": "require"
+  }'
+
+# 2. Test the connection
+curl -X POST http://localhost:8000/api/v1/database/connections/{id}/test \
+  -H "Authorization: Bearer $TOKEN"
+
+# 3. Query with natural language
+curl -X POST http://localhost:8000/api/v1/database/connections/{id}/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "What are the top 5 customers by total order value?",
+    "execute": true,
+    "explain": true
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "natural_language_query": "What are the top 5 customers by total order value?",
+  "generated_sql": "SELECT c.name, SUM(o.total) as total_value FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.id, c.name ORDER BY total_value DESC LIMIT 5",
+  "explanation": "This query joins the customers and orders tables, sums the order totals for each customer, and returns the top 5 customers ranked by their total order value.",
+  "query_result": {
+    "success": true,
+    "columns": ["name", "total_value"],
+    "rows": [
+      ["Acme Corp", 125000.00],
+      ["TechStart Inc", 98500.00],
+      ...
+    ],
+    "row_count": 5,
+    "execution_time_ms": 45
+  },
+  "confidence": 0.85
+}
+```
 
 ---
 
@@ -566,6 +732,73 @@ The knowledge graph handles LLM unavailability gracefully:
 - If Ollama is not running, entity extraction is skipped (not crashed)
 - Cloud LLM providers can be used as fallback
 - Existing entities remain accessible
+
+---
+
+## Contextual Chunking
+
+Contextual chunking implements Anthropic's contextual retrieval approach, which achieves **49-67% reduction in failed retrievals** compared to traditional chunking.
+
+### How It Works
+
+Traditional chunking splits documents into pieces without context. When you search for information, the chunk might contain the answer but lack the context needed to understand it fully.
+
+Contextual chunking solves this by:
+1. **Taking each chunk** from a document
+2. **Generating a brief context** (50-100 words) using an LLM
+3. **Prepending the context** to the chunk before embedding
+
+**Example:**
+
+Without contextual chunking:
+> "The company reported $12.5M in revenue for Q3."
+
+With contextual chunking:
+> "This excerpt is from Acme Corp's Q3 2024 earnings report, discussing financial performance. The company reported $12.5M in revenue for Q3."
+
+### Enabling Contextual Chunking
+
+Navigate to **Dashboard > Settings > RAG** and enable:
+- **Contextual Chunking**: Toggle to enable
+- **Context Provider**: Choose `ollama` (free) or `openai`
+- **Context Model**: Model to generate contexts (e.g., `llama3.2`)
+
+Or via environment variables:
+```bash
+CONTEXTUAL_CHUNKING_ENABLED=true
+CONTEXT_GENERATION_PROVIDER=ollama
+CONTEXT_GENERATION_MODEL=llama3.2
+```
+
+### Performance Considerations
+
+| Aspect | Impact |
+|--------|--------|
+| **Indexing Time** | 2-5x longer (LLM call per chunk) |
+| **Embedding Size** | ~20% larger (context added) |
+| **Retrieval Quality** | 49-67% fewer failed retrievals |
+| **Cost** | Free with Ollama, ~$0.001/chunk with OpenAI |
+
+### When to Use
+
+**Recommended for:**
+- Technical documentation where context matters
+- Legal/compliance documents with specific terminology
+- Research papers with domain-specific concepts
+- Any corpus where chunks lack standalone context
+
+**May skip for:**
+- Simple Q&A datasets
+- Short documents where chunks have natural context
+- Real-time indexing requirements
+
+### Configuration
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.contextual_chunking_enabled` | Enable contextual enhancement | `false` |
+| `rag.context_generation_provider` | LLM provider | `ollama` |
+| `rag.context_generation_model` | Model for context generation | `llama3.2` |
 
 ---
 

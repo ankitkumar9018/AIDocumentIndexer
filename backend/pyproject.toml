@@ -27,6 +27,8 @@ dependencies = [
     "pgvector>=0.2.4",
     "greenlet>=3.0.0",
     "aiosqlite>=0.19.0",
+    "aiomysql>=0.2.0",
+    "sqlparse>=0.4.4",
     # LLM & RAG (pinned to 0.3.x for stability)
     "langchain>=0.3.0,<1.0.0",
     "langchain-community>=0.3.0,<1.0.0",
@@ -92,6 +94,9 @@ dependencies = [
     "unidecode>=1.4.0",
     "edge-tts>=7.2.7",
     "hnswlib>=0.8.0",
+    "sentry-sdk[fastapi]>=1.40.0",
+    "prometheus-client>=0.19.0",
+    "motor>=3.3.0",
 ]
 
 [project.optional-dependencies]

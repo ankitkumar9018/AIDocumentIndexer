@@ -7,9 +7,12 @@ Endpoints for web scraping and content extraction.
 
 from datetime import datetime
 from typing import Optional, List
+from urllib.parse import urlparse
+import ipaddress
+import socket
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 import structlog
 
 from backend.api.middleware.auth import AuthenticatedUser
@@ -26,6 +29,95 @@ from backend.services.scraper import (
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+
+# =============================================================================
+# SSRF Protection
+# =============================================================================
+
+def is_internal_ip(ip_str: str) -> bool:
+    """Check if an IP address is internal/private."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return (
+            ip.is_private or
+            ip.is_loopback or
+            ip.is_link_local or
+            ip.is_multicast or
+            ip.is_reserved or
+            ip.is_unspecified
+        )
+    except ValueError:
+        return False
+
+
+def validate_url_for_ssrf(url: str) -> str:
+    """
+    Validate URL to prevent SSRF attacks.
+
+    Blocks:
+    - Internal IP addresses (10.x.x.x, 172.16.x.x, 192.168.x.x, 127.x.x.x)
+    - Localhost variants
+    - File:// and other dangerous protocols
+    - Cloud metadata endpoints
+
+    Returns the URL if valid, raises ValueError otherwise.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        raise ValueError(f"Invalid URL format: {url}")
+
+    # Only allow http and https
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Only HTTP/HTTPS URLs are allowed, got: {parsed.scheme}")
+
+    # Get hostname
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL must have a valid hostname")
+
+    # Block localhost variants
+    localhost_patterns = [
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "[::1]",
+        "0177.0.0.1",  # Octal
+        "2130706433",  # Decimal
+        "0x7f000001",  # Hex
+    ]
+    hostname_lower = hostname.lower()
+    if hostname_lower in localhost_patterns or hostname_lower.startswith("127."):
+        raise ValueError("Localhost URLs are not allowed")
+
+    # Block cloud metadata endpoints (AWS, GCP, Azure)
+    metadata_hostnames = [
+        "169.254.169.254",  # AWS/GCP metadata
+        "metadata.google.internal",
+        "metadata.google.com",
+        "100.100.100.200",  # Alibaba Cloud
+    ]
+    if hostname_lower in metadata_hostnames:
+        raise ValueError("Cloud metadata endpoints are not allowed")
+
+    # Try to resolve hostname and check if it resolves to internal IP
+    try:
+        # Get all IP addresses for the hostname
+        resolved_ips = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for result in resolved_ips:
+            ip_str = result[4][0]
+            if is_internal_ip(ip_str):
+                raise ValueError(f"URL resolves to internal IP address: {ip_str}")
+    except socket.gaierror:
+        # Could not resolve hostname - that's okay, might be valid external domain
+        pass
+    except ValueError:
+        # Re-raise our validation errors
+        raise
+
+    return url
 
 
 # =============================================================================
@@ -56,11 +148,29 @@ class CreateScrapeJobRequest(BaseModel):
     max_depth: int = Field(default=2, ge=1, le=5, description="Maximum depth for subpage crawling")
     same_domain_only: bool = Field(default=True, description="Only crawl links from the same domain")
 
+    @field_validator('urls')
+    @classmethod
+    def validate_urls(cls, v: List[str]) -> List[str]:
+        """Validate all URLs for SSRF protection."""
+        validated = []
+        for url in v:
+            try:
+                validated.append(validate_url_for_ssrf(url))
+            except ValueError as e:
+                raise ValueError(f"Invalid URL '{url}': {e}")
+        return validated
+
 
 class ScrapeUrlRequest(BaseModel):
     """Request to scrape a single URL immediately."""
     url: str = Field(..., description="URL to scrape")
     config: Optional[ScrapeConfigRequest] = None
+
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate URL for SSRF protection."""
+        return validate_url_for_ssrf(v)
 
 
 class ScrapeAndQueryRequest(BaseModel):
@@ -68,6 +178,12 @@ class ScrapeAndQueryRequest(BaseModel):
     url: str = Field(..., description="URL to scrape")
     query: str = Field(..., min_length=3, description="Query to answer using scraped content")
     config: Optional[ScrapeConfigRequest] = None
+
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate URL for SSRF protection."""
+        return validate_url_for_ssrf(v)
 
 
 class ScrapedPageResponse(BaseModel):
@@ -104,6 +220,15 @@ class ScrapeJobListResponse(BaseModel):
     """List of scrape jobs."""
     jobs: List[ScrapeJobResponse]
     total: int
+
+
+class IndexJobResponse(BaseModel):
+    """Response for indexing a job's content."""
+    status: str
+    documents_indexed: int = 0
+    entities_extracted: int = 0
+    chunks_processed: int = 0
+    error: Optional[str] = None
 
 
 # =============================================================================
@@ -670,15 +795,6 @@ async def extract_links(
         "links": links,
         "count": len(links),
     }
-
-
-class IndexJobResponse(BaseModel):
-    """Response for indexing a job's content."""
-    status: str
-    documents_indexed: int = 0
-    entities_extracted: int = 0
-    chunks_processed: int = 0
-    error: Optional[str] = None
 
 
 @router.post("/jobs/{job_id}/index", response_model=IndexJobResponse)

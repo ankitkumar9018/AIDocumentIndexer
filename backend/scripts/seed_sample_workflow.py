@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
 # Configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./aidocindexer.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///backend/data/aidocindexer.db")
 
 # Convert to async URL if needed
 if DATABASE_URL.startswith("sqlite:///"):

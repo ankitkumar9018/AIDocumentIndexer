@@ -18,12 +18,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import Document, Chunk, KGExtractionJob, ProcessingStatus
 from backend.services.knowledge_graph import KnowledgeGraphService
+from backend.db.database import get_async_session_factory
+from backend.api.websocket import (
+    notify_kg_extraction_started,
+    notify_kg_extraction_progress,
+    notify_kg_extraction_complete,
+)
 
 logger = structlog.get_logger(__name__)
 
 
 # Global registry of running jobs (for cancellation)
 _running_jobs: Dict[str, "KGExtractionJobRunner"] = {}
+_running_jobs_lock = asyncio.Lock()
+
+# Pause configuration
+MAX_PAUSE_DURATION_SECONDS = 3600  # 1 hour max pause
+PAUSE_CHECK_INTERVAL = 5  # Check every 5 seconds instead of 1
 
 
 class KGExtractionJobRunner:
@@ -39,10 +50,12 @@ class KGExtractionJobRunner:
         job_id: uuid.UUID,
         db_session: AsyncSession,
         organization_id: Optional[uuid.UUID] = None,
+        provider_id: Optional[str] = None,
     ):
         self.job_id = job_id
         self.db = db_session
         self.organization_id = organization_id
+        self.provider_id = provider_id
         self._cancelled = False
         self._paused = False
 
@@ -53,13 +66,15 @@ class KGExtractionJobRunner:
             logger.error("Job not found", job_id=str(self.job_id))
             return
 
-        # Register for cancellation
-        _running_jobs[str(self.job_id)] = self
+        # Register for cancellation (thread-safe)
+        async with _running_jobs_lock:
+            _running_jobs[str(self.job_id)] = self
 
         try:
             # Update status to running
             job.status = "running"
             job.started_at = datetime.now(timezone.utc)
+            job.last_activity_at = datetime.now(timezone.utc)  # Initial heartbeat
             await self.db.commit()
 
             # Get documents to process
@@ -78,6 +93,14 @@ class KGExtractionJobRunner:
             processing_times: List[float] = []
 
             for i, doc in enumerate(documents):
+                # Refresh job from DB to check for external pause/cancel requests
+                # This handles cases where pause/cancel was set via DB when runner wasn't in registry
+                await self.db.refresh(job)
+                if job.status == "paused":
+                    self._paused = True
+                elif job.status == "cancelled":
+                    self._cancelled = True
+
                 # Check for cancellation
                 if self._cancelled:
                     job.status = "cancelled"
@@ -86,21 +109,47 @@ class KGExtractionJobRunner:
                     logger.info("Job cancelled", job_id=str(self.job_id))
                     return
 
-                # Check for pause
+                # Check for pause (with max duration to prevent infinite loop)
+                pause_start = time.time()
+                pause_committed = False
                 while self._paused and not self._cancelled:
-                    job.status = "paused"
-                    await self.db.commit()
-                    await asyncio.sleep(1)
+                    if not pause_committed:
+                        job.status = "paused"
+                        await self.db.commit()
+                        pause_committed = True
+
+                    # Check for max pause duration
+                    if time.time() - pause_start > MAX_PAUSE_DURATION_SECONDS:
+                        logger.warning("Job paused too long, auto-resuming", job_id=str(self.job_id))
+                        self._paused = False
+                        break
+
+                    await asyncio.sleep(PAUSE_CHECK_INTERVAL)
+
+                    # Check DB for external resume request
+                    await self.db.refresh(job)
+                    if job.status == "running":
+                        self._paused = False
+                    elif job.status == "cancelled":
+                        self._cancelled = True
 
                 if self._cancelled:
                     continue
 
                 job.status = "running"
 
-                # Update current document
+                # Update current document and heartbeat
                 job.current_document_id = doc.id
                 job.current_document_name = doc.filename
+                job.last_activity_at = datetime.now(timezone.utc)  # Heartbeat
                 await self.db.commit()
+
+                # Send WebSocket notification for document start
+                await notify_kg_extraction_started(
+                    job_id=str(self.job_id),
+                    document_id=str(doc.id),
+                    document_name=doc.filename or str(doc.id),
+                )
 
                 # Process the document
                 start_time = time.time()
@@ -110,7 +159,18 @@ class KGExtractionJobRunner:
                     await self.db.commit()
 
                     # Create KG service and process
-                    kg_service = KnowledgeGraphService(self.db)
+                    # If a specific provider is requested, create an LLM service for it
+                    llm_service = None
+                    if self.provider_id:
+                        from backend.services.llm import LLMConfigManager, LLMFactory
+                        config = await LLMConfigManager.get_config_for_provider_id(self.provider_id)
+                        if config:
+                            llm_service = LLMFactory.get_chat_model(
+                                provider=config.provider_type,
+                                model=config.model,
+                                temperature=config.temperature,
+                            )
+                    kg_service = KnowledgeGraphService(self.db, llm_service=llm_service)
                     stats = await kg_service.process_document_for_graph(doc.id)
 
                     # Update document with results
@@ -127,8 +187,9 @@ class KGExtractionJobRunner:
                     processing_time = time.time() - start_time
                     processing_times.append(processing_time)
 
-                    # Update average processing time for ETA
+                    # Update average processing time for ETA and heartbeat
                     job.avg_doc_processing_time = sum(processing_times) / len(processing_times)
+                    job.last_activity_at = datetime.now(timezone.utc)  # Heartbeat on completion
 
                     await self.db.commit()
 
@@ -142,29 +203,51 @@ class KGExtractionJobRunner:
                         progress=f"{job.processed_documents}/{job.total_documents}",
                     )
 
+                    # Send WebSocket progress notification
+                    progress_pct = (job.processed_documents / job.total_documents * 100) if job.total_documents > 0 else 0
+                    await notify_kg_extraction_progress(
+                        job_id=str(self.job_id),
+                        entities_found=job.total_entities,
+                        relations_found=job.total_relations,
+                        progress=progress_pct,
+                    )
+
                 except Exception as e:
                     logger.error(
                         "Failed to process document for KG",
                         job_id=str(self.job_id),
                         document_id=str(doc.id),
                         error=str(e),
+                        exc_info=True,
                     )
 
                     # Update document status
                     doc.kg_extraction_status = "failed"
                     job.failed_documents += 1
-                    job.processed_documents += 1
+                    # NOTE: Do NOT increment processed_documents on failure
+                    # processed_documents should only count successful extractions
 
                     # Log error
                     error_log = job.error_log or []
                     error_log.append({
                         "doc_id": str(doc.id),
+                        "doc_name": doc.filename or str(doc.id),
                         "error": str(e),
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
                     job.error_log = error_log
 
                     await self.db.commit()
+
+                    # Send WebSocket notification for failed doc
+                    total_done = job.processed_documents + job.failed_documents
+                    progress_pct = (total_done / job.total_documents * 100) if job.total_documents > 0 else 0
+                    await notify_kg_extraction_progress(
+                        job_id=str(self.job_id),
+                        entities_found=job.total_entities,
+                        relations_found=job.total_relations,
+                        progress=progress_pct,
+                    )
 
             # Mark job as completed
             job.status = "completed" if job.failed_documents == 0 else "completed_with_errors"
@@ -182,6 +265,13 @@ class KGExtractionJobRunner:
                 total_relations=job.total_relations,
             )
 
+            # Send WebSocket completion notification
+            await notify_kg_extraction_complete(
+                job_id=str(self.job_id),
+                total_entities=job.total_entities,
+                total_relations=job.total_relations,
+            )
+
         except Exception as e:
             logger.error(
                 "KG extraction job failed",
@@ -193,8 +283,9 @@ class KGExtractionJobRunner:
             await self.db.commit()
 
         finally:
-            # Unregister from running jobs
-            _running_jobs.pop(str(self.job_id), None)
+            # Unregister from running jobs (thread-safe)
+            async with _running_jobs_lock:
+                _running_jobs.pop(str(self.job_id), None)
 
     async def cancel(self):
         """Cancel the running job."""
@@ -239,11 +330,12 @@ class KGExtractionJobRunner:
             if doc_uuids:
                 query = query.where(Document.id.in_(doc_uuids))
 
-        # Only new = skip already extracted
+        # Only new = skip already successfully extracted (include failed for retry)
         if job.only_new_documents:
             query = query.where(
                 or_(
                     Document.kg_extraction_status == "pending",
+                    Document.kg_extraction_status == "failed",  # Include failed docs for retry
                     Document.kg_extraction_status.is_(None),
                 )
             )
@@ -272,6 +364,7 @@ class KGExtractionJobService:
         organization_id: Optional[uuid.UUID] = None,
         only_new_documents: bool = True,
         document_ids: Optional[List[str]] = None,
+        provider_id: Optional[str] = None,
     ) -> KGExtractionJob:
         """
         Create a new extraction job.
@@ -281,6 +374,7 @@ class KGExtractionJobService:
             organization_id: Organization scope
             only_new_documents: Only process documents not yet extracted
             document_ids: Optional list of specific document IDs
+            provider_id: Optional LLM provider ID to use for extraction
 
         Returns:
             The created job
@@ -295,6 +389,7 @@ class KGExtractionJobService:
             organization_id=organization_id,
             only_new_documents=only_new_documents,
             document_ids=document_ids,
+            provider_id=provider_id,
             status="queued",
         )
 
@@ -308,6 +403,7 @@ class KGExtractionJobService:
             user_id=str(user_id),
             organization_id=str(organization_id) if organization_id else None,
             only_new=only_new_documents,
+            provider_id=provider_id,
         )
 
         return job
@@ -334,24 +430,72 @@ class KGExtractionJobService:
         if job.status not in ("queued", "paused"):
             raise ValueError(f"Job cannot be started from status: {job.status}")
 
-        # Create runner
-        runner = KGExtractionJobRunner(
-            job_id=job.id,
-            db_session=self.db,
-            organization_id=job.organization_id,
-        )
+        # Store job info for background task
+        org_id = job.organization_id
+        provider_id = job.provider_id  # Get provider_id from job
+
+        async def run_extraction():
+            """Run extraction with its own database session and exception handling."""
+            session_factory = get_async_session_factory()
+            try:
+                async with session_factory() as bg_session:
+                    runner = KGExtractionJobRunner(
+                        job_id=job_id,
+                        db_session=bg_session,
+                        organization_id=org_id,
+                        provider_id=provider_id,
+                    )
+                    await runner.run()
+            except Exception as e:
+                logger.error(
+                    "Background extraction task crashed",
+                    job_id=str(job_id),
+                    error=str(e),
+                    exc_info=True,
+                )
+                # Update job status to failed in database
+                try:
+                    async with session_factory() as cleanup_session:
+                        result = await cleanup_session.execute(
+                            select(KGExtractionJob).where(KGExtractionJob.id == job_id)
+                        )
+                        failed_job = result.scalar_one_or_none()
+                        if failed_job and failed_job.status in ("queued", "running", "paused"):
+                            failed_job.status = "failed"
+                            failed_job.completed_at = datetime.now(timezone.utc)
+                            error_log = failed_job.error_log or []
+                            error_log.append({
+                                "error": f"Background task crashed: {str(e)}",
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+                            failed_job.error_log = error_log
+                            await cleanup_session.commit()
+                except Exception as cleanup_error:
+                    logger.error(
+                        "Failed to update job status after crash",
+                        job_id=str(job_id),
+                        error=str(cleanup_error),
+                    )
+                # Clean up running jobs registry
+                async with _running_jobs_lock:
+                    _running_jobs.pop(str(job_id), None)
 
         # Run in background
         if background_task_runner:
-            background_task_runner.add_task(runner.run)
+            background_task_runner.add_task(run_extraction)
         else:
             # Run as asyncio task
-            asyncio.create_task(runner.run())
+            asyncio.create_task(run_extraction())
 
         return job
 
     async def get_job(self, job_id: uuid.UUID) -> Optional[KGExtractionJob]:
-        """Get a job by ID."""
+        """Get a job by ID with fresh data from database."""
+        # CRITICAL: Expire cached objects to ensure fresh read
+        # This fixes session isolation issue where background task updates
+        # aren't visible to the API session due to SQLAlchemy caching
+        self.db.expire_all()
+
         result = await self.db.execute(
             select(KGExtractionJob).where(KGExtractionJob.id == job_id)
         )
@@ -361,7 +505,10 @@ class KGExtractionJobService:
         self,
         organization_id: Optional[uuid.UUID] = None,
     ) -> Optional[KGExtractionJob]:
-        """Get the currently running job for an organization."""
+        """Get the currently running job for an organization with fresh data."""
+        # CRITICAL: Expire cached objects to ensure fresh read
+        self.db.expire_all()
+
         query = select(KGExtractionJob).where(
             KGExtractionJob.status.in_(["queued", "running", "paused"])
         )
@@ -412,7 +559,8 @@ class KGExtractionJobService:
 
         Returns True if cancellation was requested, False if job not running.
         """
-        runner = _running_jobs.get(str(job_id))
+        async with _running_jobs_lock:
+            runner = _running_jobs.get(str(job_id))
         if runner:
             await runner.cancel()
             return True
@@ -429,15 +577,32 @@ class KGExtractionJobService:
 
     async def pause_job(self, job_id: uuid.UUID) -> bool:
         """Pause a running job."""
-        runner = _running_jobs.get(str(job_id))
+        async with _running_jobs_lock:
+            runner = _running_jobs.get(str(job_id))
         if runner:
             await runner.pause()
             return True
+
+        # Job not in memory registry - check if it's running/queued in DB
+        # This can happen in race conditions or if server restarted
+        job = await self.get_job(job_id)
+        if job and job.status in ("running", "queued"):
+            # Update status directly - the runner will pick it up if it exists
+            job.status = "paused"
+            await self.db.commit()
+            logger.warning(
+                "Paused job via DB (runner not in registry)",
+                job_id=str(job_id),
+                original_status=job.status,
+            )
+            return True
+
         return False
 
     async def resume_job(self, job_id: uuid.UUID) -> bool:
         """Resume a paused job."""
-        runner = _running_jobs.get(str(job_id))
+        async with _running_jobs_lock:
+            runner = _running_jobs.get(str(job_id))
         if runner:
             await runner.resume()
             return True
@@ -456,11 +621,16 @@ class KGExtractionJobService:
         if not job:
             return None
 
+        # Calculate progress as (processed + failed) / total
+        # Since processed now only counts successes, we need to add them
+        total_done = job.processed_documents + job.failed_documents
+        progress_percent = (total_done / job.total_documents * 100) if job.total_documents > 0 else 0.0
+
         return {
             "job_id": str(job.id),
             "status": job.status,
-            "progress_percent": job.get_progress_percent(),
-            "processed_documents": job.processed_documents,
+            "progress_percent": progress_percent,
+            "processed_documents": job.processed_documents,  # Successfully completed only
             "total_documents": job.total_documents,
             "failed_documents": job.failed_documents,
             "total_entities": job.total_entities,
@@ -471,11 +641,14 @@ class KGExtractionJobService:
             "avg_doc_processing_time": job.avg_doc_processing_time,
             "started_at": job.started_at.isoformat() if job.started_at else None,
             "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "last_activity_at": job.last_activity_at.isoformat() if job.last_activity_at else None,
             "can_cancel": job.status in ("queued", "running", "paused"),
             "can_pause": job.status == "running",
             "can_resume": job.status == "paused",
             "error_count": len(job.error_log or []),
             "only_new_documents": job.only_new_documents,
+            # Include last 5 errors for UI display
+            "errors": (job.error_log or [])[-5:],
         }
 
     async def get_documents_pending_extraction(

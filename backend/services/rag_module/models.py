@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from backend.services.rag_verifier import VerificationResult
     from backend.services.corrective_rag import CRAGResult
+    from backend.services.context_sufficiency import ContextSufficiencyResult
 
 
 @dataclass
@@ -53,6 +54,8 @@ class RAGResponse:
     confidence_warning: str = ""
     # CRAG result if query was refined
     crag_result: Optional["CRAGResult"] = None
+    # Context sufficiency check result (Phase 2 enhancement)
+    context_sufficiency: Optional["ContextSufficiencyResult"] = None
 
 
 @dataclass

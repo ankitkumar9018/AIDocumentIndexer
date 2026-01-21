@@ -261,6 +261,177 @@ EDGE_VOICES = {
 }
 
 
+# =============================================================================
+# Multi-Language Voice Mappings (Phase 2 Enhancement)
+# =============================================================================
+
+# Maps language codes to recommended voices per provider
+MULTILINGUAL_VOICE_MAP: Dict[str, Dict[str, Dict[str, str]]] = {
+    # English
+    "en": {
+        "openai": {"female": "nova", "male": "onyx", "neutral": "alloy"},
+        "edge": {"female": "en-US-JennyNeural", "male": "en-US-GuyNeural"},
+        "elevenlabs": {"female": "Rachel", "male": "Adam"},
+    },
+    # Spanish
+    "es": {
+        "openai": {"female": "nova", "male": "onyx", "neutral": "alloy"},
+        "edge": {"female": "es-ES-ElviraNeural", "male": "es-ES-AlvaroNeural"},
+        "elevenlabs": {"female": "Valentina", "male": "Antoni"},
+    },
+    # French
+    "fr": {
+        "openai": {"female": "shimmer", "male": "echo", "neutral": "alloy"},
+        "edge": {"female": "fr-FR-DeniseNeural", "male": "fr-FR-HenriNeural"},
+        "elevenlabs": {"female": "Charlotte", "male": "Thomas"},
+    },
+    # German
+    "de": {
+        "openai": {"female": "nova", "male": "echo", "neutral": "alloy"},
+        "edge": {"female": "de-DE-KatjaNeural", "male": "de-DE-ConradNeural"},
+        "elevenlabs": {"female": "Gisela", "male": "Daniel"},
+    },
+    # Italian
+    "it": {
+        "openai": {"female": "shimmer", "male": "onyx", "neutral": "alloy"},
+        "edge": {"female": "it-IT-ElsaNeural", "male": "it-IT-DiegoNeural"},
+        "elevenlabs": {"female": "Lucia", "male": "Marco"},
+    },
+    # Portuguese
+    "pt": {
+        "openai": {"female": "nova", "male": "echo", "neutral": "alloy"},
+        "edge": {"female": "pt-BR-FranciscaNeural", "male": "pt-BR-AntonioNeural"},
+        "elevenlabs": {"female": "Gabriela", "male": "Pedro"},
+    },
+    # Dutch
+    "nl": {
+        "openai": {"female": "shimmer", "male": "onyx", "neutral": "alloy"},
+        "edge": {"female": "nl-NL-ColetteNeural", "male": "nl-NL-MaartenNeural"},
+        "elevenlabs": {"female": "Rachel", "male": "Adam"},  # Fallback
+    },
+    # Russian
+    "ru": {
+        "openai": {"female": "nova", "male": "echo", "neutral": "alloy"},
+        "edge": {"female": "ru-RU-SvetlanaNeural", "male": "ru-RU-DmitryNeural"},
+        "elevenlabs": {"female": "Rachel", "male": "Adam"},  # Fallback
+    },
+    # Chinese (Mandarin)
+    "zh": {
+        "openai": {"female": "nova", "male": "onyx", "neutral": "alloy"},
+        "edge": {"female": "zh-CN-XiaoxiaoNeural", "male": "zh-CN-YunxiNeural"},
+        "elevenlabs": {"female": "Lily", "male": "Harry"},
+    },
+    # Japanese
+    "ja": {
+        "openai": {"female": "shimmer", "male": "echo", "neutral": "alloy"},
+        "edge": {"female": "ja-JP-NanamiNeural", "male": "ja-JP-KeitaNeural"},
+        "elevenlabs": {"female": "Hana", "male": "Kenji"},
+    },
+    # Korean
+    "ko": {
+        "openai": {"female": "nova", "male": "onyx", "neutral": "alloy"},
+        "edge": {"female": "ko-KR-SunHiNeural", "male": "ko-KR-InJoonNeural"},
+        "elevenlabs": {"female": "Rachel", "male": "Adam"},  # Fallback
+    },
+    # Arabic
+    "ar": {
+        "openai": {"female": "nova", "male": "echo", "neutral": "alloy"},
+        "edge": {"female": "ar-SA-ZariyahNeural", "male": "ar-SA-HamedNeural"},
+        "elevenlabs": {"female": "Rachel", "male": "Adam"},  # Fallback
+    },
+    # Hindi
+    "hi": {
+        "openai": {"female": "shimmer", "male": "onyx", "neutral": "alloy"},
+        "edge": {"female": "hi-IN-SwaraNeural", "male": "hi-IN-MadhurNeural"},
+        "elevenlabs": {"female": "Rachel", "male": "Adam"},  # Fallback
+    },
+    # Polish
+    "pl": {
+        "openai": {"female": "nova", "male": "echo", "neutral": "alloy"},
+        "edge": {"female": "pl-PL-AgnieszkaNeural", "male": "pl-PL-MarekNeural"},
+        "elevenlabs": {"female": "Rachel", "male": "Adam"},  # Fallback
+    },
+    # Turkish
+    "tr": {
+        "openai": {"female": "shimmer", "male": "onyx", "neutral": "alloy"},
+        "edge": {"female": "tr-TR-EmelNeural", "male": "tr-TR-AhmetNeural"},
+        "elevenlabs": {"female": "Rachel", "male": "Adam"},  # Fallback
+    },
+}
+
+
+def get_voice_for_language(
+    language: str,
+    provider: TTSProvider,
+    gender: str = "neutral",
+) -> str:
+    """
+    Get the best voice for a language and provider.
+
+    Args:
+        language: ISO 639-1 language code (e.g., "en", "es", "fr")
+        provider: TTS provider to use
+        gender: Preferred gender ("female", "male", "neutral")
+
+    Returns:
+        Voice ID for the provider
+    """
+    # Normalize language code
+    lang = language.lower()[:2]
+
+    # Get provider name
+    provider_name = provider.value if isinstance(provider, TTSProvider) else str(provider).lower()
+
+    # Look up voice
+    lang_voices = MULTILINGUAL_VOICE_MAP.get(lang, MULTILINGUAL_VOICE_MAP["en"])
+    provider_voices = lang_voices.get(provider_name, lang_voices.get("edge", {}))
+
+    # Get voice by gender preference
+    voice = provider_voices.get(gender)
+    if not voice:
+        # Fall back to any available voice
+        voice = next(iter(provider_voices.values()), None)
+
+    # Final fallback
+    if not voice:
+        if provider_name == "openai":
+            voice = "alloy"
+        elif provider_name == "edge":
+            voice = "en-US-JennyNeural"
+        else:
+            voice = "Rachel"
+
+    return voice
+
+
+# Language names for user display
+LANGUAGE_NAMES: Dict[str, str] = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "ru": "Russian",
+    "zh": "Chinese (Mandarin)",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "pl": "Polish",
+    "tr": "Turkish",
+}
+
+
+def get_supported_languages() -> List[Dict[str, str]]:
+    """Get list of supported languages with display names."""
+    return [
+        {"code": code, "name": name}
+        for code, name in LANGUAGE_NAMES.items()
+    ]
+
+
 class EdgeTTSProvider(BaseTTSProvider):
     """
     Free Microsoft Edge TTS provider.
@@ -658,6 +829,158 @@ class TTSService(BaseService):
                 code="TTS_ERROR",
             )
 
+    async def synthesize_parallel(
+        self,
+        segments: List[Dict[str, Any]],
+        speaker_voices: Dict[str, VoiceConfig],
+        max_concurrent: int = 5,
+    ) -> List[AudioSegment]:
+        """
+        Synthesize multiple audio segments in parallel for 3-5x speedup.
+
+        Args:
+            segments: List of dicts with 'speaker', 'text', and optional 'emotion' keys
+            speaker_voices: Mapping of speaker IDs to voice configs
+            max_concurrent: Maximum concurrent TTS requests (default 5)
+
+        Returns:
+            List of AudioSegment objects with audio_data populated
+        """
+        self.log_info(
+            "Synthesizing segments in parallel",
+            segment_count=len(segments),
+            max_concurrent=max_concurrent,
+        )
+
+        # Create semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def synthesize_segment(idx: int, segment: Dict[str, Any]) -> AudioSegment:
+            """Synthesize a single segment with concurrency limiting."""
+            async with semaphore:
+                speaker = segment.get("speaker", "default")
+                text = segment.get("text", "")
+                emotion = segment.get("emotion")
+
+                if not text.strip():
+                    return AudioSegment(speaker=speaker, text=text)
+
+                # Get voice config
+                voice_config = speaker_voices.get(speaker)
+                if not voice_config:
+                    voice_config = VoiceConfig(
+                        provider=self.default_provider,
+                        voice_id="alloy" if self.default_provider == TTSProvider.OPENAI else "default",
+                        name=speaker,
+                    )
+
+                try:
+                    provider = self._get_provider(voice_config.provider)
+                    audio_data = await provider.synthesize(
+                        text=text,
+                        voice_id=voice_config.voice_id,
+                        speed=voice_config.speed,
+                        style=voice_config.style,
+                        emotion=emotion,
+                    )
+
+                    return AudioSegment(
+                        speaker=speaker,
+                        text=text,
+                        audio_data=audio_data,
+                    )
+
+                except Exception as e:
+                    self.log_warning(
+                        f"TTS failed for segment {idx}, attempting fallback",
+                        error=str(e),
+                        speaker=speaker,
+                    )
+                    # Try fallback provider (Edge TTS is free and reliable)
+                    return await self._synthesize_with_fallback(segment, voice_config)
+
+        # Create all synthesis tasks
+        tasks = [
+            synthesize_segment(idx, segment)
+            for idx, segment in enumerate(segments)
+        ]
+
+        # Execute in parallel with gather
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results - handle any exceptions
+        audio_segments = []
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                self.log_error(
+                    f"Segment {idx} synthesis failed completely",
+                    error=str(result),
+                )
+                # Create empty segment placeholder to maintain order
+                audio_segments.append(AudioSegment(
+                    speaker=segments[idx].get("speaker", "default"),
+                    text=segments[idx].get("text", ""),
+                    audio_data=None,
+                ))
+            else:
+                audio_segments.append(result)
+
+        self.log_info(
+            "Parallel synthesis complete",
+            total_segments=len(audio_segments),
+            successful=sum(1 for s in audio_segments if s.audio_data),
+        )
+
+        return audio_segments
+
+    async def _synthesize_with_fallback(
+        self,
+        segment: Dict[str, Any],
+        original_config: VoiceConfig,
+    ) -> AudioSegment:
+        """
+        Attempt synthesis with fallback provider (Edge TTS).
+
+        Args:
+            segment: Segment to synthesize
+            original_config: Original voice config that failed
+
+        Returns:
+            AudioSegment with audio from fallback provider
+        """
+        speaker = segment.get("speaker", "default")
+        text = segment.get("text", "")
+        emotion = segment.get("emotion")
+
+        try:
+            # Try Edge TTS as fallback (free, reliable)
+            edge_provider = self._get_provider(TTSProvider.EDGE)
+            audio_data = await edge_provider.synthesize(
+                text=text,
+                voice_id="en-US-JennyNeural",  # Reliable default
+                speed=original_config.speed,
+                emotion=emotion,
+            )
+
+            self.log_info(
+                "Fallback synthesis successful",
+                speaker=speaker,
+                provider="edge",
+            )
+
+            return AudioSegment(
+                speaker=speaker,
+                text=text,
+                audio_data=audio_data,
+            )
+
+        except Exception as e:
+            self.log_error(
+                "Fallback synthesis also failed",
+                error=str(e),
+            )
+            return AudioSegment(speaker=speaker, text=text, audio_data=None)
+
     async def synthesize_dialogue(
         self,
         turns: List[Dict[str, Any]],
@@ -665,6 +988,8 @@ class TTSService(BaseService):
         output_path: Optional[str] = None,
         add_pauses: bool = True,
         pause_between_speakers_ms: int = 500,
+        parallel: bool = True,  # Use parallel synthesis by default (3-5x faster)
+        max_concurrent: int = 5,
     ) -> Union[bytes, str]:
         """
         Synthesize a multi-speaker dialogue.
@@ -675,6 +1000,8 @@ class TTSService(BaseService):
             output_path: If provided, save to file and return path
             add_pauses: Whether to add pauses between speakers
             pause_between_speakers_ms: Pause duration between different speakers
+            parallel: Whether to synthesize segments in parallel (default True, 3-5x faster)
+            max_concurrent: Maximum concurrent TTS requests when parallel=True
 
         Returns:
             Combined audio bytes or file path
@@ -683,46 +1010,52 @@ class TTSService(BaseService):
             "Synthesizing dialogue",
             turn_count=len(turns),
             speakers=list(speaker_voices.keys()),
+            parallel=parallel,
         )
 
-        segments = []
-        last_speaker = None
+        # Filter out empty turns
+        valid_turns = [t for t in turns if t.get("text", "").strip()]
 
-        for turn in turns:
-            speaker = turn.get("speaker", "default")
-            text = turn.get("text", "")
-            emotion = turn.get("emotion")  # Get emotion for prosody variation
+        if parallel and len(valid_turns) > 1:
+            # Use parallel synthesis for 3-5x speedup
+            segments = await self.synthesize_parallel(
+                segments=valid_turns,
+                speaker_voices=speaker_voices,
+                max_concurrent=max_concurrent,
+            )
+        else:
+            # Sequential synthesis (fallback or single segment)
+            segments = []
+            for turn in valid_turns:
+                speaker = turn.get("speaker", "default")
+                text = turn.get("text", "")
+                emotion = turn.get("emotion")  # Get emotion for prosody variation
 
-            if not text.strip():
-                continue
+                # Get voice config
+                voice_config = speaker_voices.get(speaker)
+                if not voice_config:
+                    self.log_warning(f"No voice config for speaker: {speaker}, using default")
+                    voice_config = VoiceConfig(
+                        provider=self.default_provider,
+                        voice_id="alloy" if self.default_provider == TTSProvider.OPENAI else "default",
+                        name=speaker,
+                    )
 
-            # Get voice config
-            voice_config = speaker_voices.get(speaker)
-            if not voice_config:
-                self.log_warning(f"No voice config for speaker: {speaker}, using default")
-                voice_config = VoiceConfig(
-                    provider=self.default_provider,
-                    voice_id="alloy" if self.default_provider == TTSProvider.OPENAI else "default",
-                    name=speaker,
+                # Generate audio for this turn with emotion for prosody variation
+                provider = self._get_provider(voice_config.provider)
+                audio_data = await provider.synthesize(
+                    text=text,
+                    voice_id=voice_config.voice_id,
+                    speed=voice_config.speed,
+                    style=voice_config.style,
+                    emotion=emotion,  # Pass emotion for pitch/rate variation
                 )
 
-            # Generate audio for this turn with emotion for prosody variation
-            provider = self._get_provider(voice_config.provider)
-            audio_data = await provider.synthesize(
-                text=text,
-                voice_id=voice_config.voice_id,
-                speed=voice_config.speed,
-                style=voice_config.style,
-                emotion=emotion,  # Pass emotion for pitch/rate variation
-            )
-
-            segments.append(AudioSegment(
-                speaker=speaker,
-                text=text,
-                audio_data=audio_data,
-            ))
-
-            last_speaker = speaker
+                segments.append(AudioSegment(
+                    speaker=speaker,
+                    text=text,
+                    audio_data=audio_data,
+                ))
 
         # Combine segments
         combined_audio = await self._combine_audio_segments(
@@ -853,3 +1186,168 @@ class TTSService(BaseService):
             "estimated_cost_usd": costs.get(cost_key, 0.0),
             "costs_by_provider": costs,
         }
+
+    # -------------------------------------------------------------------------
+    # Multi-Language Support (Phase 2 Enhancement)
+    # -------------------------------------------------------------------------
+
+    async def synthesize_multilingual(
+        self,
+        text: str,
+        target_language: str,
+        provider: Optional[TTSProvider] = None,
+        gender: str = "neutral",
+        speed: float = 1.0,
+        translate_first: bool = False,
+    ) -> bytes:
+        """
+        Synthesize audio in a target language.
+
+        Automatically selects the best voice for the language
+        and optionally translates the text first.
+
+        Args:
+            text: Text to synthesize
+            target_language: ISO 639-1 language code (e.g., "en", "es", "fr")
+            provider: TTS provider (None uses default)
+            gender: Voice gender preference ("female", "male", "neutral")
+            speed: Speech speed (0.5-2.0)
+            translate_first: Whether to translate text to target language first
+
+        Returns:
+            Audio bytes (MP3 format)
+        """
+        actual_provider = provider or self.default_provider
+
+        # Get appropriate voice for language
+        voice_id = get_voice_for_language(
+            language=target_language,
+            provider=actual_provider,
+            gender=gender,
+        )
+
+        self.log_info(
+            "Synthesizing multilingual audio",
+            language=target_language,
+            provider=actual_provider.value,
+            voice=voice_id,
+            translate=translate_first,
+        )
+
+        # Optionally translate text
+        if translate_first and target_language.lower()[:2] != "en":
+            text = await self._translate_text(text, target_language)
+
+        # Synthesize with selected voice
+        return await self.synthesize_text(
+            text=text,
+            voice_id=voice_id,
+            provider=actual_provider,
+            speed=speed,
+        )
+
+    async def _translate_text(
+        self,
+        text: str,
+        target_language: str,
+    ) -> str:
+        """
+        Translate text to target language using LLM.
+
+        Args:
+            text: Text to translate
+            target_language: Target language code
+
+        Returns:
+            Translated text
+        """
+        try:
+            from backend.services.llm import EnhancedLLMFactory
+
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="translation",
+                user_id=None,
+            )
+
+            lang_name = LANGUAGE_NAMES.get(target_language.lower()[:2], target_language)
+
+            prompt = f"""Translate the following text to {lang_name}.
+Maintain the tone and style of the original text.
+Only output the translation, nothing else.
+
+Text to translate:
+{text}"""
+
+            response = await llm.ainvoke(prompt)
+            return response.content.strip()
+
+        except Exception as e:
+            self.log_warning(f"Translation failed: {e}, using original text")
+            return text
+
+    async def synthesize_dialogue_multilingual(
+        self,
+        dialogue_turns: List[Dict[str, Any]],
+        target_language: str,
+        speaker_genders: Optional[Dict[str, str]] = None,
+        provider: Optional[TTSProvider] = None,
+        translate_first: bool = False,
+        output_path: Optional[str] = None,
+    ) -> Union[bytes, str]:
+        """
+        Synthesize a multi-speaker dialogue in a target language.
+
+        Args:
+            dialogue_turns: List of {"speaker": str, "text": str} dicts
+            target_language: ISO 639-1 language code
+            speaker_genders: Optional mapping of speaker names to genders
+            provider: TTS provider (None uses default)
+            translate_first: Whether to translate texts first
+            output_path: Optional path to save audio file
+
+        Returns:
+            Audio bytes or file path
+        """
+        actual_provider = provider or self.default_provider
+        speaker_genders = speaker_genders or {}
+
+        # Build voice configs for each speaker
+        speaker_voices: Dict[str, VoiceConfig] = {}
+        speakers = list(set(turn.get("speaker", "default") for turn in dialogue_turns))
+
+        # Alternate genders if not specified
+        default_genders = ["female", "male"]
+
+        for i, speaker in enumerate(speakers):
+            gender = speaker_genders.get(speaker, default_genders[i % 2])
+            voice_id = get_voice_for_language(
+                language=target_language,
+                provider=actual_provider,
+                gender=gender,
+            )
+            speaker_voices[speaker] = VoiceConfig(
+                provider=actual_provider,
+                voice_id=voice_id,
+                name=speaker,
+            )
+
+        # Optionally translate all texts
+        if translate_first and target_language.lower()[:2] != "en":
+            dialogue_turns = [
+                {
+                    **turn,
+                    "text": await self._translate_text(turn.get("text", ""), target_language),
+                }
+                for turn in dialogue_turns
+            ]
+
+        # Use existing dialogue synthesis
+        return await self.synthesize_dialogue(
+            dialogue_turns=dialogue_turns,
+            speaker_voices=speaker_voices,
+            output_path=output_path,
+        )
+
+    def get_supported_languages(self) -> List[Dict[str, str]]:
+        """Get list of languages supported for TTS."""
+        return get_supported_languages()

@@ -636,7 +636,7 @@ class DatabaseManager:
                         "description": "Update your .env file",
                         "env_vars": {
                             "DATABASE_TYPE": "sqlite",
-                            "DATABASE_URL": "sqlite:///./aidocindexer.db",
+                            "DATABASE_URL": "sqlite:///backend/data/aidocindexer.db",
                             "VECTOR_STORE_BACKEND": "auto"
                         }
                     },

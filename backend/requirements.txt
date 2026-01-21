@@ -27,6 +27,12 @@ greenlet>=3.0.0  # For SQLAlchemy async
 # SQLite support (for development)
 aiosqlite>=0.19.0
 
+# MySQL support (for database connector)
+aiomysql>=0.2.0
+
+# SQL parsing and validation
+sqlparse>=0.4.4
+
 # -----------------------------------------------------------------------------
 # LLM & RAG (LangChain + LiteLLM)
 # -----------------------------------------------------------------------------
@@ -132,6 +138,12 @@ pytest>=7.4.0
 pytest-asyncio>=0.23.0
 pytest-cov>=4.1.0
 httpx>=0.26.0
+
+# -----------------------------------------------------------------------------
+# Monitoring & Observability
+# -----------------------------------------------------------------------------
+sentry-sdk[fastapi]>=1.40.0
+prometheus-client>=0.19.0
 
 # -----------------------------------------------------------------------------
 # Code Quality (Development)

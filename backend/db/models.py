@@ -585,6 +585,7 @@ class Document(Base, UUIDMixin, TimestampMixin):
     uploaded_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID(),
         ForeignKey("users.id"),
+        index=True,  # Index for user-scoped queries
     )
     folder_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID(),
@@ -2218,6 +2219,13 @@ class Entity(Base, UUIDMixin):
     properties: Mapped[Optional[dict]] = mapped_column(JSONType())
     mention_count: Mapped[int] = mapped_column(Integer, default=1)
 
+    # Confidence scoring (Phase 2 enhancement)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    # Confidence score 0.0-1.0 based on extraction method and validation
+    extraction_method: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True, index=True
+    )  # "llm", "dependency_parser", "ner", "pattern", "user_defined"
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -2444,6 +2452,9 @@ class KGExtractionJob(Base, UUIDMixin):
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
+    # Heartbeat - updated periodically while job is running to detect stuck jobs
+    last_activity_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
     # For ETA calculation
     avg_doc_processing_time: Mapped[Optional[float]] = mapped_column(Float)
 
@@ -2453,6 +2464,9 @@ class KGExtractionJob(Base, UUIDMixin):
     # Job configuration
     only_new_documents: Mapped[bool] = mapped_column(Boolean, default=True)
     document_ids: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+
+    # LLM provider override for this job (uses default if not set)
+    provider_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
@@ -3996,6 +4010,208 @@ class FileWatcherConfig(Base, UUIDMixin, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<FileWatcherConfig(enabled={self.enabled}, auto_start={self.auto_start})>"
+
+
+# =============================================================================
+# Database Connector Models (for natural language database querying)
+# =============================================================================
+
+class DatabaseConnectorType(str, PyEnum):
+    """Supported database connector types."""
+    POSTGRESQL = "postgresql"
+    MYSQL = "mysql"
+    MONGODB = "mongodb"
+    SQLITE = "sqlite"
+
+
+class ExternalDatabaseConnection(Base, UUIDMixin, TimestampMixin):
+    """
+    External database connection configuration for natural language querying.
+
+    Stores encrypted credentials and connection settings for external
+    databases that users can query using natural language.
+    """
+    __tablename__ = "external_database_connections"
+
+    # Organization scope (multi-tenant isolation)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # Owner
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Connection identity
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    connector_type: Mapped[DatabaseConnectorType] = mapped_column(
+        Enum(DatabaseConnectorType),
+        nullable=False,
+        index=True,
+    )
+
+    # Connection details (encrypted)
+    host_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    database_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    username_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    password_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Optional settings
+    ssl_mode: Mapped[Optional[str]] = mapped_column(String(50), default="prefer")
+    schema_name: Mapped[Optional[str]] = mapped_column(String(255), default="public")
+
+    # Query limits and safety
+    max_rows: Mapped[int] = mapped_column(Integer, default=1000)
+    query_timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
+    read_only: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Cached schema (JSON)
+    schema_cache: Mapped[Optional[dict]] = mapped_column(JSONType())
+    schema_cached_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Status
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    last_tested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_test_success: Mapped[Optional[bool]] = mapped_column(Boolean)
+    last_test_error: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Statistics
+    total_queries: Mapped[int] = mapped_column(Integer, default=0)
+    total_query_time_ms: Mapped[int] = mapped_column(BigInteger, default=0)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", backref="external_database_connections")
+    query_history: Mapped[List["DatabaseQueryHistory"]] = relationship(
+        "DatabaseQueryHistory",
+        back_populates="connection",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<ExternalDatabaseConnection(name='{self.name}', type='{self.connector_type}')>"
+
+
+class DatabaseQueryHistory(Base, UUIDMixin):
+    """
+    History of natural language queries executed against database connections.
+
+    Stores the natural language question, generated SQL, results metadata,
+    and user feedback for continuous improvement.
+    """
+    __tablename__ = "database_query_history"
+
+    # Connection reference
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("external_database_connections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # User who executed the query
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Query details
+    natural_language_query: Mapped[str] = mapped_column(Text, nullable=False)
+    generated_sql: Mapped[str] = mapped_column(Text, nullable=False)
+    explanation: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Execution results
+    execution_success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    execution_time_ms: Mapped[float] = mapped_column(Float, default=0)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Generation metadata
+    generation_attempts: Mapped[int] = mapped_column(Integer, default=1)
+    confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
+    model_used: Mapped[Optional[str]] = mapped_column(String(100))
+
+    # User feedback
+    user_rating: Mapped[Optional[int]] = mapped_column(Integer)  # 1-5 scale
+    user_feedback: Mapped[Optional[str]] = mapped_column(Text)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    connection: Mapped["ExternalDatabaseConnection"] = relationship(
+        "ExternalDatabaseConnection",
+        back_populates="query_history",
+    )
+    user: Mapped["User"] = relationship("User", backref="database_queries")
+
+    def __repr__(self) -> str:
+        return f"<DatabaseQueryHistory(query='{self.natural_language_query[:50]}...')>"
+
+
+class TextToSQLExample(Base, UUIDMixin):
+    """
+    Verified Text-to-SQL examples for few-shot prompting.
+
+    Stores question-SQL pairs that have been verified as correct,
+    used to improve query generation accuracy.
+    """
+    __tablename__ = "text_to_sql_examples"
+
+    # Connection reference (examples are connection-specific)
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("external_database_connections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Example content
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    sql: Mapped[str] = mapped_column(Text, nullable=False)
+    explanation: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Verification status
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    verified_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Usage tracking
+    times_used: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    connection: Mapped["ExternalDatabaseConnection"] = relationship("ExternalDatabaseConnection")
+    verified_by: Mapped[Optional["User"]] = relationship("User")
+
+    def __repr__(self) -> str:
+        return f"<TextToSQLExample(question='{self.question[:50]}...', verified={self.is_verified})>"
 
 
 # =============================================================================

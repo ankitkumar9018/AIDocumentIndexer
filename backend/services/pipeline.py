@@ -36,6 +36,7 @@ from backend.services.embeddings import EmbeddingService, RayEmbeddingService, E
 from backend.services.vectorstore import VectorStore, get_vector_store
 from backend.services.text_preprocessor import TextPreprocessor, PreprocessingConfig, get_text_preprocessor
 from backend.services.summarizer import DocumentSummarizer, SummarizationConfig, get_document_summarizer
+from backend.services.contextual_chunking import contextualize_chunks
 
 logger = structlog.get_logger(__name__)
 
@@ -575,6 +576,42 @@ class DocumentPipeline:
                     "Added image description chunks",
                     document_id=document_id,
                     image_chunk_count=len(image_chunks),
+                )
+
+            # Step 3.5: Apply contextual chunking (if enabled in settings)
+            # This adds contextual information to each chunk for better retrieval
+            # See: Anthropic's contextual retrieval approach (49-67% reduction in failed retrievals)
+            try:
+                full_text = extracted.text
+                if not full_text and extracted.pages:
+                    full_text = "\n\n".join(p.get("text", "") for p in extracted.pages)
+
+                document_title = result.metadata.get("title") or result.metadata.get("filename")
+
+                chunks = await contextualize_chunks(
+                    document_content=full_text,
+                    chunks=chunks,
+                    document_title=document_title,
+                )
+
+                # Track if contextual chunking was applied
+                enhanced_count = sum(1 for c in chunks if c.metadata.get("contextual_enhanced"))
+                if enhanced_count > 0:
+                    result.metadata["contextual_chunking"] = {
+                        "enabled": True,
+                        "chunks_enhanced": enhanced_count,
+                        "total_chunks": len(chunks),
+                    }
+                    logger.info(
+                        "Contextual chunking applied",
+                        document_id=document_id,
+                        enhanced_count=enhanced_count,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Contextual chunking failed, continuing with regular chunks",
+                    document_id=document_id,
+                    error=str(e),
                 )
 
             result.chunks = chunks

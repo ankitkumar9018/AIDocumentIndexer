@@ -48,8 +48,8 @@ class LLMConfig:
     """LLM configuration from environment variables."""
 
     def __init__(self):
-        # Provider settings
-        self.default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+        # Provider settings - detect available provider if not explicitly set
+        self.default_provider = self._resolve_default_provider()
 
         # OpenAI settings
         self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
@@ -73,6 +73,40 @@ class LLMConfig:
         self.embedding_dimension = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
         self.default_temperature = float(os.getenv("DEFAULT_TEMPERATURE", "0.7"))
         self.default_max_tokens = int(os.getenv("DEFAULT_MAX_TOKENS", "4096"))
+
+    def _resolve_default_provider(self) -> str:
+        """
+        Resolve the default LLM provider with smart detection.
+
+        Priority:
+        1. Explicitly set DEFAULT_LLM_PROVIDER env var
+        2. Ollama if enabled and reachable (free, local)
+        3. OpenAI if API key is set
+        4. Anthropic if API key is set
+        5. Ollama as final fallback (assumes user will set it up)
+        """
+        # If explicitly set, use that
+        explicit_provider = os.getenv("DEFAULT_LLM_PROVIDER")
+        if explicit_provider:
+            return explicit_provider
+
+        # Check Ollama first (free, local)
+        ollama_enabled = os.getenv("OLLAMA_ENABLED", "true").lower() == "true"
+        if ollama_enabled:
+            # Return ollama - it will fail gracefully if not running
+            return "ollama"
+
+        # Check for valid API keys
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        if openai_key and not openai_key.startswith("sk-your-"):
+            return "openai"
+
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if anthropic_key and not anthropic_key.startswith("sk-"):
+            return "anthropic"
+
+        # Default to ollama (user should set up a provider)
+        return "ollama"
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
@@ -511,6 +545,52 @@ class LLMConfigManager:
 
         except Exception as e:
             logger.warning("Failed to get default provider", error=str(e))
+
+        cls._set_cache(cache_key, None)
+        return None
+
+    @classmethod
+    async def get_config_for_provider_id(
+        cls,
+        provider_id: str,
+    ) -> Optional[LLMConfigResult]:
+        """
+        Get LLM configuration for a specific provider by ID.
+
+        Args:
+            provider_id: Database provider ID (UUID string)
+
+        Returns:
+            LLMConfigResult if provider found and active, None otherwise
+        """
+        cache_key = f"provider:{provider_id}"
+        cached = cls._get_from_cache(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            from backend.db.database import async_session_context
+            from backend.db.models import LLMProvider
+            from sqlalchemy import select
+
+            async with async_session_context() as db:
+                result = await db.execute(
+                    select(LLMProvider)
+                    .where(LLMProvider.id == provider_id)
+                    .where(LLMProvider.is_active == True)
+                )
+                provider = result.scalar_one_or_none()
+
+                if provider:
+                    config = await cls._build_config_from_provider(
+                        provider,
+                        source="db_explicit",
+                    )
+                    cls._set_cache(cache_key, config)
+                    return config
+
+        except Exception as e:
+            logger.warning("Failed to get provider by ID", provider_id=provider_id, error=str(e))
 
         cls._set_cache(cache_key, None)
         return None

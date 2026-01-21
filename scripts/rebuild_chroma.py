@@ -15,7 +15,7 @@ from pathlib import Path
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-os.environ.setdefault("DATABASE_URL", "sqlite:////Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/aidocindexer.db")
+os.environ.setdefault("DATABASE_URL", "sqlite:///backend/data/aidocindexer.db")
 
 
 async def rebuild_chroma():
