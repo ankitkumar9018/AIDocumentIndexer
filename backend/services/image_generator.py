@@ -1246,7 +1246,7 @@ Image prompt (ONE LINE ONLY - no explanations):"""
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as response:
                     return response.status == 200
-        except:
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             return False
 
     def get_available_backends(self) -> List[dict]:

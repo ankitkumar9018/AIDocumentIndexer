@@ -56,6 +56,10 @@ class RAGResponse:
     crag_result: Optional["CRAGResult"] = None
     # Context sufficiency check result (Phase 2 enhancement)
     context_sufficiency: Optional["ContextSufficiencyResult"] = None
+    # RLM metadata for large context processing (Phase 51)
+    rlm_metadata: Optional[Dict[str, Any]] = None
+    # Context used (for debugging/display)
+    context_used: Optional[int] = None
 
 
 @dataclass

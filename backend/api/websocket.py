@@ -269,7 +269,8 @@ class ConnectionManager:
             try:
                 await websocket.send_json(message)
                 sent_count += 1
-            except Exception:
+            except Exception as e:
+                logger.debug("WebSocket send failed, marking as disconnected", error=str(e))
                 disconnected.append(websocket)
 
         # Clean up disconnected sockets
@@ -319,7 +320,8 @@ class ConnectionManager:
             try:
                 await websocket.send_json(message)
                 sent_count += 1
-            except Exception:
+            except Exception as e:
+                logger.debug("WebSocket broadcast failed, marking as disconnected", error=str(e))
                 disconnected.append(websocket)
 
         # Clean up disconnected sockets
@@ -423,6 +425,13 @@ class MessageType:
     FACT_CHECK_STARTED = "factcheck.started"
     FACT_CHECK_PROGRESS = "factcheck.progress"
     FACT_CHECK_COMPLETE = "factcheck.complete"
+
+    # Bulk Upload Events
+    BULK_UPLOAD_STARTED = "bulk.started"
+    BULK_UPLOAD_PROGRESS = "bulk.progress"
+    BULK_FILE_COMPLETE = "bulk.file.complete"
+    BULK_FILE_FAILED = "bulk.file.failed"
+    BULK_UPLOAD_COMPLETE = "bulk.complete"
 
 
 # =============================================================================
@@ -852,4 +861,123 @@ async def notify_embedding_complete(
         message=f"Embedded {total_embedded} chunks",
         user_id=user_id,
         metadata={"total_embedded": total_embedded},
+    )
+
+
+# =============================================================================
+# Bulk Upload Events
+# =============================================================================
+
+async def notify_bulk_upload_started(
+    batch_id: str,
+    total_files: int,
+    user_id: Optional[str] = None,
+) -> int:
+    """Notify that bulk upload processing has started."""
+    return await broadcast_progress(
+        event_type=MessageType.BULK_UPLOAD_STARTED,
+        job_id=batch_id,
+        progress=0,
+        message=f"Starting bulk upload: {total_files} files",
+        user_id=user_id,
+        metadata={"batch_id": batch_id, "total_files": total_files},
+    )
+
+
+async def notify_bulk_upload_progress(
+    batch_id: str,
+    completed: int,
+    failed: int,
+    total: int,
+    current_file: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> int:
+    """Notify bulk upload progress."""
+    progress = ((completed + failed) / total) * 100 if total > 0 else 0
+    return await broadcast_progress(
+        event_type=MessageType.BULK_UPLOAD_PROGRESS,
+        job_id=batch_id,
+        progress=progress,
+        message=f"Processing: {completed + failed}/{total} files",
+        user_id=user_id,
+        metadata={
+            "batch_id": batch_id,
+            "completed": completed,
+            "failed": failed,
+            "total": total,
+            "current_file": current_file,
+        },
+    )
+
+
+async def notify_bulk_file_complete(
+    batch_id: str,
+    file_id: str,
+    filename: str,
+    document_id: str,
+    chunk_count: int,
+    user_id: Optional[str] = None,
+) -> int:
+    """Notify that a single file in bulk upload is complete."""
+    return await broadcast_progress(
+        event_type=MessageType.BULK_FILE_COMPLETE,
+        job_id=batch_id,
+        progress=0,  # Individual file progress
+        message=f"Completed: {filename}",
+        user_id=user_id,
+        metadata={
+            "batch_id": batch_id,
+            "file_id": file_id,
+            "filename": filename,
+            "document_id": document_id,
+            "chunk_count": chunk_count,
+        },
+    )
+
+
+async def notify_bulk_file_failed(
+    batch_id: str,
+    file_id: str,
+    filename: str,
+    error: str,
+    user_id: Optional[str] = None,
+) -> int:
+    """Notify that a file in bulk upload failed."""
+    return await broadcast_progress(
+        event_type=MessageType.BULK_FILE_FAILED,
+        job_id=batch_id,
+        progress=0,
+        message=f"Failed: {filename}",
+        user_id=user_id,
+        metadata={
+            "batch_id": batch_id,
+            "file_id": file_id,
+            "filename": filename,
+            "error": error,
+        },
+    )
+
+
+async def notify_bulk_upload_complete(
+    batch_id: str,
+    successful: int,
+    failed: int,
+    total: int,
+    elapsed_seconds: int,
+    user_id: Optional[str] = None,
+) -> int:
+    """Notify that bulk upload is complete."""
+    return await broadcast_progress(
+        event_type=MessageType.BULK_UPLOAD_COMPLETE,
+        job_id=batch_id,
+        progress=100,
+        message=f"Bulk upload complete: {successful}/{total} successful",
+        user_id=user_id,
+        metadata={
+            "batch_id": batch_id,
+            "successful": successful,
+            "failed": failed,
+            "total": total,
+            "elapsed_seconds": elapsed_seconds,
+        },
     )

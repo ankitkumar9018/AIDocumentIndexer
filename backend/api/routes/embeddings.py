@@ -3,7 +3,7 @@ Embedding System API Routes
 """
 
 from typing import List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, func, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -143,7 +143,7 @@ async def get_embedding_stats(
     except Exception as e:
         logger.error("Failed to get embedding stats", error=str(e))
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve embedding statistics: {str(e)}"
         )
 
@@ -163,6 +163,178 @@ async def generate_missing_embeddings(
     """
     # TODO: Implement background job system
     raise HTTPException(
-        status_code=501,
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
         detail="Background embedding generation not yet implemented. Use CLI scripts instead."
     )
+
+
+class ProviderInfo(BaseModel):
+    """Information about an embedding provider."""
+    name: str
+    model: str
+    dimensions: int
+    description: str
+    requires_api_key: bool
+    requires_gpu: bool
+    max_tokens: int
+    batch_size: int
+
+
+class EmbedTextRequest(BaseModel):
+    """Request to embed text."""
+    text: str
+    provider: str = "openai"
+
+
+class EmbedTextResponse(BaseModel):
+    """Response from text embedding."""
+    embedding: List[float]
+    dimensions: int
+    provider: str
+    model: str
+
+
+@router.get("/embeddings/providers", response_model=List[ProviderInfo])
+async def list_embedding_providers(
+    current_user: CurrentUser = Depends(get_current_user)
+):
+    """
+    List all available embedding providers with their configurations.
+
+    Returns information about each provider including:
+    - Model name and dimensions
+    - Whether API key or GPU is required
+    - Maximum token length and batch size
+    """
+    from backend.services.embeddings import (
+        EmbeddingService,
+        PROVIDER_BATCH_CONFIG,
+        VOYAGEAI_AVAILABLE,
+        QWEN3_AVAILABLE,
+    )
+
+    providers = [
+        ProviderInfo(
+            name="openai",
+            model=EmbeddingService.DEFAULT_MODELS.get("openai", "text-embedding-3-small"),
+            dimensions=1536,
+            description="OpenAI embeddings - reliable, good quality",
+            requires_api_key=True,
+            requires_gpu=False,
+            max_tokens=8191,
+            batch_size=PROVIDER_BATCH_CONFIG.get("openai", {}).get("optimal_batch_size", 500),
+        ),
+        ProviderInfo(
+            name="ollama",
+            model=EmbeddingService.DEFAULT_MODELS.get("ollama", "nomic-embed-text"),
+            dimensions=768,
+            description="Local embeddings via Ollama - free, private",
+            requires_api_key=False,
+            requires_gpu=False,
+            max_tokens=8192,
+            batch_size=PROVIDER_BATCH_CONFIG.get("ollama", {}).get("optimal_batch_size", 50),
+        ),
+    ]
+
+    # Add Voyage AI if available
+    if VOYAGEAI_AVAILABLE:
+        providers.extend([
+            ProviderInfo(
+                name="voyage",
+                model=EmbeddingService.DEFAULT_MODELS.get("voyage", "voyage-3-large"),
+                dimensions=1024,
+                description="Voyage AI - top MTEB scores, RAG-optimized",
+                requires_api_key=True,
+                requires_gpu=False,
+                max_tokens=16000,
+                batch_size=PROVIDER_BATCH_CONFIG.get("voyage", {}).get("optimal_batch_size", 100),
+            ),
+            ProviderInfo(
+                name="voyage4",
+                model=EmbeddingService.DEFAULT_MODELS.get("voyage4", "voyage-4"),
+                dimensions=1024,
+                description="Voyage 4 - shared embedding space, latest gen",
+                requires_api_key=True,
+                requires_gpu=False,
+                max_tokens=16000,
+                batch_size=PROVIDER_BATCH_CONFIG.get("voyage4", {}).get("optimal_batch_size", 100),
+            ),
+        ])
+
+    # Add Qwen3 if available
+    if QWEN3_AVAILABLE:
+        providers.extend([
+            ProviderInfo(
+                name="qwen3",
+                model=EmbeddingService.DEFAULT_MODELS.get("qwen3", "Alibaba-NLP/Qwen3-Embedding-8B"),
+                dimensions=4096,
+                description="Qwen3-8B - highest MTEB score (70.58), 100+ languages",
+                requires_api_key=False,
+                requires_gpu=True,
+                max_tokens=8192,
+                batch_size=PROVIDER_BATCH_CONFIG.get("qwen3", {}).get("optimal_batch_size", 32),
+            ),
+            ProviderInfo(
+                name="qwen3-4b",
+                model=EmbeddingService.DEFAULT_MODELS.get("qwen3-4b", "Alibaba-NLP/Qwen3-Embedding-4B"),
+                dimensions=2048,
+                description="Qwen3-4B - balanced performance and efficiency",
+                requires_api_key=False,
+                requires_gpu=True,
+                max_tokens=8192,
+                batch_size=PROVIDER_BATCH_CONFIG.get("qwen3-4b", {}).get("optimal_batch_size", 64),
+            ),
+            ProviderInfo(
+                name="qwen3-small",
+                model=EmbeddingService.DEFAULT_MODELS.get("qwen3-small", "Alibaba-NLP/Qwen3-Embedding-0.6B"),
+                dimensions=1024,
+                description="Qwen3-0.6B - fast and lightweight",
+                requires_api_key=False,
+                requires_gpu=False,  # Can run on CPU
+                max_tokens=8192,
+                batch_size=PROVIDER_BATCH_CONFIG.get("qwen3-small", {}).get("optimal_batch_size", 128),
+            ),
+        ])
+
+    return providers
+
+
+@router.post("/embeddings/test", response_model=EmbedTextResponse)
+async def test_embedding(
+    request: EmbedTextRequest,
+    current_user: CurrentUser = Depends(get_current_user)
+):
+    """
+    Test embedding generation with a specific provider.
+
+    Useful for verifying provider configuration and comparing output dimensions.
+    """
+    try:
+        from backend.services.embeddings import EmbeddingService
+
+        service = EmbeddingService(provider=request.provider)
+        embedding = service.embed_text(request.text)
+
+        return EmbedTextResponse(
+            embedding=embedding,
+            dimensions=len(embedding),
+            provider=request.provider,
+            model=service.model,
+        )
+
+    except ImportError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Provider '{request.provider}' dependencies not installed: {str(e)}"
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Provider configuration error: {str(e)}"
+        )
+    except Exception as e:
+        logger.error("Embedding test failed", provider=request.provider, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Embedding generation failed: {str(e)}"
+        )

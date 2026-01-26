@@ -226,7 +226,7 @@ class DocumentPreviewService:
             try:
                 font_title = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 32)
                 font_body = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 18)
-            except:
+            except (OSError, IOError):
                 font_title = ImageFont.load_default()
                 font_body = ImageFont.load_default()
 
@@ -467,7 +467,7 @@ class DocumentPreviewService:
             # Draw format text
             try:
                 font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
-            except:
+            except (OSError, IOError):
                 font = ImageFont.load_default()
 
             text = format.upper()

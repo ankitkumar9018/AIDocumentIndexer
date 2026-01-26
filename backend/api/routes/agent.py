@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, status
 from fastapi.responses import StreamingResponse
 
 from backend.api.middleware.auth import AuthenticatedUser
@@ -89,6 +89,13 @@ class UpdateAgentConfigRequest(BaseModel):
     is_active: Optional[bool] = None
 
 
+class TTSConfigRequest(BaseModel):
+    """TTS configuration for voice agents."""
+    provider: str = Field("openai", description="TTS provider: openai, elevenlabs, cartesia, edge")
+    voice_id: str = Field("alloy", description="Voice ID for the TTS provider")
+    speed: float = Field(1.0, ge=0.5, le=2.0, description="Speech speed multiplier")
+
+
 class CreateAgentRequest(BaseModel):
     """Request to create a new agent."""
     name: str = Field(..., min_length=1, max_length=100)
@@ -99,6 +106,11 @@ class CreateAgentRequest(BaseModel):
     settings: Optional[Dict[str, Any]] = None
     default_provider_id: Optional[str] = None
     default_model: Optional[str] = None
+    # Voice/Chat agent specific fields
+    agent_mode: Optional[str] = Field(None, description="Agent mode: voice, chat, or hybrid")
+    tts_config: Optional[TTSConfigRequest] = Field(None, description="TTS configuration for voice agents")
+    system_prompt: Optional[str] = Field(None, description="System prompt for the agent")
+    knowledge_bases: Optional[List[str]] = Field(None, description="List of knowledge base IDs")
 
 
 class UpdateAgentRequest(BaseModel):
@@ -111,6 +123,10 @@ class UpdateAgentRequest(BaseModel):
     default_provider_id: Optional[str] = None
     default_model: Optional[str] = None
     is_active: Optional[bool] = None
+    # Voice/Chat agent specific fields
+    agent_mode: Optional[str] = Field(None, description="Agent mode: voice, chat, or hybrid")
+    tts_config: Optional[TTSConfigRequest] = Field(None, description="TTS configuration for voice agents")
+    knowledge_bases: Optional[List[str]] = Field(None, description="List of knowledge base IDs")
     # Prompt fields - when provided, creates a new prompt version
     system_prompt: Optional[str] = Field(None, description="System prompt - creates new prompt version if provided")
     task_prompt_template: Optional[str] = Field(None, description="Task template - creates new prompt version if provided")
@@ -219,7 +235,7 @@ async def execute_request(
         if update.get("type") == "plan_completed":
             result = update
         elif update.get("type") == "error":
-            raise HTTPException(status_code=500, detail=update.get("error"))
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=update.get("error"))
         elif update.get("type") in ("budget_exceeded", "approval_required"):
             return update
 
@@ -303,7 +319,7 @@ async def cancel_execution(
     result = await orchestrator.cancel_execution(plan_id, user_id)
 
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error"))
 
     return result
 
@@ -322,7 +338,7 @@ async def get_plan_status(
     status = await orchestrator.get_plan_status(plan_id)
 
     if not status:
-        raise HTTPException(status_code=404, detail="Plan not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
 
     return PlanStatusResponse(**status)
 
@@ -552,7 +568,7 @@ async def get_agent_config(
     agent = result.scalar_one_or_none()
 
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     return {
         "id": str(agent.id),
@@ -585,7 +601,7 @@ async def update_agent_config(
     agent = result.scalar_one_or_none()
 
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     if request.default_provider_id is not None:
         agent.default_provider_id = uuid.UUID(request.default_provider_id) if request.default_provider_id else None
@@ -625,9 +641,14 @@ async def create_agent(
     )
     if existing.scalar_one_or_none():
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Agent type '{request.agent_type}' already exists"
         )
+
+    # Build settings with knowledge bases if provided
+    settings = request.settings or {}
+    if request.knowledge_bases:
+        settings["knowledge_bases"] = request.knowledge_bases
 
     agent = AgentDefinition(
         name=request.name,
@@ -635,22 +656,44 @@ async def create_agent(
         description=request.description,
         default_temperature=request.default_temperature,
         max_tokens=request.max_tokens,
-        settings=request.settings or {},
+        settings=settings,
         default_provider_id=uuid.UUID(request.default_provider_id) if request.default_provider_id else None,
         default_model=request.default_model,
         is_active=True,
+        # Voice/Chat agent fields
+        agent_mode=request.agent_mode,
+        tts_config=request.tts_config.model_dump() if request.tts_config else None,
     )
 
     db.add(agent)
     await db.commit()
     await db.refresh(agent)
 
-    logger.info("Created new agent", agent_id=str(agent.id), agent_type=request.agent_type)
+    # Create initial prompt version if system_prompt provided
+    if request.system_prompt:
+        prompt_version = AgentPromptVersion(
+            agent_id=agent.id,
+            version_number=1,
+            system_prompt=request.system_prompt,
+            task_prompt_template="{{input}}",
+            change_reason="Initial prompt",
+            created_by="api",
+        )
+        db.add(prompt_version)
+        await db.commit()
+        await db.refresh(prompt_version)
+
+        # Set as active prompt
+        agent.active_prompt_version_id = prompt_version.id
+        await db.commit()
+
+    logger.info("Created new agent", agent_id=str(agent.id), agent_type=request.agent_type, agent_mode=request.agent_mode)
 
     return {
         "id": str(agent.id),
         "name": agent.name,
         "agent_type": agent.agent_type,
+        "agent_mode": agent.agent_mode,
         "message": f"Agent '{agent.name}' created successfully",
     }
 
@@ -675,7 +718,7 @@ async def update_agent(
     agent = result.scalar_one_or_none()
 
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     # Update fields if provided
     if request.name is not None:
@@ -777,7 +820,7 @@ async def delete_agent(
     agent = result.scalar_one_or_none()
 
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     agent_name = agent.name
     agent_type = agent.agent_type
@@ -786,7 +829,7 @@ async def delete_agent(
     core_agents = {"manager", "generator", "critic", "research", "tool_executor"}
     if agent_type in core_agents and hard_delete:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot permanently delete core agent type '{agent_type}'. Use soft delete instead."
         )
 
@@ -928,7 +971,7 @@ async def trigger_optimization(
     agent = result.scalar_one_or_none()
 
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     # Create optimization job
     config = AgentConfig(
@@ -1008,7 +1051,7 @@ async def get_optimization_job(
     job = result.scalar_one_or_none()
 
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     return {
         "id": str(job.id),
@@ -1047,13 +1090,13 @@ async def approve_optimization(
     job = result.scalar_one_or_none()
 
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     if job.status != "awaiting_approval":
-        raise HTTPException(status_code=400, detail=f"Job is not awaiting approval (status: {job.status})")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Job is not awaiting approval (status: {job.status})")
 
     if not job.winning_variant_id:
-        raise HTTPException(status_code=400, detail="No winning variant selected")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No winning variant selected")
 
     # Promote winning variant
     version_manager = PromptVersionManager(db)
@@ -1092,7 +1135,7 @@ async def reject_optimization(
     job = result.scalar_one_or_none()
 
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
     job.status = "rejected"
     job.rejection_reason = reason
@@ -1128,7 +1171,7 @@ async def get_prompt_version(
     version = await version_manager.get_version(version_id)
 
     if not version or str(version.agent_id) != agent_id:
-        raise HTTPException(status_code=404, detail="Version not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
 
     return {
         "id": str(version.id),
@@ -1186,7 +1229,7 @@ async def rollback_prompt(
     result = await version_manager.rollback(agent_id, version_id)
 
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error"))
 
     return result
 
@@ -1261,7 +1304,7 @@ async def get_trajectory(
     trajectory = await collector.get_trajectory(trajectory_id)
 
     if not trajectory:
-        raise HTTPException(status_code=404, detail="Trajectory not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trajectory not found")
 
     return {
         "id": str(trajectory.id),
@@ -1294,7 +1337,7 @@ async def add_trajectory_feedback(
     trajectory = await collector.add_user_feedback(trajectory_id, rating, feedback)
 
     if not trajectory:
-        raise HTTPException(status_code=404, detail="Trajectory not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trajectory not found")
 
     return {"success": True, "trajectory_id": trajectory_id}
 
@@ -1361,7 +1404,7 @@ async def enhance_agent_prompt(
     agent = result.scalar_one_or_none()
 
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     # Get current active prompt version
     result = await db.execute(
@@ -1376,7 +1419,7 @@ async def enhance_agent_prompt(
 
     if not prompt_version:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="No active prompt version found for this agent"
         )
 
@@ -1386,7 +1429,7 @@ async def enhance_agent_prompt(
 
     if system_empty and task_empty:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Agent has empty prompts. Please set prompts before enhancing. "
                    "Both system_prompt and task_prompt_template are empty or whitespace-only."
         )
@@ -1407,7 +1450,7 @@ async def enhance_agent_prompt(
                 strategy = MutationStrategy(request.strategy)
             except ValueError:
                 raise HTTPException(
-                    status_code=400,
+                    status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid strategy. Valid options: {[s.value for s in MutationStrategy]}"
                 )
 
@@ -1450,7 +1493,7 @@ async def enhance_agent_prompt(
 
         if not mutation:
             raise HTTPException(
-                status_code=500,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to generate enhanced prompt"
             )
 
@@ -1508,7 +1551,7 @@ Respond with ONLY the improved description, nothing else."""
             traceback=traceback.format_exc(),
         )
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to enhance prompt: {str(e)}"
         )
 
@@ -1545,7 +1588,7 @@ async def update_agent_settings(
     agent = result.scalar_one_or_none()
 
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     # Update settings
     current_settings = agent.settings or {}
@@ -1558,7 +1601,7 @@ async def update_agent_settings(
         ext = request.external_agent
         if ext.get("enabled") and not ext.get("api_url"):
             raise HTTPException(
-                status_code=400,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail="api_url is required when external agent is enabled"
             )
         current_settings["external_agent"] = ext
@@ -1589,7 +1632,7 @@ async def get_agent_settings(
     agent = result.scalar_one_or_none()
 
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     settings = agent.settings or {}
 
@@ -1627,14 +1670,14 @@ async def test_external_agent(
     agent = result.scalar_one_or_none()
 
     if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     settings = agent.settings or {}
     external_config = settings.get("external_agent", {})
 
     if not external_config.get("api_url"):
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="No external agent URL configured"
         )
 
@@ -1673,3 +1716,575 @@ async def test_external_agent(
             "success": False,
             "message": f"Connection failed: {str(e)}",
         }
+
+
+# =============================================================================
+# Agent Publishing Endpoints
+# =============================================================================
+
+class PublishAgentRequest(BaseModel):
+    """Request to publish an agent for external use."""
+    allowed_domains: List[str] = Field(default=["*"], description="Allowed domains for embedding")
+    rate_limit: int = Field(default=100, ge=1, le=10000, description="Requests per hour limit")
+    welcome_message: Optional[str] = Field(None, max_length=500)
+    branding: Optional[Dict[str, Any]] = Field(None, description="Custom branding config")
+    # Branding: {"logo_url": "...", "primary_color": "#...", "agent_name": "..."}
+
+
+class PublishAgentResponse(BaseModel):
+    """Response after publishing an agent."""
+    agent_id: str
+    embed_token: str
+    embed_code: str
+    widget_url: str
+    is_published: bool
+
+
+class EmbedChatRequest(BaseModel):
+    """Request for embedded chat interaction."""
+    message: str = Field(..., min_length=1, max_length=4000)
+    conversation_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@router.post("/agents/{agent_id}/publish", response_model=PublishAgentResponse)
+async def publish_agent(
+    agent_id: str,
+    request: PublishAgentRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Publish an agent for external embedding.
+
+    Creates an embed token that can be used to embed the agent as a
+    chat widget on external websites.
+    """
+    import secrets
+
+    # Get the agent
+    result = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.id == uuid.UUID(agent_id))
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    # Generate embed token if not exists
+    if not agent.embed_token:
+        agent.embed_token = secrets.token_urlsafe(32)
+
+    # Update publish config
+    agent.is_published = True
+    agent.publish_config = {
+        "allowed_domains": request.allowed_domains,
+        "rate_limit": request.rate_limit,
+        "welcome_message": request.welcome_message,
+        "branding": request.branding or {},
+        "published_by": str(user.id),
+        "published_at": datetime.utcnow().isoformat(),
+    }
+
+    await db.commit()
+    await db.refresh(agent)
+
+    # Generate embed code
+    from backend.core.config import settings
+    base_url = settings.BASE_URL or "http://localhost:8000"
+    widget_url = f"{base_url}/embed/chat/{agent.embed_token}"
+
+    embed_code = f'''<!-- AI Agent Widget -->
+<script src="{base_url}/static/embed/agent-widget.js"></script>
+<script>
+  AIAgent.init({{
+    token: "{agent.embed_token}",
+    position: "bottom-right",
+    theme: "light"
+  }});
+</script>'''
+
+    return PublishAgentResponse(
+        agent_id=str(agent.id),
+        embed_token=agent.embed_token,
+        embed_code=embed_code,
+        widget_url=widget_url,
+        is_published=True,
+    )
+
+
+@router.delete("/agents/{agent_id}/publish")
+async def unpublish_agent(
+    agent_id: str,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """Unpublish an agent, disabling external access."""
+    result = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.id == uuid.UUID(agent_id))
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    agent.is_published = False
+    # Keep the embed_token so republishing uses the same token
+
+    await db.commit()
+
+    return {"success": True, "message": "Agent unpublished successfully"}
+
+
+@router.get("/agents/{agent_id}/publish/status")
+async def get_publish_status(
+    agent_id: str,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the publishing status of an agent."""
+    result = await db.execute(
+        select(AgentDefinition).where(AgentDefinition.id == uuid.UUID(agent_id))
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    from backend.core.config import settings
+    base_url = settings.BASE_URL or "http://localhost:8000"
+
+    return {
+        "agent_id": str(agent.id),
+        "is_published": agent.is_published,
+        "embed_token": agent.embed_token if agent.is_published else None,
+        "widget_url": f"{base_url}/embed/chat/{agent.embed_token}" if agent.is_published and agent.embed_token else None,
+        "publish_config": agent.publish_config if agent.is_published else None,
+    }
+
+
+# =============================================================================
+# Public Embedded Agent Endpoints (No Auth Required)
+# =============================================================================
+
+@router.get("/embed/{embed_token}/config")
+async def get_embed_config(
+    embed_token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get configuration for embedded agent widget.
+    This endpoint is public and accessed by the embed script.
+    """
+    result = await db.execute(
+        select(AgentDefinition).where(
+            and_(
+                AgentDefinition.embed_token == embed_token,
+                AgentDefinition.is_published == True,
+                AgentDefinition.is_active == True,
+            )
+        )
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found or not published")
+
+    publish_config = agent.publish_config or {}
+
+    return {
+        "agent_name": agent.name,
+        "agent_type": agent.agent_type,
+        "agent_mode": agent.agent_mode or "chat",
+        "welcome_message": publish_config.get("welcome_message", f"Hi! I'm {agent.name}. How can I help you?"),
+        "branding": publish_config.get("branding", {}),
+        "tts_enabled": agent.agent_mode in ["voice", "hybrid"],
+        "tts_config": agent.tts_config if agent.agent_mode in ["voice", "hybrid"] else None,
+    }
+
+
+@router.post("/embed/{embed_token}/chat")
+async def embedded_chat(
+    embed_token: str,
+    request: EmbedChatRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Chat endpoint for embedded agent widget.
+    This endpoint is public and rate-limited based on publish config.
+    """
+    # Get the agent
+    result = await db.execute(
+        select(AgentDefinition).where(
+            and_(
+                AgentDefinition.embed_token == embed_token,
+                AgentDefinition.is_published == True,
+                AgentDefinition.is_active == True,
+            )
+        )
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found or not published")
+
+    # TODO: Add rate limiting based on publish_config["rate_limit"]
+
+    try:
+        from backend.services.llm import EnhancedLLMFactory
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        # Get agent's system prompt
+        system_prompt = "You are a helpful AI assistant."
+        if agent.active_prompt_version_id:
+            prompt_result = await db.execute(
+                select(AgentPromptVersion).where(
+                    AgentPromptVersion.id == agent.active_prompt_version_id
+                )
+            )
+            prompt_version = prompt_result.scalar_one_or_none()
+            if prompt_version:
+                system_prompt = prompt_version.system_prompt
+
+        # Get LLM
+        llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+            operation="embed_chat",
+            user_id=None,
+            track_usage=True,
+        )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=request.message),
+        ]
+
+        response = await llm.ainvoke(messages)
+        response_text = response.content if hasattr(response, 'content') else str(response)
+
+        # Generate audio if voice agent
+        audio_url = None
+        if agent.agent_mode in ["voice", "hybrid"] and agent.tts_config:
+            try:
+                from backend.services.audio.tts_service import TTSService, TTSProvider
+
+                tts = TTSService()
+                tts_config = agent.tts_config or {}
+                provider = TTSProvider(tts_config.get("provider", "openai"))
+
+                audio_bytes = await tts.synthesize_text(
+                    text=response_text,
+                    voice_id=tts_config.get("voice_id", "alloy"),
+                    provider=provider,
+                    speed=tts_config.get("speed", 1.0),
+                )
+
+                if audio_bytes:
+                    import base64
+                    audio_url = f"data:audio/mp3;base64,{base64.b64encode(audio_bytes).decode()}"
+
+            except Exception as e:
+                logger.warning("Failed to generate audio for embed chat", error=str(e))
+
+        return {
+            "response": response_text,
+            "conversation_id": request.conversation_id or str(uuid.uuid4()),
+            "audio_url": audio_url,
+            "agent_name": agent.name,
+        }
+
+    except Exception as e:
+        logger.error("Embedded chat error", error=str(e), agent_id=str(agent.id))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process message")
+
+
+@router.post("/embed/{embed_token}/voice")
+async def embedded_voice_chat(
+    embed_token: str,
+    request: EmbedChatRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Voice chat endpoint for embedded voice agent.
+    Returns both text and audio response.
+    """
+    # Get the agent
+    result = await db.execute(
+        select(AgentDefinition).where(
+            and_(
+                AgentDefinition.embed_token == embed_token,
+                AgentDefinition.is_published == True,
+                AgentDefinition.is_active == True,
+                AgentDefinition.agent_mode.in_(["voice", "hybrid"]),
+            )
+        )
+    )
+    agent = result.scalar_one_or_none()
+
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice agent not found or not published")
+
+    try:
+        from backend.services.llm import EnhancedLLMFactory
+        from backend.services.audio.tts_service import TTSService, TTSProvider
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        # Get agent's system prompt
+        system_prompt = "You are a helpful voice AI assistant. Keep responses concise and conversational."
+        if agent.active_prompt_version_id:
+            prompt_result = await db.execute(
+                select(AgentPromptVersion).where(
+                    AgentPromptVersion.id == agent.active_prompt_version_id
+                )
+            )
+            prompt_version = prompt_result.scalar_one_or_none()
+            if prompt_version:
+                system_prompt = prompt_version.system_prompt
+
+        # Get LLM
+        llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+            operation="embed_voice",
+            user_id=None,
+            track_usage=True,
+        )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=request.message),
+        ]
+
+        response = await llm.ainvoke(messages)
+        response_text = response.content if hasattr(response, 'content') else str(response)
+
+        # Generate audio
+        tts = TTSService()
+        tts_config = agent.tts_config or {}
+        provider = TTSProvider(tts_config.get("provider", "openai"))
+
+        audio_bytes = await tts.synthesize_text(
+            text=response_text,
+            voice_id=tts_config.get("voice_id", "alloy"),
+            provider=provider,
+            speed=tts_config.get("speed", 1.0),
+        )
+
+        import base64
+        audio_data = base64.b64encode(audio_bytes).decode() if audio_bytes else None
+
+        return {
+            "response": response_text,
+            "audio_data": audio_data,
+            "audio_format": "mp3",
+            "conversation_id": request.conversation_id or str(uuid.uuid4()),
+            "agent_name": agent.name,
+            "tts_provider": tts_config.get("provider", "openai"),
+        }
+
+    except Exception as e:
+        logger.error("Embedded voice chat error", error=str(e), agent_id=str(agent.id))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process voice message")
+
+
+# =============================================================================
+# Phase 59: Agent Evaluation & Personalization Endpoints
+# =============================================================================
+
+class RecordTrialRequest(BaseModel):
+    """Request to record an evaluation trial."""
+    query: str
+    response: str
+    ground_truth: Optional[str] = None
+    latency_ms: float = 0.0
+    retrieved_docs: int = 0
+    correct_retrievals: int = 0
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class RecordFeedbackRequest(BaseModel):
+    """Request to record user feedback for personalization."""
+    query: str
+    response: str
+    rating: Optional[int] = Field(None, ge=1, le=5)
+    explicit_feedback: Optional[str] = None
+    follow_up_questions: int = 0
+    response_was_edited: bool = False
+
+
+@router.get("/agents/{agent_id}/evaluation")
+async def get_agent_evaluation(
+    agent_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Get comprehensive evaluation metrics for an agent.
+
+    Returns Pass^k, progress rate, hallucination rate, invocation accuracy,
+    and other performance metrics based on recorded trials.
+    """
+    try:
+        from backend.services.agent_evaluation import get_agent_evaluator
+
+        evaluator = await get_agent_evaluator(agent_id)
+        result = await evaluator.get_full_evaluation()
+
+        return {
+            "agent_id": result.agent_id,
+            "evaluation_id": result.evaluation_id,
+            "trial_count": len(result.trials),
+            "pass_rate": result.pass_rate,
+            "metrics": result.metrics,
+            "timestamp": result.timestamp.isoformat(),
+            "recent_trials": [t.to_dict() for t in result.trials[-10:]],
+        }
+
+    except Exception as e:
+        logger.error("Failed to get agent evaluation", error=str(e), agent_id=agent_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get evaluation: {str(e)}")
+
+
+@router.post("/agents/{agent_id}/evaluation/trial")
+async def record_evaluation_trial(
+    agent_id: str,
+    request: RecordTrialRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Record a trial for agent evaluation.
+
+    This endpoint is called after each agent interaction to track
+    performance metrics like pass rate, latency, and hallucination detection.
+    """
+    try:
+        from backend.services.agent_evaluation import get_agent_evaluator
+
+        evaluator = await get_agent_evaluator(agent_id)
+        trial = await evaluator.record_trial(
+            query=request.query,
+            response=request.response,
+            ground_truth=request.ground_truth,
+            latency_ms=request.latency_ms,
+            retrieved_docs=request.retrieved_docs,
+            correct_retrievals=request.correct_retrievals,
+            metadata=request.metadata,
+        )
+
+        return {
+            "trial_id": trial.trial_id,
+            "passed": trial.passed,
+            "score": trial.score,
+            "hallucination_detected": trial.hallucination_detected,
+            "timestamp": trial.timestamp.isoformat(),
+        }
+
+    except Exception as e:
+        logger.error("Failed to record trial", error=str(e), agent_id=agent_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to record trial: {str(e)}")
+
+
+@router.get("/agents/{agent_id}/evaluation/pass-k")
+async def get_pass_k_metric(
+    agent_id: str,
+    user: AuthenticatedUser,
+    k: int = Query(3, ge=1, le=10),
+):
+    """
+    Get Pass^k reliability metric for an agent.
+
+    Pass^k measures the probability that at least one of k trials
+    passes for each query. Target: >95% at k=3.
+    """
+    try:
+        from backend.services.agent_evaluation import get_agent_evaluator
+
+        evaluator = await get_agent_evaluator(agent_id)
+        result = await evaluator.compute_pass_k(k=k)
+
+        return {
+            "k": result.k,
+            "pass_rate": result.pass_rate,
+            "trials_per_query": result.trials_per_query,
+            "total_queries": result.total_queries,
+            "confidence_interval": {
+                "lower": result.confidence_interval[0],
+                "upper": result.confidence_interval[1],
+            },
+            "target": 0.95,
+            "meets_target": result.pass_rate >= 0.95,
+        }
+
+    except Exception as e:
+        logger.error("Failed to compute Pass^k", error=str(e), agent_id=agent_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to compute Pass^k: {str(e)}")
+
+
+@router.get("/agents/{agent_id}/personalization")
+async def get_user_personalization(
+    agent_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Get personalization settings learned from user interactions.
+
+    Returns expertise level, communication style preferences,
+    topic interests, and recommendations.
+    """
+    try:
+        from backend.services.agent_evaluation import get_personalization_service
+
+        service = await get_personalization_service(
+            user_id=str(user.user_id),
+            agent_id=agent_id,
+        )
+
+        preferences = service.preferences
+        recommendations = await service.get_recommendations()
+
+        return {
+            "preferences": preferences.to_dict(),
+            "recommendations": recommendations,
+            "prompt_instructions": preferences.to_prompt_instructions(),
+        }
+
+    except Exception as e:
+        logger.error("Failed to get personalization", error=str(e), agent_id=agent_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get personalization: {str(e)}")
+
+
+@router.post("/agents/{agent_id}/personalization/feedback")
+async def record_personalization_feedback(
+    agent_id: str,
+    request: RecordFeedbackRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Record user feedback to improve personalization.
+
+    This endpoint learns user preferences from interactions
+    to adapt future responses.
+    """
+    try:
+        from backend.services.agent_evaluation import get_personalization_service
+
+        service = await get_personalization_service(
+            user_id=str(user.user_id),
+            agent_id=agent_id,
+        )
+
+        feedback = await service.record_interaction(
+            query=request.query,
+            response=request.response,
+            rating=request.rating,
+            explicit_feedback=request.explicit_feedback,
+            follow_up_questions=request.follow_up_questions,
+            response_was_edited=request.response_was_edited,
+        )
+
+        return {
+            "interaction_id": feedback.interaction_id,
+            "preferences_updated": True,
+            "expertise_level": service.preferences.expertise_level.value,
+            "communication_style": service.preferences.communication_style.value,
+        }
+
+    except Exception as e:
+        logger.error("Failed to record feedback", error=str(e), agent_id=agent_id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to record feedback: {str(e)}")

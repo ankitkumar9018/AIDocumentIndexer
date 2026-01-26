@@ -394,7 +394,7 @@ class GoogleDriveConnector(BaseConnector):
             )
 
             if response.status_code != 200:
-                raise Exception(f"Token exchange failed: {response.text}")
+                raise ValueError(f"OAuth token exchange failed (HTTP {response.status_code}): {response.text}")
 
             tokens = response.json()
 

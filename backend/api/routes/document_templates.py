@@ -11,9 +11,12 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/document-templates", tags=["Document Templates"])
 
@@ -122,7 +125,7 @@ def load_template_metadata(json_path: Path) -> Optional[TemplateMetadata]:
             data["preview_url"] = f"/api/v1/document-templates/{file_type}/{category}/{template_id}/preview"
             return TemplateMetadata(**data)
     except Exception as e:
-        print(f"Failed to load template metadata from {json_path}: {e}")
+        logger.warning("Failed to load template metadata", path=str(json_path), error=str(e))
         return None
 
 
@@ -346,7 +349,7 @@ async def get_template_metadata(
         if metadata:
             return metadata
 
-    raise HTTPException(status_code=404, detail="Template not found")
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
 
 
 @router.get("/{file_type}/{category}/{template_id}/download")
@@ -362,7 +365,7 @@ async def download_template(
     template_dir = TEMPLATES_DIR / file_type / category
 
     if not template_dir.exists():
-        raise HTTPException(status_code=404, detail="Template category not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template category not found")
 
     # Look for the template file
     template_name = template_id.replace(f"{category}-", "")
@@ -377,7 +380,7 @@ async def download_template(
                 break
 
     if not template_file.exists():
-        raise HTTPException(status_code=404, detail="Template file not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template file not found")
 
     return FileResponse(
         path=str(template_file),
@@ -400,7 +403,7 @@ async def get_template_preview(
     template_dir = TEMPLATES_DIR / file_type / category
 
     if not template_dir.exists():
-        raise HTTPException(status_code=404, detail="Template category not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template category not found")
 
     # Look for preview image
     template_name = template_id.replace(f"{category}-", "")

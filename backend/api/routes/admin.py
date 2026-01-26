@@ -32,6 +32,7 @@ from backend.services.audit import (
     AuditService,
     AuditAction,
     AuditEntry,
+    LogSeverity,
     get_audit_service,
 )
 from backend.services.settings import (
@@ -164,6 +165,7 @@ class AuditLogResponse(BaseModel):
     """Audit log entry response."""
     id: str
     action: str
+    severity: str = "info"  # Phase 52: Log severity level
     user_id: Optional[str]
     user_email: Optional[str]
     resource_type: Optional[str]
@@ -180,6 +182,16 @@ class AuditLogListResponse(BaseModel):
     page: int
     page_size: int
     has_more: bool
+
+
+class SeverityCountResponse(BaseModel):
+    """Log severity count response (Phase 52)."""
+    debug: int = 0
+    info: int = 0
+    notice: int = 0
+    warning: int = 0
+    error: int = 0
+    critical: int = 0
 
 
 # =============================================================================
@@ -892,13 +904,29 @@ async def list_audit_logs(
     resource_type: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    severity: Optional[str] = Query(
+        default=None,
+        description="Filter by exact severity (debug, info, notice, warning, error, critical)"
+    ),
+    min_severity: Optional[str] = Query(
+        default=None,
+        description="Filter by minimum severity (includes all at or above this level)"
+    ),
 ):
     """
     List audit logs with filtering.
 
     Admin only endpoint.
+
+    Severity levels (in order of increasing importance):
+    - debug: Debug information, very verbose
+    - info: Informational messages, normal operations
+    - notice: Normal but significant conditions
+    - warning: Warning conditions, potential issues
+    - error: Error conditions, operation failed
+    - critical: Critical conditions, needs immediate attention
     """
-    logger.info("Listing audit logs", admin_id=admin.user_id, page=page)
+    logger.info("Listing audit logs", admin_id=admin.user_id, page=page, severity=severity)
 
     audit_service = get_audit_service()
 
@@ -913,12 +941,36 @@ async def list_audit_logs(
                 detail=f"Invalid action: {action}",
             )
 
+    # Phase 52: Convert severity strings to enums
+    severity_enum = None
+    min_severity_enum = None
+
+    if severity:
+        try:
+            severity_enum = LogSeverity(severity.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid severity: {severity}. Valid values: debug, info, notice, warning, error, critical",
+            )
+
+    if min_severity:
+        try:
+            min_severity_enum = LogSeverity(min_severity.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid min_severity: {min_severity}. Valid values: debug, info, notice, warning, error, critical",
+            )
+
     entries, total = await audit_service.get_logs(
         action=action_enum,
         user_id=str(user_id) if user_id else None,
         resource_type=resource_type,
         start_date=start_date,
         end_date=end_date,
+        severity=severity_enum,
+        min_severity=min_severity_enum,
         page=page,
         page_size=page_size,
         session=db,
@@ -928,6 +980,7 @@ async def list_audit_logs(
         AuditLogResponse(
             id=entry.id,
             action=entry.action,
+            severity=entry.severity,
             user_id=entry.user_id,
             user_email=entry.user_email,
             resource_type=entry.resource_type,
@@ -965,6 +1018,108 @@ async def list_audit_actions(admin: AdminUser):
     }
 
 
+@router.get("/audit-logs/severities")
+async def list_audit_severities(admin: AdminUser):
+    """
+    List all available log severity levels (Phase 52).
+
+    Admin only endpoint.
+    """
+    return {
+        "severities": [
+            {"value": s.value, "name": s.name, "order": i}
+            for i, s in enumerate(LogSeverity)
+        ],
+        "description": {
+            "debug": "Debug information, very verbose",
+            "info": "Informational messages, normal operations",
+            "notice": "Normal but significant conditions",
+            "warning": "Warning conditions, potential issues",
+            "error": "Error conditions, operation failed",
+            "critical": "Critical conditions, needs immediate attention",
+        }
+    }
+
+
+@router.get("/audit-logs/severity-counts", response_model=SeverityCountResponse)
+async def get_audit_severity_counts(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    hours: int = Query(default=24, ge=1, le=720),
+):
+    """
+    Get count of logs by severity level (Phase 52).
+
+    Useful for dashboard statistics and alerting.
+
+    Admin only endpoint.
+    """
+    audit_service = get_audit_service()
+    counts = await audit_service.get_severity_counts(hours=hours, session=db)
+
+    return SeverityCountResponse(
+        debug=counts.get("debug", 0),
+        info=counts.get("info", 0),
+        notice=counts.get("notice", 0),
+        warning=counts.get("warning", 0),
+        error=counts.get("error", 0),
+        critical=counts.get("critical", 0),
+    )
+
+
+@router.get("/audit-logs/warnings-and-errors")
+async def get_warnings_and_errors(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    hours: int = Query(default=24, ge=1, le=168),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+):
+    """
+    Get logs with severity WARNING or higher (Phase 52).
+
+    Useful for monitoring and alerting on issues.
+
+    Admin only endpoint.
+    """
+    audit_service = get_audit_service()
+
+    entries, total = await audit_service.get_logs_by_severity(
+        min_severity=LogSeverity.WARNING,
+        hours=hours,
+        page=page,
+        page_size=page_size,
+        session=db,
+    )
+
+    log_responses = [
+        AuditLogResponse(
+            id=entry.id,
+            action=entry.action,
+            severity=entry.severity,
+            user_id=entry.user_id,
+            user_email=entry.user_email,
+            resource_type=entry.resource_type,
+            resource_id=entry.resource_id,
+            details=entry.details,
+            ip_address=entry.ip_address,
+            created_at=entry.created_at,
+        )
+        for entry in entries
+    ]
+
+    offset = (page - 1) * page_size
+
+    return {
+        "hours": hours,
+        "logs": log_responses,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "has_more": (offset + len(entries)) < total,
+    }
+
+
 @router.get("/audit-logs/user/{user_id}")
 async def get_user_audit_logs(
     user_id: UUID,
@@ -992,6 +1147,7 @@ async def get_user_audit_logs(
             AuditLogResponse(
                 id=entry.id,
                 action=entry.action,
+                severity=entry.severity,
                 user_id=entry.user_id,
                 user_email=entry.user_email,
                 resource_type=entry.resource_type,
@@ -1029,6 +1185,7 @@ async def get_security_events(
                 AuditLogResponse(
                     id=entry.id,
                     action=entry.action,
+                    severity=entry.severity,
                     user_id=entry.user_id,
                     user_email=entry.user_email,
                     resource_type=entry.resource_type,
@@ -1046,6 +1203,7 @@ async def get_security_events(
                 AuditLogResponse(
                     id=entry.id,
                     action=entry.action,
+                    severity=entry.severity,
                     user_id=entry.user_id,
                     user_email=entry.user_email,
                     resource_type=entry.resource_type,
@@ -1985,6 +2143,96 @@ async def get_system_health(
 
 
 # =============================================================================
+# Phase 51: Ray/Distributed Processor Health Endpoint
+# =============================================================================
+
+@router.get("/health/ray")
+async def get_ray_health(
+    admin: AdminUser,
+):
+    """
+    Get Ray distributed computing health status.
+
+    Returns Ray cluster status, worker availability, and actor pool information.
+    Admin only endpoint.
+    """
+    from datetime import datetime
+
+    health_status = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "ray_status": "unavailable",
+        "ray_initialized": False,
+        "nodes": 0,
+        "cpus": {"total": 0, "available": 0},
+        "gpus": {"total": 0, "available": 0},
+        "actor_pools": [],
+        "message": "",
+    }
+
+    try:
+        # Check Ray availability
+        from backend.services.distributed_processor import get_distributed_processor
+
+        processor = await get_distributed_processor()
+        health = await processor.health_check()
+
+        # Extract Ray-specific info
+        ray_info = health.get("backends", {}).get("ray", {})
+
+        health_status.update({
+            "ray_status": ray_info.get("status", "unknown"),
+            "ray_initialized": ray_info.get("available", False),
+            "nodes": ray_info.get("nodes", 0),
+            "cpus": ray_info.get("cpus", {"total": 0, "available": 0}),
+            "gpus": ray_info.get("gpus", {"total": 0, "available": 0}),
+            "actor_pools": health.get("pools", []),
+            "message": "Ray cluster connected" if ray_info.get("available") else "Ray not available",
+        })
+
+    except Exception as e:
+        health_status["message"] = f"Error checking Ray health: {str(e)}"
+        logger.warning("Failed to check Ray health", error=str(e))
+
+    return health_status
+
+
+@router.get("/health/distributed")
+async def get_distributed_processor_health(
+    admin: AdminUser,
+):
+    """
+    Get distributed processor health status.
+
+    Returns full health information including Ray, Celery, and fallback status.
+    Admin only endpoint.
+    """
+    from datetime import datetime
+
+    try:
+        from backend.services.distributed_processor import get_distributed_processor
+
+        processor = await get_distributed_processor()
+        health = await processor.health_check()
+
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            **health,
+        }
+
+    except Exception as e:
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "status": "error",
+            "error": str(e),
+            "backends": {
+                "ray": {"status": "error", "available": False},
+                "celery": {"status": "unknown", "available": False},
+                "local": {"status": "available", "available": True},
+            },
+        }
+
+
+# =============================================================================
 # Database Management Endpoints
 # =============================================================================
 
@@ -2030,6 +2278,119 @@ async def get_database_info(
     info = await manager.get_info()
 
     return DatabaseInfoResponse(**info)
+
+
+@router.get("/database/index-stats")
+async def get_index_stats(
+    admin: AdminUser,
+):
+    """
+    Get vector index statistics and pgvector configuration.
+
+    Returns information about HNSW indexes, pgvector version,
+    and current optimization settings.
+
+    Admin only endpoint (Phase 57 - Index Optimization).
+    """
+    from backend.services.vectorstore import VectorStore
+    from backend.core.config import get_settings
+
+    logger.info("Getting index stats", admin_id=admin.user_id)
+
+    settings = get_settings()
+    vectorstore = VectorStore()
+    stats = await vectorstore.get_index_stats()
+
+    # Add configuration info
+    stats["config"] = {
+        "hnsw_ef_search": settings.HNSW_EF_SEARCH,
+        "hnsw_ef_search_high_precision": settings.HNSW_EF_SEARCH_HIGH_PRECISION,
+        "pgvector_iterative_scan": settings.PGVECTOR_ITERATIVE_SCAN,
+        "index_build_maintenance_work_mem": settings.INDEX_BUILD_MAINTENANCE_WORK_MEM,
+        "index_build_parallel_workers": settings.INDEX_BUILD_PARALLEL_WORKERS,
+    }
+
+    return stats
+
+
+@router.post("/database/reindex/{index_name}")
+async def reindex_vector_index(
+    index_name: str,
+    admin: AdminUser,
+    concurrent: bool = True,
+    request: Request = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Rebuild a vector index with optimized settings.
+
+    This applies maintenance_work_mem and parallel workers before reindexing
+    for faster index builds. Uses REINDEX CONCURRENTLY by default to avoid
+    blocking queries.
+
+    Admin only endpoint (Phase 57 - Index Optimization).
+
+    Args:
+        index_name: Name of the index to rebuild (e.g., idx_chunks_embedding_hnsw)
+        concurrent: If True, use REINDEX CONCURRENTLY (non-blocking, default)
+    """
+    from backend.services.vectorstore import VectorStore
+
+    logger.info(
+        "Reindexing vector index",
+        admin_id=admin.user_id,
+        index_name=index_name,
+        concurrent=concurrent
+    )
+
+    # Validate index name to prevent SQL injection
+    allowed_indexes = [
+        "idx_chunks_embedding_hnsw",
+        "idx_scraped_content_embedding_hnsw",
+        "idx_entities_embedding_hnsw",
+        "idx_response_cache_embedding_hnsw",
+    ]
+
+    if index_name not in allowed_indexes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid index name. Allowed: {', '.join(allowed_indexes)}"
+        )
+
+    vectorstore = VectorStore()
+    success = await vectorstore.reindex_with_optimization(
+        index_name=index_name,
+        concurrent=concurrent
+    )
+
+    # Log the reindex action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="index",
+        changes={
+            "action": "reindex",
+            "index_name": index_name,
+            "concurrent": concurrent,
+            "success": success
+        },
+        ip_address=get_client_ip(request) if request else None,
+        session=db,
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reindex {index_name}. Check logs for details."
+        )
+
+    return {
+        "status": "success",
+        "message": f"Successfully reindexed {index_name}",
+        "index_name": index_name,
+        "concurrent": concurrent
+    }
 
 
 @router.post("/database/test")
@@ -4977,8 +5338,8 @@ async def get_celery_status(
                 active_tasks = get_active_tasks()
                 for worker_tasks in active_tasks.get("active", {}).values():
                     active_count += len(worker_tasks)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to get active Celery tasks", error=str(e))
 
         return CeleryStatusResponse(
             enabled=worker_stats.get("enabled", False),
@@ -5361,3 +5722,1111 @@ async def list_organizations_for_admin(
             for org in orgs
         ]
     }
+
+
+# =============================================================================
+# Feature Management (Phase 55 - Superadmin Feature Toggles)
+# =============================================================================
+
+class FeatureToggle(BaseModel):
+    """Feature toggle model."""
+    id: str
+    name: str
+    description: str
+    category: str
+    enabled: bool
+    requires_api_key: Optional[str] = None
+    dependencies: List[str] = []
+    status: str = "available"  # available, unavailable, degraded
+
+
+class FeatureToggleUpdate(BaseModel):
+    """Feature toggle update request."""
+    enabled: bool
+
+
+class FeatureToggleListResponse(BaseModel):
+    """Feature toggles list response."""
+    features: List[FeatureToggle]
+    categories: List[str]
+
+
+# Feature definitions with dependencies and requirements
+SYSTEM_FEATURES = {
+    # Vision & Document Processing
+    "vlm": {
+        "name": "Vision Language Model (VLM)",
+        "description": "Use AI vision models for charts, tables, and infographics",
+        "category": "Document Processing",
+        "config_key": "ENABLE_VLM",
+        "requires_api_key": "ANTHROPIC_API_KEY",
+        "dependencies": [],
+    },
+    "ocr_surya": {
+        "name": "Surya OCR",
+        "description": "High-quality document OCR with layout detection",
+        "category": "Document Processing",
+        "config_key": "USE_SURYA_OCR",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+    "knowledge_graph": {
+        "name": "Knowledge Graph Extraction",
+        "description": "Extract entities and relationships from documents",
+        "category": "Document Processing",
+        "config_key": "ENABLE_KNOWLEDGE_GRAPH",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+
+    # Advanced RAG Features
+    "rlm": {
+        "name": "Recursive Language Model (RLM)",
+        "description": "Process 10M+ token contexts with O(log N) complexity",
+        "category": "Advanced RAG",
+        "config_key": "ENABLE_RLM",
+        "requires_api_key": "ANTHROPIC_API_KEY",
+        "dependencies": [],
+    },
+    "colbert": {
+        "name": "ColBERT Retrieval",
+        "description": "Token-level retrieval for precise matching",
+        "category": "Advanced RAG",
+        "config_key": "ENABLE_COLBERT",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+    "warp": {
+        "name": "WARP Engine",
+        "description": "3x faster retrieval than ColBERT PLAID",
+        "category": "Advanced RAG",
+        "config_key": "ENABLE_WARP",
+        "requires_api_key": None,
+        "dependencies": ["colbert"],
+    },
+    "colpali": {
+        "name": "ColPali Visual Retrieval",
+        "description": "Visual document retrieval without OCR",
+        "category": "Advanced RAG",
+        "config_key": "ENABLE_COLPALI",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+    "hybrid_search": {
+        "name": "Hybrid Search",
+        "description": "Combine vector, keyword, and graph search",
+        "category": "Advanced RAG",
+        "config_key": "ENABLE_HYBRID_SEARCH",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+    "reranking": {
+        "name": "Reranking Pipeline",
+        "description": "Multi-stage result reranking for accuracy",
+        "category": "Advanced RAG",
+        "config_key": "ENABLE_RERANKING",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+
+    # Distributed Processing
+    "ray_embeddings": {
+        "name": "Ray Distributed Embeddings",
+        "description": "Use Ray cluster for embedding generation",
+        "category": "Distributed Processing",
+        "config_key": "USE_RAY_FOR_EMBEDDINGS",
+        "requires_api_key": None,
+        "dependencies": ["ray_cluster"],
+    },
+    "ray_kg": {
+        "name": "Ray Distributed KG Extraction",
+        "description": "Use Ray cluster for knowledge graph extraction",
+        "category": "Distributed Processing",
+        "config_key": "USE_RAY_FOR_KG",
+        "requires_api_key": None,
+        "dependencies": ["ray_cluster", "knowledge_graph"],
+    },
+    "ray_vlm": {
+        "name": "Ray Distributed VLM",
+        "description": "Use Ray cluster for VLM processing",
+        "category": "Distributed Processing",
+        "config_key": "USE_RAY_FOR_VLM",
+        "requires_api_key": None,
+        "dependencies": ["ray_cluster", "vlm"],
+    },
+    "ray_cluster": {
+        "name": "Ray Cluster",
+        "description": "Enable Ray distributed computing",
+        "category": "Distributed Processing",
+        "config_key": "RAY_ADDRESS",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+
+    # Audio Features
+    "audio_overviews": {
+        "name": "Audio Overviews",
+        "description": "Generate audio summaries of documents",
+        "category": "Audio & Voice",
+        "config_key": "ENABLE_AUDIO_OVERVIEWS",
+        "requires_api_key": None,
+        "dependencies": ["tts"],
+    },
+    "tts": {
+        "name": "Text-to-Speech",
+        "description": "Convert text to speech using various providers",
+        "category": "Audio & Voice",
+        "config_key": "ENABLE_TTS",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+    "voice_agents": {
+        "name": "Voice Agents",
+        "description": "Create voice-enabled AI agents",
+        "category": "Audio & Voice",
+        "config_key": "ENABLE_VOICE_AGENTS",
+        "requires_api_key": None,
+        "dependencies": ["tts"],
+    },
+
+    # Workflow & Agents
+    "workflow_engine": {
+        "name": "Workflow Engine",
+        "description": "Create and run automated workflows",
+        "category": "Workflow & Agents",
+        "config_key": "ENABLE_WORKFLOW_ENGINE",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+    "chat_agents": {
+        "name": "Chat Agents",
+        "description": "Create custom chat agents with knowledge bases",
+        "category": "Workflow & Agents",
+        "config_key": "ENABLE_CHAT_AGENTS",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+    "agent_memory": {
+        "name": "Agent Memory System",
+        "description": "Persistent memory for agents across sessions",
+        "category": "Workflow & Agents",
+        "config_key": "ENABLE_AGENT_MEMORY",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+
+    # Integrations
+    "google_drive": {
+        "name": "Google Drive Sync",
+        "description": "Sync documents from Google Drive",
+        "category": "Integrations",
+        "config_key": "ENABLE_GOOGLE_DRIVE",
+        "requires_api_key": "GOOGLE_CLIENT_ID",
+        "dependencies": [],
+    },
+    "web_scraping": {
+        "name": "Web Scraping",
+        "description": "Scrape and index web content",
+        "category": "Integrations",
+        "config_key": "ENABLE_WEB_SCRAPING",
+        "requires_api_key": "FIRECRAWL_API_KEY",
+        "dependencies": [],
+    },
+    "connectors": {
+        "name": "External Connectors",
+        "description": "Connect to external data sources",
+        "category": "Integrations",
+        "config_key": "ENABLE_CONNECTORS",
+        "requires_api_key": None,
+        "dependencies": [],
+    },
+}
+
+
+def _get_feature_status(feature_id: str, feature_def: dict) -> tuple[bool, str]:
+    """Get current feature status from settings."""
+    from backend.core.config import settings
+
+    config_key = feature_def.get("config_key", "")
+
+    # Check if feature is enabled
+    enabled = getattr(settings, config_key, False) if config_key else False
+
+    # For string config keys (like RAY_ADDRESS), check if it's set
+    if isinstance(enabled, str):
+        enabled = bool(enabled and enabled not in ["", "None", "null"])
+
+    # Check API key requirement
+    requires_key = feature_def.get("requires_api_key")
+    if requires_key:
+        api_key = getattr(settings, requires_key, None)
+        if not api_key or api_key.startswith("your-") or api_key.startswith("sk-your"):
+            return enabled, "unavailable"
+
+    # Check dependencies
+    for dep in feature_def.get("dependencies", []):
+        if dep in SYSTEM_FEATURES:
+            dep_enabled, dep_status = _get_feature_status(dep, SYSTEM_FEATURES[dep])
+            if not dep_enabled or dep_status == "unavailable":
+                return enabled, "degraded"
+
+    return enabled, "available"
+
+
+@router.get("/features", response_model=FeatureToggleListResponse)
+async def list_system_features(
+    admin: AdminUser,
+    category: Optional[str] = None,
+):
+    """
+    List all system features with their current status.
+
+    Superadmin only endpoint (Phase 55).
+
+    Returns:
+        List of features with enabled status, dependencies, and requirements
+    """
+    features = []
+    categories = set()
+
+    for feature_id, feature_def in SYSTEM_FEATURES.items():
+        cat = feature_def["category"]
+        categories.add(cat)
+
+        if category and cat != category:
+            continue
+
+        enabled, status = _get_feature_status(feature_id, feature_def)
+
+        features.append(FeatureToggle(
+            id=feature_id,
+            name=feature_def["name"],
+            description=feature_def["description"],
+            category=cat,
+            enabled=enabled,
+            requires_api_key=feature_def.get("requires_api_key"),
+            dependencies=feature_def.get("dependencies", []),
+            status=status,
+        ))
+
+    return FeatureToggleListResponse(
+        features=features,
+        categories=sorted(categories),
+    )
+
+
+@router.get("/features/{feature_id}", response_model=FeatureToggle)
+async def get_feature_status(
+    feature_id: str,
+    admin: AdminUser,
+):
+    """
+    Get status of a specific feature.
+
+    Superadmin only endpoint (Phase 55).
+    """
+    if feature_id not in SYSTEM_FEATURES:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Feature '{feature_id}' not found",
+        )
+
+    feature_def = SYSTEM_FEATURES[feature_id]
+    enabled, feature_status = _get_feature_status(feature_id, feature_def)
+
+    return FeatureToggle(
+        id=feature_id,
+        name=feature_def["name"],
+        description=feature_def["description"],
+        category=feature_def["category"],
+        enabled=enabled,
+        requires_api_key=feature_def.get("requires_api_key"),
+        dependencies=feature_def.get("dependencies", []),
+        status=feature_status,
+    )
+
+
+@router.put("/features/{feature_id}")
+async def toggle_feature(
+    feature_id: str,
+    toggle: FeatureToggleUpdate,
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Enable or disable a system feature.
+
+    Superadmin only endpoint (Phase 55).
+
+    Note: Some features require server restart to take effect.
+    """
+    if feature_id not in SYSTEM_FEATURES:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Feature '{feature_id}' not found",
+        )
+
+    feature_def = SYSTEM_FEATURES[feature_id]
+    config_key = feature_def.get("config_key")
+
+    if not config_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Feature '{feature_id}' cannot be toggled dynamically",
+        )
+
+    # Check dependencies when enabling
+    if toggle.enabled:
+        for dep in feature_def.get("dependencies", []):
+            if dep in SYSTEM_FEATURES:
+                dep_enabled, _ = _get_feature_status(dep, SYSTEM_FEATURES[dep])
+                if not dep_enabled:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Cannot enable '{feature_id}': dependency '{dep}' is not enabled",
+                    )
+
+        # Check API key requirement
+        requires_key = feature_def.get("requires_api_key")
+        if requires_key:
+            from backend.core.config import settings
+            api_key = getattr(settings, requires_key, None)
+            if not api_key or api_key.startswith("your-") or api_key.startswith("sk-your"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot enable '{feature_id}': {requires_key} is not configured",
+                )
+
+    # Update the setting
+    settings_service = get_settings_service()
+    old_value, _ = _get_feature_status(feature_id, feature_def)
+
+    await settings_service.update_setting(
+        key=config_key,
+        value=toggle.enabled,
+        user_id=admin.user_id,
+        session=db,
+    )
+
+    # Log the change
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="feature",
+        target_resource_id=feature_id,
+        changes={
+            "feature": feature_id,
+            "feature_name": feature_def["name"],
+            "old_value": old_value,
+            "new_value": toggle.enabled,
+            "config_key": config_key,
+        },
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    return {
+        "feature_id": feature_id,
+        "feature_name": feature_def["name"],
+        "enabled": toggle.enabled,
+        "requires_restart": config_key in [
+            "RAY_ADDRESS", "ENABLE_COLBERT", "ENABLE_WARP",
+        ],
+        "message": f"Feature '{feature_def['name']}' {'enabled' if toggle.enabled else 'disabled'}",
+    }
+
+
+@router.get("/features/health/check")
+async def check_features_health(
+    admin: AdminUser,
+):
+    """
+    Check health status of all features.
+
+    Superadmin only endpoint (Phase 55).
+
+    Returns counts of available, unavailable, and degraded features.
+    """
+    counts = {"available": 0, "unavailable": 0, "degraded": 0, "enabled": 0, "disabled": 0}
+    issues = []
+
+    for feature_id, feature_def in SYSTEM_FEATURES.items():
+        enabled, status = _get_feature_status(feature_id, feature_def)
+
+        counts[status] += 1
+        counts["enabled" if enabled else "disabled"] += 1
+
+        if status == "unavailable":
+            issues.append({
+                "feature_id": feature_id,
+                "feature_name": feature_def["name"],
+                "issue": f"Missing API key: {feature_def.get('requires_api_key')}",
+            })
+        elif status == "degraded":
+            issues.append({
+                "feature_id": feature_id,
+                "feature_name": feature_def["name"],
+                "issue": f"Missing dependencies: {feature_def.get('dependencies')}",
+            })
+
+    return {
+        "counts": counts,
+        "issues": issues,
+        "total_features": len(SYSTEM_FEATURES),
+    }
+
+
+# =============================================================================
+# VLM Configuration Endpoints (Phase 54)
+# =============================================================================
+
+class VLMConfigResponse(BaseModel):
+    """VLM configuration response."""
+    enabled: bool
+    provider: str
+    model: str
+    max_images_per_request: int
+    auto_process_visual_docs: bool
+    extract_tables: bool
+    extract_charts: bool
+    ocr_fallback: bool
+
+
+class VLMConfigUpdate(BaseModel):
+    """VLM configuration update request."""
+    enabled: Optional[bool] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    max_images_per_request: Optional[int] = Field(None, ge=1, le=20)
+    auto_process_visual_docs: Optional[bool] = None
+    extract_tables: Optional[bool] = None
+    extract_charts: Optional[bool] = None
+    ocr_fallback: Optional[bool] = None
+
+
+class VLMTestRequest(BaseModel):
+    """VLM test request."""
+    image_url: Optional[str] = None
+    test_text: Optional[str] = "Describe what you see in this test image."
+
+
+@router.get("/vlm/config", response_model=VLMConfigResponse)
+async def get_vlm_config(
+    admin: AdminUser,
+):
+    """
+    Get VLM configuration.
+
+    Superadmin only endpoint (Phase 54).
+    """
+    return VLMConfigResponse(
+        enabled=settings.ENABLE_VLM,
+        provider=getattr(settings, "VLM_PROVIDER", "claude"),
+        model=getattr(settings, "VLM_MODEL", "claude-3-5-sonnet-20241022"),
+        max_images_per_request=getattr(settings, "VLM_MAX_IMAGES", 10),
+        auto_process_visual_docs=getattr(settings, "VLM_AUTO_PROCESS", True),
+        extract_tables=getattr(settings, "VLM_EXTRACT_TABLES", True),
+        extract_charts=getattr(settings, "VLM_EXTRACT_CHARTS", True),
+        ocr_fallback=getattr(settings, "VLM_OCR_FALLBACK", True),
+    )
+
+
+@router.put("/vlm/config")
+async def update_vlm_config(
+    config: VLMConfigUpdate,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update VLM configuration.
+
+    Superadmin only endpoint (Phase 54).
+    """
+    logger.info("Updating VLM config", admin_id=admin.user_id)
+
+    updates = {}
+    if config.enabled is not None:
+        updates["ENABLE_VLM"] = config.enabled
+    if config.provider is not None:
+        updates["VLM_PROVIDER"] = config.provider
+    if config.model is not None:
+        updates["VLM_MODEL"] = config.model
+    if config.max_images_per_request is not None:
+        updates["VLM_MAX_IMAGES"] = config.max_images_per_request
+    if config.auto_process_visual_docs is not None:
+        updates["VLM_AUTO_PROCESS"] = config.auto_process_visual_docs
+    if config.extract_tables is not None:
+        updates["VLM_EXTRACT_TABLES"] = config.extract_tables
+    if config.extract_charts is not None:
+        updates["VLM_EXTRACT_CHARTS"] = config.extract_charts
+    if config.ocr_fallback is not None:
+        updates["VLM_OCR_FALLBACK"] = config.ocr_fallback
+
+    # Update settings in database
+    for key, value in updates.items():
+        await _update_setting(db, key, value, admin.user_id)
+
+    await audit_service.log_admin_action(
+        db=db,
+        user_id=admin.user_id,
+        action=AuditAction.UPDATE,
+        target_resource_type="vlm_config",
+        details={"updates": updates},
+    )
+
+    return {"message": "VLM configuration updated", "updates": updates}
+
+
+@router.post("/vlm/test")
+async def test_vlm(
+    request: VLMTestRequest,
+    admin: AdminUser,
+):
+    """
+    Test VLM connection and processing.
+
+    Superadmin only endpoint (Phase 54).
+    """
+    if not settings.ENABLE_VLM:
+        return {
+            "success": False,
+            "error": "VLM is disabled",
+            "message": "Enable VLM in settings first",
+        }
+
+    try:
+        from backend.services.vlm_processor import get_vlm_processor
+
+        processor = await get_vlm_processor()
+        health = await processor.health_check()
+
+        return {
+            "success": health.get("healthy", False),
+            "provider": health.get("provider", "unknown"),
+            "model": health.get("model", "unknown"),
+            "latency_ms": health.get("latency_ms"),
+            "message": "VLM connection successful" if health.get("healthy") else "VLM connection failed",
+        }
+
+    except Exception as e:
+        logger.error("VLM test failed", error=str(e))
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "VLM test failed",
+        }
+
+
+# =============================================================================
+# RLM Configuration Endpoints (Phase 54)
+# =============================================================================
+
+class RLMConfigResponse(BaseModel):
+    """RLM configuration response."""
+    enabled: bool
+    provider: str
+    context_threshold: int
+    max_context_tokens: int
+    sandbox_type: str
+    enable_self_refinement: bool
+
+
+class RLMConfigUpdate(BaseModel):
+    """RLM configuration update request."""
+    enabled: Optional[bool] = None
+    provider: Optional[str] = None
+    context_threshold: Optional[int] = Field(None, ge=10000)
+    max_context_tokens: Optional[int] = Field(None, ge=100000)
+    sandbox_type: Optional[str] = None
+    enable_self_refinement: Optional[bool] = None
+
+
+@router.get("/rlm/config", response_model=RLMConfigResponse)
+async def get_rlm_config(
+    admin: AdminUser,
+):
+    """
+    Get RLM configuration.
+
+    Superadmin only endpoint (Phase 54).
+    """
+    return RLMConfigResponse(
+        enabled=settings.ENABLE_RLM,
+        provider=getattr(settings, "RLM_PROVIDER", "anthropic"),
+        context_threshold=getattr(settings, "RLM_THRESHOLD", 100000),
+        max_context_tokens=getattr(settings, "RLM_MAX_CONTEXT", 10000000),
+        sandbox_type=getattr(settings, "RLM_SANDBOX", "local"),
+        enable_self_refinement=getattr(settings, "RLM_SELF_REFINE", True),
+    )
+
+
+@router.put("/rlm/config")
+async def update_rlm_config(
+    config: RLMConfigUpdate,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update RLM configuration.
+
+    Superadmin only endpoint (Phase 54).
+    """
+    logger.info("Updating RLM config", admin_id=admin.user_id)
+
+    updates = {}
+    if config.enabled is not None:
+        updates["ENABLE_RLM"] = config.enabled
+    if config.provider is not None:
+        updates["RLM_PROVIDER"] = config.provider
+    if config.context_threshold is not None:
+        updates["RLM_THRESHOLD"] = config.context_threshold
+    if config.max_context_tokens is not None:
+        updates["RLM_MAX_CONTEXT"] = config.max_context_tokens
+    if config.sandbox_type is not None:
+        updates["RLM_SANDBOX"] = config.sandbox_type
+    if config.enable_self_refinement is not None:
+        updates["RLM_SELF_REFINE"] = config.enable_self_refinement
+
+    # Update settings in database
+    for key, value in updates.items():
+        await _update_setting(db, key, value, admin.user_id)
+
+    await audit_service.log_admin_action(
+        db=db,
+        user_id=admin.user_id,
+        action=AuditAction.UPDATE,
+        target_resource_type="rlm_config",
+        details={"updates": updates},
+    )
+
+    return {"message": "RLM configuration updated", "updates": updates}
+
+
+# =============================================================================
+# Ray Status Endpoint (Phase 54)
+# =============================================================================
+
+class RayStatusResponse(BaseModel):
+    """Ray cluster status response."""
+    connected: bool
+    address: str
+    nodes: int
+    cpus_total: int
+    cpus_available: int
+    gpus_total: int
+    gpus_available: int
+    memory_total_gb: float
+    memory_available_gb: float
+    tasks_pending: int
+    actors_alive: int
+    use_for_embeddings: bool
+    use_for_kg: bool
+    use_for_vlm: bool
+
+
+@router.get("/ray/status", response_model=RayStatusResponse)
+async def get_ray_status(
+    admin: AdminUser,
+):
+    """
+    Get Ray cluster status.
+
+    Superadmin only endpoint (Phase 54).
+    """
+    try:
+        from backend.services.distributed_processor import get_distributed_processor
+
+        processor = await get_distributed_processor()
+        health = await processor.health_check()
+
+        ray_info = health.get("backends", {}).get("ray", {})
+
+        return RayStatusResponse(
+            connected=ray_info.get("available", False),
+            address=getattr(settings, "RAY_ADDRESS", "auto"),
+            nodes=ray_info.get("nodes", 0),
+            cpus_total=ray_info.get("cpus", {}).get("total", 0),
+            cpus_available=ray_info.get("cpus", {}).get("available", 0),
+            gpus_total=ray_info.get("gpus", {}).get("total", 0),
+            gpus_available=ray_info.get("gpus", {}).get("available", 0),
+            memory_total_gb=ray_info.get("memory", {}).get("total_gb", 0),
+            memory_available_gb=ray_info.get("memory", {}).get("available_gb", 0),
+            tasks_pending=ray_info.get("tasks_pending", 0),
+            actors_alive=ray_info.get("actors_alive", 0),
+            use_for_embeddings=settings.USE_RAY_FOR_EMBEDDINGS,
+            use_for_kg=settings.USE_RAY_FOR_KG,
+            use_for_vlm=settings.USE_RAY_FOR_VLM,
+        )
+
+    except Exception as e:
+        logger.warning("Failed to get Ray status", error=str(e))
+        return RayStatusResponse(
+            connected=False,
+            address=getattr(settings, "RAY_ADDRESS", "auto"),
+            nodes=0,
+            cpus_total=0,
+            cpus_available=0,
+            gpus_total=0,
+            gpus_available=0,
+            memory_total_gb=0,
+            memory_available_gb=0,
+            tasks_pending=0,
+            actors_alive=0,
+            use_for_embeddings=settings.USE_RAY_FOR_EMBEDDINGS,
+            use_for_kg=settings.USE_RAY_FOR_KG,
+            use_for_vlm=settings.USE_RAY_FOR_VLM,
+        )
+
+
+@router.put("/ray/config")
+async def update_ray_config(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+    use_for_embeddings: Optional[bool] = None,
+    use_for_kg: Optional[bool] = None,
+    use_for_vlm: Optional[bool] = None,
+):
+    """
+    Update Ray configuration.
+
+    Superadmin only endpoint (Phase 54).
+    """
+    logger.info("Updating Ray config", admin_id=admin.user_id)
+
+    updates = {}
+    if use_for_embeddings is not None:
+        updates["USE_RAY_FOR_EMBEDDINGS"] = use_for_embeddings
+    if use_for_kg is not None:
+        updates["USE_RAY_FOR_KG"] = use_for_kg
+    if use_for_vlm is not None:
+        updates["USE_RAY_FOR_VLM"] = use_for_vlm
+
+    # Update settings in database
+    for key, value in updates.items():
+        await _update_setting(db, key, value, admin.user_id)
+
+    await audit_service.log_admin_action(
+        db=db,
+        user_id=admin.user_id,
+        action=AuditAction.UPDATE,
+        target_resource_type="ray_config",
+        details={"updates": updates},
+    )
+
+    return {"message": "Ray configuration updated", "updates": updates}
+
+
+# =============================================================================
+# Analytics Endpoints (Phase 59: Wire analytics service)
+# =============================================================================
+
+@router.get("/analytics/dashboard")
+async def get_analytics_dashboard(
+    admin: AdminUser,
+    period: str = "day",
+):
+    """
+    Get comprehensive analytics dashboard data.
+
+    Phase 59: Integrates the previously unused analytics service.
+
+    Returns query metrics, document metrics, user metrics, and system health.
+    """
+    from backend.services.analytics import get_analytics_service, MetricPeriod
+
+    try:
+        service = get_analytics_service()
+
+        # Convert period string to enum
+        period_map = {
+            "hour": MetricPeriod.HOUR,
+            "day": MetricPeriod.DAY,
+            "week": MetricPeriod.WEEK,
+            "month": MetricPeriod.MONTH,
+        }
+        metric_period = period_map.get(period, MetricPeriod.DAY)
+
+        # Get dashboard data
+        data = await service.get_dashboard_data(period=metric_period)
+
+        return {
+            "query_metrics": {
+                "total_queries": data.query_metrics.total_queries,
+                "successful_queries": data.query_metrics.successful_queries,
+                "failed_queries": data.query_metrics.failed_queries,
+                "avg_latency_ms": data.query_metrics.avg_latency_ms,
+                "p50_latency_ms": data.query_metrics.p50_latency_ms,
+                "p95_latency_ms": data.query_metrics.p95_latency_ms,
+                "p99_latency_ms": data.query_metrics.p99_latency_ms,
+                "cache_hit_rate": data.query_metrics.cache_hit_rate,
+                "by_intent": data.query_metrics.by_intent,
+                "by_complexity": data.query_metrics.by_complexity,
+            },
+            "document_metrics": {
+                "total_documents": data.document_metrics.total_documents,
+                "total_chunks": data.document_metrics.total_chunks,
+                "by_type": data.document_metrics.by_type,
+                "by_status": data.document_metrics.by_status,
+                "documents_added_today": data.document_metrics.documents_added_today,
+            },
+            "system_health": {
+                "status": data.system_health.status,
+                "uptime_seconds": data.system_health.uptime_seconds,
+                "error_rate": data.system_health.error_rate,
+                "avg_response_time_ms": data.system_health.avg_response_time_ms,
+            },
+            "period": period,
+        }
+
+    except Exception as e:
+        logger.error("Failed to get analytics dashboard", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Analytics error: {str(e)}")
+
+
+@router.get("/analytics/queries")
+async def get_query_analytics(
+    admin: AdminUser,
+    period: str = "day",
+    limit: int = 100,
+):
+    """
+    Get detailed query analytics and recent queries.
+
+    Phase 59: Provides query performance metrics and logs.
+    """
+    from backend.services.analytics import get_analytics_service, MetricPeriod
+
+    try:
+        service = get_analytics_service()
+
+        period_map = {
+            "hour": MetricPeriod.HOUR,
+            "day": MetricPeriod.DAY,
+            "week": MetricPeriod.WEEK,
+            "month": MetricPeriod.MONTH,
+        }
+        metric_period = period_map.get(period, MetricPeriod.DAY)
+
+        # Get query metrics
+        metrics = await service.get_query_metrics(period=metric_period)
+
+        # Get recent queries
+        recent = service.get_recent_queries(limit=limit)
+
+        return {
+            "metrics": {
+                "total_queries": metrics.total_queries,
+                "successful_queries": metrics.successful_queries,
+                "failed_queries": metrics.failed_queries,
+                "avg_latency_ms": metrics.avg_latency_ms,
+                "p50_latency_ms": metrics.p50_latency_ms,
+                "p95_latency_ms": metrics.p95_latency_ms,
+                "p99_latency_ms": metrics.p99_latency_ms,
+                "avg_sources_per_query": metrics.avg_sources_per_query,
+                "cache_hit_rate": metrics.cache_hit_rate,
+                "by_intent": metrics.by_intent,
+                "by_complexity": metrics.by_complexity,
+                "by_strategy": metrics.by_strategy,
+                "queries_per_hour": metrics.queries_per_hour,
+            },
+            "recent_queries": [q.to_dict() for q in recent],
+            "period": period,
+        }
+
+    except Exception as e:
+        logger.error("Failed to get query analytics", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Analytics error: {str(e)}")
+
+
+@router.get("/analytics/documents")
+async def get_document_analytics(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get document and indexing analytics.
+
+    Phase 59: Provides document metrics and index health.
+    """
+    from backend.services.analytics import get_analytics_service
+
+    try:
+        service = get_analytics_service()
+        metrics = await service.get_document_metrics(session=db)
+
+        return {
+            "total_documents": metrics.total_documents,
+            "total_chunks": metrics.total_chunks,
+            "total_embeddings": metrics.total_embeddings,
+            "by_type": metrics.by_type,
+            "by_status": metrics.by_status,
+            "avg_chunk_size": metrics.avg_chunk_size,
+            "avg_chunks_per_doc": metrics.avg_chunks_per_doc,
+            "index_last_updated": metrics.index_last_updated.isoformat() if metrics.index_last_updated else None,
+            "documents_added_today": metrics.documents_added_today,
+            "documents_added_week": metrics.documents_added_week,
+        }
+
+    except Exception as e:
+        logger.error("Failed to get document analytics", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Analytics error: {str(e)}")
+
+
+@router.post("/analytics/log-query")
+async def log_query_for_analytics(
+    admin: AdminUser,
+    query_id: str,
+    query: str,
+    user_id: str,
+    latency_ms: float,
+    source_count: int = 0,
+    intent: str = "general",
+    complexity: str = "simple",
+    strategy: str = "standard",
+    cache_hit: bool = False,
+    success: bool = True,
+    error: Optional[str] = None,
+):
+    """
+    Manually log a query for analytics tracking.
+
+    Phase 59: Allows manual query logging for testing/admin purposes.
+    """
+    from backend.services.analytics import get_analytics_service
+
+    try:
+        service = get_analytics_service()
+        await service.log_query(
+            query_id=query_id,
+            query=query,
+            user_id=user_id,
+            latency_ms=latency_ms,
+            source_count=source_count,
+            intent=intent,
+            complexity=complexity,
+            strategy=strategy,
+            cache_hit=cache_hit,
+            success=success,
+            error=error,
+        )
+
+        return {"message": "Query logged successfully", "query_id": query_id}
+
+    except Exception as e:
+        logger.error("Failed to log query", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Logging error: {str(e)}")
+
+
+# =============================================================================
+# Phase 70: Circuit Breaker Monitoring
+# =============================================================================
+
+class CircuitBreakerStats(BaseModel):
+    """Circuit breaker statistics."""
+    name: str
+    state: str
+    failure_count: int
+    success_count: int
+    last_failure_time: Optional[float] = None
+    config: Dict[str, Any]
+
+
+class CircuitBreakerStatsResponse(BaseModel):
+    """Response for circuit breaker stats."""
+    llm_circuits: Dict[str, CircuitBreakerStats]
+    total_circuits: int
+    open_circuits: List[str]
+    healthy: bool
+
+
+@router.get("/resilience/circuit-breakers", response_model=CircuitBreakerStatsResponse)
+async def get_circuit_breaker_stats(
+    _user: AdminUser,
+):
+    """
+    Get circuit breaker statistics (admin only).
+
+    Returns health and state of all LLM circuit breakers.
+    Open circuits indicate services that are failing and being protected.
+    """
+    try:
+        from backend.services.rag import get_llm_circuit_breaker_stats
+
+        llm_stats = get_llm_circuit_breaker_stats()
+
+        # Transform to response format
+        circuits = {}
+        open_circuits = []
+        for name, stats in llm_stats.items():
+            circuits[name] = CircuitBreakerStats(
+                name=stats["name"],
+                state=stats["state"],
+                failure_count=stats["failure_count"],
+                success_count=stats["success_count"],
+                last_failure_time=stats.get("last_failure_time"),
+                config=stats.get("config", {}),
+            )
+            if stats["state"] == "open":
+                open_circuits.append(name)
+
+        return CircuitBreakerStatsResponse(
+            llm_circuits=circuits,
+            total_circuits=len(circuits),
+            open_circuits=open_circuits,
+            healthy=len(open_circuits) == 0,
+        )
+
+    except Exception as e:
+        logger.error("Failed to get circuit breaker stats", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get circuit breaker stats: {str(e)}"
+        )
+
+
+@router.post("/resilience/circuit-breakers/{circuit_name}/reset")
+async def reset_circuit_breaker(
+    circuit_name: str,
+    _user: AdminUser,
+):
+    """
+    Manually reset a circuit breaker (admin only).
+
+    Use this to force a circuit breaker back to closed state
+    after the underlying issue has been resolved.
+    """
+    try:
+        from backend.services.resilience import CircuitBreaker
+
+        cb = CircuitBreaker.get(circuit_name)
+        if not cb:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Circuit breaker '{circuit_name}' not found"
+            )
+
+        old_state = cb.state.value
+        cb.reset()
+
+        logger.info(
+            "Circuit breaker manually reset",
+            name=circuit_name,
+            old_state=old_state,
+        )
+
+        return {
+            "message": f"Circuit breaker '{circuit_name}' reset successfully",
+            "old_state": old_state,
+            "new_state": "closed",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to reset circuit breaker", name=circuit_name, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reset circuit breaker: {str(e)}"
+        )

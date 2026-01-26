@@ -11,10 +11,14 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, List
 from pathlib import Path
 
+import structlog
+
 try:
     from lxml import etree
 except ImportError:
     import xml.etree.ElementTree as etree
+
+logger = structlog.get_logger(__name__)
 
 from .models import (
     PPTXTheme,
@@ -72,7 +76,7 @@ class PPTXThemeExtractor(ThemeExtractor):
                 self._extract_layouts(zf, theme)
 
         except Exception as e:
-            print(f"Warning: Could not fully extract theme from {template_path}: {e}")
+            logger.warning("Could not fully extract theme", path=str(template_path), error=str(e))
 
         return theme
 
@@ -360,7 +364,7 @@ class DOCXThemeExtractor(ThemeExtractor):
                     self._parse_document_xml(doc_xml, theme)
 
         except Exception as e:
-            print(f"Warning: Could not fully extract theme from {template_path}: {e}")
+            logger.warning("Could not fully extract theme", path=str(template_path), error=str(e))
 
         return theme
 
@@ -432,7 +436,7 @@ class XLSXThemeExtractor(ThemeExtractor):
                     self._parse_styles_xml(styles_xml, theme)
 
         except Exception as e:
-            print(f"Warning: Could not fully extract theme from {template_path}: {e}")
+            logger.warning("Could not fully extract theme", path=str(template_path), error=str(e))
 
         return theme
 
@@ -481,7 +485,7 @@ class PDFThemeExtractor(ThemeExtractor):
                     self._parse_css(css, theme)
 
         except Exception as e:
-            print(f"Warning: Could not extract theme from {template_path}: {e}")
+            logger.warning("Could not extract theme", path=str(template_path), error=str(e))
 
         return theme
 

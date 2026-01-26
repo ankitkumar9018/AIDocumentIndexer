@@ -1,0 +1,222 @@
+{
+  "name": "Advanced Voice Assistant",
+  "description": "AI-powered voice agent with ultra-fast TTS, real-time streaming, and document knowledge",
+  "type": "VOICE",
+  "version": "1.0.0",
+
+  "system_prompt": "You are a friendly and helpful voice assistant. Keep your responses concise and natural-sounding, as they will be spoken aloud. Aim for responses under 3 sentences unless more detail is specifically requested. Use conversational language and avoid jargon.",
+
+  "capabilities": {
+    "rag_enabled": true,
+    "memory_enabled": true,
+    "vision_enabled": false,
+    "web_search_enabled": false,
+    "real_time_streaming": true,
+    "interrupt_handling": true
+  },
+
+  "voice_config": {
+    "tts_provider": {
+      "primary": "cartesia",
+      "fallback": ["elevenlabs", "openai", "edge"],
+      "description": "Cartesia Sonic 2.0 offers 40ms TTFA for real-time conversations"
+    },
+
+    "ultra_fast_tts": {
+      "enabled": true,
+      "provider": "smallest",
+      "description": "Sub-100ms synthesis for instant responses",
+      "options": {
+        "murf": {
+          "enabled": true,
+          "latency_ms": 55,
+          "cost_per_min": 0.01,
+          "voice_id": "en-US-natalie"
+        },
+        "smallest": {
+          "enabled": true,
+          "latency_ms": 30,
+          "model": "lightning",
+          "voice_id": "emily"
+        },
+        "cartesia": {
+          "enabled": true,
+          "latency_ms": 40,
+          "model": "sonic-2",
+          "voice_id": "default"
+        },
+        "fish_speech": {
+          "enabled": false,
+          "latency_ms": 100,
+          "quality": "highest"
+        }
+      }
+    },
+
+    "voice_selection": {
+      "host_voices": {
+        "primary": {
+          "name": "Alex",
+          "voice_id": "en-US-AndrewMultilingualNeural",
+          "gender": "male",
+          "style": "conversational"
+        },
+        "secondary": {
+          "name": "Sarah",
+          "voice_id": "en-US-AvaMultilingualNeural",
+          "gender": "female",
+          "style": "friendly"
+        }
+      },
+      "allow_user_selection": true,
+      "available_voices": [
+        {"id": "en-US-AndrewMultilingualNeural", "name": "Andrew", "gender": "male", "style": "conversational"},
+        {"id": "en-US-AvaMultilingualNeural", "name": "Ava", "gender": "female", "style": "friendly"},
+        {"id": "en-US-BrianMultilingualNeural", "name": "Brian", "gender": "male", "style": "professional"},
+        {"id": "en-US-EmmaMultilingualNeural", "name": "Emma", "gender": "female", "style": "warm"},
+        {"id": "en-GB-RyanNeural", "name": "Ryan", "gender": "male", "style": "british"},
+        {"id": "en-GB-SoniaNeural", "name": "Sonia", "gender": "female", "style": "british"}
+      ]
+    },
+
+    "audio_settings": {
+      "sample_rate": 24000,
+      "format": "mp3",
+      "bitrate": 128,
+      "enable_noise_reduction": true,
+      "normalize_volume": true
+    },
+
+    "streaming_config": {
+      "enabled": true,
+      "chunk_size": 4096,
+      "buffer_size_ms": 100,
+      "enable_websocket": true
+    }
+  },
+
+  "stt_config": {
+    "enabled": true,
+    "provider": "whisper",
+    "model": "whisper-1",
+    "language": "auto",
+    "options": {
+      "deepgram": {
+        "enabled": false,
+        "model": "nova-2",
+        "features": ["punctuation", "diarization"]
+      },
+      "assembly_ai": {
+        "enabled": false,
+        "model": "best",
+        "features": ["speaker_labels"]
+      }
+    }
+  },
+
+  "enhancements": {
+    "response_optimization": {
+      "enabled": true,
+      "description": "Optimize responses for spoken delivery",
+      "options": {
+        "max_response_length": 150,
+        "simplify_language": true,
+        "avoid_lists": true,
+        "use_contractions": true,
+        "add_pauses": true,
+        "ssml_enabled": true
+      }
+    },
+
+    "conversation_flow": {
+      "enabled": true,
+      "options": {
+        "allow_interruptions": true,
+        "handle_silence": true,
+        "silence_timeout_ms": 3000,
+        "confirmation_phrases": true,
+        "clarification_prompts": true
+      }
+    },
+
+    "context_awareness": {
+      "enabled": true,
+      "options": {
+        "remember_context": true,
+        "max_context_turns": 5,
+        "summarize_long_context": true
+      }
+    },
+
+    "error_recovery": {
+      "enabled": true,
+      "options": {
+        "retry_on_failure": true,
+        "max_retries": 2,
+        "graceful_degradation": true,
+        "fallback_responses": [
+          "I'm having trouble understanding. Could you rephrase that?",
+          "Let me try that again.",
+          "I didn't catch that. Could you repeat?"
+        ]
+      }
+    }
+  },
+
+  "llm_config": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "temperature": 0.7,
+    "max_tokens": 500,
+    "response_format": "concise",
+    "fallback_models": ["gpt-3.5-turbo"]
+  },
+
+  "audio_overview_config": {
+    "enabled": true,
+    "description": "Generate podcast-style audio summaries of documents",
+    "formats": [
+      {
+        "id": "deep_dive",
+        "name": "Deep Dive Discussion",
+        "duration_minutes": "15-20",
+        "style": "two hosts exploring topic in depth"
+      },
+      {
+        "id": "quick_summary",
+        "name": "Quick Summary",
+        "duration_minutes": "3-5",
+        "style": "single narrator, key points only"
+      },
+      {
+        "id": "interview",
+        "name": "Expert Interview",
+        "duration_minutes": "10-15",
+        "style": "interviewer and expert discussion"
+      },
+      {
+        "id": "debate",
+        "name": "Debate Format",
+        "duration_minutes": "10-12",
+        "style": "two perspectives on the topic"
+      }
+    ]
+  },
+
+  "ui_config": {
+    "show_transcript": true,
+    "show_audio_controls": true,
+    "enable_voice_input": true,
+    "push_to_talk": false,
+    "auto_play_responses": true,
+    "show_speaking_indicator": true
+  },
+
+  "rate_limits": {
+    "requests_per_minute": 30,
+    "audio_minutes_per_day": 60
+  },
+
+  "languages": ["en", "de", "es", "fr", "it", "pt"],
+  "default_language": "en"
+}

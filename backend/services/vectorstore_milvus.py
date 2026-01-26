@@ -131,7 +131,7 @@ class MilvusVectorStore:
 
         try:
             # Run sync operations in thread pool
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._sync_initialize)
             self._initialized = True
             logger.info("Milvus initialized successfully")
@@ -300,7 +300,7 @@ class MilvusVectorStore:
             return []
 
         # Insert data
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
             lambda: self._collection.insert([
@@ -361,7 +361,7 @@ class MilvusVectorStore:
         }
 
         # Run search
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         results = await loop.run_in_executor(
             None,
             lambda: self._collection.search(
@@ -413,7 +413,7 @@ class MilvusVectorStore:
 
         expr = f'document_id == "{document_id}"'
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
             lambda: self._collection.delete(expr)
@@ -427,7 +427,7 @@ class MilvusVectorStore:
         if not self._initialized:
             await self.initialize()
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         stats = await loop.run_in_executor(
             None,
             lambda: self._collection.get_stats()

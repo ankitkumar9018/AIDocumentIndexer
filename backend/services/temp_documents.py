@@ -184,7 +184,7 @@ class TempDocumentService:
                     chunk_size=512,
                     chunk_overlap=50,
                 )
-                chunks = await asyncio.get_event_loop().run_in_executor(
+                chunks = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: self._chunker.chunk_text(extracted.text, chunk_config),
                 )

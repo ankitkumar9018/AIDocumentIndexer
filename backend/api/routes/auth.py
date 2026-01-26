@@ -5,11 +5,13 @@ AIDocumentIndexer - Authentication API Routes
 Endpoints for user authentication and authorization.
 """
 
+import time
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import update, select
@@ -27,7 +29,18 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 # JWT Configuration
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+_jwt_secret = os.getenv("JWT_SECRET", os.getenv("SECRET_KEY", ""))
+if not _jwt_secret or _jwt_secret in ("your-secret-key-change-in-production", "change-me-in-production"):
+    _env = os.getenv("ENVIRONMENT", "development")
+    if _env in ("production", "staging"):
+        raise RuntimeError(
+            "CRITICAL: JWT_SECRET or SECRET_KEY must be set to a secure value in production. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+        )
+    _jwt_secret = "dev-only-insecure-key-do-not-use-in-production"
+    logger.warning("Using insecure default JWT secret — acceptable for development only")
+
+JWT_SECRET = _jwt_secret
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 
@@ -36,6 +49,37 @@ security = HTTPBearer(auto_error=False)
 
 # Password hashing with bcrypt
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+# =============================================================================
+# Rate Limiting for Auth Endpoints
+# =============================================================================
+
+class AuthRateLimiter:
+    """Simple in-memory rate limiter for authentication endpoints."""
+
+    def __init__(self):
+        self._attempts: Dict[str, list] = defaultdict(list)
+
+    def _clean_old(self, key: str, window_seconds: int):
+        cutoff = time.time() - window_seconds
+        self._attempts[key] = [t for t in self._attempts[key] if t > cutoff]
+
+    def check_rate_limit(self, ip: str, action: str, max_attempts: int, window_seconds: int):
+        key = f"{action}:{ip}"
+        self._clean_old(key, window_seconds)
+        if len(self._attempts[key]) >= max_attempts:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many {action} attempts. Please try again later.",
+                headers={"Retry-After": str(window_seconds)},
+            )
+        self._attempts[key].append(time.time())
+
+_auth_limiter = AuthRateLimiter()
+
+# Need Dict import for type annotation
+from typing import Dict
 
 
 # =============================================================================
@@ -292,12 +336,16 @@ def require_tier(min_tier: int):
 # =============================================================================
 
 @router.post("/login", response_model=TokenResponse)
-async def login(request: LoginRequest, db: AsyncSession = Depends(get_async_session)):
+async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(get_async_session)):
     """
     Authenticate user with email and password.
 
     Returns JWT token on success.
+    Rate limited: 10 attempts per 60 seconds per IP.
     """
+    client_ip = req.client.host if req.client else "unknown"
+    _auth_limiter.check_rate_limit(client_ip, "login", max_attempts=10, window_seconds=60)
+
     logger.info("Login attempt", email=request.email)
 
     # Find user in database
@@ -417,12 +465,16 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_async_sess
 
 
 @router.post("/register", response_model=TokenResponse)
-async def register(request: RegisterRequest):
+async def register(request: RegisterRequest, req: Request):
     """
     Register a new user.
 
     Note: In production, this might require admin approval or invitation.
+    Rate limited: 5 registrations per 3600 seconds per IP.
     """
+    client_ip = req.client.host if req.client else "unknown"
+    _auth_limiter.check_rate_limit(client_ip, "register", max_attempts=5, window_seconds=3600)
+
     logger.info("Registration attempt", email=request.email)
 
     # Check if email already exists

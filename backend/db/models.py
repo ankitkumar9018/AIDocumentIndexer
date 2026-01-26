@@ -1736,12 +1736,25 @@ class AgentDefinition(Base, UUIDMixin, TimestampMixin):
     avg_latency_ms: Mapped[Optional[int]] = mapped_column(Integer)
     avg_tokens_per_execution: Mapped[Optional[int]] = mapped_column(Integer)
 
+    # Publishing settings for external use
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False)
+    embed_token: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True)
+    publish_config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Config: {"allowed_domains": ["*"], "rate_limit": 100, "branding": {...}, "welcome_message": "..."}
+
+    # Voice/Chat agent specific settings
+    agent_mode: Mapped[Optional[str]] = mapped_column(String(20))  # "voice", "chat", "hybrid"
+    tts_config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # TTS config: {"provider": "openai", "voice_id": "alloy", "speed": 1.0}
+
     # Relationships
     default_provider: Mapped[Optional["LLMProvider"]] = relationship("LLMProvider")
 
     __table_args__ = (
         Index("idx_agent_definitions_type", "agent_type"),
         Index("idx_agent_definitions_active", "is_active"),
+        Index("idx_agent_definitions_published", "is_published"),
+        Index("idx_agent_definitions_embed_token", "embed_token"),
     )
 
     def __repr__(self) -> str:
@@ -1991,6 +2004,111 @@ class PromptOptimizationJob(Base, UUIDMixin, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<PromptOptimizationJob(agent_id={self.agent_id}, status='{self.status}')>"
+
+
+class DSPyTrainingExample(Base, UUIDMixin, TimestampMixin):
+    """
+    Training examples for DSPy prompt optimization.
+
+    Stores input/output pairs for specific DSPy signatures, collected from
+    user interactions (chat feedback, agent trajectories) or manually curated.
+    """
+    __tablename__ = "dspy_training_examples"
+
+    signature_name: Mapped[str] = mapped_column(
+        String(100), nullable=False, index=True,
+    )
+    # e.g., "rag_answer", "query_expansion", "react_reasoning"
+
+    inputs: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # JSON dict of input fields, e.g., {"context": "...", "question": "..."}
+
+    outputs: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # JSON dict of output fields, e.g., {"answer": "...", "suggested_questions": "..."}
+
+    source: Mapped[str] = mapped_column(String(50), default="manual")
+    # Values: "manual", "chat_feedback", "trajectory", "evaluation"
+
+    source_id: Mapped[Optional[str]] = mapped_column(String(255))
+    # ID of the source record (e.g., ChatFeedback ID, AgentTrajectory ID)
+
+    quality_score: Mapped[float] = mapped_column(Float, default=1.0)
+    # Quality score (0-1), used for sorting and filtering
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Whether this example is included in training datasets
+
+    __table_args__ = (
+        Index("idx_dspy_example_signature", "signature_name"),
+        Index("idx_dspy_example_active", "is_active"),
+        Index("idx_dspy_example_source", "source"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DSPyTrainingExample(signature='{self.signature_name}', source='{self.source}', quality={self.quality_score})>"
+
+
+class DSPyOptimizationJob(Base, UUIDMixin, TimestampMixin):
+    """
+    Tracks DSPy prompt optimization jobs.
+
+    Records the optimization run configuration, scores, and compiled state.
+    """
+    __tablename__ = "dspy_optimization_jobs"
+
+    signature_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Which signature was optimized
+
+    optimizer_type: Mapped[str] = mapped_column(
+        String(50), default="bootstrap_few_shot",
+    )
+    # "bootstrap_few_shot" or "miprov2"
+
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    # Values: "pending", "running", "completed", "failed", "deployed"
+
+    # Training data stats
+    num_train_examples: Mapped[int] = mapped_column(Integer, default=0)
+    num_dev_examples: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Scores
+    baseline_score: Mapped[Optional[float]] = mapped_column(Float)
+    optimized_score: Mapped[Optional[float]] = mapped_column(Float)
+    improvement_pct: Mapped[Optional[float]] = mapped_column(Float)
+
+    # Compiled state (serialized DSPy module state)
+    compiled_state: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Structure: {"instructions": "...", "demos": [...]}
+
+    # Link to created prompt version (if deployed)
+    prompt_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("agent_prompt_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Optional agent association
+    agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("agent_definitions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Relationships
+    prompt_version: Mapped[Optional["AgentPromptVersion"]] = relationship(
+        "AgentPromptVersion",
+    )
+    agent: Mapped[Optional["AgentDefinition"]] = relationship("AgentDefinition")
+
+    __table_args__ = (
+        Index("idx_dspy_job_signature", "signature_name"),
+        Index("idx_dspy_job_status", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DSPyOptimizationJob(signature='{self.signature_name}', status='{self.status}')>"
 
 
 class ExecutionModePreference(Base, UUIDMixin, TimestampMixin):
@@ -2855,6 +2973,8 @@ class WorkflowTriggerType(str, PyEnum):
 class WorkflowNodeType(str, PyEnum):
     """Types of workflow nodes."""
     AGENT = "agent"
+    VOICE_AGENT = "voice_agent"
+    CHAT_AGENT = "chat_agent"
     ACTION = "action"
     CONDITION = "condition"
     LOOP = "loop"

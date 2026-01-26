@@ -512,7 +512,7 @@ Produce the best possible final version that incorporates all valuable feedback.
                     score_text = "".join(c for c in score_text if c.isdigit() or c == ".")
                     if score_text:
                         overall_score = float(score_text)
-                except:
+                except (ValueError, IndexError):
                     pass
             elif "RECOMMEND REVISION:" in line.upper():
                 should_revise = "YES" in line.upper()

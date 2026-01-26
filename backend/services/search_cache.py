@@ -498,8 +498,8 @@ class SemanticSearchCache(SearchResultCache):
                     # Try Redis
                     try:
                         cached_results = await self._redis_cache.get(best_match_key)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Redis cache get failed", key=best_match_key, error=str(e))
 
                 if cached_results is not None:
                     self._stats["semantic_hits"] += 1

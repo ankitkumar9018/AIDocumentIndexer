@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -250,7 +250,7 @@ async def get_connector(connection: ExternalDatabaseConnection):
         )
     else:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported connector type: {connection.connector_type}"
         )
 
@@ -273,7 +273,7 @@ async def get_user_id(db: AsyncSession, user: AuthenticatedUser) -> UUID:
         if db_user:
             return db_user.id
 
-    raise HTTPException(status_code=401, detail="User not found")
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
 
 # =============================================================================
@@ -408,7 +408,7 @@ async def get_connection(
         connection = result.scalar_one_or_none()
 
         if not connection:
-            raise HTTPException(status_code=404, detail="Connection not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
 
         return ExternalDatabaseConnectionResponse(
             id=str(connection.id),
@@ -451,7 +451,7 @@ async def update_connection(
         connection = result.scalar_one_or_none()
 
         if not connection:
-            raise HTTPException(status_code=404, detail="Connection not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
 
         # Update fields
         if request.name is not None:
@@ -526,7 +526,7 @@ async def delete_connection(
         connection = result.scalar_one_or_none()
 
         if not connection:
-            raise HTTPException(status_code=404, detail="Connection not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
 
         await db.delete(connection)
         await db.commit()
@@ -558,7 +558,7 @@ async def test_connection(
         connection = result.scalar_one_or_none()
 
         if not connection:
-            raise HTTPException(status_code=404, detail="Connection not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
 
         start_time = time.time()
 
@@ -620,7 +620,7 @@ async def get_database_schema(
         connection = result.scalar_one_or_none()
 
         if not connection:
-            raise HTTPException(status_code=404, detail="Connection not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
 
         # Check cache
         if not refresh and connection.schema_cache and connection.schema_cached_at:
@@ -655,7 +655,7 @@ async def get_database_schema(
 
         except Exception as e:
             logger.error("Failed to get schema", error=str(e))
-            raise HTTPException(status_code=500, detail=f"Failed to get schema: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get schema: {e}")
 
 
 # =============================================================================
@@ -682,7 +682,7 @@ async def query_database(
         connection = result.scalar_one_or_none()
 
         if not connection:
-            raise HTTPException(status_code=404, detail="Connection not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
 
         try:
             connector = await get_connector(connection)
@@ -748,7 +748,7 @@ async def query_database(
 
         except Exception as e:
             logger.error("Query failed", error=str(e), question=request.question)
-            raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Query failed: {e}")
 
 
 @router.get("/connections/{connection_id}/history", response_model=List[QueryHistoryResponse])
@@ -770,7 +770,7 @@ async def get_query_history(
             )
         )
         if not result.scalar_one_or_none():
-            raise HTTPException(status_code=404, detail="Connection not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
 
         # Get history
         query = (
@@ -820,7 +820,7 @@ async def submit_feedback(
         history = result.scalar_one_or_none()
 
         if not history:
-            raise HTTPException(status_code=404, detail="Query not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Query not found")
 
         # Update feedback
         history.user_rating = request.rating

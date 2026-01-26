@@ -109,7 +109,7 @@ def update_chroma_metadata(
 
     # Get document info from SQLite
     print("Fetching document metadata from SQLite...")
-    doc_info = asyncio.get_event_loop().run_until_complete(get_documents_with_org_info())
+    doc_info = asyncio.run(get_documents_with_org_info())
     print(f"Found {len(doc_info)} documents in SQLite")
 
     # Group embeddings by document_id for batch updates

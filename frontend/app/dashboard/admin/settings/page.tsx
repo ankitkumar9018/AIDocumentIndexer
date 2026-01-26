@@ -63,6 +63,9 @@ import { ProvidersTab } from "./components/providers-tab";
 import { DatabaseTab } from "./components/database-tab";
 import { OcrTab } from "./components/ocr-tab";
 import { GenerationTab } from "./components/generation-tab";
+import { ExperimentsTab } from "./components/experiments-tab";
+import { CacheTab } from "./components/cache-tab";
+import { EvaluationTab } from "./components/evaluation-tab";
 import {
   Card,
   CardContent,
@@ -939,6 +942,18 @@ export default function AdminSettingsPage() {
             <PenTool className="h-4 w-4" />
             Document Generation
           </TabsTrigger>
+          <TabsTrigger value="experiments" className="flex items-center gap-2">
+            <TestTube className="h-4 w-4" />
+            Experiments
+          </TabsTrigger>
+          <TabsTrigger value="cache" className="flex items-center gap-2">
+            <HardDrive className="h-4 w-4" />
+            Cache
+          </TabsTrigger>
+          <TabsTrigger value="evaluation" className="flex items-center gap-2">
+            <BarChart3 className="h-4 w-4" />
+            Evaluation
+          </TabsTrigger>
         </TabsList>
 
         {/* Overview Tab */}
@@ -1094,6 +1109,15 @@ export default function AdminSettingsPage() {
           providersData={providersData}
           ollamaLocalModels={ollamaLocalModels}
         />
+
+        {/* Experiments Tab (Phase 90) */}
+        <ExperimentsTab />
+
+        {/* Cache Management Tab (Phase 90) */}
+        <CacheTab />
+
+        {/* Evaluation Dashboard Tab (Phase 90) */}
+        <EvaluationTab />
 
       </Tabs>
 

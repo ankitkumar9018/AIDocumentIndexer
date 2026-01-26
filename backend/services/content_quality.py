@@ -551,9 +551,9 @@ class ContentQualityScorer:
                     # Store first few foreign sentences for feedback
                     if len(foreign_sentences) < 3:
                         foreign_sentences.append(sentence[:80] + '...' if len(sentence) > 80 else sentence)
-            except Exception:
+            except Exception as e:
                 # langdetect can throw exceptions for unusual text
-                pass
+                logger.debug("Language detection failed for sentence", error=str(e))
 
         # Calculate penalty based on ratio of foreign sentences
         if sentences:

@@ -206,7 +206,8 @@ class MongoDBConnector(BaseDatabaseConnector):
                 try:
                     stats = await self._db.command('collStats', collection_name)
                     row_count = stats.get('count', 0)
-                except Exception:
+                except Exception as e:
+                    self.log_debug("collStats failed, using estimate", collection=collection_name, error=str(e))
                     row_count = await collection.estimated_document_count()
 
                 # Sample documents to infer schema

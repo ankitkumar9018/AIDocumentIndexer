@@ -36,6 +36,19 @@ from backend.services.connectors.database.base import (
 logger = structlog.get_logger(__name__)
 
 
+def _sanitize_identifier(name: str) -> str:
+    """
+    Sanitize a SQL identifier (table/column name) to prevent injection.
+
+    Only allows alphanumeric characters and underscores.
+    Raises ValueError for invalid identifiers.
+    """
+    import re
+    if not name or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+        raise ValueError(f"Invalid SQL identifier: {name}")
+    return name
+
+
 class SQLiteConnector(BaseDatabaseConnector):
     """
     SQLite database connector using aiosqlite.
@@ -187,13 +200,16 @@ class SQLiteConnector(BaseDatabaseConnector):
         """Get columns for a table."""
         columns = []
 
+        # Sanitize table name to prevent SQL injection
+        safe_table = _sanitize_identifier(table_name)
+
         # Get column info using PRAGMA
-        async with self._connection.execute(f"PRAGMA table_info('{table_name}')") as cursor:
+        async with self._connection.execute(f"PRAGMA table_info('{safe_table}')") as cursor:
             rows = await cursor.fetchall()
 
         # Get foreign key info
         fk_map = {}
-        async with self._connection.execute(f"PRAGMA foreign_key_list('{table_name}')") as cursor:
+        async with self._connection.execute(f"PRAGMA foreign_key_list('{safe_table}')") as cursor:
             fk_rows = await cursor.fetchall()
             for row in fk_rows:
                 # row format: (id, seq, table, from, to, on_update, on_delete, match)
@@ -221,8 +237,9 @@ class SQLiteConnector(BaseDatabaseConnector):
     async def _get_primary_key(self, table_name: str) -> Optional[List[str]]:
         """Get primary key columns for a table."""
         pk_columns = []
+        safe_table = _sanitize_identifier(table_name)
 
-        async with self._connection.execute(f"PRAGMA table_info('{table_name}')") as cursor:
+        async with self._connection.execute(f"PRAGMA table_info('{safe_table}')") as cursor:
             rows = await cursor.fetchall()
 
         for row in rows:
@@ -235,8 +252,9 @@ class SQLiteConnector(BaseDatabaseConnector):
     async def _get_foreign_keys(self, table_name: str) -> List[Dict[str, Any]]:
         """Get foreign key relationships for a table."""
         foreign_keys = []
+        safe_table = _sanitize_identifier(table_name)
 
-        async with self._connection.execute(f"PRAGMA foreign_key_list('{table_name}')") as cursor:
+        async with self._connection.execute(f"PRAGMA foreign_key_list('{safe_table}')") as cursor:
             rows = await cursor.fetchall()
 
         for row in rows:
@@ -253,12 +271,14 @@ class SQLiteConnector(BaseDatabaseConnector):
     async def _get_row_count(self, table_name: str) -> Optional[int]:
         """Get row count for a table."""
         try:
+            safe_table = _sanitize_identifier(table_name)
             async with self._connection.execute(
-                f"SELECT COUNT(*) FROM \"{table_name}\""
+                f'SELECT COUNT(*) FROM "{safe_table}"'
             ) as cursor:
                 result = await cursor.fetchone()
                 return result[0] if result else None
-        except Exception:
+        except Exception as e:
+            self.log_debug("Row count failed", table=table_name, error=str(e))
             return None
 
     async def execute_query(

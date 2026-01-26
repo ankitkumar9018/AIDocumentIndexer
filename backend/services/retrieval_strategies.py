@@ -29,16 +29,26 @@ from backend.services.vectorstore import VectorStore, SearchResult, SearchType
 logger = structlog.get_logger(__name__)
 
 
-# Cached settings
+# Phase 71.5: TTL-based settings cache (auto-invalidates after 5 minutes)
+import time as _time
+
 _two_stage_enabled: Optional[bool] = None
 _stage1_candidates: Optional[int] = None
+_two_stage_cache_time: Optional[float] = None
+_TWO_STAGE_CACHE_TTL = 300  # 5 minutes
 
 
 async def _get_two_stage_settings() -> Tuple[bool, int]:
-    """Get two-stage retrieval settings from database."""
-    global _two_stage_enabled, _stage1_candidates
+    """Get two-stage retrieval settings from database with TTL cache."""
+    global _two_stage_enabled, _stage1_candidates, _two_stage_cache_time
 
-    if _two_stage_enabled is not None and _stage1_candidates is not None:
+    now = _time.time()
+
+    # Check if cache is valid (not None and not expired)
+    if (_two_stage_enabled is not None
+        and _stage1_candidates is not None
+        and _two_stage_cache_time is not None
+        and (now - _two_stage_cache_time) < _TWO_STAGE_CACHE_TTL):
         return _two_stage_enabled, _stage1_candidates
 
     try:
@@ -50,6 +60,7 @@ async def _get_two_stage_settings() -> Tuple[bool, int]:
 
         _two_stage_enabled = enabled if enabled is not None else False
         _stage1_candidates = candidates if candidates else 150
+        _two_stage_cache_time = now  # Update cache timestamp
 
         return _two_stage_enabled, _stage1_candidates
     except Exception as e:
@@ -58,10 +69,11 @@ async def _get_two_stage_settings() -> Tuple[bool, int]:
 
 
 def invalidate_two_stage_settings():
-    """Invalidate cached settings."""
-    global _two_stage_enabled, _stage1_candidates
+    """Invalidate cached settings (for immediate refresh)."""
+    global _two_stage_enabled, _stage1_candidates, _two_stage_cache_time
     _two_stage_enabled = None
     _stage1_candidates = None
+    _two_stage_cache_time = None
 
 
 class RetrievalStrategy(str, Enum):
@@ -784,7 +796,7 @@ class ThreeLevelRetriever:
                     try:
                         import json
                         tags = json.loads(tags)
-                    except:
+                    except (json.JSONDecodeError, ValueError):
                         tags = [tags]
 
                 if not isinstance(tags, list):

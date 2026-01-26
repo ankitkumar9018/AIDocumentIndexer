@@ -48,6 +48,27 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 | **User Preferences** | Persistent theme, view mode, default collection settings |
 | **Beautiful UI** | Modern, responsive interface built with Next.js 15 and shadcn/ui |
 
+### Advanced Features (2025-2026)
+
+| Feature | Description |
+|---------|-------------|
+| **SELF-RAG** | Self-reflective retrieval with claim verification and hallucination detection |
+| **RLM (Recursive LM)** | Process 10M+ token contexts with O(log N) complexity |
+| **Tiered Reranking** | 3-stage pipeline: ColBERT → Cross-Encoder → LLM verification |
+| **GenerativeCache** | 9x faster than GPTCache with adaptive similarity thresholds |
+| **Context Compression** | 32x compression with rolling summarization (85% cost savings) |
+| **Mem0 Memory** | Persistent user memory with 91% lower latency |
+| **Voice Agents** | TTS-enabled AI agents (OpenAI, ElevenLabs, Cartesia, Edge) |
+| **Chat Agents** | Knowledge-base powered chat agents with memory |
+| **Workflow Designer** | Visual workflow builder with 10+ node types |
+| **Agent Publishing** | Embed agents externally with secure tokens |
+| **Ray Distributed** | Horizontal scaling for 100K+ document processing |
+| **VLM Integration** | Vision-language models for visual document understanding |
+| **ColBERT PLAID** | 45x faster late-interaction search |
+| **WARP Engine** | 3x faster multi-vector retrieval |
+| **Ultra-Fast TTS** | <55ms latency with Murf Falcon, Cartesia Sonic |
+| **A-Mem Agentic** | 90% token reduction with intelligent memory operations |
+
 ---
 
 ## Quick Start

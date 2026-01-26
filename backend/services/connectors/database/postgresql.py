@@ -36,6 +36,19 @@ from backend.services.connectors.database.base import (
 logger = structlog.get_logger(__name__)
 
 
+def _sanitize_identifier(name: str) -> str:
+    """
+    Sanitize a SQL identifier (table/column/schema name) to prevent injection.
+
+    Only allows alphanumeric characters and underscores.
+    Raises ValueError for invalid identifiers.
+    """
+    import re
+    if not name or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+        raise ValueError(f"Invalid SQL identifier: {name}")
+    return name
+
+
 class PostgreSQLConnector(BaseDatabaseConnector):
     """
     PostgreSQL database connector using asyncpg.
@@ -341,7 +354,8 @@ class PostgreSQLConnector(BaseDatabaseConnector):
                 WHERE n.nspname = $1 AND c.relname = $2
             """, self.schema, table_name)
             return result if result and result > 0 else None
-        except Exception:
+        except Exception as e:
+            self.log_debug("Row count estimate failed", table=table_name, error=str(e))
             return None
 
     async def execute_query(
@@ -428,7 +442,10 @@ class PostgreSQLConnector(BaseDatabaseConnector):
                 error=f"Table '{table_name}' not found",
             )
 
-        query = f'SELECT * FROM "{self.schema}"."{table_name}" LIMIT {limit}'
+        # Sanitize identifiers to prevent SQL injection
+        safe_schema = _sanitize_identifier(self.schema)
+        safe_table = _sanitize_identifier(table_name)
+        query = f'SELECT * FROM "{safe_schema}"."{safe_table}" LIMIT {int(limit)}'
         return await self.execute_query(query)
 
     async def get_distinct_values(

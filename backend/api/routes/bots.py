@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, Query, status
 from fastapi.responses import RedirectResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -106,7 +106,7 @@ async def list_bot_connections(
             platform_enum = BotPlatform(platform)
             query = query.where(BotConnection.platform == platform_enum)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid platform: {platform}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid platform: {platform}")
 
     result = await session.execute(query)
     connections = result.scalars().all()
@@ -129,7 +129,7 @@ async def create_bot_connection(
         platform_enum = BotPlatform(request.platform)
     except ValueError:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid platform: {request.platform}. Valid: {[p.value for p in BotPlatform]}",
         )
 
@@ -144,7 +144,7 @@ async def create_bot_connection(
 
     if existing.scalar_one_or_none():
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="A connection for this workspace already exists",
         )
 
@@ -183,7 +183,7 @@ async def get_bot_connection(
     connection = result.scalar_one_or_none()
 
     if not connection:
-        raise HTTPException(status_code=404, detail="Bot connection not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bot connection not found")
 
     return to_response(connection)
 
@@ -205,7 +205,7 @@ async def delete_bot_connection(
     connection = result.scalar_one_or_none()
 
     if not connection:
-        raise HTTPException(status_code=404, detail="Bot connection not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bot connection not found")
 
     await session.delete(connection)
     await session.commit()
@@ -230,7 +230,7 @@ async def handle_slack_events(request: Request):
 
     if not slack_bot or not slack_bot.handler:
         raise HTTPException(
-            status_code=503,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Slack bot not configured",
         )
 
@@ -251,7 +251,7 @@ async def handle_slack_commands(request: Request):
 
     if not slack_bot or not slack_bot.handler:
         raise HTTPException(
-            status_code=503,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Slack bot not configured",
         )
 
@@ -278,7 +278,7 @@ async def slack_oauth_callback(
 
     if not client_id or not client_secret:
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Slack OAuth not configured",
         )
 
@@ -299,7 +299,7 @@ async def slack_oauth_callback(
 
             if not data.get("ok"):
                 raise HTTPException(
-                    status_code=400,
+                    status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"OAuth failed: {data.get('error', 'Unknown error')}",
                 )
 
@@ -317,8 +317,8 @@ async def slack_oauth_callback(
                 state_data = json.loads(state)
                 org_id = uuid.UUID(state_data.get("org_id"))
                 user_id = uuid.UUID(state_data.get("user_id"))
-            except:
-                pass
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass  # Invalid state data, will redirect to error page
 
         if not org_id:
             # Redirect to error page
@@ -366,7 +366,7 @@ async def slack_oauth_callback(
         raise
     except Exception as e:
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"OAuth failed: {str(e)}",
         )
 
@@ -386,7 +386,7 @@ async def get_slack_install_url(
 
     if not client_id:
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Slack OAuth not configured",
         )
 

@@ -300,3 +300,130 @@ def create_test_chunk(
         "page_number": 1,
         "metadata": {"section": "test"},
     }
+
+
+# =============================================================================
+# Phase 25: Integration Test Fixtures
+# =============================================================================
+
+@pytest.fixture
+def mock_redis():
+    """Mock Redis client for integration tests."""
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+    redis.set = AsyncMock(return_value=True)
+    redis.setex = AsyncMock(return_value=True)
+    redis.delete = AsyncMock(return_value=True)
+    redis.hset = AsyncMock(return_value=True)
+    redis.hget = AsyncMock(return_value=None)
+    redis.hgetall = AsyncMock(return_value={})
+    redis.expire = AsyncMock(return_value=True)
+    redis.incr = AsyncMock(return_value=1)
+    redis.publish = AsyncMock(return_value=1)
+    redis.lpush = AsyncMock(return_value=1)
+    redis.lrange = AsyncMock(return_value=[])
+    redis.pipeline = MagicMock(return_value=AsyncMock())
+    return redis
+
+
+@pytest.fixture
+def mock_embedding_service():
+    """Mock embedding service for integration tests."""
+    service = AsyncMock()
+    service.embed_texts = AsyncMock(return_value=[[0.1] * 1536 for _ in range(10)])
+    service.embed_query = AsyncMock(return_value=[0.1] * 1536)
+    service.embed_documents = AsyncMock(return_value=[[0.1] * 1536 for _ in range(10)])
+    return service
+
+
+@pytest.fixture
+def sample_documents():
+    """Generate sample documents for testing."""
+    return [
+        {
+            "id": f"doc_{i}",
+            "filename": f"document_{i}.pdf",
+            "content": f"This is test document {i} with content about topic {i % 5}.",
+            "metadata": {"source": "test", "page_count": 5},
+        }
+        for i in range(100)
+    ]
+
+
+@pytest.fixture
+def sample_chunks():
+    """Generate sample chunks for testing."""
+    return [
+        {
+            "id": f"chunk_{i}",
+            "document_id": f"doc_{i // 10}",
+            "content": f"This is chunk {i} with content about topic {i % 5}.",
+            "metadata": {"page": i % 5, "position": i},
+        }
+        for i in range(1000)
+    ]
+
+
+@pytest.fixture
+def sample_queries():
+    """Sample queries for benchmarking."""
+    return [
+        "What is the main topic of document 1?",
+        "Summarize the key findings",
+        "What are the recommendations?",
+        "List all mentioned dates",
+        "Who are the stakeholders?",
+    ]
+
+
+@pytest.fixture
+def performance_timer():
+    """Timer for performance tests."""
+    import time
+
+    class Timer:
+        def __init__(self):
+            self.start_time = None
+            self.end_time = None
+
+        def start(self):
+            self.start_time = time.perf_counter()
+            return self
+
+        def stop(self):
+            self.end_time = time.perf_counter()
+            return self
+
+        @property
+        def elapsed_ms(self):
+            if self.start_time and self.end_time:
+                return (self.end_time - self.start_time) * 1000
+            return 0
+
+    return Timer()
+
+
+# =============================================================================
+# Pytest Configuration
+# =============================================================================
+
+def pytest_configure(config):
+    """Configure pytest with custom markers."""
+    config.addinivalue_line(
+        "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
+    )
+    config.addinivalue_line(
+        "markers", "integration: marks tests as integration tests"
+    )
+    config.addinivalue_line(
+        "markers", "benchmark: marks tests as benchmark tests"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Modify test collection to add markers."""
+    for item in items:
+        if "benchmark" in item.nodeid:
+            item.add_marker(pytest.mark.slow)
+        if "integration" in item.nodeid:
+            item.add_marker(pytest.mark.integration)

@@ -41,6 +41,104 @@ logger = structlog.get_logger(__name__)
 
 
 # =============================================================================
+# Per-Provider Rate Limiter (Token Bucket)
+# =============================================================================
+
+import asyncio
+import threading
+from collections import defaultdict
+
+
+class ProviderRateLimiter:
+    """
+    Per-provider rate limiter using token bucket algorithm.
+
+    Prevents exceeding provider API rate limits and provides
+    backpressure when limits are approached.
+    """
+
+    # Default rate limits per provider (requests per minute)
+    DEFAULT_LIMITS = {
+        "openai": 500,
+        "anthropic": 60,
+        "google": 60,
+        "cohere": 100,
+        "ollama": 10000,  # Local — effectively unlimited
+        "groq": 30,
+        "together": 60,
+        "mistral": 60,
+        "deepseek": 60,
+        "fireworks": 100,
+        "default": 60,
+    }
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._requests: Dict[str, list] = defaultdict(list)
+        self._enabled = True
+
+    def _get_limit(self, provider: str) -> int:
+        return self.DEFAULT_LIMITS.get(provider.lower(), self.DEFAULT_LIMITS["default"])
+
+    def check(self, provider: str) -> bool:
+        """Check if a request is allowed. Returns True if allowed."""
+        if not self._enabled:
+            return True
+
+        provider = provider.lower()
+        limit = self._get_limit(provider)
+        now = time.time()
+        window = 60.0  # 1 minute
+
+        with self._lock:
+            # Clean old entries
+            cutoff = now - window
+            self._requests[provider] = [t for t in self._requests[provider] if t > cutoff]
+
+            if len(self._requests[provider]) >= limit:
+                logger.warning(
+                    "Rate limit reached for provider",
+                    provider=provider,
+                    limit=limit,
+                    window_seconds=window,
+                )
+                return False
+
+            self._requests[provider].append(now)
+            return True
+
+    def wait_if_needed(self, provider: str) -> float:
+        """
+        Check rate limit. If exceeded, return seconds to wait.
+        Returns 0 if request is allowed.
+        """
+        if not self._enabled:
+            return 0.0
+
+        provider = provider.lower()
+        limit = self._get_limit(provider)
+        now = time.time()
+        window = 60.0
+
+        with self._lock:
+            cutoff = now - window
+            self._requests[provider] = [t for t in self._requests[provider] if t > cutoff]
+
+            if len(self._requests[provider]) >= limit:
+                # Calculate wait time until oldest request expires
+                oldest = min(self._requests[provider])
+                wait = (oldest + window) - now
+                return max(0.1, wait)
+
+            self._requests[provider].append(now)
+            return 0.0
+
+
+# Global rate limiter instance
+_provider_rate_limiter = ProviderRateLimiter()
+
+
+# =============================================================================
 # Configuration
 # =============================================================================
 
@@ -233,6 +331,10 @@ class LLMFactory:
             litellm_model = f"ollama/{model}"  # e.g., "ollama/llama3.2"
         elif provider == "anthropic":
             litellm_model = f"anthropic/{model}"  # e.g., "anthropic/claude-3-5-sonnet"
+        elif provider == "vllm":
+            # Phase 68: vLLM integration - 2-4x faster inference
+            # Route through OpenAI-compatible API
+            litellm_model = f"openai/{model}"
         else:
             litellm_model = f"{provider}/{model}"
 
@@ -240,6 +342,11 @@ class LLMFactory:
         extra_params = {}
         if provider == "ollama":
             extra_params["api_base"] = llm_config.ollama_host
+        elif provider == "vllm":
+            # Phase 68: vLLM uses OpenAI-compatible API
+            vllm_api_base = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
+            extra_params["api_base"] = vllm_api_base
+            extra_params["api_key"] = os.getenv("VLLM_API_KEY", "dummy")
 
         return ChatLiteLLM(
             model=litellm_model,
@@ -285,6 +392,18 @@ class LLMFactory:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 api_key=llm_config.anthropic_api_key,
+                **kwargs,
+            )
+
+        elif provider == "vllm":
+            # Phase 68: vLLM integration - use OpenAI-compatible interface
+            vllm_api_base = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
+            return ChatOpenAI(
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                openai_api_key=os.getenv("VLLM_API_KEY", "dummy"),
+                openai_api_base=vllm_api_base,
                 **kwargs,
             )
 
@@ -352,6 +471,65 @@ class LLMFactory:
             return OpenAIEmbeddings(
                 model=llm_config.openai_embedding_model,
                 api_key=llm_config.openai_api_key,
+            )
+
+    @classmethod
+    def get_structured_model(
+        cls,
+        response_schema: dict,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+    ) -> BaseChatModel:
+        """
+        Phase 82: Get a chat model configured for structured outputs (JSON schema).
+
+        Uses OpenAI's response_format with json_schema for reliable structured extraction.
+        Falls back to regular model with JSON instruction for non-OpenAI providers.
+
+        Args:
+            response_schema: JSON schema dict describing the expected output structure
+            provider: LLM provider (openai recommended for native support)
+            model: Model name
+            temperature: Sampling temperature (default 0 for structured extraction)
+
+        Returns:
+            BaseChatModel configured for structured output
+        """
+        provider = provider or llm_config.default_provider
+        if model is None:
+            if provider == "openai":
+                model = llm_config.default_chat_model
+            elif provider == "anthropic":
+                model = llm_config.anthropic_model
+            else:
+                model = llm_config.default_chat_model
+        temperature = temperature if temperature is not None else 0.0
+
+        if provider == "openai":
+            # Native structured outputs via response_format
+            return ChatOpenAI(
+                model=model,
+                temperature=temperature,
+                max_tokens=llm_config.default_max_tokens,
+                api_key=llm_config.openai_api_key,
+                model_kwargs={
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": response_schema.get("title", "structured_output"),
+                            "schema": response_schema,
+                            "strict": True,
+                        },
+                    },
+                },
+            )
+        else:
+            # For non-OpenAI providers, use JSON mode instruction
+            return cls.get_chat_model(
+                provider=provider,
+                model=model,
+                temperature=temperature,
             )
 
     @classmethod
@@ -471,8 +649,8 @@ class LLMConfigManager:
                     cls._set_cache(cache_key, config)
                     return config
 
-        except Exception as e:
-            logger.warning("Failed to get session override", session_id=session_id, error=str(e))
+        except (ValueError, RuntimeError, ConnectionError, TimeoutError, OSError) as e:
+            logger.warning("Failed to get session override", session_id=session_id, error=str(e), error_type=type(e).__name__)
 
         cls._set_cache(cache_key, None)
         return None
@@ -508,8 +686,8 @@ class LLMConfigManager:
                     cls._set_cache(cache_key, config)
                     return config
 
-        except Exception as e:
-            logger.warning("Failed to get operation config", operation=operation, error=str(e))
+        except (ValueError, RuntimeError, ConnectionError, TimeoutError, OSError) as e:
+            logger.warning("Failed to get operation config", operation=operation, error=str(e), error_type=type(e).__name__)
 
         cls._set_cache(cache_key, None)
         return None
@@ -1247,6 +1425,12 @@ async def generate_response(
     Returns:
         str: Generated response
     """
+    effective_provider = provider or llm_config.default_provider
+    wait = _provider_rate_limiter.wait_if_needed(effective_provider)
+    if wait > 0:
+        logger.info("Rate limit backpressure", provider=effective_provider, wait_seconds=round(wait, 1))
+        await asyncio.sleep(wait)
+
     llm = get_chat_model(provider=provider, model=model, **kwargs)
     response = await llm.ainvoke(messages)
     return response.content

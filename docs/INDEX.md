@@ -1,6 +1,6 @@
 # AIDocumentIndexer - Documentation Index
 
-**Last Updated:** January 20, 2026
+**Last Updated:** January 26, 2026
 
 ## Quick Links
 
@@ -8,6 +8,7 @@
 - [🚀 Getting Started](#getting-started)
 - [📚 Core Features](#core-features)
 - [🔧 Configuration](#configuration)
+- [🔒 Security](SECURITY.md)
 - [🎯 Guides & Tutorials](#guides--tutorials)
 
 ---
@@ -144,6 +145,15 @@ Generate response with LLM
 - ✅ **Knowledge Graph:** Entity-based enhancements
 - ✅ **MMR:** Maximal Marginal Relevance for diversity
 - ✅ **Caching:** Semantic caching of LLM responses
+
+**Phase 62/63 Advanced Features (Optional):**
+- ⚙️ **Tree of Thoughts:** Multi-path reasoning for complex queries (`ENABLE_TREE_OF_THOUGHTS`)
+- ⚙️ **Answer Refiner:** Post-generation quality improvement (`ENABLE_ANSWER_REFINER`)
+- ⚙️ **Sufficiency Checker:** ICLR 2025 context detection (`ENABLE_SUFFICIENCY_CHECKER`)
+- ⚙️ **TTT Compression:** Long context compression (`ENABLE_TTT_COMPRESSION`)
+- ⚙️ **Fast Chunking:** Chonkie 33x faster chunking (`ENABLE_FAST_CHUNKING`)
+- ⚙️ **Docling Parser:** 97.9% table extraction (`ENABLE_DOCLING_PARSER`)
+- ⚙️ **Agent Evaluation:** Pass^k metrics, hallucination detection (`ENABLE_AGENT_EVALUATION`)
 
 **Performance:**
 - Query latency: ~60-120ms
@@ -422,11 +432,46 @@ python backend/scripts/backfill_chunk_embeddings.py
 - ✅ Chat now uses semantic search + knowledge graph
 - ✅ RAG search fully functional (100% coverage)
 
+### January 23, 2026 - Phase 62/63 Service Integration
+- ✅ Integrated TreeOfThoughts for complex analytical queries
+- ✅ Integrated AnswerRefiner for post-generation quality improvement
+- ✅ Integrated SufficiencyChecker (ICLR 2025) for context detection
+- ✅ Integrated TTTCompression for long context handling
+- ✅ Integrated FastChunker (Chonkie 33x faster)
+- ✅ Integrated DocumentParser (Docling 97.9% table accuracy)
+- ✅ Integrated AgentEvaluator (Pass^k metrics)
+- ✅ Added 6 new feature flags for runtime control
+- ✅ Exported 23 new services in __init__.py
+- ✅ Created 8 tutorial stub files
+- ✅ Archived 6 outdated docs, removed 6 duplicates
+
+### January 23, 2026 - Phase 65: Scale to 1M+ Documents
+- ✅ **BM25 Scoring**: Search-engine quality ranking with term saturation
+- ✅ **Field Boosting**: Title/section matches weighted higher (3x for titles)
+- ✅ **Scale-Aware HNSW**: Auto-tuned index params (small/medium/large/xlarge)
+- ✅ **EnhancedWebCrawler**: Anti-bot bypass + LLM content extraction
+- ✅ **Web Query API**: Answer questions about any website
+- ✅ **Text-to-SQL Enhancements**: Interactive queries + auto-visualization
+- ✅ **ABAC for Retrieval**: Attribute-based access control for search results
+- ✅ **30+ New Settings**: Comprehensive configuration for all features
+- ✅ **API Endpoints**: /crawler/crawl, /crawler/query, /crawler/extract
+
+### January 23, 2026 - Phase 65.2: Advanced Optimizations
+- ✅ **Binary Quantization**: 32x memory reduction with Hamming distance search
+- ✅ **GPU Acceleration**: FAISS + cuVS support for 8-20x faster search
+- ✅ **Learning-to-Rank**: XGBoost-based ranking trained on click data
+- ✅ **Spell Correction**: BK-tree based O(log n) fuzzy matching
+- ✅ **Semantic Query Cache**: Intelligent caching with embedding similarity
+- ✅ **Streaming Citations**: Real-time citation matching during LLM streaming
+- ✅ **Late Chunking**: Embed full document then split (context preservation)
+- ✅ **Web Crawler UI**: Full-featured frontend component
+- ✅ **Natural Language DB Query UI**: Text-to-SQL with auto-visualization
+
 ### Upcoming
 - 🔄 Multi-embedding table implementation (Alembic migration)
 - 🔄 UI controls for embedding provider selection
-- 🔄 Background job system for embedding generation
-- 🔄 Embedding status dashboard in UI
+- 🔄 Matryoshka multi-resolution search
+- 🔄 RAPTOR hierarchical indexing
 
 ---
 
@@ -453,6 +498,6 @@ python backend/scripts/backfill_chunk_embeddings.py
 
 ---
 
-**Last Updated:** January 20, 2026
-**Documentation Version:** 1.0
+**Last Updated:** January 23, 2026
+**Documentation Version:** 1.2 (Phase 65.2)
 **System Version:** 0.1.0

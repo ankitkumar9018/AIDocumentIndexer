@@ -1533,6 +1533,413 @@ Focus on:
         </div>
       )}
 
+      {/* VOICE_AGENT Node */}
+      {normalizedType === "VOICE_AGENT" && (
+        <div className="space-y-4">
+          <ConfigSection title="Voice Agent Settings">
+            <div className="space-y-2">
+              <FieldLabel label="Agent ID" tooltip="Select or enter a custom agent ID" />
+              <Input
+                value={getConfig("agent_id", "")}
+                onChange={(e) => updateConfig("agent_id", e.target.value)}
+                placeholder="Enter agent ID or leave blank for default"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Prompt / Task" required />
+              <Textarea
+                value={getConfig("prompt", "")}
+                onChange={(e) => updateConfig("prompt", e.target.value)}
+                placeholder={`Speak to the user about:
+{{input.topic}}
+
+Be conversational and helpful.`}
+                rows={6}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="System Instructions" tooltip="Voice agent personality and behavior" />
+              <Textarea
+                value={getConfig("system_prompt", "")}
+                onChange={(e) => updateConfig("system_prompt", e.target.value)}
+                placeholder="You are a friendly and professional voice assistant..."
+                rows={3}
+              />
+            </div>
+          </ConfigSection>
+
+          <ConfigSection title="TTS Settings">
+            <div className="space-y-2">
+              <FieldLabel label="TTS Provider" required />
+              <Select
+                value={getConfig("tts_provider", "openai")}
+                onValueChange={(value) => updateConfig("tts_provider", value)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="openai">OpenAI TTS</SelectItem>
+                  <SelectItem value="elevenlabs">ElevenLabs</SelectItem>
+                  <SelectItem value="cartesia">Cartesia Sonic</SelectItem>
+                  <SelectItem value="edge">Edge TTS (Free)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Voice" />
+              <Select
+                value={getConfig("voice_id", "alloy")}
+                onValueChange={(value) => updateConfig("voice_id", value)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {getConfig("tts_provider", "openai") === "openai" && (
+                    <>
+                      <SelectItem value="alloy">Alloy (Neutral)</SelectItem>
+                      <SelectItem value="echo">Echo (Male)</SelectItem>
+                      <SelectItem value="fable">Fable (British)</SelectItem>
+                      <SelectItem value="onyx">Onyx (Deep Male)</SelectItem>
+                      <SelectItem value="nova">Nova (Female)</SelectItem>
+                      <SelectItem value="shimmer">Shimmer (Soft Female)</SelectItem>
+                    </>
+                  )}
+                  {getConfig("tts_provider", "openai") === "elevenlabs" && (
+                    <>
+                      <SelectItem value="rachel">Rachel (Female)</SelectItem>
+                      <SelectItem value="drew">Drew (Male)</SelectItem>
+                      <SelectItem value="clyde">Clyde (Male)</SelectItem>
+                      <SelectItem value="paul">Paul (Male)</SelectItem>
+                      <SelectItem value="domi">Domi (Female)</SelectItem>
+                      <SelectItem value="dave">Dave (British)</SelectItem>
+                    </>
+                  )}
+                  {getConfig("tts_provider", "openai") === "cartesia" && (
+                    <>
+                      <SelectItem value="sonic-default">Sonic Default</SelectItem>
+                      <SelectItem value="sonic-male">Sonic Male</SelectItem>
+                      <SelectItem value="sonic-female">Sonic Female</SelectItem>
+                    </>
+                  )}
+                  {getConfig("tts_provider", "openai") === "edge" && (
+                    <>
+                      <SelectItem value="en-US-AriaNeural">Aria (US Female)</SelectItem>
+                      <SelectItem value="en-US-GuyNeural">Guy (US Male)</SelectItem>
+                      <SelectItem value="en-GB-SoniaNeural">Sonia (UK Female)</SelectItem>
+                      <SelectItem value="en-AU-NatashaNeural">Natasha (AU Female)</SelectItem>
+                    </>
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Speed" />
+              <Slider
+                value={[getConfigNumber("speed", 1.0)]}
+                onValueChange={([value]) => updateConfig("speed", value)}
+                min={0.5}
+                max={2.0}
+                step={0.1}
+              />
+              <p className="text-xs text-muted-foreground text-right">{getConfigNumber("speed", 1.0).toFixed(1)}x</p>
+            </div>
+          </ConfigSection>
+
+          <ConfigSection title="RAG & Context" defaultOpen={false}>
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="voice_use_rag"
+                checked={getConfigBool("use_rag", true)}
+                onCheckedChange={(checked) => updateConfig("use_rag", checked)}
+              />
+              <Label htmlFor="voice_use_rag">Use RAG (Document Search)</Label>
+            </div>
+
+            {getConfigBool("use_rag", true) && (
+              <div className="space-y-2">
+                <FieldLabel label="Document Filter" />
+                <Input
+                  value={getConfig("doc_filter", "")}
+                  onChange={(e) => updateConfig("doc_filter", e.target.value)}
+                  placeholder="folder:Training, tag:audio-content"
+                />
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <FieldLabel label="Max Context Length" />
+              <Input
+                type="number"
+                value={getConfigNumber("max_context", 4000)}
+                onChange={(e) => updateConfig("max_context", parseInt(e.target.value) || 4000)}
+                min={500}
+                max={32000}
+              />
+            </div>
+          </ConfigSection>
+
+          <ConfigSection title="Output Settings" defaultOpen={false}>
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="include_transcript"
+                checked={getConfigBool("include_transcript", true)}
+                onCheckedChange={(checked) => updateConfig("include_transcript", checked)}
+              />
+              <Label htmlFor="include_transcript">Include Text Transcript</Label>
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Audio Format" />
+              <Select
+                value={getConfig("audio_format", "mp3")}
+                onValueChange={(value) => updateConfig("audio_format", value)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="mp3">MP3</SelectItem>
+                  <SelectItem value="wav">WAV</SelectItem>
+                  <SelectItem value="ogg">OGG</SelectItem>
+                  <SelectItem value="aac">AAC</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Timeout (seconds)" />
+              <Input
+                type="number"
+                value={getConfigNumber("timeout", 120)}
+                onChange={(e) => updateConfig("timeout", parseInt(e.target.value) || 120)}
+                min={10}
+                max={600}
+              />
+            </div>
+          </ConfigSection>
+        </div>
+      )}
+
+      {/* CHAT_AGENT Node */}
+      {normalizedType === "CHAT_AGENT" && (
+        <div className="space-y-4">
+          <ConfigSection title="Chat Agent Settings">
+            <div className="space-y-2">
+              <FieldLabel label="Agent ID" tooltip="Select or enter a custom agent ID" />
+              <Input
+                value={getConfig("agent_id", "")}
+                onChange={(e) => updateConfig("agent_id", e.target.value)}
+                placeholder="Enter agent ID or leave blank for default"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Prompt / Task" required />
+              <Textarea
+                value={getConfig("prompt", "")}
+                onChange={(e) => updateConfig("prompt", e.target.value)}
+                placeholder={`Chat with the user about:
+{{input.topic}}
+
+Answer questions and provide helpful information.`}
+                rows={6}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="System Instructions" tooltip="Chat agent personality and behavior" />
+              <Textarea
+                value={getConfig("system_prompt", "")}
+                onChange={(e) => updateConfig("system_prompt", e.target.value)}
+                placeholder="You are a knowledgeable and helpful chat assistant..."
+                rows={3}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Response Style" />
+              <Select
+                value={getConfig("response_style", "professional")}
+                onValueChange={(value) => updateConfig("response_style", value)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="professional">Professional</SelectItem>
+                  <SelectItem value="friendly">Friendly</SelectItem>
+                  <SelectItem value="casual">Casual</SelectItem>
+                  <SelectItem value="technical">Technical</SelectItem>
+                  <SelectItem value="formal">Formal</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </ConfigSection>
+
+          <ConfigSection title="Knowledge & Memory">
+            <div className="space-y-2">
+              <FieldLabel label="Knowledge Bases" tooltip="Comma-separated list of knowledge base IDs" />
+              <Textarea
+                value={getConfig("knowledge_bases", "")}
+                onChange={(e) => updateConfig("knowledge_bases", e.target.value)}
+                placeholder="kb-1, kb-2, kb-3"
+                rows={2}
+              />
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="chat_use_memory"
+                checked={getConfigBool("use_memory", true)}
+                onCheckedChange={(checked) => updateConfig("use_memory", checked)}
+              />
+              <Label htmlFor="chat_use_memory">Enable Conversation Memory</Label>
+            </div>
+
+            {getConfigBool("use_memory", true) && (
+              <div className="space-y-2">
+                <FieldLabel label="Memory Type" />
+                <Select
+                  value={getConfig("memory_type", "session")}
+                  onValueChange={(value) => updateConfig("memory_type", value)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="session">Session Only</SelectItem>
+                    <SelectItem value="persistent">Persistent (Mem0)</SelectItem>
+                    <SelectItem value="user">User-Scoped</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <FieldLabel label="Max History Turns" tooltip="Number of conversation turns to include" />
+              <Slider
+                value={[getConfigNumber("max_history", 10)]}
+                onValueChange={([value]) => updateConfig("max_history", value)}
+                min={1}
+                max={50}
+                step={1}
+              />
+              <p className="text-xs text-muted-foreground text-right">{getConfigNumber("max_history", 10)} turns</p>
+            </div>
+          </ConfigSection>
+
+          <ConfigSection title="Model Settings" defaultOpen={false}>
+            <div className="space-y-2">
+              <FieldLabel label="Model" />
+              <Select
+                value={getConfig("model", "default")}
+                onValueChange={(value) => updateConfig("model", value)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">Default (from settings)</SelectItem>
+                  <SelectItem value="gpt-4o">GPT-4o</SelectItem>
+                  <SelectItem value="gpt-4o-mini">GPT-4o Mini</SelectItem>
+                  <SelectItem value="claude-3-5-sonnet">Claude 3.5 Sonnet</SelectItem>
+                  <SelectItem value="claude-3-opus">Claude 3 Opus</SelectItem>
+                  <SelectItem value="gemini-pro">Gemini Pro</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Temperature" />
+              <Slider
+                value={[getConfigNumber("temperature", 0.7)]}
+                onValueChange={([value]) => updateConfig("temperature", value)}
+                min={0}
+                max={1}
+                step={0.05}
+              />
+              <p className="text-xs text-muted-foreground text-right">{getConfigNumber("temperature", 0.7).toFixed(2)}</p>
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Max Tokens" />
+              <Input
+                type="number"
+                value={getConfigNumber("max_tokens", 4096)}
+                onChange={(e) => updateConfig("max_tokens", parseInt(e.target.value) || 4096)}
+                min={100}
+                max={128000}
+              />
+            </div>
+          </ConfigSection>
+
+          <ConfigSection title="Advanced" defaultOpen={false}>
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="chat_use_rag"
+                checked={getConfigBool("use_rag", true)}
+                onCheckedChange={(checked) => updateConfig("use_rag", checked)}
+              />
+              <Label htmlFor="chat_use_rag">Use RAG (Document Search)</Label>
+            </div>
+
+            {getConfigBool("use_rag", true) && (
+              <div className="space-y-2">
+                <FieldLabel label="Document Filter" />
+                <Input
+                  value={getConfig("doc_filter", "")}
+                  onChange={(e) => updateConfig("doc_filter", e.target.value)}
+                  placeholder="folder:Support, tag:faq"
+                />
+              </div>
+            )}
+
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="streaming"
+                checked={getConfigBool("streaming", true)}
+                onCheckedChange={(checked) => updateConfig("streaming", checked)}
+              />
+              <Label htmlFor="streaming">Enable Streaming Response</Label>
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Timeout (seconds)" />
+              <Input
+                type="number"
+                value={getConfigNumber("timeout", 120)}
+                onChange={(e) => updateConfig("timeout", parseInt(e.target.value) || 120)}
+                min={10}
+                max={600}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <FieldLabel label="Output Format" />
+              <Select
+                value={getConfig("output_format", "text")}
+                onValueChange={(value) => updateConfig("output_format", value)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="text">Plain Text</SelectItem>
+                  <SelectItem value="json">JSON</SelectItem>
+                  <SelectItem value="markdown">Markdown</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </ConfigSection>
+        </div>
+      )}
+
       {/* HUMAN_APPROVAL Node - Enhanced */}
       {normalizedType === "HUMAN_APPROVAL" && (
         <div className="space-y-4">

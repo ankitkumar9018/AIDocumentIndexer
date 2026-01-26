@@ -266,8 +266,8 @@ class YouTubeConnector(BaseConnector):
                 if items:
                     return items[0].get("snippet", {}).get("title", playlist_id)
 
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_debug("Failed to get playlist name, using ID", error=str(e), playlist_id=playlist_id)
 
         return playlist_id
 
@@ -293,8 +293,8 @@ class YouTubeConnector(BaseConnector):
                 if items:
                     return items[0].get("snippet", {}).get("title", channel_id)
 
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_debug("Failed to get channel name, using ID", error=str(e), channel_id=channel_id)
 
         return channel_id
 
@@ -436,13 +436,14 @@ class YouTubeConnector(BaseConnector):
                 transcript = transcript_list.find_manually_created_transcript(
                     self.config.sync_config.get("languages", ["en"])
                 )
-            except Exception:
+            except Exception as e:
+                self.log_debug("No manual transcript, trying auto-generated", error=str(e), video_id=video_id)
                 try:
                     transcript = transcript_list.find_generated_transcript(
                         self.config.sync_config.get("languages", ["en"])
                     )
-                except Exception:
-                    pass
+                except Exception as e2:
+                    self.log_debug("No auto-generated transcript available", error=str(e2), video_id=video_id)
 
             if transcript:
                 return transcript.fetch()

@@ -822,3 +822,266 @@ curl -X POST http://localhost:8000/api/v1/settings/apply-preset/speed
 # Via UI
 Dashboard > Settings > Presets tab > Click preset button
 ```
+
+---
+
+## Advanced RAG Features (Phase 66)
+
+### User Personalization
+
+The system learns your preferences over time based on feedback and usage patterns.
+
+**What It Learns:**
+- Response length preference (concise vs detailed)
+- Format preference (bullet points vs prose)
+- Expertise level (beginner vs expert)
+- Citation style preferences
+
+**How It Works:**
+1. Submit feedback on responses (thumbs up/down)
+2. System analyzes feedback patterns
+3. Future responses are tailored to your preferences
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.user_personalization_enabled` | Enable preference learning | `true` |
+
+### Adaptive RAG Routing
+
+Automatically routes queries to the optimal retrieval strategy based on query complexity.
+
+**Routing Strategies:**
+| Strategy | When Used | Description |
+|----------|-----------|-------------|
+| DIRECT | Simple factual queries | Fast single-shot retrieval |
+| HYBRID | Standard queries | Vector + keyword search |
+| TWO_STAGE | Complex queries | Retrieval + reranking |
+| AGENTIC | Multi-step queries | Query decomposition + ReAct loop |
+| GRAPH_ENHANCED | Entity-rich queries | Knowledge graph traversal |
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.adaptive_routing_enabled` | Enable query-dependent routing | `true` |
+
+### RAG-Fusion
+
+Generates multiple query variations and merges results using Reciprocal Rank Fusion.
+
+**How It Works:**
+1. Original query is paraphrased into 3-5 variations
+2. Each variation runs through retrieval
+3. Results are merged using RRF scoring
+4. Improves recall by 20-40%
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.fusion_enabled` | Enable RAG-Fusion | `true` |
+| `rag.fusion_query_count` | Number of query variations | `3` |
+
+### LazyGraphRAG
+
+Query-time community summarization for knowledge graphs. Achieves 99% cost reduction compared to eager summarization.
+
+**How It Works:**
+1. Communities are detected in the knowledge graph
+2. Summaries are generated on-demand when queried
+3. Summaries are cached for subsequent queries
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.lazy_graphrag_enabled` | Enable lazy community summarization | `true` |
+
+### Dependency-Based Entity Extraction
+
+Fast entity extraction using spaCy dependency parsing. Achieves 94% of LLM performance at 80% lower cost.
+
+**When It's Used:**
+- High-volume entity extraction
+- Real-time processing
+- Cost-sensitive deployments
+
+**Automatic LLM Fallback:**
+For complex technical text, the system automatically falls back to LLM extraction.
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `kg.dependency_extraction_enabled` | Enable fast dependency parsing | `true` |
+| `kg.complexity_threshold` | Text complexity threshold for LLM fallback | `0.7` |
+
+### RAG Evaluation (RAGAS Metrics)
+
+Comprehensive evaluation of RAG quality using industry-standard RAGAS metrics.
+
+**Metrics:**
+| Metric | Description |
+|--------|-------------|
+| Context Relevance | How relevant retrieved documents are to the query |
+| Faithfulness | How grounded the response is in the retrieved context |
+| Answer Relevance | How well the response answers the question |
+
+**API Endpoints:**
+```bash
+# Evaluate a single query
+POST /api/v1/evaluation/query
+{
+  "query": "What is machine learning?",
+  "response": "Machine learning is...",
+  "context": ["Document 1 content...", "Document 2 content..."]
+}
+
+# Batch evaluation
+POST /api/v1/evaluation/batch
+{
+  "evaluations": [...]
+}
+
+# Get evaluation history
+GET /api/v1/evaluation/history
+```
+
+---
+
+## TTS Providers
+
+### Chatterbox TTS (NEW)
+
+Ultra-realistic open-source TTS from Resemble AI with emotional expressiveness.
+
+**Features:**
+- Emotional speech synthesis
+- Voice cloning support
+- Zero API cost (open-source)
+- Configurable exaggeration and CFG weight
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `tts.chatterbox_enabled` | Enable Chatterbox TTS | `true` |
+| `tts.chatterbox_exaggeration` | Emotional exaggeration (0-1) | `0.5` |
+| `tts.chatterbox_cfg_weight` | CFG weight for generation | `0.5` |
+
+### CosyVoice2 (NEW)
+
+Alibaba's open-source streaming TTS with 150ms latency.
+
+**Features:**
+- Ultra-low latency (150ms)
+- Streaming audio generation
+- Zero API cost (open-source)
+- Multi-language support
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `tts.cosyvoice_enabled` | Enable CosyVoice2 | `true` |
+
+### TTS Provider Comparison
+
+| Provider | Latency | Quality | Cost | Best For |
+|----------|---------|---------|------|----------|
+| OpenAI TTS | 500-1000ms | High | $0.015/1K chars | Production |
+| ElevenLabs | 300-600ms | Highest | $0.03/1K chars | Premium audio |
+| Chatterbox | 800-1500ms | High | Free | Emotional speech |
+| CosyVoice2 | 150ms | Good | Free | Real-time streaming |
+| Fish Speech | 200ms | Good | Free | Multilingual |
+
+---
+
+## Phase 78-83 Features (January 2026)
+
+### AttentionRAG Compression
+
+6.3x more efficient context compression than LLMLingua, using attention scores to identify the most relevant context segments.
+
+**How It Works:**
+1. Forward pass with query + context through attention model
+2. Extract attention scores from query tokens to context tokens
+3. Aggregate attention to sentence/chunk level
+4. Keep top-k most attended segments
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.attention_rag_enabled` | Enable attention-based compression | `false` |
+| `rag.attention_rag_mode` | Compression aggressiveness (light/moderate/aggressive) | `moderate` |
+
+### Graph-O1 Reasoning
+
+Efficient beam search reasoning over the knowledge graph, providing 3-5x faster reasoning than naive traversal while maintaining 95%+ accuracy.
+
+**How It Works:**
+1. Parse query to identify entity and relationship targets
+2. Expand search beam across knowledge graph hops
+3. Score and prune paths based on confidence
+4. Return evidence-backed reasoning chain
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.graph_o1_enabled` | Enable Graph-O1 beam search reasoning | `false` |
+| `rag.graph_o1_beam_width` | Number of parallel paths to explore | `5` |
+| `rag.graph_o1_confidence_threshold` | Minimum confidence to continue path | `0.7` |
+
+### Anthropic Prompt Caching
+
+Automatically caches system prompts when using Claude models, saving 50-60% on repeated API calls. No configuration needed — enabled automatically for Anthropic providers.
+
+### OpenAI Structured Outputs
+
+`LLMFactory.get_structured_model()` creates models configured with JSON schema validation for reliable structured extraction. Uses OpenAI's native `response_format` with `json_schema` for strict output compliance.
+
+### Stability Improvements (Phase 79)
+
+- **Session LLM cache TTL**: 1-hour TTL + 200 max entries prevents unbounded memory growth
+- **FAISS rebuild lock**: Prevents concurrent index rebuilds in GenerativeCache
+- **SHA-256 cache keys**: Replaced MD5 with SHA-256 for cache key generation (collision resistance at scale)
+- **Settings cache TTL**: All settings caches auto-invalidate after 5 minutes (admin changes take effect without restart)
+
+### Import Smoke Test (Phase 83)
+
+CI-friendly test that imports every module in `backend/services/` and `backend/api/routes/` to catch broken imports at build time:
+
+```bash
+pytest backend/tests/test_imports.py -v
+```
+
+### Security Hardening (Phase 84-85)
+
+**Sandbox Execution Security (Phase 84):**
+- Safe wrapper classes (`SafeRegex`, `SafeJson`) replace raw module access in sandboxed code execution
+- AST validation blocks dunder attribute chains (`__class__.__bases__.__subclasses__`)
+- Code execution timeout via `ThreadPoolExecutor` prevents infinite loops
+- Blocks `getattr`, `setattr`, `delattr`, `globals`, `locals`, `vars`, `dir`, `breakpoint` in sandboxed code
+
+**Authentication & Input Validation (Phase 85):**
+- Default `SECRET_KEY` rejected at startup in production/staging environments
+- Query length limits on chat endpoints (100K message, 500K content)
+- Collection name regex validation (`^[a-zA-Z0-9_\-\s\.]+$`)
+- Auth endpoint rate limiting (10 logins/min, 5 registrations/hour per IP)
+
+See [SECURITY.md](SECURITY.md) for comprehensive security documentation.
+
+### LLM Provider Rate Limiting (Phase 86)
+
+Per-provider token bucket rate limiting prevents API cost overruns and cascading failures:
+- Configurable RPM limits per provider (OpenAI: 500, Anthropic: 60, etc.)
+- Backpressure mechanism (async sleep) when limits are approached
+- Automatic tracking of request rates across the application
+
+### Dependency Updates (Phase 87)
+
+- **Google GenAI SDK migration**: Replaced deprecated `google-generativeai` with unified `google-genai` SDK
+- **LangChain audit**: All imports verified correct for LangChain 0.3.x
+- **Dependency pinning**: Upper bounds added to critical deps (FastAPI, Pydantic, SQLAlchemy, Ray)
+- **Ray 2.10+**: Updated for better async support and memory management
+
+### Error Handling & Observability (Phase 88)
+
+- **Narrowed exception handling**: Top 22 broad `except Exception` blocks in critical paths (rag.py, redis_client.py, llm.py) replaced with specific exception types
+- **Structured error context**: All error logs now include `error_type` for easier debugging and monitoring
+- **Redis-specific exceptions**: Cache operations catch `ConnectionError`, `TimeoutError`, `JSONDecodeError` separately for better failure diagnosis

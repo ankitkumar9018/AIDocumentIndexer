@@ -640,6 +640,8 @@ class NodeExecutor:
             WorkflowNodeType.HTTP.value: self._execute_http,
             WorkflowNodeType.NOTIFICATION.value: self._execute_notification,
             WorkflowNodeType.AGENT.value: self._execute_agent,
+            WorkflowNodeType.VOICE_AGENT.value: self._execute_voice_agent,
+            WorkflowNodeType.CHAT_AGENT.value: self._execute_chat_agent,
             WorkflowNodeType.HUMAN_APPROVAL.value: self._execute_human_approval,
         }
 
@@ -1377,16 +1379,64 @@ class NodeExecutor:
             # Fallback to basic exec with timeout if RestrictedPython not available
             return await self._execute_python_basic(code, context)
 
-        # Prepare restricted globals
+        # Prepare restricted globals with safe module wrappers
+        # NOTE: Never pass raw module objects — they expose __builtins__/__import__
+        import math as _math
+
+        class _SafeMath:
+            """Restricted math interface."""
+            ceil = staticmethod(_math.ceil)
+            floor = staticmethod(_math.floor)
+            sqrt = staticmethod(_math.sqrt)
+            pow = staticmethod(_math.pow)
+            log = staticmethod(_math.log)
+            log10 = staticmethod(_math.log10)
+            abs = staticmethod(_math.fabs)
+            pi = _math.pi
+            e = _math.e
+            inf = _math.inf
+            def __getattr__(self, name):
+                raise AttributeError(f"Access to 'math.{name}' is not allowed in sandbox")
+
+        class _SafeJson:
+            """Restricted JSON interface."""
+            @staticmethod
+            def loads(s, **kwargs): return json.loads(s, **kwargs)
+            @staticmethod
+            def dumps(obj, indent=None, ensure_ascii=True, default=None, sort_keys=False):
+                return json.dumps(obj, indent=indent, ensure_ascii=ensure_ascii, default=default, sort_keys=sort_keys)
+            def __getattr__(self, name):
+                raise AttributeError(f"Access to 'json.{name}' is not allowed in sandbox")
+
+        import re as _re
+
+        class _SafeRegex:
+            """Restricted regex interface."""
+            @staticmethod
+            def search(pattern, string, flags=0): return _re.search(pattern, string, flags)
+            @staticmethod
+            def match(pattern, string, flags=0): return _re.match(pattern, string, flags)
+            @staticmethod
+            def findall(pattern, string, flags=0): return _re.findall(pattern, string, flags)
+            @staticmethod
+            def sub(pattern, repl, string, count=0, flags=0): return _re.sub(pattern, repl, string, count, flags)
+            @staticmethod
+            def split(pattern, string, maxsplit=0, flags=0): return _re.split(pattern, string, maxsplit, flags)
+            IGNORECASE = _re.IGNORECASE
+            MULTILINE = _re.MULTILINE
+            DOTALL = _re.DOTALL
+            def __getattr__(self, name):
+                raise AttributeError(f"Access to 're.{name}' is not allowed in sandbox")
+
         restricted_globals = {
             "__builtins__": safe_builtins,
             "_getitem_": default_guarded_getitem,
             "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
-            # Add safe modules
-            "json": json,
-            "math": __import__("math"),
+            # Safe module wrappers (no __builtins__/__import__ access)
+            "json": _SafeJson(),
+            "math": _SafeMath(),
             "datetime": datetime,
-            "re": __import__("re"),
+            "re": _SafeRegex(),
             # Add context
             "variables": context.get("variables", {}),
             "input": context.get("input", {}),
@@ -1423,14 +1473,32 @@ class NodeExecutor:
             return {"status": "error", "error": f"Syntax error: {e}"}
 
         # Check for dangerous constructs
-        dangerous_nodes = (ast.Import, ast.ImportFrom, ast.Exec, ast.Global)
+        dangerous_nodes = (ast.Import, ast.ImportFrom, ast.Global)
+        # Also block ast.Exec on Python < 3.x (doesn't exist in 3.x but safe to check)
+        if hasattr(ast, 'Exec'):
+            dangerous_nodes = dangerous_nodes + (ast.Exec,)
+
+        # Blocked dunder attributes that enable sandbox escape
+        blocked_attrs = {
+            "__builtins__", "__import__", "__class__", "__bases__",
+            "__subclasses__", "__mro__", "__globals__", "__code__",
+            "__getattribute__", "__dict__", "__module__", "__loader__",
+            "__spec__", "__init_subclass__",
+        }
+
         for node in ast.walk(tree):
             if isinstance(node, dangerous_nodes):
                 return {"status": "error", "error": "Imports and global statements not allowed"}
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name):
-                    if node.func.id in ("eval", "exec", "compile", "open", "__import__"):
+                    if node.func.id in ("eval", "exec", "compile", "open", "__import__",
+                                         "getattr", "setattr", "delattr", "globals", "locals",
+                                         "vars", "dir", "breakpoint"):
                         return {"status": "error", "error": f"Function '{node.func.id}' not allowed"}
+            # Block access to dunder attributes (prevents __class__.__bases__ escape)
+            if isinstance(node, ast.Attribute):
+                if node.attr in blocked_attrs:
+                    return {"status": "error", "error": f"Access to '{node.attr}' is not allowed"}
 
         # Execute with limited builtins
         safe_builtins = {
@@ -2081,6 +2149,247 @@ class NodeExecutor:
                 "output": {"status": "error", "error": str(e)},
             }
 
+    async def _execute_voice_agent(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
+        """
+        Voice Agent node - executes an AI agent with text-to-speech output.
+
+        Config:
+            agent_id: ID of the agent to use (optional)
+            prompt: User prompt/task
+            system_prompt: System instructions
+            model: LLM model to use
+            temperature: Model temperature (0-2)
+            max_tokens: Maximum response tokens
+            tts_provider: TTS provider (openai, elevenlabs, cartesia, edge)
+            voice_id: Voice ID for TTS
+            speed: Speech speed (0.5-2.0)
+            output_format: audio, text_and_audio
+            use_rag: Enable document search
+            use_streaming: Enable streaming TTS (for real-time)
+        """
+        config = node.config or {}
+
+        # First, execute the agent to get text response
+        agent_result = await self._execute_agent(node, context)
+
+        if agent_result.get("output", {}).get("status") == "error":
+            return agent_result
+
+        # Extract text response
+        text_response = agent_result.get("output", {}).get("response", "")
+        if not text_response:
+            text_response = agent_result.get("output", {}).get("answer", "")
+
+        # TTS configuration
+        tts_provider = config.get("tts_provider", "openai")
+        voice_id = config.get("voice_id", "alloy")
+        speed = config.get("speed", 1.0)
+        output_format = config.get("output_format", "text_and_audio")
+
+        # Generate audio
+        audio_data = None
+        audio_url = None
+        try:
+            from backend.services.audio.tts_service import TTSService, TTSProvider
+
+            tts = TTSService()
+            provider_enum = TTSProvider(tts_provider) if tts_provider else TTSProvider.OPENAI
+
+            audio_bytes = await tts.synthesize_text(
+                text=text_response,
+                voice_id=voice_id,
+                provider=provider_enum,
+                speed=speed,
+            )
+
+            if audio_bytes:
+                # Save audio to temp file and return URL
+                import tempfile
+                import os
+                from pathlib import Path
+
+                audio_dir = Path(settings.UPLOAD_DIR) / "audio" / "workflow"
+                audio_dir.mkdir(parents=True, exist_ok=True)
+
+                audio_filename = f"voice_agent_{node.id}_{context.execution_id}.mp3"
+                audio_path = audio_dir / audio_filename
+
+                with open(audio_path, "wb") as f:
+                    f.write(audio_bytes)
+
+                audio_url = f"/api/v1/audio/workflow/{audio_filename}"
+                audio_data = {
+                    "path": str(audio_path),
+                    "url": audio_url,
+                    "size_bytes": len(audio_bytes),
+                    "provider": tts_provider,
+                    "voice_id": voice_id,
+                }
+
+                self.logger.info(
+                    "Voice agent audio generated",
+                    node_id=str(node.id),
+                    audio_size=len(audio_bytes),
+                    provider=tts_provider,
+                )
+
+        except Exception as e:
+            self.logger.error("Voice agent TTS failed", error=str(e))
+            # Continue without audio - return text at minimum
+
+        return {
+            **agent_result,
+            "node_type": "voice_agent",
+            "audio": audio_data,
+            "audio_url": audio_url,
+            "text_response": text_response,
+            "tts_provider": tts_provider,
+            "voice_id": voice_id,
+        }
+
+    async def _execute_chat_agent(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
+        """
+        Chat Agent node - executes a conversational AI agent with knowledge base access.
+
+        Config:
+            agent_id: ID of the agent to use (optional)
+            prompt: User prompt/task
+            system_prompt: System instructions for chat personality
+            model: LLM model to use
+            temperature: Model temperature (0-2)
+            max_tokens: Maximum response tokens
+            knowledge_bases: Array of knowledge base/collection IDs to use
+            conversation_id: ID to maintain conversation history
+            use_memory: Enable conversation memory
+            memory_window: Number of turns to remember
+            enable_citations: Include source citations in response
+            response_style: formal, casual, technical, friendly
+        """
+        config = node.config or {}
+
+        # Extract chat-specific config
+        knowledge_bases = config.get("knowledge_bases", [])
+        conversation_id = config.get("conversation_id") or str(context.execution_id)
+        use_memory = config.get("use_memory", True)
+        memory_window = config.get("memory_window", 10)
+        enable_citations = config.get("enable_citations", True)
+        response_style = config.get("response_style", "friendly")
+
+        # Build prompt with style instruction
+        style_instructions = {
+            "formal": "Respond in a formal, professional tone.",
+            "casual": "Respond in a casual, conversational tone.",
+            "technical": "Respond with technical precision and detail.",
+            "friendly": "Respond in a warm, friendly, and helpful manner.",
+        }
+
+        prompt = context.resolve_template(config.get("prompt", ""))
+        system_prompt = config.get("system_prompt", "You are a helpful AI assistant.")
+
+        # Add style instruction to system prompt
+        if response_style in style_instructions:
+            system_prompt = f"{system_prompt}\n\n{style_instructions[response_style]}"
+
+        # Get conversation history if memory is enabled
+        conversation_history = []
+        if use_memory:
+            try:
+                from backend.services.conversation_memory import ConversationMemoryService
+                memory_service = ConversationMemoryService()
+                history = await memory_service.get_history(
+                    conversation_id=conversation_id,
+                    limit=memory_window,
+                )
+                conversation_history = history or []
+            except Exception as e:
+                self.logger.warning("Failed to load conversation history", error=str(e))
+
+        # Determine if we should use RAG
+        use_rag = bool(knowledge_bases) or config.get("use_rag", False)
+
+        if use_rag:
+            # Use RAG service for knowledge-grounded response
+            try:
+                from backend.services.rag import RAGService
+                rag = RAGService()
+
+                rag_result = await rag.query(
+                    query=prompt,
+                    organization_id=str(context.organization_id) if context.organization_id else None,
+                    collection_filter=knowledge_bases if knowledge_bases else None,
+                    enable_knowledge_graph=config.get("use_knowledge_graph", True),
+                    conversation_history=conversation_history,
+                    system_prompt=system_prompt,
+                )
+
+                response_text = rag_result.get("answer", "")
+                sources = rag_result.get("sources", []) if enable_citations else []
+
+                # Save to conversation memory
+                if use_memory:
+                    try:
+                        from backend.services.conversation_memory import ConversationMemoryService
+                        memory_service = ConversationMemoryService()
+                        await memory_service.add_turn(
+                            conversation_id=conversation_id,
+                            role="user",
+                            content=prompt,
+                        )
+                        await memory_service.add_turn(
+                            conversation_id=conversation_id,
+                            role="assistant",
+                            content=response_text,
+                        )
+                    except Exception as e:
+                        self.logger.warning("Failed to save conversation turn", error=str(e))
+
+                return {
+                    "status": "success",
+                    "node_type": "chat_agent",
+                    "response": response_text,
+                    "sources": sources,
+                    "conversation_id": conversation_id,
+                    "knowledge_bases_used": knowledge_bases,
+                    "model": config.get("model", "default"),
+                    "response_style": response_style,
+                }
+
+            except Exception as e:
+                self.logger.error("Chat agent RAG failed", error=str(e))
+                # Fall through to regular agent execution
+
+        # Fall back to regular agent execution without RAG
+        agent_result = await self._execute_agent(node, context)
+
+        # Extract response
+        output = agent_result.get("output", {})
+        response_text = output.get("response", "") or output.get("answer", "")
+
+        # Save to conversation memory
+        if use_memory and response_text:
+            try:
+                from backend.services.conversation_memory import ConversationMemoryService
+                memory_service = ConversationMemoryService()
+                await memory_service.add_turn(
+                    conversation_id=conversation_id,
+                    role="user",
+                    content=prompt,
+                )
+                await memory_service.add_turn(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=response_text,
+                )
+            except Exception as e:
+                self.logger.warning("Failed to save conversation turn", error=str(e))
+
+        return {
+            **agent_result,
+            "node_type": "chat_agent",
+            "conversation_id": conversation_id,
+            "response_style": response_style,
+        }
+
     async def _run_agent(
         self,
         agent_id: Optional[str],
@@ -2120,16 +2429,82 @@ class NodeExecutor:
             return {"status": "error", "error": str(e)}
 
     async def _run_inline_llm(self, agent_input: Dict, config: Dict, context: "ExecutionContext") -> Dict:
-        """Run an inline LLM call without a predefined agent."""
+        """Run an inline LLM call without a predefined agent.
+
+        Phase 59: Enhanced to support advanced RAG features when use_rag=True.
+        """
         try:
             from backend.services.llm import EnhancedLLMFactory
             from langchain_core.messages import HumanMessage, SystemMessage
             from backend.services.rag_module.prompts import enhance_agent_system_prompt
 
             prompt = agent_input.get("prompt", "")
+            system_prompt = agent_input.get("system_prompt", "")
             model = config.get("model", "gpt-4")
             temperature = config.get("temperature", 0.7)
             max_tokens = config.get("max_tokens", 2000)
+
+            # Phase 59: Use RAG service when use_rag is enabled
+            use_rag = config.get("use_rag", False)
+            rag_context = ""
+            sources = []
+
+            if use_rag:
+                try:
+                    from backend.services.rag import RAGService
+                    from backend.core.config import settings as core_settings
+
+                    rag = RAGService()
+
+                    # Build RAG query with advanced features
+                    rag_kwargs = {
+                        "query": prompt,
+                        "organization_id": str(context.organization_id) if context.organization_id else None,
+                    }
+
+                    # Apply document filter if specified
+                    doc_filter = config.get("doc_filter", "")
+                    if doc_filter:
+                        rag_kwargs["folder_filter"] = doc_filter
+
+                    # Phase 59: Enable advanced RAG features from config
+                    # Self-RAG for hallucination detection
+                    if config.get("use_self_rag", getattr(core_settings, 'ENABLE_SELF_RAG', True)):
+                        rag_kwargs["use_self_rag"] = True
+
+                    # Hybrid retrieval (LightRAG + RAPTOR)
+                    if config.get("use_hybrid", True):
+                        rag_kwargs["use_hybrid_retrieval"] = True
+
+                    # Knowledge graph
+                    if config.get("use_knowledge_graph", True):
+                        rag_kwargs["enable_knowledge_graph"] = True
+
+                    # Query expansion
+                    if config.get("use_query_expansion", getattr(core_settings, 'ENABLE_QUERY_EXPANSION', True)):
+                        rag_kwargs["enable_query_expansion"] = True
+
+                    # Execute RAG query with full pipeline
+                    rag_result = await rag.query(**rag_kwargs)
+
+                    # Extract context and sources
+                    rag_context = rag_result.get("context", "") or rag_result.get("answer", "")
+                    sources = rag_result.get("sources", [])
+
+                    # If RAG returned a direct answer, we can use it
+                    if rag_result.get("answer"):
+                        return {
+                            "status": "success",
+                            "response": rag_result.get("answer"),
+                            "sources": sources,
+                            "kg_entities": rag_result.get("kg_entities", []),
+                            "model": model,
+                            "rag_used": True,
+                        }
+
+                except Exception as rag_error:
+                    self.logger.warning(f"RAG retrieval failed, falling back to LLM only: {rag_error}")
+                    # Continue with LLM-only response
 
             # Get LLM using EnhancedLLMFactory
             llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
@@ -2142,8 +2517,23 @@ class NodeExecutor:
             # Enhance the prompt with model-specific base instructions
             enhanced_prompt = enhance_agent_system_prompt(prompt, model)
 
-            # Build messages
-            messages = [HumanMessage(content=enhanced_prompt)]
+            # Build messages with RAG context if available
+            messages = []
+            if system_prompt:
+                messages.append(SystemMessage(content=system_prompt))
+
+            if rag_context:
+                # Include RAG context in the prompt
+                context_prompt = f"""Based on the following context from relevant documents:
+
+{rag_context}
+
+User question: {enhanced_prompt}
+
+Please provide a comprehensive answer based on the context above."""
+                messages.append(HumanMessage(content=context_prompt))
+            else:
+                messages.append(HumanMessage(content=enhanced_prompt))
 
             # Invoke LLM with configured parameters
             response = await llm.ainvoke(
@@ -2152,18 +2542,30 @@ class NodeExecutor:
                 max_tokens=max_tokens,
             )
 
-            return {
+            result = {
                 "status": "success",
                 "response": response.content if hasattr(response, 'content') else str(response),
                 "model": model,
             }
+
+            # Include sources if RAG was used
+            if sources:
+                result["sources"] = sources
+                result["rag_used"] = True
+
+            return result
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
     async def _run_rag_agent(self, agent_def, agent_input: Dict, context: "ExecutionContext") -> Dict:
-        """Run a RAG-based agent with full agent definition support."""
+        """Run a RAG-based agent with full agent definition support.
+
+        Phase 59: Enhanced to support advanced RAG features (Self-RAG, LightRAG, RAPTOR).
+        """
         try:
             from backend.services.rag import RAGService
+            from backend.core.config import settings as core_settings
+
             rag = RAGService()
 
             query = agent_input.get("prompt") or agent_input.get("query", "")
@@ -2195,6 +2597,40 @@ class NodeExecutor:
             if "enable_query_expansion" in agent_config:
                 rag_kwargs["enable_query_expansion"] = agent_config.get("enable_query_expansion", False)
 
+            # Phase 59: Add advanced RAG features
+            # Self-RAG for hallucination detection (default from global settings)
+            use_self_rag = agent_config.get(
+                "use_self_rag",
+                getattr(core_settings, 'ENABLE_SELF_RAG', True)
+            )
+            if use_self_rag:
+                rag_kwargs["use_self_rag"] = True
+
+            # Hybrid retrieval (LightRAG + RAPTOR fusion)
+            use_hybrid = agent_config.get(
+                "use_hybrid_retrieval",
+                getattr(core_settings, 'ENABLE_LIGHTRAG', True) or
+                getattr(core_settings, 'ENABLE_RAPTOR', True)
+            )
+            if use_hybrid:
+                rag_kwargs["use_hybrid_retrieval"] = True
+
+            # Tiered reranking
+            use_reranking = agent_config.get(
+                "use_tiered_reranking",
+                getattr(core_settings, 'ENABLE_TIERED_RERANKING', True)
+            )
+            if use_reranking:
+                rag_kwargs["use_tiered_reranking"] = True
+
+            # Context compression for long responses
+            use_compression = agent_config.get(
+                "use_context_compression",
+                getattr(core_settings, 'ENABLE_CONTEXT_COMPRESSION', True)
+            )
+            if use_compression:
+                rag_kwargs["use_context_compression"] = True
+
             result = await rag.query(**rag_kwargs)
 
             return {
@@ -2204,6 +2640,9 @@ class NodeExecutor:
                 "kg_entities": result.get("kg_entities", []),
                 "agent_type": "rag",
                 "agent_name": agent_def.name if hasattr(agent_def, 'name') else None,
+                # Phase 59: Include advanced RAG metadata
+                "self_rag_verified": result.get("self_rag_verified", False),
+                "retrieval_method": result.get("retrieval_method", "standard"),
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}

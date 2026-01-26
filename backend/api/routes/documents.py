@@ -52,9 +52,9 @@ router = APIRouter()
 
 class DocumentBase(BaseModel):
     """Base document model."""
-    name: str
+    name: str = Field(..., min_length=1, max_length=500)
     file_type: str
-    collection: Optional[str] = None
+    collection: Optional[str] = Field(None, max_length=100, pattern=r"^[a-zA-Z0-9_\-\s\.]+$")
     access_tier: int = Field(default=1, ge=1, le=100)
 
 
@@ -65,8 +65,8 @@ class DocumentCreate(DocumentBase):
 
 class DocumentUpdate(BaseModel):
     """Document update request."""
-    name: Optional[str] = None
-    collection: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=500)
+    collection: Optional[str] = Field(None, max_length=100, pattern=r"^[a-zA-Z0-9_\-\s\.]+$")
     access_tier: Optional[int] = Field(default=None, ge=1, le=100)
     tags: Optional[List[str]] = None
 
@@ -984,32 +984,41 @@ async def search_documents(
         session=db,
     )
 
-    # Build response
+    # Build response - batch fetch document info to avoid N+1 queries
     search_results = []
-    for result in results:
-        # Get document info
-        doc_query = (
-            select(Document.original_filename)
-            .where(Document.id == result.document_id)
+
+    # Collect all unique document IDs
+    doc_ids = list({result.document_id for result in results})
+
+    # Batch query for all document info in one query
+    doc_info_lookup = {}
+    if doc_ids:
+        doc_info_query = (
+            select(Document.id, Document.original_filename, Document.tags, Document.file_type)
+            .where(Document.id.in_(doc_ids))
         )
-        doc_result = await db.execute(doc_query)
-        doc_name = doc_result.scalar_one_or_none() or "Unknown"
+        doc_info_result = await db.execute(doc_info_query)
+        for row in doc_info_result.all():
+            doc_info_lookup[row[0]] = {
+                "name": row[1] or "Unknown",
+                "tags": row[2] or [],
+                "file_type": row[3],
+            }
+
+    for result in results:
+        # Get document info from lookup (O(1) instead of O(n) queries)
+        doc_info = doc_info_lookup.get(result.document_id, {})
+        doc_name = doc_info.get("name", "Unknown")
+        tags = doc_info.get("tags", [])
+        file_type = doc_info.get("file_type")
 
         # Filter by collection if specified
-        if request.collection:
-            doc_tags_query = select(Document.tags).where(Document.id == result.document_id)
-            tags_result = await db.execute(doc_tags_query)
-            tags = tags_result.scalar_one_or_none() or []
-            if request.collection not in tags:
-                continue
+        if request.collection and request.collection not in tags:
+            continue
 
         # Filter by file type if specified
-        if request.file_types:
-            doc_type_query = select(Document.file_type).where(Document.id == result.document_id)
-            type_result = await db.execute(doc_type_query)
-            file_type = type_result.scalar_one_or_none()
-            if file_type not in request.file_types:
-                continue
+        if request.file_types and file_type not in request.file_types:
+            continue
 
         search_results.append(
             SearchResultItem(
@@ -1726,8 +1735,8 @@ def _extract_name_from_pdf(file_path: str) -> Optional[str]:
             title = reader.metadata.get("/Title") or reader.metadata.get("/Subject")
             if title and title.strip() and title.strip().lower() != "untitled":
                 return title.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("PDF metadata extraction failed", error=str(e))
     return None
 
 
@@ -1740,8 +1749,8 @@ def _extract_name_from_pptx(file_path: str) -> Optional[str]:
             return prs.core_properties.title.strip()
         if prs.core_properties.subject:
             return prs.core_properties.subject.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("PPTX metadata extraction failed", error=str(e))
     return None
 
 
@@ -1917,13 +1926,13 @@ async def move_document(
     document = result.scalar_one_or_none()
 
     if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     # Check document access
     user_tier = user.access_tier_level
     doc_tier = document.access_tier.level if document.access_tier else 1
     if user_tier < doc_tier:
-        raise HTTPException(status_code=403, detail="No access to this document")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this document")
 
     folder_service = get_folder_service()
     folder_name = None
@@ -1932,11 +1941,11 @@ async def move_document(
         # Check target folder access
         target_folder = await folder_service.get_folder_by_id(request.folder_id)
         if not target_folder:
-            raise HTTPException(status_code=404, detail="Target folder not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target folder not found")
 
         effective_tier = await folder_service.get_effective_tier_level(target_folder)
         if user_tier < effective_tier:
-            raise HTTPException(status_code=403, detail="No access to target folder")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to target folder")
 
         document.folder_id = uuid_module.UUID(request.folder_id)
         folder_name = target_folder.name
@@ -1983,11 +1992,11 @@ async def bulk_move_documents(
     if request.folder_id:
         target_folder = await folder_service.get_folder_by_id(request.folder_id)
         if not target_folder:
-            raise HTTPException(status_code=404, detail="Target folder not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target folder not found")
 
         effective_tier = await folder_service.get_effective_tier_level(target_folder)
         if user_tier < effective_tier:
-            raise HTTPException(status_code=403, detail="No access to target folder")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to target folder")
 
         folder_name = target_folder.name
 

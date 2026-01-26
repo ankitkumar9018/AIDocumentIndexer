@@ -12,6 +12,7 @@ Features:
 - Graph traversal for multi-hop reasoning
 - Hybrid retrieval (vector + graph)
 - Entity resolution and deduplication
+- Phase 34: LLMGraphTransformer integration for enhanced extraction
 """
 
 import asyncio
@@ -38,8 +39,34 @@ from backend.db.models import (
 )
 from backend.services.llm import EnhancedLLMFactory
 from backend.services.embeddings import get_embedding_service
+from backend.db.database import async_session_context
+from backend.core.config import settings
 
 logger = structlog.get_logger(__name__)
+
+# Phase 34: LLMGraphTransformer support for enhanced KG extraction
+try:
+    from langchain_experimental.graph_transformers import LLMGraphTransformer
+    from langchain_core.documents import Document as LCDocument
+    HAS_LLMGRAPH_TRANSFORMER = True
+except ImportError:
+    HAS_LLMGRAPH_TRANSFORMER = False
+    logger.info("LLMGraphTransformer not available - using standard extraction")
+
+# Phase 60: GraphRAG Enhancements for better KG extraction
+try:
+    from backend.services.graphrag_enhancements import (
+        GraphRAGEnhancer,
+        CommunityDetector,
+        EntityStandardizer,
+        KGGenExtractor,
+        GraphRAGConfig,
+        get_graphrag_enhancer,
+    )
+    HAS_GRAPHRAG_ENHANCEMENTS = True
+except ImportError:
+    HAS_GRAPHRAG_ENHANCEMENTS = False
+    logger.info("GraphRAG enhancements not available - using standard KG extraction")
 
 
 # =============================================================================
@@ -514,30 +541,230 @@ class KnowledgeGraphService:
         self.llm = llm_service
         self.embeddings = embedding_service
 
+        # Phase 60: GraphRAG enhancement components
+        self.graphrag_enhancer: Optional[GraphRAGEnhancer] = None
+        self.kggen_extractor: Optional[KGGenExtractor] = None
+        self.entity_standardizer: Optional[EntityStandardizer] = None
+        self.community_detector: Optional[CommunityDetector] = None
+        self._graphrag_initialized = False
+
+    async def _init_graphrag_enhancements(self):
+        """Initialize GraphRAG enhancement components if enabled."""
+        if self._graphrag_initialized:
+            return
+
+        if not HAS_GRAPHRAG_ENHANCEMENTS:
+            logger.debug("GraphRAG enhancements not available")
+            return
+
+        if not settings.KG_USE_GRAPHRAG_ENHANCEMENTS:
+            logger.debug("GraphRAG enhancements disabled in settings")
+            return
+
+        try:
+            # Initialize KGGen extractor (94% quality, 5x cheaper)
+            if settings.KG_USE_KGGEN_EXTRACTOR:
+                self.kggen_extractor = KGGenExtractor()
+                logger.info("KGGen extractor initialized for cost-efficient extraction")
+
+            # Initialize entity standardizer for deduplication
+            if settings.KG_USE_ENTITY_STANDARDIZATION:
+                self.entity_standardizer = EntityStandardizer()
+                logger.info("Entity standardizer initialized for normalization")
+
+            # Initialize community detector
+            if settings.KG_USE_COMMUNITY_DETECTION:
+                self.community_detector = CommunityDetector()
+                logger.info("Community detector initialized for Leiden clustering")
+
+            # Initialize full GraphRAG enhancer
+            self.graphrag_enhancer = await get_graphrag_enhancer()
+            logger.info("GraphRAG enhancer initialized successfully")
+
+            self._graphrag_initialized = True
+        except Exception as e:
+            logger.warning("Failed to initialize GraphRAG enhancements", error=str(e))
+
+    async def _standardize_entities(
+        self,
+        entities: List[ExtractedEntity],
+    ) -> List[ExtractedEntity]:
+        """
+        Standardize entities using EntityStandardizer for deduplication and normalization.
+
+        Args:
+            entities: List of extracted entities
+
+        Returns:
+            List of standardized entities
+        """
+        if not self.entity_standardizer:
+            return entities
+
+        try:
+            # Convert to format expected by standardizer
+            entity_dicts = [
+                {
+                    "name": e.name,
+                    "type": e.entity_type.value if hasattr(e.entity_type, 'value') else str(e.entity_type),
+                    "description": e.description,
+                    "confidence": e.confidence,
+                    "aliases": e.aliases,
+                }
+                for e in entities
+            ]
+
+            # Standardize (dedupe, normalize)
+            standardized = await self.entity_standardizer.standardize_entities(entity_dicts)
+
+            # Convert back to ExtractedEntity
+            result = []
+            for std in standardized:
+                try:
+                    entity_type_str = std.get("type", "OTHER").upper()
+                    entity_type = getattr(EntityType, entity_type_str, EntityType.OTHER)
+
+                    result.append(ExtractedEntity(
+                        name=std.get("canonical_name", std.get("name", "")),
+                        entity_type=entity_type,
+                        description=std.get("description"),
+                        confidence=std.get("confidence", 0.9),
+                        aliases=std.get("aliases", []),
+                    ))
+                except (ValueError, KeyError, TypeError) as e:
+                    logger.debug("Failed to standardize entity", error=str(e))
+                    continue
+
+            logger.debug(
+                "Entity standardization complete",
+                original_count=len(entities),
+                standardized_count=len(result),
+            )
+            return result
+
+        except Exception as e:
+            logger.warning("Entity standardization failed", error=str(e))
+            return entities
+
     async def _get_llm(self):
         """
         Get or initialize LLM service with graceful fallback.
 
+        Phase 60: Implements multi-provider fallback chain for reliability.
         Uses the configured provider from environment or database.
-        Supports FREE (Ollama) and PAID (OpenAI, Anthropic) providers.
+        Supports FREE (Ollama) and PAID (OpenAI, Anthropic, Groq) providers.
+
+        Fallback order: Primary provider → OpenAI → Anthropic → Groq → Ollama
 
         Returns:
             LLM instance or None if unavailable
         """
-        if not self.llm:
+        if self.llm:
+            return self.llm
+
+        # Try the default configured provider first
+        try:
+            llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="chat",  # Use chat operation for entity extraction
+                db_session=self.db,
+            )
+            self.llm = llm
+            return self.llm
+        except Exception as e:
+            logger.warning("Primary LLM initialization failed", error=str(e))
+
+        # Phase 60: Multi-provider fallback chain
+        if not settings.KG_LLM_FALLBACK_ENABLED:
+            return None
+
+        fallback_chain = settings.KG_LLM_FALLBACK_CHAIN.split(",")
+        last_error = None
+
+        for provider in fallback_chain:
+            provider = provider.strip().lower()
             try:
-                llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
-                    operation="chat",  # Use chat operation for entity extraction
-                    db_session=self.db,
-                )
-                self.llm = llm
+                llm = await self._get_llm_for_provider(provider)
+                if llm:
+                    self.llm = llm
+                    logger.info(f"Using fallback LLM provider: {provider}")
+                    return self.llm
             except Exception as e:
-                logger.warning(
-                    "Failed to initialize LLM for knowledge graph",
-                    error=str(e),
-                )
+                logger.warning(f"Fallback provider {provider} failed", error=str(e))
+                last_error = e
+                continue
+
+        if last_error:
+            logger.error("All LLM providers failed for KG extraction", error=str(last_error))
+        return None
+
+    async def _get_llm_for_provider(self, provider: str):
+        """
+        Get LLM instance for a specific provider.
+
+        Args:
+            provider: Provider name (openai, anthropic, groq, ollama)
+
+        Returns:
+            LLM instance or None
+        """
+        import os
+
+        if provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
                 return None
-        return self.llm
+            try:
+                from langchain_openai import ChatOpenAI
+                return ChatOpenAI(
+                    model=settings.KG_EXTRACTION_MODEL,
+                    api_key=api_key,
+                    temperature=0.3,
+                )
+            except ImportError:
+                return None
+
+        elif provider == "anthropic":
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                return None
+            try:
+                from langchain_anthropic import ChatAnthropic
+                return ChatAnthropic(
+                    model="claude-3-haiku-20240307",
+                    api_key=api_key,
+                    temperature=0.3,
+                )
+            except ImportError:
+                return None
+
+        elif provider == "groq":
+            api_key = os.getenv("GROQ_API_KEY")
+            if not api_key:
+                return None
+            try:
+                from langchain_groq import ChatGroq
+                return ChatGroq(
+                    model="llama-3.1-70b-versatile",
+                    api_key=api_key,
+                    temperature=0.3,
+                )
+            except ImportError:
+                return None
+
+        elif provider == "ollama":
+            ollama_enabled = os.getenv("OLLAMA_ENABLED", "false").lower() == "true"
+            if not ollama_enabled:
+                return None
+            try:
+                from langchain_ollama import ChatOllama
+                return ChatOllama(
+                    model=os.getenv("OLLAMA_MODEL", "llama3.2"),
+                    temperature=0.3,
+                )
+            except ImportError:
+                return None
+
+        return None
 
     async def _get_embeddings(self):
         """Get or initialize embedding service."""
@@ -573,6 +800,64 @@ class KnowledgeGraphService:
         Returns:
             Tuple of (entities, relations)
         """
+        # Phase 60: Initialize GraphRAG enhancements if not done
+        await self._init_graphrag_enhancements()
+
+        # Phase 60: Use KGGen extractor if enabled (94% quality, 5x cheaper than standard LLM)
+        if self.kggen_extractor and settings.KG_USE_KGGEN_EXTRACTOR:
+            try:
+                extraction_result = await self.kggen_extractor.extract(text)
+
+                # Convert to our ExtractedEntity/ExtractedRelation format
+                entities = []
+                relations = []
+
+                for entity_data in extraction_result.get("entities", []):
+                    try:
+                        # Map entity type
+                        entity_type_str = entity_data.get("type", "OTHER").upper()
+                        entity_type = getattr(EntityType, entity_type_str, EntityType.OTHER)
+
+                        entities.append(ExtractedEntity(
+                            name=entity_data.get("name", ""),
+                            entity_type=entity_type,
+                            description=entity_data.get("description"),
+                            confidence=entity_data.get("confidence", 0.9),
+                            language=document_language,
+                        ))
+                    except Exception:
+                        pass
+
+                for rel_data in extraction_result.get("relations", []):
+                    try:
+                        rel_type_str = rel_data.get("type", "OTHER").upper()
+                        rel_type = getattr(RelationType, rel_type_str, RelationType.OTHER)
+
+                        relations.append(ExtractedRelation(
+                            source_entity=rel_data.get("source", ""),
+                            target_entity=rel_data.get("target", ""),
+                            relation_type=rel_type,
+                            relation_label=rel_data.get("label"),
+                            confidence=rel_data.get("confidence", 0.9),
+                        ))
+                    except Exception:
+                        pass
+
+                # Apply entity standardization if enabled
+                if self.entity_standardizer and settings.KG_USE_ENTITY_STANDARDIZATION:
+                    entities = await self._standardize_entities(entities)
+
+                if entities:
+                    logger.info(
+                        "KGGen extraction completed (Phase 60 - 5x cheaper)",
+                        entity_count=len(entities),
+                        relation_count=len(relations),
+                    )
+                    return entities, relations
+
+            except Exception as e:
+                logger.warning("KGGen extraction failed, falling back to standard methods", error=str(e))
+
         # Phase 2: Try fast extraction first (80-90% cost reduction)
         if use_fast_extraction and document_language == "en":  # Fast extraction currently English-only
             try:
@@ -773,6 +1058,196 @@ class KnowledgeGraphService:
             logger.error("Entity extraction failed", error=str(e))
             return [], []
 
+    async def extract_entities_with_llm_graph_transformer(
+        self,
+        text: str,
+        document_id: Optional[uuid.UUID] = None,
+        chunk_id: Optional[uuid.UUID] = None,
+        allowed_nodes: Optional[List[str]] = None,
+        allowed_relationships: Optional[List[str]] = None,
+    ) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
+        """
+        Phase 34: Extract entities using LangChain's LLMGraphTransformer.
+
+        LLMGraphTransformer provides:
+        - Better understanding of context and nuance
+        - Smoother knowledge graph creation process
+        - Automatic schema extraction
+        - Neo4j-compatible output format
+
+        Args:
+            text: Text to extract from
+            document_id: Source document ID
+            chunk_id: Source chunk ID
+            allowed_nodes: Optional list of allowed node types
+            allowed_relationships: Optional list of allowed relationship types
+
+        Returns:
+            Tuple of (entities, relations)
+        """
+        if not HAS_LLMGRAPH_TRANSFORMER:
+            logger.debug("LLMGraphTransformer not available, using standard extraction")
+            return await self.extract_entities_from_text(
+                text, document_id, chunk_id
+            )
+
+        try:
+            llm = await self._get_llm()
+            if not llm:
+                return [], []
+
+            # Create LLMGraphTransformer
+            transformer_kwargs = {
+                "llm": llm,
+            }
+
+            if allowed_nodes:
+                transformer_kwargs["allowed_nodes"] = allowed_nodes
+            if allowed_relationships:
+                transformer_kwargs["allowed_relationships"] = allowed_relationships
+
+            transformer = LLMGraphTransformer(**transformer_kwargs)
+
+            # Create LangChain document
+            lc_doc = LCDocument(
+                page_content=text,
+                metadata={
+                    "document_id": str(document_id) if document_id else None,
+                    "chunk_id": str(chunk_id) if chunk_id else None,
+                }
+            )
+
+            # Run in thread pool since it may be blocking
+            loop = asyncio.get_running_loop()
+            graph_docs = await loop.run_in_executor(
+                None,
+                lambda: transformer.convert_to_graph_documents([lc_doc])
+            )
+
+            # Convert to our format
+            entities = []
+            relations = []
+
+            for graph_doc in graph_docs:
+                # Extract nodes as entities
+                for node in graph_doc.nodes:
+                    entity_type = self._map_node_type_to_entity_type(node.type)
+                    entities.append(ExtractedEntity(
+                        name=node.id,
+                        entity_type=entity_type,
+                        description=node.properties.get("description"),
+                        confidence=0.9,  # High confidence from LLMGraphTransformer
+                    ))
+
+                # Extract relationships
+                for rel in graph_doc.relationships:
+                    relation_type = self._map_relationship_type(rel.type)
+                    relations.append(ExtractedRelation(
+                        source_entity=rel.source.id,
+                        target_entity=rel.target.id,
+                        relation_type=relation_type,
+                        relation_label=rel.type,
+                        confidence=0.9,
+                    ))
+
+            logger.info(
+                "LLMGraphTransformer extraction complete",
+                entities=len(entities),
+                relations=len(relations),
+            )
+
+            return entities, relations
+
+        except Exception as e:
+            logger.error(f"LLMGraphTransformer extraction failed: {e}")
+            # Fall back to standard extraction
+            return await self.extract_entities_from_text(
+                text, document_id, chunk_id
+            )
+
+    def _map_node_type_to_entity_type(self, node_type: str) -> EntityType:
+        """Map LLMGraphTransformer node type to our EntityType enum."""
+        type_map = {
+            "person": EntityType.PERSON,
+            "organization": EntityType.ORGANIZATION,
+            "location": EntityType.LOCATION,
+            "date": EntityType.DATE,
+            "event": EntityType.EVENT,
+            "concept": EntityType.CONCEPT,
+            "product": EntityType.PRODUCT,
+            "technology": EntityType.TECHNOLOGY,
+        }
+
+        node_type_lower = node_type.lower()
+        return type_map.get(node_type_lower, EntityType.CONCEPT)
+
+    def _map_relationship_type(self, rel_type: str) -> RelationType:
+        """Map LLMGraphTransformer relationship type to our RelationType enum."""
+        type_map = {
+            "works_for": RelationType.WORKS_FOR,
+            "located_in": RelationType.LOCATED_IN,
+            "part_of": RelationType.PART_OF,
+            "created_by": RelationType.CREATED_BY,
+            "related_to": RelationType.RELATED_TO,
+            "causes": RelationType.CAUSES,
+            "depends_on": RelationType.DEPENDS_ON,
+            "occurred_at": RelationType.OCCURRED_AT,
+            "uses": RelationType.USES,
+            "mentions": RelationType.MENTIONS,
+        }
+
+        rel_type_lower = rel_type.lower().replace(" ", "_").replace("-", "_")
+        return type_map.get(rel_type_lower, RelationType.RELATED_TO)
+
+    async def extract_from_document(
+        self,
+        chunks: List[str],
+        document_id: Optional[uuid.UUID] = None,
+        document_language: str = "en",
+        use_batch: Optional[bool] = None,
+    ) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
+        """
+        Extract entities from document chunks with automatic batch mode selection.
+
+        Phase 60: Uses batch extraction by default when KG_BATCH_EXTRACTION_DEFAULT
+        is enabled in settings for 3-5x performance improvement.
+
+        Args:
+            chunks: List of text chunks to process
+            document_id: Source document ID
+            document_language: Language code
+            use_batch: Override batch mode (None = use settings default)
+
+        Returns:
+            Tuple of (entities, relations)
+        """
+        # Determine batch mode from settings if not specified
+        if use_batch is None:
+            use_batch = getattr(settings, 'KG_BATCH_EXTRACTION_DEFAULT', True)
+
+        if use_batch and len(chunks) > 1:
+            # Use batch extraction for multiple chunks
+            return await self.extract_entities_batch(
+                chunks=chunks,
+                document_id=document_id,
+                document_language=document_language,
+            )
+        else:
+            # Process chunks individually
+            all_entities = []
+            all_relations = []
+
+            for chunk in chunks:
+                entities, relations = await self.extract_entities_from_text(
+                    text=chunk,
+                    document_id=document_id,
+                    document_language=document_language,
+                )
+                all_entities.extend(entities)
+                all_relations.extend(relations)
+
+            return all_entities, all_relations
+
     async def extract_entities_batch(
         self,
         chunks: List[str],
@@ -817,9 +1292,13 @@ class KnowledgeGraphService:
         language_name = LANGUAGE_NAMES.get(document_language, "English")
 
         # Calculate optimal batch size if not provided
+        # Phase 60: Use KG_BATCH_SIZE setting as default
         if batch_size is None:
+            batch_size = getattr(settings, 'KG_BATCH_SIZE', 4)
             model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None)
-            batch_size = _calculate_optimal_batch_size(model_name)
+            # Override with model-optimized size if smaller
+            model_optimal = _calculate_optimal_batch_size(model_name)
+            batch_size = min(batch_size, model_optimal)
             logger.info(
                 "Using adaptive batch sizing for entity extraction",
                 model=model_name,
@@ -3023,3 +3502,120 @@ Only include entities and relations clearly supported by the text."""
 async def get_knowledge_graph_service(db_session: AsyncSession) -> KnowledgeGraphService:
     """Get configured knowledge graph service."""
     return KnowledgeGraphService(db_session)
+
+
+# =============================================================================
+# Singleton Pattern & Convenience Functions
+# =============================================================================
+
+_kg_service_instance: Optional[KnowledgeGraphService] = None
+_kg_service_session = None
+
+
+async def get_kg_service() -> KnowledgeGraphService:
+    """
+    Get or create singleton KnowledgeGraphService instance.
+
+    This function manages its own database session for standalone use.
+    For use within FastAPI routes, prefer get_knowledge_graph_service(db_session).
+
+    Returns:
+        KnowledgeGraphService: Singleton instance
+    """
+    global _kg_service_instance, _kg_service_session
+
+    if _kg_service_instance is None:
+        # Create a new session for the singleton
+        session_factory = async_session_context()
+        _kg_service_session = await session_factory.__aenter__()
+        _kg_service_instance = KnowledgeGraphService(_kg_service_session)
+        logger.info("KG service singleton created")
+
+    return _kg_service_instance
+
+
+async def extract_knowledge_graph(
+    text: str,
+    collection: str = "default",
+    use_batch: bool = None,
+    document_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Standalone function to extract entities and relations from text.
+
+    This is a convenience function for extracting knowledge graph data
+    without needing to manage the service lifecycle.
+
+    Args:
+        text: Text to extract entities/relations from
+        collection: Collection to associate with (default: "default")
+        use_batch: Use batch extraction for performance (default: from settings)
+        document_id: Optional document ID to associate entities with
+
+    Returns:
+        dict with:
+            - entities: List of extracted entities
+            - relations: List of extracted relations
+            - metadata: Extraction metadata
+
+    Example:
+        result = await extract_knowledge_graph(
+            "Apple Inc was founded by Steve Jobs in 1976.",
+            collection="tech-docs"
+        )
+        print(f"Found {len(result['entities'])} entities")
+    """
+    service = await get_kg_service()
+
+    # Use settings default if not specified
+    if use_batch is None:
+        use_batch = getattr(settings, 'KG_BATCH_EXTRACTION_DEFAULT', True)
+
+    try:
+        # Extract entities from text
+        entities = await service.extract_entities_from_text(text)
+
+        # Extract relations between entities
+        entity_names = [e.name for e in entities]
+        relations = await service.extract_relations(text, entity_names)
+
+        return {
+            "entities": [
+                {
+                    "name": e.name,
+                    "type": e.entity_type.value if hasattr(e.entity_type, 'value') else str(e.entity_type),
+                    "description": e.description,
+                    "confidence": e.confidence,
+                    "aliases": e.aliases,
+                }
+                for e in entities
+            ],
+            "relations": [
+                {
+                    "source": r.source_entity,
+                    "target": r.target_entity,
+                    "type": r.relation_type.value if hasattr(r.relation_type, 'value') else str(r.relation_type),
+                    "label": r.relation_label,
+                    "confidence": r.confidence,
+                }
+                for r in relations
+            ],
+            "metadata": {
+                "collection": collection,
+                "document_id": document_id,
+                "entity_count": len(entities),
+                "relation_count": len(relations),
+                "batch_mode": use_batch,
+            }
+        }
+    except Exception as e:
+        logger.error("KG extraction failed", error=str(e))
+        return {
+            "entities": [],
+            "relations": [],
+            "metadata": {
+                "collection": collection,
+                "document_id": document_id,
+                "error": str(e),
+            }
+        }

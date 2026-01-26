@@ -62,6 +62,7 @@ class MutationStrategy(str, Enum):
     ADD_CHAIN_OF_THOUGHT = "add_chain_of_thought"
     SIMPLIFY = "simplify"
     ADD_CONSTRAINTS = "add_constraints"
+    DSPY_OPTIMIZE = "dspy_optimize"  # Phase 93: DSPy compilation-based optimization
 
 
 @dataclass

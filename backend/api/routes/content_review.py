@@ -175,7 +175,7 @@ async def create_review_session(
             content = SpreadsheetContent(**request.spreadsheet)
         else:
             raise HTTPException(
-                status_code=400,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Content required for type: {request.content_type}"
             )
 
@@ -191,13 +191,13 @@ async def create_review_session(
     except ValidationError as e:
         # Pydantic validation errors → 400 Bad Request
         logger.warning("Validation error creating review session", error=str(e))
-        raise HTTPException(status_code=400, detail=f"Invalid content structure: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid content structure: {str(e)}")
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         # True server errors → 500
         logger.error("Failed to create review session", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.get("/sessions/{session_id}/status", response_model=ReviewStatusResponse)
@@ -207,7 +207,7 @@ async def get_review_status(session_id: str):
     status = service.get_review_status(session_id)
 
     if "error" in status:
-        raise HTTPException(status_code=404, detail=status["error"])
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=status["error"])
 
     return ReviewStatusResponse(
         session_id=session_id,
@@ -227,7 +227,7 @@ async def delete_review_session(session_id: str):
     service = get_review_service()
     if service.delete_session(session_id):
         return {"success": True, "message": "Session deleted"}
-    raise HTTPException(status_code=404, detail="Session not found")
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
 
 # =============================================================================
@@ -245,7 +245,7 @@ async def list_all_items(session_id: str):
     items = service.get_all_items_preview(session_id)
 
     if not items:
-        raise HTTPException(status_code=404, detail="Session not found or empty")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found or empty")
 
     return {
         "session_id": session_id,
@@ -265,7 +265,7 @@ async def get_item_detail(session_id: str, item_id: str):
     detail = service.get_item_detail(session_id, item_id)
 
     if not detail:
-        raise HTTPException(status_code=404, detail="Item not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
 
     return detail
 
@@ -300,7 +300,7 @@ async def edit_item(
         action = EditAction(request.action)
     except ValueError:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid action: {request.action}. Valid: {[a.value for a in EditAction]}"
         )
 
@@ -316,7 +316,7 @@ async def edit_item(
     result = service.edit_item(session_id, edit_request)
 
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "Edit failed"))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error", "Edit failed"))
 
     return EditContentResponse(
         success=True,
@@ -397,7 +397,7 @@ async def approve_item(session_id: str, item_id: str):
     result = service.edit_item(session_id, edit_request)
 
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error"))
 
     return {
         "success": True,
@@ -414,7 +414,7 @@ async def batch_approve(session_id: str, request: BatchApproveRequest):
     result = service.batch_approve(session_id, request.item_ids)
 
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error"))
 
     return result
 
@@ -426,7 +426,7 @@ async def approve_all_items(session_id: str):
     result = service.approve_all(session_id)
 
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error"))
 
     return result
 
@@ -448,11 +448,11 @@ async def get_approved_content(session_id: str):
     # Check if all items are approved
     status = service.get_review_status(session_id)
     if "error" in status:
-        raise HTTPException(status_code=404, detail=status["error"])
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=status["error"])
 
     if not status.get("can_render"):
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Not all items approved. Progress: {status['progress']['approved']}/{status['progress']['total']}"
         )
 
@@ -460,7 +460,7 @@ async def get_approved_content(session_id: str):
     content = service.get_approved_content(session_id)
 
     if not content:
-        raise HTTPException(status_code=400, detail="Could not retrieve approved content")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not retrieve approved content")
 
     return {
         "session_id": session_id,
@@ -486,7 +486,7 @@ async def export_content(session_id: str, force: bool = False):
 
     if not content:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not retrieve content. Use force=true to export anyway."
         )
 

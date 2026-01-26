@@ -919,6 +919,34 @@ export default function AudioOverviewsPage() {
                       <Badge variant="outline" className="text-xs bg-blue-500/10 text-blue-600">Self-hosted</Badge>
                     </div>
                   </SelectItem>
+                  {/* Ultra-Fast TTS Providers (Phase 45) */}
+                  <div className="px-2 py-1 text-xs font-semibold text-muted-foreground border-t mt-1">
+                    ⚡ Ultra-Fast TTS (Sub-100ms)
+                  </div>
+                  <SelectItem value="cartesia">
+                    <div className="flex items-center gap-2">
+                      <span>Cartesia Sonic 2.0</span>
+                      <Badge variant="outline" className="text-xs bg-yellow-500/10 text-yellow-600">40ms TTFA</Badge>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="murf">
+                    <div className="flex items-center gap-2">
+                      <span>Murf Falcon</span>
+                      <Badge variant="outline" className="text-xs bg-yellow-500/10 text-yellow-600">55ms</Badge>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="smallest">
+                    <div className="flex items-center gap-2">
+                      <span>Smallest.ai Lightning</span>
+                      <Badge variant="outline" className="text-xs bg-orange-500/10 text-orange-600">Fastest</Badge>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="fish_speech">
+                    <div className="flex items-center gap-2">
+                      <span>Fish Speech 1.5</span>
+                      <Badge variant="outline" className="text-xs bg-purple-500/10 text-purple-600">High Quality</Badge>
+                    </div>
+                  </SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
@@ -926,6 +954,10 @@ export default function AudioOverviewsPage() {
                 {selectedTTSProvider === "openai" && "Requires OPENAI_API_KEY. High quality, natural sounding."}
                 {selectedTTSProvider === "elevenlabs" && "Premium voices with voice cloning. Requires API key."}
                 {selectedTTSProvider === "coqui" && "Runs locally using Coqui TTS. Requires 'pip install TTS'."}
+                {selectedTTSProvider === "cartesia" && "Ultra-fast 40ms TTFA. Requires CARTESIA_API_KEY."}
+                {selectedTTSProvider === "murf" && "55ms latency, $0.01/min. Requires MURF_API_KEY."}
+                {selectedTTSProvider === "smallest" && "Fastest TTS available (RTF 0.01). Requires SMALLEST_API_KEY."}
+                {selectedTTSProvider === "fish_speech" && "High quality ELO 1339. Requires FISH_API_KEY."}
               </p>
             </div>
 

@@ -7,6 +7,34 @@ It initializes the FastAPI application with all routes, middleware,
 and lifecycle events.
 """
 
+# =============================================================================
+# CRITICAL: uvloop must be installed before any asyncio event loop is created
+# This provides 2-4x performance improvement for async operations
+# =============================================================================
+import sys
+
+def _install_uvloop():
+    """
+    Install uvloop as the default event loop policy.
+
+    uvloop is a fast, drop-in replacement for asyncio's event loop,
+    providing 2-4x performance improvement for async I/O operations.
+
+    Only installed on Linux/macOS (not Windows, as uvloop doesn't support it).
+    """
+    if sys.platform == "win32":
+        return False
+
+    try:
+        import uvloop
+        uvloop.install()
+        return True
+    except ImportError:
+        # uvloop not installed, continue with default asyncio
+        return False
+
+_uvloop_installed = _install_uvloop()
+
 import os
 from pathlib import Path
 
@@ -28,6 +56,14 @@ import structlog
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+# Phase 35: Use ORJSON for 20-50% faster JSON serialization
+try:
+    from fastapi.responses import ORJSONResponse
+    ORJSON_AVAILABLE = True
+except ImportError:
+    ORJSONResponse = JSONResponse
+    ORJSON_AVAILABLE = False
 
 from backend.api.middleware.request_id import RequestIDMiddleware
 from backend.api.errors import register_exception_handlers as register_app_exception_handlers
@@ -67,6 +103,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     - Background tasks initialization
     """
     logger.info("Starting AIDocumentIndexer API...")
+
+    # Log uvloop status
+    if _uvloop_installed:
+        logger.info("uvloop installed - 2-4x async performance boost enabled")
+    else:
+        logger.info("uvloop not available - using default asyncio event loop")
+
+    # Log ORJSON status (Phase 35)
+    if ORJSON_AVAILABLE:
+        logger.info("ORJSON enabled - 20-50% faster JSON serialization")
+    else:
+        logger.info("ORJSON not available - using standard JSON serialization")
 
     # Startup tasks
     try:
@@ -187,6 +235,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutting down AIDocumentIndexer API...")
 
     try:
+        # Close shared HTTP client
+        try:
+            from backend.services.http_client import close_http_client
+            await close_http_client()
+            logger.info("HTTP client closed")
+        except Exception as http_error:
+            logger.warning("HTTP client shutdown failed", error=str(http_error))
+
         # Close database connections
         # from backend.db.database import close_db
         # await close_db()
@@ -220,6 +276,7 @@ def create_app() -> FastAPI:
     Returns:
         FastAPI: Configured application instance
     """
+    # Phase 35: Use ORJSONResponse as default for 20-50% faster JSON serialization
     app = FastAPI(
         title="AIDocumentIndexer",
         description="Intelligent Document Archive with RAG - Transform your knowledge base into a searchable AI assistant",
@@ -228,6 +285,7 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
         openapi_url="/openapi.json",
         lifespan=lifespan,
+        default_response_class=ORJSONResponse if ORJSON_AVAILABLE else JSONResponse,
     )
 
     # Add Request ID middleware (must be first to ensure all requests get an ID)
@@ -320,6 +378,23 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.document_templates import router as document_templates_router
     from backend.api.routes.telemetry import router as telemetry_router
     from backend.api.routes.embeddings import router as embeddings_router
+    from backend.api.routes.agent_templates import router as agent_templates_router
+    from backend.api.routes.crawler import router as crawler_router
+    from backend.api.routes.evaluation import router as evaluation_router
+    from backend.api.routes.watcher import router as watcher_router
+    from backend.api.routes.indexer import router as indexer_router
+    from backend.api.routes.agentic import router as agentic_router
+    from backend.api.routes.annotations import router as annotations_router
+    from backend.api.routes.charts import router as charts_router
+    from backend.api.routes.cache import router as cache_router
+    from backend.api.routes.reranking import router as reranking_router
+    from backend.api.routes.vision import router as vision_router
+    from backend.api.routes.late_chunking import router as late_chunking_router
+    from backend.api.routes.compression import router as compression_router
+    from backend.api.routes.security import router as security_router
+    from backend.api.routes.experiments import router as experiments_router
+    from backend.api.routes.diagnostics import router as diagnostics_router
+    from backend.api.routes.dspy_optimization import router as dspy_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
@@ -344,6 +419,23 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(document_templates_router, prefix="/api/v1", tags=["Document Templates"])
     app.include_router(telemetry_router, prefix="/api/v1/telemetry", tags=["Phase 15 Telemetry"])
     app.include_router(embeddings_router, prefix="/api/v1", tags=["Embeddings"])
+    app.include_router(agent_templates_router, prefix="/api/v1", tags=["Agent & Workflow Templates"])
+    app.include_router(crawler_router, prefix="/api/v1", tags=["Web Crawler"])
+    app.include_router(evaluation_router, prefix="/api/v1", tags=["RAG Evaluation"])
+    app.include_router(watcher_router, prefix="/api/v1/watcher", tags=["File Watcher"])
+    app.include_router(indexer_router, prefix="/api/v1/indexer", tags=["Real-Time Indexer"])
+    app.include_router(agentic_router, prefix="/api/v1/agentic", tags=["Agentic RAG"])
+    app.include_router(annotations_router, prefix="/api/v1/annotations", tags=["Annotations"])
+    app.include_router(charts_router, prefix="/api/v1", tags=["Charts"])
+    app.include_router(cache_router, prefix="/api/v1", tags=["Cache Management"])
+    app.include_router(reranking_router, prefix="/api/v1", tags=["Reranking"])
+    app.include_router(vision_router, prefix="/api/v1", tags=["Vision Processing"])
+    app.include_router(late_chunking_router, prefix="/api/v1", tags=["Late Chunking"])
+    app.include_router(compression_router, prefix="/api/v1", tags=["Compression"])
+    app.include_router(security_router, prefix="/api/v1", tags=["RAG Security"])
+    app.include_router(experiments_router, prefix="/api/v1", tags=["Experiments & Feedback"])
+    app.include_router(diagnostics_router, prefix="/api/v1", tags=["Diagnostics & Monitoring"])
+    app.include_router(dspy_router, prefix="/api/v1", tags=["DSPy Optimization"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

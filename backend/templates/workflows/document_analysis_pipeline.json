@@ -1,0 +1,485 @@
+{
+  "name": "Advanced Document Analysis Pipeline",
+  "description": "A comprehensive multi-stage workflow that processes documents through analysis, extraction, summarization, and notification stages with human approval checkpoints and error recovery.",
+  "version": "1.0.0",
+  "trigger": "MANUAL",
+
+  "metadata": {
+    "category": "document_processing",
+    "complexity": "advanced",
+    "estimated_duration_minutes": "5-15",
+    "use_cases": [
+      "Legal document review",
+      "Research paper analysis",
+      "Contract extraction",
+      "Compliance checking"
+    ],
+    "patterns_used": [
+      "orchestrator_worker",
+      "reflection",
+      "human_in_the_loop",
+      "consensus_validation",
+      "error_recovery"
+    ]
+  },
+
+  "variables": {
+    "input": {
+      "document_ids": {"type": "array", "required": true},
+      "analysis_depth": {"type": "string", "default": "comprehensive", "options": ["quick", "standard", "comprehensive"]},
+      "output_format": {"type": "string", "default": "structured", "options": ["structured", "narrative", "bullet_points"]},
+      "language": {"type": "string", "default": "en"},
+      "require_approval": {"type": "boolean", "default": true},
+      "notification_email": {"type": "string", "required": false}
+    },
+    "runtime": {
+      "extracted_entities": [],
+      "key_findings": [],
+      "summary": "",
+      "confidence_score": 0,
+      "validation_status": "pending",
+      "error_count": 0
+    }
+  },
+
+  "config": {
+    "max_retries": 3,
+    "timeout_minutes": 30,
+    "parallel_execution": true,
+    "enable_tracing": true,
+    "budget_limit_usd": 5.0,
+    "llm_fallback_chain": ["gpt-4o", "gpt-4o-mini", "claude-3-haiku"]
+  },
+
+  "nodes": [
+    {
+      "id": "start",
+      "type": "START",
+      "name": "Pipeline Start",
+      "position": {"x": 100, "y": 200},
+      "config": {
+        "log_start": true,
+        "validate_inputs": true
+      },
+      "next": ["validate_documents"]
+    },
+
+    {
+      "id": "validate_documents",
+      "type": "ACTION",
+      "name": "Validate Documents",
+      "description": "Check that all documents exist and are accessible",
+      "position": {"x": 250, "y": 200},
+      "config": {
+        "action": "validate_document_access",
+        "parameters": {
+          "document_ids": "{{input.document_ids}}",
+          "check_permissions": true,
+          "check_format": true
+        }
+      },
+      "error_handling": {
+        "on_error": "log_and_fail",
+        "error_message": "One or more documents could not be accessed"
+      },
+      "next": ["check_document_count"]
+    },
+
+    {
+      "id": "check_document_count",
+      "type": "CONDITION",
+      "name": "Check Document Count",
+      "description": "Route based on number of documents",
+      "position": {"x": 400, "y": 200},
+      "config": {
+        "condition": "{{runtime.document_count}} > 5",
+        "true_branch": "parallel_analysis",
+        "false_branch": "sequential_analysis"
+      }
+    },
+
+    {
+      "id": "parallel_analysis",
+      "type": "LOOP",
+      "name": "Parallel Document Analysis",
+      "description": "Process multiple documents in parallel using worker agents",
+      "position": {"x": 550, "y": 100},
+      "config": {
+        "loop_type": "parallel",
+        "items": "{{input.document_ids}}",
+        "max_concurrency": 3,
+        "item_variable": "current_doc_id"
+      },
+      "children": ["analyze_single_document"],
+      "next": ["merge_analysis_results"]
+    },
+
+    {
+      "id": "sequential_analysis",
+      "type": "LOOP",
+      "name": "Sequential Document Analysis",
+      "description": "Process documents one at a time",
+      "position": {"x": 550, "y": 300},
+      "config": {
+        "loop_type": "sequential",
+        "items": "{{input.document_ids}}",
+        "item_variable": "current_doc_id"
+      },
+      "children": ["analyze_single_document"],
+      "next": ["merge_analysis_results"]
+    },
+
+    {
+      "id": "analyze_single_document",
+      "type": "AGENT",
+      "name": "Document Analysis Agent",
+      "description": "AI agent that analyzes a single document",
+      "position": {"x": 700, "y": 200},
+      "config": {
+        "agent_type": "worker",
+        "task": "document_analysis",
+        "parameters": {
+          "document_id": "{{current_doc_id}}",
+          "analysis_depth": "{{input.analysis_depth}}",
+          "extract_entities": true,
+          "extract_key_points": true,
+          "generate_summary": true
+        },
+        "llm_config": {
+          "model": "gpt-4o",
+          "temperature": 0.3,
+          "max_tokens": 4000
+        },
+        "tools": [
+          "document_reader",
+          "entity_extractor",
+          "summarizer",
+          "knowledge_graph_query"
+        ]
+      },
+      "timeout_seconds": 120,
+      "error_handling": {
+        "on_error": "retry_with_fallback",
+        "max_retries": 2,
+        "fallback_model": "gpt-4o-mini"
+      }
+    },
+
+    {
+      "id": "merge_analysis_results",
+      "type": "ACTION",
+      "name": "Merge Analysis Results",
+      "description": "Combine results from all document analyses",
+      "position": {"x": 850, "y": 200},
+      "config": {
+        "action": "merge_results",
+        "parameters": {
+          "merge_strategy": "deduplicate_and_rank",
+          "output_key": "merged_analysis"
+        }
+      },
+      "next": ["reflection_validation"]
+    },
+
+    {
+      "id": "reflection_validation",
+      "type": "AGENT",
+      "name": "Reflection Validator",
+      "description": "Self-reflection pattern: Validate analysis quality and completeness",
+      "position": {"x": 1000, "y": 200},
+      "config": {
+        "agent_type": "validator",
+        "task": "reflection_validation",
+        "parameters": {
+          "analysis": "{{runtime.merged_analysis}}",
+          "validation_criteria": [
+            "completeness",
+            "accuracy",
+            "coherence",
+            "source_citation"
+          ],
+          "scoring_rubric": {
+            "completeness": "All key topics covered (0-10)",
+            "accuracy": "Facts verified against source (0-10)",
+            "coherence": "Logical flow and consistency (0-10)",
+            "citation": "Proper source attribution (0-10)"
+          }
+        },
+        "llm_config": {
+          "model": "gpt-4o",
+          "temperature": 0.2
+        }
+      },
+      "next": ["check_validation_score"]
+    },
+
+    {
+      "id": "check_validation_score",
+      "type": "CONDITION",
+      "name": "Check Validation Score",
+      "description": "Route based on validation quality score",
+      "position": {"x": 1150, "y": 200},
+      "config": {
+        "conditions": [
+          {
+            "condition": "{{runtime.validation_score}} >= 8",
+            "branch": "generate_final_report"
+          },
+          {
+            "condition": "{{runtime.validation_score}} >= 5 && {{runtime.error_count}} < 2",
+            "branch": "refinement_loop"
+          }
+        ],
+        "default_branch": "human_review_required"
+      }
+    },
+
+    {
+      "id": "refinement_loop",
+      "type": "AGENT",
+      "name": "Self-Refine Agent",
+      "description": "Self-Refine pattern: Improve analysis based on validation feedback",
+      "position": {"x": 1150, "y": 350},
+      "config": {
+        "agent_type": "refiner",
+        "task": "self_refine",
+        "parameters": {
+          "original_analysis": "{{runtime.merged_analysis}}",
+          "validation_feedback": "{{runtime.validation_feedback}}",
+          "focus_areas": "{{runtime.improvement_areas}}"
+        },
+        "llm_config": {
+          "model": "gpt-4o",
+          "temperature": 0.4
+        }
+      },
+      "next": ["increment_error_count", "reflection_validation"]
+    },
+
+    {
+      "id": "increment_error_count",
+      "type": "CODE",
+      "name": "Increment Retry Counter",
+      "position": {"x": 1150, "y": 450},
+      "config": {
+        "language": "python",
+        "code": "runtime['error_count'] = runtime.get('error_count', 0) + 1\nreturn runtime"
+      }
+    },
+
+    {
+      "id": "human_review_required",
+      "type": "HUMAN_APPROVAL",
+      "name": "Human Review Required",
+      "description": "Analysis quality below threshold - requires human review",
+      "position": {"x": 1300, "y": 350},
+      "config": {
+        "approval_type": "review_and_edit",
+        "message": "Analysis quality score is {{runtime.validation_score}}/10. Please review and approve or modify.",
+        "show_data": ["merged_analysis", "validation_feedback"],
+        "timeout_hours": 24,
+        "escalation_email": "{{input.notification_email}}",
+        "allow_modification": true
+      },
+      "next": ["generate_final_report"]
+    },
+
+    {
+      "id": "generate_final_report",
+      "type": "AGENT",
+      "name": "Report Generator",
+      "description": "Generate final structured report",
+      "position": {"x": 1300, "y": 200},
+      "config": {
+        "agent_type": "generator",
+        "task": "generate_report",
+        "parameters": {
+          "analysis": "{{runtime.merged_analysis}}",
+          "format": "{{input.output_format}}",
+          "language": "{{input.language}}",
+          "include_sections": [
+            "executive_summary",
+            "key_findings",
+            "entity_analysis",
+            "recommendations",
+            "appendix"
+          ]
+        },
+        "llm_config": {
+          "model": "gpt-4o",
+          "temperature": 0.5,
+          "max_tokens": 8000
+        }
+      },
+      "next": ["check_approval_required"]
+    },
+
+    {
+      "id": "check_approval_required",
+      "type": "CONDITION",
+      "name": "Check If Approval Required",
+      "position": {"x": 1450, "y": 200},
+      "config": {
+        "condition": "{{input.require_approval}} == true",
+        "true_branch": "final_approval",
+        "false_branch": "store_results"
+      }
+    },
+
+    {
+      "id": "final_approval",
+      "type": "HUMAN_APPROVAL",
+      "name": "Final Report Approval",
+      "description": "Human approval checkpoint before delivery",
+      "position": {"x": 1600, "y": 100},
+      "config": {
+        "approval_type": "approve_or_reject",
+        "message": "Please review the final analysis report for approval.",
+        "show_data": ["final_report"],
+        "timeout_hours": 48,
+        "on_timeout": "auto_approve",
+        "on_reject": "refinement_loop"
+      },
+      "next": ["store_results"]
+    },
+
+    {
+      "id": "store_results",
+      "type": "ACTION",
+      "name": "Store Results",
+      "description": "Save analysis results to database",
+      "position": {"x": 1600, "y": 200},
+      "config": {
+        "action": "store_workflow_results",
+        "parameters": {
+          "data": "{{runtime.final_report}}",
+          "metadata": {
+            "document_ids": "{{input.document_ids}}",
+            "analysis_depth": "{{input.analysis_depth}}",
+            "validation_score": "{{runtime.validation_score}}",
+            "execution_time": "{{runtime.execution_time}}"
+          }
+        }
+      },
+      "next": ["check_notification"]
+    },
+
+    {
+      "id": "check_notification",
+      "type": "CONDITION",
+      "name": "Check Notification Required",
+      "position": {"x": 1750, "y": 200},
+      "config": {
+        "condition": "{{input.notification_email}} != null",
+        "true_branch": "send_notification",
+        "false_branch": "end"
+      }
+    },
+
+    {
+      "id": "send_notification",
+      "type": "NOTIFICATION",
+      "name": "Send Completion Email",
+      "description": "Notify user of completed analysis",
+      "position": {"x": 1900, "y": 100},
+      "config": {
+        "channel": "email",
+        "to": "{{input.notification_email}}",
+        "subject": "Document Analysis Complete: {{runtime.document_count}} documents processed",
+        "template": "analysis_complete",
+        "data": {
+          "summary": "{{runtime.executive_summary}}",
+          "key_findings_count": "{{runtime.key_findings.length}}",
+          "confidence_score": "{{runtime.validation_score}}",
+          "report_url": "{{runtime.report_url}}"
+        }
+      },
+      "next": ["end"]
+    },
+
+    {
+      "id": "end",
+      "type": "END",
+      "name": "Pipeline Complete",
+      "position": {"x": 1900, "y": 200},
+      "config": {
+        "log_completion": true,
+        "cleanup": true,
+        "output": {
+          "report": "{{runtime.final_report}}",
+          "validation_score": "{{runtime.validation_score}}",
+          "execution_time": "{{runtime.execution_time}}",
+          "documents_processed": "{{runtime.document_count}}"
+        }
+      }
+    }
+  ],
+
+  "edges": [
+    {"from": "start", "to": "validate_documents"},
+    {"from": "validate_documents", "to": "check_document_count"},
+    {"from": "check_document_count", "to": "parallel_analysis", "condition": "document_count > 5"},
+    {"from": "check_document_count", "to": "sequential_analysis", "condition": "document_count <= 5"},
+    {"from": "parallel_analysis", "to": "merge_analysis_results"},
+    {"from": "sequential_analysis", "to": "merge_analysis_results"},
+    {"from": "merge_analysis_results", "to": "reflection_validation"},
+    {"from": "reflection_validation", "to": "check_validation_score"},
+    {"from": "check_validation_score", "to": "generate_final_report", "condition": "score >= 8"},
+    {"from": "check_validation_score", "to": "refinement_loop", "condition": "score >= 5 && retries < 2"},
+    {"from": "check_validation_score", "to": "human_review_required", "condition": "default"},
+    {"from": "refinement_loop", "to": "reflection_validation"},
+    {"from": "human_review_required", "to": "generate_final_report"},
+    {"from": "generate_final_report", "to": "check_approval_required"},
+    {"from": "check_approval_required", "to": "final_approval", "condition": "require_approval"},
+    {"from": "check_approval_required", "to": "store_results", "condition": "!require_approval"},
+    {"from": "final_approval", "to": "store_results"},
+    {"from": "store_results", "to": "check_notification"},
+    {"from": "check_notification", "to": "send_notification", "condition": "has_email"},
+    {"from": "check_notification", "to": "end", "condition": "!has_email"},
+    {"from": "send_notification", "to": "end"}
+  ],
+
+  "error_handling": {
+    "global_timeout_minutes": 30,
+    "on_timeout": {
+      "action": "notify_and_pause",
+      "notification": "Workflow timed out after 30 minutes",
+      "save_state": true
+    },
+    "on_budget_exceeded": {
+      "action": "pause_for_approval",
+      "message": "Budget limit of ${{config.budget_limit_usd}} exceeded"
+    },
+    "retry_policy": {
+      "max_retries": 3,
+      "backoff": "exponential",
+      "initial_delay_seconds": 5
+    }
+  },
+
+  "observability": {
+    "tracing_enabled": true,
+    "log_level": "INFO",
+    "metrics": [
+      "execution_time",
+      "token_usage",
+      "cost",
+      "validation_scores",
+      "retry_count"
+    ],
+    "audit_log": {
+      "enabled": true,
+      "include_inputs": true,
+      "include_outputs": true,
+      "retention_days": 90
+    }
+  },
+
+  "security": {
+    "require_authentication": true,
+    "allowed_roles": ["admin", "analyst"],
+    "data_classification": "confidential",
+    "pii_detection": true,
+    "redaction_enabled": true
+  }
+}

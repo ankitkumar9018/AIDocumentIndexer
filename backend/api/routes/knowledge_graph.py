@@ -547,6 +547,199 @@ async def get_entity(
     )
 
 
+class EntityUpdate(BaseModel):
+    """Request model for updating an entity."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    aliases: Optional[List[str]] = None
+    entity_type: Optional[str] = None
+
+
+class DeleteResponse(BaseModel):
+    """Response for delete operations."""
+    success: bool
+    message: str
+
+
+@router.patch("/entities/{entity_id}", response_model=EntityResponse)
+async def update_entity(
+    entity_id: str,
+    update: EntityUpdate,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update an entity in the knowledge graph.
+
+    Allows updating the entity's name, description, aliases, or type.
+    """
+    try:
+        entity_uuid = uuid.UUID(entity_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid entity ID format"
+        )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    entity_query = select(Entity).where(Entity.id == entity_uuid)
+    if org_id and not user.is_superadmin:
+        entity_query = entity_query.where(
+            or_(
+                Entity.organization_id == org_id,
+                Entity.organization_id.is_(None),
+            )
+        )
+
+    result = await db.execute(entity_query)
+    entity = result.scalar_one_or_none()
+
+    if not entity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Entity not found"
+        )
+
+    # Apply updates
+    if update.name is not None:
+        entity.name = update.name
+
+    if update.description is not None:
+        entity.description = update.description
+
+    if update.aliases is not None:
+        entity.aliases = update.aliases
+
+    if update.entity_type is not None:
+        try:
+            entity.entity_type = EntityType(update.entity_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid entity type: {update.entity_type}. Valid types: {[e.value for e in EntityType]}"
+            )
+
+    await db.commit()
+    await db.refresh(entity)
+
+    # Get mention count
+    mention_count = await db.scalar(
+        select(func.count(EntityMention.id))
+        .where(EntityMention.entity_id == entity_uuid)
+    ) or 0
+
+    logger.info("Entity updated", entity_id=entity_id, updates=update.model_dump(exclude_none=True))
+
+    return EntityResponse(
+        id=str(entity.id),
+        name=entity.name,
+        entity_type=entity.entity_type.value,
+        description=entity.description,
+        aliases=entity.aliases or [],
+        mention_count=mention_count,
+        created_at=entity.created_at.isoformat() if entity.created_at else "",
+    )
+
+
+@router.delete("/entities/{entity_id}", response_model=DeleteResponse)
+async def delete_entity(
+    entity_id: str,
+    user: AuthenticatedUser,
+    cascade: bool = Query(False, description="Also delete all relations involving this entity"),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete an entity from the knowledge graph.
+
+    By default, this will fail if the entity has relations. Use cascade=true
+    to also delete all relations involving this entity.
+    """
+    from sqlalchemy import delete
+
+    try:
+        entity_uuid = uuid.UUID(entity_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid entity ID format"
+        )
+
+    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    org_id = get_org_filter(user)
+    entity_query = select(Entity).where(Entity.id == entity_uuid)
+    if org_id and not user.is_superadmin:
+        entity_query = entity_query.where(
+            or_(
+                Entity.organization_id == org_id,
+                Entity.organization_id.is_(None),
+            )
+        )
+
+    result = await db.execute(entity_query)
+    entity = result.scalar_one_or_none()
+
+    if not entity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Entity not found"
+        )
+
+    # Check for existing relations
+    relation_count = await db.scalar(
+        select(func.count(EntityRelation.id))
+        .where(
+            or_(
+                EntityRelation.source_entity_id == entity_uuid,
+                EntityRelation.target_entity_id == entity_uuid,
+            )
+        )
+    ) or 0
+
+    if relation_count > 0 and not cascade:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Entity has {relation_count} relations. Use cascade=true to delete them as well."
+        )
+
+    entity_name = entity.name
+
+    # Delete relations if cascading
+    if cascade and relation_count > 0:
+        await db.execute(
+            delete(EntityRelation)
+            .where(
+                or_(
+                    EntityRelation.source_entity_id == entity_uuid,
+                    EntityRelation.target_entity_id == entity_uuid,
+                )
+            )
+        )
+
+    # Delete entity mentions
+    await db.execute(
+        delete(EntityMention).where(EntityMention.entity_id == entity_uuid)
+    )
+
+    # Delete the entity
+    await db.delete(entity)
+    await db.commit()
+
+    logger.info(
+        "Entity deleted",
+        entity_id=entity_id,
+        entity_name=entity_name,
+        cascade=cascade,
+        relations_deleted=relation_count if cascade else 0,
+    )
+
+    return DeleteResponse(
+        success=True,
+        message=f"Entity '{entity_name}' deleted successfully" +
+                (f" along with {relation_count} relations" if cascade and relation_count > 0 else "")
+    )
+
+
 @router.get("/entities/{entity_id}/neighborhood", response_model=EntityNeighborhoodResponse)
 async def get_entity_neighborhood(
     entity_id: str,

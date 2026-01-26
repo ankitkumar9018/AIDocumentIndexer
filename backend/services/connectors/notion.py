@@ -261,16 +261,16 @@ class NotionConnector(BaseConnector):
             response = await client.get(f"/pages/{resource_id}")
             if response.status_code == 200:
                 return self._parse_notion_object(response.json())
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_debug("Not a Notion page, trying database", resource_id=resource_id, error=str(e))
 
         # Try as database
         try:
             response = await client.get(f"/databases/{resource_id}")
             if response.status_code == 200:
                 return self._parse_notion_object(response.json())
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_debug("Resource not found as page or database", resource_id=resource_id, error=str(e))
 
         return None
 
@@ -405,7 +405,7 @@ class NotionConnector(BaseConnector):
                     "bot_id": data.get("bot_id"),
                 }
             else:
-                raise Exception(f"OAuth token exchange failed: {response.text}")
+                raise ValueError(f"OAuth token exchange failed (HTTP {response.status_code}): {response.text}")
 
     @classmethod
     def get_credentials_schema(cls) -> Dict[str, Any]:

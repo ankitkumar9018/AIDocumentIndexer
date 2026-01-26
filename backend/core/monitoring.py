@@ -84,7 +84,8 @@ def _get_version() -> str:
     try:
         from importlib.metadata import version
         return version("aidocindexer")
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to get application version", error=str(e))
         return "unknown"
 
 
@@ -151,7 +152,8 @@ def capture_exception(error: Exception, **extra_context) -> Optional[str]:
             for key, value in extra_context.items():
                 scope.set_extra(key, value)
             return sentry_sdk.capture_exception(error)
-    except Exception:
+    except Exception as e:
+        logger.debug("Sentry capture_exception failed", error=str(e))
         return None
 
 
@@ -179,7 +181,8 @@ def capture_message(message: str, level: str = "info", **extra_context) -> Optio
             for key, value in extra_context.items():
                 scope.set_extra(key, value)
             return sentry_sdk.capture_message(message, level=level)
-    except Exception:
+    except Exception as e:
+        logger.debug("Sentry capture_message failed", error=str(e))
         return None
 
 
@@ -205,8 +208,8 @@ def set_user_context(user_id: str, email: Optional[str] = None, username: Option
             "email": email,
             "username": username,
         })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Sentry set_user failed", error=str(e))
 
 
 def init_prometheus_metrics(app):

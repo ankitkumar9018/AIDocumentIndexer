@@ -10,18 +10,18 @@ authors = [
 keywords = ["ai", "rag", "document-indexing", "llm", "fastapi"]
 
 dependencies = [
-    # Core Framework
-    "fastapi>=0.109.0",
-    "uvicorn[standard]>=0.27.0",
-    "pydantic>=2.5.0",
-    "pydantic-settings>=2.1.0",
+    # Core Framework (Phase 87: upper bounds on critical deps)
+    "fastapi>=0.109.0,<1.0.0",
+    "uvicorn[standard]>=0.27.0,<1.0.0",
+    "pydantic>=2.5.0,<3.0.0",
+    "pydantic-settings>=2.1.0,<3.0.0",
     "python-multipart>=0.0.6",
     "python-jose[cryptography]>=3.3.0",
     "passlib[bcrypt]>=1.7.4",
     "httpx>=0.26.0",
-    # Database
-    "sqlalchemy>=2.0.25",
-    "alembic>=1.13.0",
+    # Database (Phase 87: upper bounds on critical deps)
+    "sqlalchemy>=2.0.25,<3.0.0",
+    "alembic>=1.13.0,<2.0.0",
     "asyncpg>=0.29.0",
     "psycopg2-binary>=2.9.9",
     "pgvector>=0.2.4",
@@ -40,6 +40,10 @@ dependencies = [
     # Embeddings
     "sentence-transformers>=2.2.2",
     "tiktoken>=0.5.2",
+    "transformers>=4.45.0",  # Phase 68: Required for Qwen3 Embedding
+    "torch>=2.1.0",  # Phase 68: Required for Qwen3 Embedding
+    "google-genai>=1.0.0",  # Phase 87: Unified Google GenAI SDK (replaces deprecated google-generativeai)
+    "faiss-cpu>=1.8.0",  # Phase 68: FAISS index for semantic cache O(log n) search
     # Local Vector Store
     "chromadb>=0.5.0",
     # Document Processing - PDF
@@ -61,8 +65,8 @@ dependencies = [
     # Email parsing
     "extract-msg>=0.48.0",
     "email-validator>=2.1.0",
-    # Ray (Distributed Processing)
-    "ray[default]>=2.9.0",
+    # Ray (Distributed Processing) - Phase 87: updated to 2.10+ for better async/memory mgmt
+    "ray[default]>=2.10.0,<3.0.0",
     # Web Scraping
     "crawl4ai>=0.3.0",
     "beautifulsoup4>=4.12.0",
@@ -97,6 +101,25 @@ dependencies = [
     "sentry-sdk[fastapi]>=1.40.0",
     "prometheus-client>=0.19.0",
     "motor>=3.3.0",
+    "ragatouille>=0.0.9.post2",
+    "chonkie>=1.5.2",
+    "docling>=2.69.1",
+    "cartesia>=2.0.17",
+    "websockets>=15.0.1",
+    "cohere>=5.20.1",
+    "dspy-ai>=3.1.2",
+    "instructor>=1.14.4",
+    "gptcache>=0.1.44",
+    "cachetools>=6.2.2",
+    "httptools>=0.7.1",
+    "voyageai>=0.3.7",
+    "elevenlabs>=2.31.0",
+    "colpali-engine>=0.3.13",
+    "rank-bm25>=0.2.2",
+    "fastembed>=0.7.4",
+    "pdf2image>=1.17.0",
+    # Note: surya-ocr removed due to dependency conflict with fastembed
+    # VisionDocumentProcessor uses tesseract or claude for OCR instead
 ]
 
 [project.optional-dependencies]
@@ -107,6 +130,16 @@ dev = [
     "black>=24.1.0",
     "ruff>=0.1.0",
     "mypy>=1.8.0",
+]
+# Advanced TTS providers (experimental, may require GPU)
+# Note: These packages may need to be installed from source:
+# - chatterbox-tts: pip install git+https://github.com/resemble-ai/chatterbox.git
+# - cosyvoice: pip install git+https://github.com/FunAudioLLM/CosyVoice.git
+# The TTS service gracefully falls back to HTTP API if packages are not installed
+tts-advanced = [
+    # Uncomment when packages are available on PyPI:
+    # "chatterbox-tts>=0.1.0",
+    # "cosyvoice>=0.1.0",
 ]
 
 [build-system]

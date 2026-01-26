@@ -35,6 +35,19 @@ from backend.services.connectors.database.base import (
 logger = structlog.get_logger(__name__)
 
 
+def _sanitize_identifier(name: str) -> str:
+    """
+    Sanitize a SQL identifier (table/column name) to prevent injection.
+
+    Only allows alphanumeric characters and underscores.
+    Raises ValueError for invalid identifiers.
+    """
+    import re
+    if not name or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+        raise ValueError(f"Invalid SQL identifier: {name}")
+    return name
+
+
 class MySQLConnector(BaseDatabaseConnector):
     """
     MySQL database connector using aiomysql.
@@ -327,7 +340,8 @@ class MySQLConnector(BaseDatabaseConnector):
             if result and result["TABLE_ROWS"]:
                 return int(result["TABLE_ROWS"])
             return None
-        except Exception:
+        except Exception as e:
+            self.log_debug("Row count estimate failed", table=table_name, error=str(e))
             return None
 
     async def execute_query(
@@ -416,7 +430,9 @@ class MySQLConnector(BaseDatabaseConnector):
                 error=f"Table '{table_name}' not found",
             )
 
-        query = f"SELECT * FROM `{table_name}` LIMIT {limit}"
+        # Sanitize identifier to prevent SQL injection
+        safe_table = _sanitize_identifier(table_name)
+        query = f"SELECT * FROM `{safe_table}` LIMIT {int(limit)}"
         return await self.execute_query(query)
 
     async def get_distinct_values(

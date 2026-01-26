@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 import structlog
 
@@ -351,7 +351,7 @@ async def set_my_override(
 
         if not config.allow_user_override:
             raise HTTPException(
-                status_code=403,
+                status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Service '{service_name}' does not allow user overrides"
             )
 
@@ -362,7 +362,7 @@ async def set_my_override(
 
         if not allowed:
             raise HTTPException(
-                status_code=403,
+                status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"You don't have access to model '{override.model_name}': {reason}"
             )
 
@@ -422,7 +422,9 @@ async def update_service_config(
 
     Admin only.
     """
-    # TODO: Check admin role
+    if not user.is_admin():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+
     llm_router = get_llm_router()
 
     async with async_session_context() as db:
@@ -519,7 +521,7 @@ async def grant_user_access(
         )
 
         if not success:
-            raise HTTPException(status_code=400, detail="Failed to grant access")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to grant access")
 
         return {
             "success": True,
@@ -598,7 +600,7 @@ async def get_access_group(
         group = await llm_router.get_access_group(db, group_name, user.organization_id)
 
         if not group:
-            raise HTTPException(status_code=404, detail=f"Access group '{group_name}' not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Access group '{group_name}' not found")
 
         return AccessGroupDetailResponse(
             id=group.id,
@@ -628,7 +630,7 @@ async def create_access_group(
         # Check if group already exists
         existing = await llm_router.get_access_group(db, request.name, user.organization_id)
         if existing:
-            raise HTTPException(status_code=400, detail=f"Access group '{request.name}' already exists")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Access group '{request.name}' already exists")
 
         group = await llm_router.create_access_group(
             db,
@@ -676,7 +678,7 @@ async def update_access_group(
 
     updates = request.model_dump(exclude_none=True)
     if not updates:
-        raise HTTPException(status_code=400, detail="No updates provided")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No updates provided")
 
     async with async_session_context() as db:
         group = await llm_router.update_access_group(
@@ -687,7 +689,7 @@ async def update_access_group(
         )
 
         if not group:
-            raise HTTPException(status_code=404, detail=f"Access group '{group_name}' not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Access group '{group_name}' not found")
 
         logger.info(
             "Access group updated",
@@ -724,7 +726,7 @@ async def delete_access_group(
         success = await llm_router.delete_access_group(db, group_name, user.organization_id)
 
         if not success:
-            raise HTTPException(status_code=404, detail=f"Access group '{group_name}' not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Access group '{group_name}' not found")
 
         logger.info(
             "Access group deleted",
@@ -938,7 +940,7 @@ async def update_model_in_registry(
 
     updates = request.model_dump(exclude_none=True)
     if not updates:
-        raise HTTPException(status_code=400, detail="No updates provided")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No updates provided")
 
     # Build dynamic update
     set_clauses = []
@@ -979,7 +981,7 @@ async def update_model_in_registry(
         await db.commit()
 
         if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail=f"Model '{provider_type}/{model_name}' not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Model '{provider_type}/{model_name}' not found")
 
         # Clear cache
         llm_router = get_llm_router()
@@ -1057,7 +1059,7 @@ async def remove_model_from_registry(
         await db.commit()
 
         if result.rowcount == 0:
-            raise HTTPException(status_code=404, detail=f"Model '{provider_type}/{model_name}' not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Model '{provider_type}/{model_name}' not found")
 
         # Clear cache
         llm_router = get_llm_router()
@@ -1071,3 +1073,158 @@ async def remove_model_from_registry(
         )
 
         return {"success": True, "message": f"Model '{provider_type}/{model_name}' removed from registry"}
+
+
+# =============================================================================
+# Phase 68: vLLM Provider Endpoints
+# =============================================================================
+
+class VLLMHealthResponse(BaseModel):
+    """vLLM health status."""
+    status: str
+    mode: str
+    api_base: Optional[str] = None
+    model: Optional[str] = None
+    models_available: Optional[List[str]] = None
+    error: Optional[str] = None
+
+
+class VLLMModelInfoResponse(BaseModel):
+    """vLLM model information."""
+    model: str
+    mode: str
+    dtype: Optional[str] = None
+    tensor_parallel_size: Optional[int] = None
+    max_model_len: Optional[int] = None
+    quantization: Optional[str] = None
+
+
+class VLLMGenerateRequest(BaseModel):
+    """Request for vLLM text generation."""
+    prompt: str = Field(..., description="Input prompt")
+    max_tokens: int = Field(512, ge=1, le=32768, description="Max tokens to generate")
+    temperature: float = Field(0.7, ge=0, le=2, description="Sampling temperature")
+    top_p: float = Field(1.0, ge=0, le=1, description="Top-p sampling")
+    stop: Optional[List[str]] = Field(None, description="Stop sequences")
+
+
+class VLLMGenerateResponse(BaseModel):
+    """Response from vLLM generation."""
+    text: str
+    tokens_generated: int
+    prompt_tokens: int
+    latency_ms: float
+    tokens_per_second: float
+    model: str
+
+
+@router.get("/vllm/health", response_model=VLLMHealthResponse)
+async def vllm_health_check():
+    """
+    Check vLLM provider health.
+
+    Phase 68: vLLM provides 2-4x faster inference with:
+    - Dynamic batching
+    - PagedAttention for KV cache
+    - Automatic quantization detection
+    """
+    try:
+        from backend.services.vllm_provider import get_vllm_provider
+
+        provider = await get_vllm_provider()
+        health = await provider.health_check()
+
+        return VLLMHealthResponse(
+            status=health.get("status", "unknown"),
+            mode=health.get("mode", "unknown"),
+            api_base=health.get("api_base"),
+            model=health.get("model"),
+            models_available=health.get("models"),
+            error=health.get("error"),
+        )
+
+    except ImportError:
+        return VLLMHealthResponse(
+            status="unavailable",
+            mode="not_installed",
+            error="vLLM provider not installed",
+        )
+    except Exception as e:
+        return VLLMHealthResponse(
+            status="error",
+            mode="unknown",
+            error=str(e),
+        )
+
+
+@router.get("/vllm/model-info", response_model=VLLMModelInfoResponse)
+async def get_vllm_model_info():
+    """Get information about the loaded vLLM model."""
+    try:
+        from backend.services.vllm_provider import get_vllm_provider
+
+        provider = await get_vllm_provider()
+        info = await provider.get_model_info()
+
+        return VLLMModelInfoResponse(
+            model=info.get("model", "unknown"),
+            mode=info.get("mode", "unknown"),
+            dtype=info.get("dtype"),
+            tensor_parallel_size=info.get("tensor_parallel_size"),
+            max_model_len=info.get("max_model_len"),
+            quantization=info.get("quantization"),
+        )
+
+    except Exception as e:
+        logger.error("Failed to get vLLM model info", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get model info: {str(e)}",
+        )
+
+
+@router.post("/vllm/generate", response_model=VLLMGenerateResponse)
+async def vllm_generate(
+    request: VLLMGenerateRequest,
+    user: AuthenticatedUser = None,
+):
+    """
+    Generate text using vLLM.
+
+    Phase 68: Direct vLLM generation with:
+    - 2-4x faster inference
+    - Dynamic batching
+    - Optimized KV caching
+    """
+    try:
+        from backend.services.vllm_provider import get_vllm_provider
+
+        provider = await get_vllm_provider()
+        response = await provider.generate(
+            prompt=request.prompt,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            stop=request.stop,
+        )
+
+        return VLLMGenerateResponse(
+            text=response.text,
+            tokens_generated=response.tokens_generated,
+            prompt_tokens=response.prompt_tokens,
+            latency_ms=response.latency_ms,
+            tokens_per_second=response.tokens_per_second,
+            model=response.model,
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error("vLLM generation failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Generation failed: {str(e)}",
+        )

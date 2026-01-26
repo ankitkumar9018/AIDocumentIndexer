@@ -26,7 +26,7 @@ import structlog
 from sqlalchemy import select, func, and_, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import Document, Chunk, ProcessingStatus
+from backend.db.models import Document, Chunk, ProcessingStatus
 
 logger = structlog.get_logger(__name__)
 

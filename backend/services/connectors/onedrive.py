@@ -431,7 +431,7 @@ class OneDriveConnector(BaseConnector):
                     "token_type": data.get("token_type"),
                 }
             else:
-                raise Exception(f"OAuth token exchange failed: {response.text}")
+                raise ValueError(f"OAuth token exchange failed (HTTP {response.status_code}): {response.text}")
 
     async def list_sites(self) -> List[Dict[str, Any]]:
         """List accessible SharePoint sites."""

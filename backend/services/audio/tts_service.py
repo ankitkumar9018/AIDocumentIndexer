@@ -28,12 +28,22 @@ from backend.core.config import settings
 
 logger = structlog.get_logger(__name__)
 
+# Phase 55: Import audit logging for fallback events
+try:
+    from backend.services.audit import audit_service_fallback, audit_service_error
+    AUDIT_AVAILABLE = True
+except ImportError:
+    AUDIT_AVAILABLE = False
+
 
 class TTSProvider(str, Enum):
     """Available TTS providers."""
     OPENAI = "openai"
     ELEVENLABS = "elevenlabs"
     EDGE = "edge"  # Free Microsoft Edge TTS - no API key needed
+    CARTESIA = "cartesia"  # Ultra-low latency streaming TTS (40ms TTFA)
+    CHATTERBOX = "chatterbox"  # Resemble AI open-source TTS (ultra-realistic)
+    COSYVOICE = "cosyvoice"  # Alibaba CosyVoice2 open-source TTS
     LOCAL = "local"
     COQUI = "coqui"  # Alias for local Coqui TTS
 
@@ -142,10 +152,44 @@ class OpenAITTSProvider(BaseTTSProvider):
 
 
 class ElevenLabsTTSProvider(BaseTTSProvider):
-    """ElevenLabs TTS provider for premium voice synthesis."""
+    """
+    ElevenLabs TTS provider for premium voice synthesis.
 
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or getattr(settings, "ELEVENLABS_API_KEY", None)
+    Phase 32: Enhanced with official SDK support for Flash v2.5 (75ms TTFB)
+    and 70+ languages.
+
+    Models:
+    - eleven_flash_v2_5: Ultra-low latency (75ms TTFB)
+    - eleven_multilingual_v2: High quality, 29 languages
+    - eleven_turbo_v2_5: Fast, 32 languages
+    """
+
+    # Available ElevenLabs models
+    MODELS = {
+        "flash": "eleven_flash_v2_5",        # Fastest - 75ms TTFB
+        "multilingual": "eleven_multilingual_v2",  # High quality
+        "turbo": "eleven_turbo_v2_5",        # Good balance
+    }
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "flash",  # Default to fastest model
+    ):
+        self.api_key = api_key or getattr(settings, "ELEVENLABS_API_KEY", None) or os.getenv("ELEVENLABS_API_KEY")
+        self.model_id = self.MODELS.get(model, model)
+        self._client = None
+
+    def _get_client(self):
+        """Get or create ElevenLabs client."""
+        if self._client is None:
+            try:
+                from elevenlabs import ElevenLabs
+                self._client = ElevenLabs(api_key=self.api_key)
+            except ImportError:
+                logger.warning("elevenlabs SDK not installed, using HTTP fallback")
+                return None
+        return self._client
 
     async def synthesize(
         self,
@@ -158,6 +202,68 @@ class ElevenLabsTTSProvider(BaseTTSProvider):
         if not self.api_key:
             raise ProviderException("elevenlabs", "ElevenLabs API key not configured")
 
+        # Try official SDK first
+        client = self._get_client()
+        if client:
+            return await self._synthesize_with_sdk(client, text, voice_id, speed, **kwargs)
+
+        # Fallback to HTTP
+        return await self._synthesize_with_http(text, voice_id, speed, **kwargs)
+
+    async def _synthesize_with_sdk(
+        self,
+        client,
+        text: str,
+        voice_id: str,
+        speed: float = 1.0,
+        **kwargs,
+    ) -> bytes:
+        """Synthesize using official ElevenLabs SDK."""
+        try:
+            from elevenlabs import VoiceSettings
+            import asyncio
+
+            # Map speed to ElevenLabs stability (inverse relationship)
+            # Higher speed = lower stability for faster output
+            stability = max(0.3, min(1.0, 0.7 / speed if speed > 0 else 0.5))
+
+            voice_settings = VoiceSettings(
+                stability=stability,
+                similarity_boost=kwargs.get("similarity_boost", 0.75),
+                style=kwargs.get("style", 0.0),
+                use_speaker_boost=True,
+            )
+
+            # Run in thread pool since SDK is sync
+            loop = asyncio.get_running_loop()
+
+            def generate():
+                audio = client.text_to_speech.convert(
+                    voice_id=voice_id,
+                    text=text,
+                    model_id=self.model_id,
+                    voice_settings=voice_settings,
+                    output_format="mp3_44100_128",
+                )
+                # Convert generator to bytes
+                return b"".join(audio)
+
+            audio_data = await loop.run_in_executor(None, generate)
+            return audio_data
+
+        except Exception as e:
+            logger.error("ElevenLabs SDK synthesis failed", error=str(e))
+            # Fallback to HTTP
+            return await self._synthesize_with_http(text, voice_id, speed, **kwargs)
+
+    async def _synthesize_with_http(
+        self,
+        text: str,
+        voice_id: str,
+        speed: float = 1.0,
+        **kwargs,
+    ) -> bytes:
+        """Fallback HTTP-based synthesis."""
         try:
             import httpx
 
@@ -170,7 +276,7 @@ class ElevenLabsTTSProvider(BaseTTSProvider):
                     },
                     json={
                         "text": text,
-                        "model_id": "eleven_multilingual_v2",
+                        "model_id": self.model_id,
                         "voice_settings": {
                             "stability": 0.5,
                             "similarity_boost": 0.75,
@@ -197,6 +303,32 @@ class ElevenLabsTTSProvider(BaseTTSProvider):
         if not self.api_key:
             return []
 
+        # Try SDK first
+        client = self._get_client()
+        if client:
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+
+                def fetch_voices():
+                    response = client.voices.get_all()
+                    return [
+                        {
+                            "id": voice.voice_id,
+                            "name": voice.name,
+                            "category": getattr(voice, "category", "custom"),
+                            "preview_url": getattr(voice, "preview_url", None),
+                            "labels": getattr(voice, "labels", {}),
+                        }
+                        for voice in response.voices
+                    ]
+
+                return await loop.run_in_executor(None, fetch_voices)
+
+            except Exception as e:
+                logger.warning("Failed to fetch voices via SDK", error=str(e))
+
+        # Fallback to HTTP
         try:
             import httpx
 
@@ -711,7 +843,7 @@ class LocalTTSProvider(BaseTTSProvider):
 
         try:
             # Run in thread pool to not block
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None,
                 lambda: tts.tts_to_file(text=text, file_path=temp_path, speed=speed),
@@ -765,6 +897,20 @@ class TTSService(BaseService):
                 self._providers[provider] = ElevenLabsTTSProvider()
             elif provider == TTSProvider.EDGE:
                 self._providers[provider] = EdgeTTSProvider()
+            elif provider == TTSProvider.CARTESIA:
+                # Ultra-low latency Cartesia TTS (40ms TTFA)
+                from backend.services.audio.cartesia_tts import CartesiaTTSProvider
+                self._providers[provider] = CartesiaTTSProvider()
+            elif provider == TTSProvider.CHATTERBOX:
+                # Resemble AI Chatterbox - ultra-realistic open-source TTS
+                from backend.services.audio.ultra_fast_tts import ChatterboxTTS, UltraFastTTSConfig
+                config = UltraFastTTSConfig()
+                self._providers[provider] = ChatterboxTTS(config)
+            elif provider == TTSProvider.COSYVOICE:
+                # Alibaba CosyVoice2 - open-source streaming TTS
+                from backend.services.audio.ultra_fast_tts import CosyVoiceTTS, UltraFastTTSConfig
+                config = UltraFastTTSConfig()
+                self._providers[provider] = CosyVoiceTTS(config)
             elif provider in (TTSProvider.LOCAL, TTSProvider.COQUI):
                 # Both LOCAL and COQUI use the local Coqui TTS provider
                 self._providers[provider] = LocalTTSProvider()
@@ -897,7 +1043,7 @@ class TTSService(BaseService):
                         speaker=speaker,
                     )
                     # Try fallback provider (Edge TTS is free and reliable)
-                    return await self._synthesize_with_fallback(segment, voice_config)
+                    return await self._synthesize_with_fallback(segment, voice_config, str(e))
 
         # Create all synthesis tasks
         tasks = [
@@ -937,6 +1083,7 @@ class TTSService(BaseService):
         self,
         segment: Dict[str, Any],
         original_config: VoiceConfig,
+        original_error: str = "",
     ) -> AudioSegment:
         """
         Attempt synthesis with fallback provider (Edge TTS).
@@ -944,6 +1091,7 @@ class TTSService(BaseService):
         Args:
             segment: Segment to synthesize
             original_config: Original voice config that failed
+            original_error: Error message from the original provider
 
         Returns:
             AudioSegment with audio from fallback provider
@@ -968,6 +1116,21 @@ class TTSService(BaseService):
                 provider="edge",
             )
 
+            # Phase 55: Log TTS fallback to audit system
+            if AUDIT_AVAILABLE:
+                try:
+                    import asyncio
+                    asyncio.create_task(audit_service_fallback(
+                        service_type="tts",
+                        primary_provider=original_config.provider.value,
+                        fallback_provider="edge",
+                        error_message=original_error,
+                        context={"speaker": speaker, "text_length": len(text)},
+                        user_id=self.user_id,
+                    ))
+                except Exception:
+                    pass  # Don't let audit logging break TTS
+
             return AudioSegment(
                 speaker=speaker,
                 text=text,
@@ -979,6 +1142,21 @@ class TTSService(BaseService):
                 "Fallback synthesis also failed",
                 error=str(e),
             )
+
+            # Phase 55: Log TTS error when all fallbacks exhausted
+            if AUDIT_AVAILABLE:
+                try:
+                    import asyncio
+                    asyncio.create_task(audit_service_error(
+                        service_type="tts",
+                        provider=f"{original_config.provider.value}, edge",
+                        error_message=f"Primary: {original_error}, Fallback: {str(e)}",
+                        context={"speaker": speaker, "text_length": len(text)},
+                        user_id=self.user_id,
+                    ))
+                except Exception:
+                    pass  # Don't let audit logging break TTS
+
             return AudioSegment(speaker=speaker, text=text, audio_data=None)
 
     async def synthesize_dialogue(
@@ -1166,11 +1344,14 @@ class TTSService(BaseService):
         """
         char_count = len(text)
 
-        # Rough cost estimates (as of 2024)
+        # Rough cost estimates (as of 2024-2025)
         costs = {
             "openai_tts1": char_count * 0.000015,  # $15 per 1M chars
             "openai_tts1_hd": char_count * 0.00003,  # $30 per 1M chars
             "elevenlabs": char_count * 0.00018,  # ~$0.18 per 1K chars
+            "cartesia": char_count * 0.000025,  # ~$25 per 1M chars (Sonic 2.0)
+            "chatterbox": 0.0,  # Free (open-source, local compute only)
+            "cosyvoice": 0.0,  # Free (open-source, local compute only)
             "edge": 0.0,  # Free (Microsoft Edge TTS)
             "local": 0.0,  # Free (compute cost only)
             "coqui": 0.0,  # Free (local Coqui TTS)

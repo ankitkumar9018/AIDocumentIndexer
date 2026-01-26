@@ -373,9 +373,8 @@ class DOCXGenerator(BaseFormatGenerator):
                             "bullet_max_chars": 150,
                         }
 
-                        import asyncio
-                        review_result, fix_result = asyncio.get_event_loop().run_until_complete(
-                            section_reviewer.review_and_fix(section_spec, idx, constraints)
+                        review_result, fix_result = await section_reviewer.review_and_fix(
+                            section_spec, idx, constraints
                         )
 
                         if fix_result.fixes_applied > 0:

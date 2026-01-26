@@ -11,11 +11,14 @@ Provides Redis connection management for:
 Settings-aware: Respects queue.celery_enabled and queue.redis_url settings.
 """
 
+import asyncio
 import json
 import os
-from typing import Any, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 import redis.asyncio as aioredis
+import redis.exceptions as redis_exceptions
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -126,8 +129,8 @@ async def get_redis_client() -> Optional[aioredis.Redis]:
             # Test connection
             await _redis_client.ping()
             logger.info("Redis client connected", url=redis_url.split("@")[-1])
-        except Exception as e:
-            logger.warning("Redis connection failed, using in-memory fallback", error=str(e))
+        except (redis_exceptions.ConnectionError, redis_exceptions.TimeoutError, redis_exceptions.AuthenticationError, OSError) as e:
+            logger.warning("Redis connection failed, using in-memory fallback", error=str(e), error_type=type(e).__name__)
             _redis_client = None
             raise
 
@@ -323,14 +326,17 @@ class RedisCache:
                 self._stats["redis_hits"] += 1
                 return json.loads(value)
             self._stats["redis_misses"] += 1
-        except Exception as e:
+        except (redis_exceptions.ConnectionError, redis_exceptions.TimeoutError, OSError) as e:
             self._stats["redis_errors"] += 1
-            logger.debug(f"Redis get failed, using memory fallback: {e}")
-            # Fallback to in-memory
+            logger.debug("Redis get connection failed, using memory fallback", error=str(e), error_type=type(e).__name__)
             value = self._memory_get(cache_key)
             if value is not None:
                 self._stats["memory_hits"] += 1
             return value
+        except (json.JSONDecodeError, ValueError) as e:
+            self._stats["redis_errors"] += 1
+            logger.warning("Redis get deserialization failed", error=str(e), key=cache_key[:50])
+            return None
 
         return None
 
@@ -347,12 +353,15 @@ class RedisCache:
                 return True
             await client.setex(cache_key, ttl, json.dumps(value))
             return True
-        except Exception as e:
+        except (redis_exceptions.ConnectionError, redis_exceptions.TimeoutError, OSError) as e:
             self._stats["redis_errors"] += 1
-            logger.debug(f"Redis set failed, using memory fallback: {e}")
-            # Fallback to in-memory
+            logger.debug("Redis set connection failed, using memory fallback", error=str(e), error_type=type(e).__name__)
             self._memory_set(cache_key, value, ttl)
             return True
+        except (TypeError, ValueError) as e:
+            self._stats["redis_errors"] += 1
+            logger.warning("Redis set serialization failed", error=str(e), key=cache_key[:50])
+            return False
 
     async def delete(self, key: str) -> bool:
         """Delete a value from cache."""
@@ -367,9 +376,9 @@ class RedisCache:
                     self._fallback_order.remove(cache_key)
                 return True
             await client.delete(cache_key)
-        except Exception as e:
+        except (redis_exceptions.ConnectionError, redis_exceptions.TimeoutError, OSError) as e:
             self._stats["redis_errors"] += 1
-            logger.debug(f"Redis delete failed: {e}")
+            logger.debug("Redis delete failed", error=str(e), error_type=type(e).__name__)
             self._fallback_cache.pop(cache_key, None)
             self._fallback_timestamps.pop(cache_key, None)
             if cache_key in self._fallback_order:
@@ -386,7 +395,7 @@ class RedisCache:
             if client is None:
                 return self._memory_get(cache_key) is not None
             return await client.exists(cache_key) > 0
-        except Exception:
+        except (redis_exceptions.ConnectionError, redis_exceptions.TimeoutError, OSError):
             return self._memory_get(cache_key) is not None
 
     def get_stats(self) -> dict:
@@ -409,3 +418,371 @@ embedding_cache = RedisCache(prefix="embed", default_ttl=EMBEDDING_CACHE_TTL)
 semantic_cache = RedisCache(prefix="semantic", default_ttl=SEMANTIC_CACHE_TTL)
 session_cache = RedisCache(prefix="session", default_ttl=SESSION_CACHE_TTL)
 search_cache = RedisCache(prefix="search", default_ttl=SEARCH_CACHE_TTL)
+
+
+# =============================================================================
+# Phase 75: Distributed Cache Invalidation via Redis Pub/Sub
+# =============================================================================
+
+# Channel names for cache invalidation
+CACHE_INVALIDATION_CHANNEL = "cache:invalidation"
+SETTINGS_CHANGE_CHANNEL = "settings:change"
+
+# Global pub/sub listener
+_pubsub_listener: Optional[asyncio.Task] = None
+_invalidation_handlers: Dict[str, list] = {}
+
+
+async def publish_cache_invalidation(
+    cache_type: str,
+    keys: Optional[List[str]] = None,
+    pattern: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    Publish a cache invalidation message to all instances.
+
+    Args:
+        cache_type: Type of cache (embedding, semantic, session, search, settings)
+        keys: Specific keys to invalidate
+        pattern: Pattern to match keys for invalidation
+        metadata: Additional metadata
+
+    Returns:
+        True if published successfully
+    """
+    try:
+        client = await get_redis_client()
+        if client is None:
+            logger.debug("Redis not available, skipping pub/sub")
+            return False
+
+        message = json.dumps({
+            "type": cache_type,
+            "keys": keys,
+            "pattern": pattern,
+            "metadata": metadata or {},
+            "timestamp": time.time() if 'time' in dir() else 0,
+        })
+
+        await client.publish(CACHE_INVALIDATION_CHANNEL, message)
+        logger.debug(
+            "Published cache invalidation",
+            cache_type=cache_type,
+            keys_count=len(keys) if keys else 0,
+            pattern=pattern,
+        )
+        return True
+
+    except (redis_exceptions.ConnectionError, redis_exceptions.TimeoutError, OSError) as e:
+        logger.warning("Failed to publish cache invalidation", error=str(e), error_type=type(e).__name__)
+        return False
+
+
+async def publish_settings_change(
+    setting_key: str,
+    new_value: Any,
+    old_value: Any = None,
+) -> bool:
+    """
+    Publish a settings change notification to all instances.
+
+    Args:
+        setting_key: The setting key that changed
+        new_value: New value
+        old_value: Previous value (if known)
+
+    Returns:
+        True if published successfully
+    """
+    try:
+        client = await get_redis_client()
+        if client is None:
+            return False
+
+        import time as time_module
+        message = json.dumps({
+            "key": setting_key,
+            "new_value": new_value,
+            "old_value": old_value,
+            "timestamp": time_module.time(),
+        })
+
+        await client.publish(SETTINGS_CHANGE_CHANNEL, message)
+        logger.info(
+            "Published settings change",
+            key=setting_key,
+        )
+        return True
+
+    except (redis_exceptions.ConnectionError, redis_exceptions.TimeoutError, OSError) as e:
+        logger.warning("Failed to publish settings change", error=str(e), error_type=type(e).__name__)
+        return False
+
+
+def register_invalidation_handler(
+    cache_type: str,
+    handler: Callable[[Dict[str, Any]], None],
+):
+    """
+    Register a handler for cache invalidation messages.
+
+    Args:
+        cache_type: Type of cache to handle (embedding, semantic, etc.)
+        handler: Async function to call when invalidation is received
+    """
+    if cache_type not in _invalidation_handlers:
+        _invalidation_handlers[cache_type] = []
+    _invalidation_handlers[cache_type].append(handler)
+    logger.debug(f"Registered invalidation handler for {cache_type}")
+
+
+async def _handle_invalidation_message(message: Dict[str, Any]):
+    """Handle a received cache invalidation message."""
+    try:
+        cache_type = message.get("type", "")
+        handlers = _invalidation_handlers.get(cache_type, [])
+
+        for handler in handlers:
+            try:
+                if asyncio.iscoroutinefunction(handler):
+                    await handler(message)
+                else:
+                    handler(message)
+            except Exception as e:
+                logger.error(f"Invalidation handler failed: {e}")
+
+        # Also handle built-in cache types
+        if cache_type == "embedding":
+            embedding_cache.clear_memory_cache()
+        elif cache_type == "semantic":
+            semantic_cache.clear_memory_cache()
+        elif cache_type == "session":
+            session_cache.clear_memory_cache()
+        elif cache_type == "search":
+            search_cache.clear_memory_cache()
+        elif cache_type == "settings":
+            invalidate_redis_cache()
+
+    except Exception as e:
+        logger.error(f"Failed to handle invalidation message: {e}")
+
+
+async def _handle_settings_message(message: Dict[str, Any]):
+    """Handle a received settings change message."""
+    try:
+        key = message.get("key", "")
+        handlers = _invalidation_handlers.get("settings", [])
+
+        # Notify registered handlers
+        for handler in handlers:
+            try:
+                if asyncio.iscoroutinefunction(handler):
+                    await handler(message)
+                else:
+                    handler(message)
+            except Exception as e:
+                logger.error(f"Settings handler failed: {e}")
+
+        # Invalidate related caches based on setting key
+        if key.startswith("rag.") or key.startswith("embedding."):
+            semantic_cache.clear_memory_cache()
+        elif key.startswith("queue.") or key.startswith("cache."):
+            invalidate_redis_cache()
+
+        logger.debug(f"Processed settings change: {key}")
+
+    except Exception as e:
+        logger.error(f"Failed to handle settings message: {e}")
+
+
+async def start_pubsub_listener():
+    """
+    Start the Redis pub/sub listener for distributed cache invalidation.
+
+    Should be called during application startup.
+    """
+    global _pubsub_listener
+
+    if _pubsub_listener is not None:
+        logger.debug("Pub/sub listener already running")
+        return
+
+    try:
+        client = await get_redis_client()
+        if client is None:
+            logger.info("Redis not available, pub/sub listener not started")
+            return
+
+        pubsub = client.pubsub()
+        await pubsub.subscribe(CACHE_INVALIDATION_CHANNEL, SETTINGS_CHANGE_CHANNEL)
+
+        async def listener():
+            """Listen for pub/sub messages."""
+            try:
+                async for message in pubsub.listen():
+                    if message["type"] != "message":
+                        continue
+
+                    try:
+                        data = json.loads(message["data"])
+                        channel = message["channel"]
+
+                        if channel == CACHE_INVALIDATION_CHANNEL:
+                            await _handle_invalidation_message(data)
+                        elif channel == SETTINGS_CHANGE_CHANNEL:
+                            await _handle_settings_message(data)
+
+                    except json.JSONDecodeError:
+                        logger.warning("Invalid pub/sub message format")
+                    except Exception as e:
+                        logger.error(f"Error processing pub/sub message: {e}")
+
+            except asyncio.CancelledError:
+                logger.info("Pub/sub listener cancelled")
+            except Exception as e:
+                logger.error(f"Pub/sub listener error: {e}")
+            finally:
+                await pubsub.unsubscribe()
+                await pubsub.close()
+
+        _pubsub_listener = asyncio.create_task(listener())
+        logger.info("Started Redis pub/sub listener for distributed cache invalidation")
+
+    except Exception as e:
+        logger.warning(f"Failed to start pub/sub listener: {e}")
+
+
+async def stop_pubsub_listener():
+    """Stop the Redis pub/sub listener."""
+    global _pubsub_listener
+
+    if _pubsub_listener is not None:
+        _pubsub_listener.cancel()
+        try:
+            await _pubsub_listener
+        except asyncio.CancelledError:
+            pass
+        _pubsub_listener = None
+        logger.info("Stopped Redis pub/sub listener")
+
+
+class DistributedCache(RedisCache):
+    """
+    Extended Redis cache with distributed invalidation support.
+
+    Automatically publishes invalidation messages when cache is modified.
+    """
+
+    def __init__(
+        self,
+        prefix: str = "cache",
+        default_ttl: int = 3600,
+        max_memory_items: int = 10000,
+        cache_type: str = "general",
+    ):
+        super().__init__(prefix, default_ttl, max_memory_items)
+        self.cache_type = cache_type
+
+    async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Set value and optionally broadcast to other instances."""
+        result = await super().set(key, value, ttl)
+        return result
+
+    async def delete(self, key: str, broadcast: bool = True) -> bool:
+        """Delete value and optionally broadcast invalidation."""
+        result = await super().delete(key)
+        if broadcast:
+            await publish_cache_invalidation(
+                cache_type=self.cache_type,
+                keys=[key],
+            )
+        return result
+
+    async def invalidate_pattern(self, pattern: str, broadcast: bool = True) -> int:
+        """
+        Invalidate all keys matching a pattern.
+
+        Args:
+            pattern: Redis-style pattern (e.g., "user:*")
+            broadcast: Whether to notify other instances
+
+        Returns:
+            Number of keys deleted
+        """
+        full_pattern = self._make_key(pattern)
+        deleted = 0
+
+        try:
+            client = await get_redis_client()
+            if client:
+                # Use SCAN to find matching keys
+                cursor = 0
+                while True:
+                    cursor, keys = await client.scan(cursor, match=full_pattern, count=100)
+                    if keys:
+                        await client.delete(*keys)
+                        deleted += len(keys)
+                    if cursor == 0:
+                        break
+        except Exception as e:
+            logger.warning(f"Pattern invalidation failed: {e}")
+
+        # Also clear memory cache entries matching pattern
+        import fnmatch
+        to_delete = [
+            k for k in self._fallback_cache.keys()
+            if fnmatch.fnmatch(k, full_pattern)
+        ]
+        for k in to_delete:
+            self._fallback_cache.pop(k, None)
+            self._fallback_timestamps.pop(k, None)
+            if k in self._fallback_order:
+                self._fallback_order.remove(k)
+        deleted += len(to_delete)
+
+        if broadcast:
+            await publish_cache_invalidation(
+                cache_type=self.cache_type,
+                pattern=pattern,
+            )
+
+        return deleted
+
+    async def clear_all(self, broadcast: bool = True) -> bool:
+        """Clear all cache entries for this prefix."""
+        self.clear_memory_cache()
+
+        try:
+            client = await get_redis_client()
+            if client:
+                pattern = self._make_key("*")
+                cursor = 0
+                while True:
+                    cursor, keys = await client.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        await client.delete(*keys)
+                    if cursor == 0:
+                        break
+        except Exception as e:
+            logger.warning(f"Failed to clear Redis cache: {e}")
+
+        if broadcast:
+            await publish_cache_invalidation(
+                cache_type=self.cache_type,
+                pattern="*",
+            )
+
+        return True
+
+
+# Pre-configured distributed cache instances
+distributed_embedding_cache = DistributedCache(
+    prefix="embed", default_ttl=EMBEDDING_CACHE_TTL, cache_type="embedding"
+)
+distributed_semantic_cache = DistributedCache(
+    prefix="semantic", default_ttl=SEMANTIC_CACHE_TTL, cache_type="semantic"
+)
+distributed_search_cache = DistributedCache(
+    prefix="search", default_ttl=SEARCH_CACHE_TTL, cache_type="search"
+)

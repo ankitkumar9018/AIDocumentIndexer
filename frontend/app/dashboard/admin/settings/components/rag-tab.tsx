@@ -4,7 +4,7 @@ import { TabsContent } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { EmbeddingDashboard } from "@/components/embedding-dashboard";
-import { Sparkles, FileText, MessageSquare, Search, Zap, Cog, Activity, Workflow, Bot, RefreshCw, DollarSign } from "lucide-react";
+import { Sparkles, FileText, MessageSquare, Search, Zap, Cog, Activity, Workflow, Bot, RefreshCw, DollarSign, Shield, Layers, TreePine } from "lucide-react";
 
 interface RagTabProps {
   localSettings: Record<string, unknown>;
@@ -699,6 +699,394 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
             </div>
           </div>
 
+          {/* Memory Services (Phase 40/48) */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Activity className="h-4 w-4" />
+              Agent Memory (Mem0/A-Mem)
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Enable persistent memory for context retention across conversations (91% lower latency, 90% token savings)
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Agent Memory</p>
+                <p className="text-sm text-muted-foreground">
+                  Remember facts and preferences across sessions
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["memory.enabled"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("memory.enabled", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Memory Provider</label>
+                <select
+                  className="w-full p-2 border rounded-md"
+                  value={localSettings["memory.provider"] as string ?? "mem0"}
+                  onChange={(e) => handleSettingChange("memory.provider", e.target.value)}
+                >
+                  <option value="mem0">Mem0 (Recommended)</option>
+                  <option value="amem">A-Mem (Agentic)</option>
+                </select>
+                <p className="text-xs text-muted-foreground">Memory backend to use</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Max Memory Entries</label>
+                <Input
+                  type="number"
+                  min="100"
+                  max="10000"
+                  value={localSettings["memory.max_entries"] as number ?? 1000}
+                  onChange={(e) => handleSettingChange("memory.max_entries", parseInt(e.target.value) || 1000)}
+                />
+                <p className="text-xs text-muted-foreground">Per-user memory limit</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Memory Decay</p>
+                <p className="text-sm text-muted-foreground">
+                  Automatically deprioritize old memories
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["memory.decay_enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("memory.decay_enabled", e.target.checked)}
+              />
+            </div>
+          </div>
+
+          {/* Context Compression (Phase 38) */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Zap className="h-4 w-4" />
+              Context Compression
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Compress long conversations to reduce token costs (32x compression, 85% cost reduction)
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Context Compression</p>
+                <p className="text-sm text-muted-foreground">
+                  Summarize older turns while keeping recent ones verbatim
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["compression.enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("compression.enabled", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Recent Turns (Verbatim)</label>
+                <Input
+                  type="number"
+                  min="3"
+                  max="20"
+                  value={localSettings["compression.recent_turns"] as number ?? 10}
+                  onChange={(e) => handleSettingChange("compression.recent_turns", parseInt(e.target.value) || 10)}
+                />
+                <p className="text-xs text-muted-foreground">Keep last N turns uncompressed</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Compression Level</label>
+                <select
+                  className="w-full p-2 border rounded-md"
+                  value={localSettings["compression.level"] as string ?? "moderate"}
+                  onChange={(e) => handleSettingChange("compression.level", e.target.value)}
+                >
+                  <option value="minimal">Minimal (Keep more context)</option>
+                  <option value="moderate">Moderate (Balanced)</option>
+                  <option value="aggressive">Aggressive (Max savings)</option>
+                </select>
+                <p className="text-xs text-muted-foreground">How aggressively to compress</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Anchor Important Facts</p>
+                <p className="text-sm text-muted-foreground">
+                  Never compress critical information (names, dates, etc.)
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["compression.enable_anchoring"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("compression.enable_anchoring", e.target.checked)}
+              />
+            </div>
+          </div>
+
+          {/* Tiered Reranking (Phase 43) - Enhanced */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <RefreshCw className="h-4 w-4" />
+              Tiered Reranking Pipeline
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Multi-stage reranking for optimal retrieval (ColBERT → Cross-Encoder → LLM)
+            </p>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Tiered Reranking</p>
+                <p className="text-sm text-muted-foreground">
+                  Use 3-stage pipeline for 87% multi-hop accuracy
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rerank.tiered_enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rerank.tiered_enabled", e.target.checked)}
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Stage 1 Top-K</label>
+                <Input
+                  type="number"
+                  min="20"
+                  max="200"
+                  value={localSettings["rerank.stage1_top_k"] as number ?? 100}
+                  onChange={(e) => handleSettingChange("rerank.stage1_top_k", parseInt(e.target.value) || 100)}
+                />
+                <p className="text-xs text-muted-foreground">ColBERT candidates</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Stage 2 Top-K</label>
+                <Input
+                  type="number"
+                  min="5"
+                  max="50"
+                  value={localSettings["rerank.stage2_top_k"] as number ?? 20}
+                  onChange={(e) => handleSettingChange("rerank.stage2_top_k", parseInt(e.target.value) || 20)}
+                />
+                <p className="text-xs text-muted-foreground">Cross-encoder output</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Final Top-K</label>
+                <Input
+                  type="number"
+                  min="3"
+                  max="20"
+                  value={localSettings["rerank.final_top_k"] as number ?? 5}
+                  onChange={(e) => handleSettingChange("rerank.final_top_k", parseInt(e.target.value) || 5)}
+                />
+                <p className="text-xs text-muted-foreground">Results returned</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable LLM Reranking (Stage 3)</p>
+                <p className="text-sm text-muted-foreground">
+                  Use LLM for final reranking (higher quality, more cost)
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rerank.use_llm_stage"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("rerank.use_llm_stage", e.target.checked)}
+              />
+            </div>
+          </div>
+
+          {/* Advanced Retrieval Methods (Phase 46/49) */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Shield className="h-4 w-4" />
+              Advanced Retrieval Methods
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              State-of-the-art retrieval architectures for improved accuracy and reduced hallucinations
+            </p>
+
+            {/* SELF-RAG */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-blue-500" />
+                  SELF-RAG (Self-Reflective RAG)
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Reduces hallucinations by 30% with self-verification and correction
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.self_rag_enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.self_rag_enabled", e.target.checked)}
+              />
+            </div>
+            {(localSettings["rag.self_rag_enabled"] as boolean ?? true) && (
+              <div className="ml-6 space-y-3 p-3 bg-muted/30 rounded-lg">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Confidence Threshold</label>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      min="0.5"
+                      max="0.95"
+                      value={localSettings["rag.self_rag_confidence_threshold"] as number ?? 0.7}
+                      onChange={(e) => handleSettingChange("rag.self_rag_confidence_threshold", parseFloat(e.target.value))}
+                    />
+                    <p className="text-xs text-muted-foreground">Min confidence for verification (0.5-0.95)</p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Max Retries</label>
+                    <Input
+                      type="number"
+                      min="1"
+                      max="5"
+                      value={localSettings["rag.self_rag_max_retries"] as number ?? 2}
+                      onChange={(e) => handleSettingChange("rag.self_rag_max_retries", parseInt(e.target.value) || 2)}
+                    />
+                    <p className="text-xs text-muted-foreground">Retry count for low-confidence answers</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* LightRAG */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium flex items-center gap-2">
+                  <Layers className="h-4 w-4 text-purple-500" />
+                  LightRAG (Dual-Level Retrieval)
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  10x token reduction with entity-based and relationship-aware retrieval
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.lightrag_enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.lightrag_enabled", e.target.checked)}
+              />
+            </div>
+            {(localSettings["rag.lightrag_enabled"] as boolean ?? true) && (
+              <div className="ml-6 space-y-3 p-3 bg-muted/30 rounded-lg">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">LightRAG Mode</label>
+                    <select
+                      className="w-full h-10 px-3 rounded-md border bg-background"
+                      value={localSettings["rag.lightrag_mode"] as string ?? "hybrid"}
+                      onChange={(e) => handleSettingChange("rag.lightrag_mode", e.target.value)}
+                    >
+                      <option value="local">Local (Entity-focused)</option>
+                      <option value="global">Global (Relationship-focused)</option>
+                      <option value="hybrid">Hybrid (Both - Recommended)</option>
+                    </select>
+                    <p className="text-xs text-muted-foreground">Retrieval strategy</p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Max Entities</label>
+                    <Input
+                      type="number"
+                      min="5"
+                      max="50"
+                      value={localSettings["rag.lightrag_max_entities"] as number ?? 20}
+                      onChange={(e) => handleSettingChange("rag.lightrag_max_entities", parseInt(e.target.value) || 20)}
+                    />
+                    <p className="text-xs text-muted-foreground">Max entities per query</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* RAPTOR */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium flex items-center gap-2">
+                  <TreePine className="h-4 w-4 text-green-500" />
+                  RAPTOR (Tree-Organized Retrieval)
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  97% token reduction with hierarchical document tree for multi-level understanding
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.raptor_enabled"] as boolean ?? true}
+                onChange={(e) => handleSettingChange("rag.raptor_enabled", e.target.checked)}
+              />
+            </div>
+            {(localSettings["rag.raptor_enabled"] as boolean ?? true) && (
+              <div className="ml-6 space-y-3 p-3 bg-muted/30 rounded-lg">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Tree Depth</label>
+                    <Input
+                      type="number"
+                      min="2"
+                      max="6"
+                      value={localSettings["rag.raptor_tree_depth"] as number ?? 3}
+                      onChange={(e) => handleSettingChange("rag.raptor_tree_depth", parseInt(e.target.value) || 3)}
+                    />
+                    <p className="text-xs text-muted-foreground">Hierarchy levels (2-6)</p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Cluster Size</label>
+                    <Input
+                      type="number"
+                      min="3"
+                      max="15"
+                      value={localSettings["rag.raptor_cluster_size"] as number ?? 5}
+                      onChange={(e) => handleSettingChange("rag.raptor_cluster_size", parseInt(e.target.value) || 5)}
+                    />
+                    <p className="text-xs text-muted-foreground">Chunks per cluster</p>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between p-3 rounded-lg border bg-background">
+                  <div>
+                    <p className="font-medium text-sm">Use Summary Nodes</p>
+                    <p className="text-xs text-muted-foreground">
+                      Generate summaries at each tree level
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4"
+                    checked={localSettings["rag.raptor_use_summaries"] as boolean ?? true}
+                    onChange={(e) => handleSettingChange("rag.raptor_use_summaries", e.target.checked)}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Advanced Retrieval Info Box */}
+            <div className="bg-blue-50 dark:bg-blue-950/30 rounded-lg p-4 mt-4">
+              <div className="flex items-start gap-3">
+                <Shield className="h-5 w-5 text-blue-500 mt-0.5" />
+                <div>
+                  <p className="font-medium text-sm">How These Work Together</p>
+                  <ul className="text-sm text-muted-foreground mt-1 space-y-1">
+                    <li><strong>SELF-RAG:</strong> Verifies answers and re-retrieves if confidence is low</li>
+                    <li><strong>LightRAG:</strong> Uses entity graphs for relationship-aware retrieval</li>
+                    <li><strong>RAPTOR:</strong> Retrieves from hierarchical summaries for broad understanding</li>
+                    <li>All three can be enabled together for maximum accuracy</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Query Suggestions */}
           <div className="space-y-4 pt-4 border-t">
             <h4 className="text-sm font-medium flex items-center gap-2">
@@ -729,6 +1117,230 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                 onChange={(e) => handleSettingChange("rag.suggestions_count", parseInt(e.target.value) || 3)}
               />
               <p className="text-xs text-muted-foreground">Number of suggestions (1-5)</p>
+            </div>
+          </div>
+
+          {/* Phase 62/63 Advanced Processing */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Sparkles className="h-4 w-4" />
+              Advanced Processing (Phase 62/63)
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Cutting-edge document processing and answer quality features
+            </p>
+
+            {/* Answer Refiner */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Answer Refiner</p>
+                <p className="text-sm text-muted-foreground">
+                  Self-Refine/CRITIC for +20% answer quality (NeurIPS 2023)
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.answer_refiner_enabled"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("rag.answer_refiner_enabled", e.target.checked)}
+              />
+            </div>
+            {(localSettings["rag.answer_refiner_enabled"] as boolean) && (
+              <div className="ml-6 space-y-3 p-3 bg-muted/30 rounded-lg">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Refinement Strategy</label>
+                    <select
+                      className="w-full h-10 px-3 rounded-md border bg-background"
+                      value={localSettings["rag.answer_refiner_strategy"] as string ?? "self_refine"}
+                      onChange={(e) => handleSettingChange("rag.answer_refiner_strategy", e.target.value)}
+                    >
+                      <option value="self_refine">Self-Refine (General quality)</option>
+                      <option value="critic">CRITIC (Tool-verified facts)</option>
+                      <option value="cove">CoVe (Hallucination reduction)</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Max Iterations</label>
+                    <Input
+                      type="number"
+                      min="1"
+                      max="5"
+                      value={localSettings["rag.answer_refiner_max_iterations"] as number ?? 2}
+                      onChange={(e) => handleSettingChange("rag.answer_refiner_max_iterations", parseInt(e.target.value) || 2)}
+                    />
+                    <p className="text-xs text-muted-foreground">Refinement passes (1-5)</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TTT Compression */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable TTT Compression</p>
+                <p className="text-sm text-muted-foreground">
+                  Test-Time Training for 35x faster inference on 2M+ context (NVIDIA)
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.ttt_compression_enabled"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("rag.ttt_compression_enabled", e.target.checked)}
+              />
+            </div>
+            {(localSettings["rag.ttt_compression_enabled"] as boolean) && (
+              <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
+                <label className="text-sm font-medium">Compression Ratio</label>
+                <Input
+                  type="number"
+                  min="0.3"
+                  max="0.8"
+                  step="0.1"
+                  value={localSettings["rag.ttt_compression_ratio"] as number ?? 0.5}
+                  onChange={(e) => handleSettingChange("rag.ttt_compression_ratio", parseFloat(e.target.value) || 0.5)}
+                />
+                <p className="text-xs text-muted-foreground">Target ratio (0.3-0.8, lower = more compression)</p>
+              </div>
+            )}
+
+            {/* Sufficiency Checker */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Sufficiency Checker</p>
+                <p className="text-sm text-muted-foreground">
+                  ICLR 2025 technique to skip unnecessary retrieval rounds
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.sufficiency_checker_enabled"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("rag.sufficiency_checker_enabled", e.target.checked)}
+              />
+            </div>
+            {(localSettings["rag.sufficiency_checker_enabled"] as boolean) && (
+              <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
+                <label className="text-sm font-medium">Sufficiency Threshold</label>
+                <Input
+                  type="number"
+                  min="0.5"
+                  max="0.9"
+                  step="0.05"
+                  value={localSettings["rag.sufficiency_threshold"] as number ?? 0.7}
+                  onChange={(e) => handleSettingChange("rag.sufficiency_threshold", parseFloat(e.target.value) || 0.7)}
+                />
+                <p className="text-xs text-muted-foreground">Confidence threshold (0.5-0.9)</p>
+              </div>
+            )}
+
+            {/* Tree of Thoughts */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Tree of Thoughts</p>
+                <p className="text-sm text-muted-foreground">
+                  Multi-path reasoning for complex analytical queries
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["rag.tree_of_thoughts_enabled"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("rag.tree_of_thoughts_enabled", e.target.checked)}
+              />
+            </div>
+            {(localSettings["rag.tree_of_thoughts_enabled"] as boolean) && (
+              <div className="ml-6 space-y-3 p-3 bg-muted/30 rounded-lg">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Max Depth</label>
+                    <Input
+                      type="number"
+                      min="2"
+                      max="5"
+                      value={localSettings["rag.tot_max_depth"] as number ?? 3}
+                      onChange={(e) => handleSettingChange("rag.tot_max_depth", parseInt(e.target.value) || 3)}
+                    />
+                    <p className="text-xs text-muted-foreground">Tree depth (2-5)</p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Branching Factor</label>
+                    <Input
+                      type="number"
+                      min="2"
+                      max="5"
+                      value={localSettings["rag.tot_branching_factor"] as number ?? 3}
+                      onChange={(e) => handleSettingChange("rag.tot_branching_factor", parseInt(e.target.value) || 3)}
+                    />
+                    <p className="text-xs text-muted-foreground">Branches per node (2-5)</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Fast Chunking */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Fast Chunking</p>
+                <p className="text-sm text-muted-foreground">
+                  Chonkie-based chunking (33x faster, 10-50x less memory)
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["processing.fast_chunking_enabled"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("processing.fast_chunking_enabled", e.target.checked)}
+              />
+            </div>
+            {(localSettings["processing.fast_chunking_enabled"] as boolean) && (
+              <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
+                <label className="text-sm font-medium">Chunking Strategy</label>
+                <select
+                  className="w-full h-10 px-3 rounded-md border bg-background"
+                  value={localSettings["processing.fast_chunking_strategy"] as string ?? "auto"}
+                  onChange={(e) => handleSettingChange("processing.fast_chunking_strategy", e.target.value)}
+                >
+                  <option value="auto">Auto (Select based on doc size)</option>
+                  <option value="token">Token (Fastest)</option>
+                  <option value="sentence">Sentence (Fast)</option>
+                  <option value="semantic">Semantic (Balanced)</option>
+                  <option value="sdpm">SDPM (Best quality)</option>
+                </select>
+              </div>
+            )}
+
+            {/* Docling Parser */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Docling Parser</p>
+                <p className="text-sm text-muted-foreground">
+                  Enterprise document parsing with 97.9% table accuracy
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["processing.docling_parser_enabled"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("processing.docling_parser_enabled", e.target.checked)}
+              />
+            </div>
+
+            {/* Agent Evaluation */}
+            <div className="flex items-center justify-between p-3 rounded-lg border">
+              <div>
+                <p className="font-medium">Enable Agent Evaluation</p>
+                <p className="text-sm text-muted-foreground">
+                  Pass^k metrics, hallucination detection, progress tracking
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={localSettings["agent.evaluation_enabled"] as boolean ?? false}
+                onChange={(e) => handleSettingChange("agent.evaluation_enabled", e.target.checked)}
+              />
             </div>
           </div>
         </CardContent>

@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional, List, AsyncGenerator
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
@@ -19,6 +19,8 @@ import json
 
 from backend.services.rag import RAGService, RAGConfig, get_rag_service
 from backend.services.response_cache import get_response_cache_service, ResponseCacheService
+from backend.services.knowledge_graph import get_kg_service
+from backend.core.config import settings
 from backend.db.database import async_session_context, get_async_session
 from backend.db.models import (
     ChatSession as ChatSessionModel,
@@ -29,6 +31,7 @@ from backend.db.models import (
     AgentTrajectory,
 )
 from backend.services.agent_orchestrator import AgentOrchestrator, create_orchestrator
+from backend.services.user_personalization import get_personalization_service, UserPersonalizationService
 from backend.api.middleware.auth import AuthenticatedUser
 
 logger = structlog.get_logger(__name__)
@@ -182,7 +185,7 @@ def get_rag() -> RAGService:
 class ChatMessage(BaseModel):
     """Single chat message."""
     role: str = Field(..., pattern="^(user|assistant|system)$")
-    content: str
+    content: str = Field(..., max_length=500000)
     confidence_score: Optional[float] = None
     confidence_level: Optional[str] = None
 
@@ -223,8 +226,8 @@ class ChatRequest(BaseModel):
     session_id: Optional[UUID] = None
     include_sources: bool = True
     max_sources: int = Field(default=5, ge=1, le=20)
-    collection_filter: Optional[str] = None  # Single collection filter (backward compatible)
-    collection_filters: Optional[List[str]] = None  # Multiple collection filters
+    collection_filter: Optional[str] = Field(None, max_length=100, description="Single collection filter (backward compatible)")
+    collection_filters: Optional[List[str]] = Field(None, description="Multiple collection filters")
     query_only: bool = False  # If True, don't store in RAG
     mode: Optional[str] = Field(None, pattern="^(agent|chat|general|vision)$")  # Execution mode: agent, chat (RAG), general (LLM), or vision (multimodal)
     agent_options: Optional[AgentOptions] = Field(default=None, description="Options for agent mode execution")
@@ -397,7 +400,7 @@ async def create_chat_completion(
                             created_at=datetime.now(),
                         )
                     elif update.get("type") == "error":
-                        raise HTTPException(status_code=500, detail=update.get("error", "Agent execution failed"))
+                        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=update.get("error", "Agent execution failed"))
 
                 # Convert agent sources to ChatSource format if available
                 formatted_sources = []
@@ -515,7 +518,7 @@ async def create_chat_completion(
         elif request.mode == "vision":
             # Vision mode: Use multimodal LLM for image analysis
             if not request.images:
-                raise HTTPException(status_code=400, detail="Vision mode requires at least one image attachment")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Vision mode requires at least one image attachment")
 
             from backend.services.llm import chat_with_vision
             import base64
@@ -555,7 +558,7 @@ async def create_chat_completion(
                     image_url=image_urls[0],
                 )
             else:
-                raise HTTPException(status_code=400, detail="No valid image data or URL provided")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid image data or URL provided")
 
             # Save messages to database
             if not request.query_only:
@@ -617,6 +620,115 @@ async def create_chat_completion(
                                 created_at=datetime.now(),
                             )
 
+            # PHASE 40/48: Retrieve relevant memories to enhance context
+            memory_context = None
+            from backend.core.config import settings as app_settings
+            if getattr(app_settings, "ENABLE_AGENT_MEMORY", False):
+                try:
+                    from backend.services.mem0_memory import get_memory_service
+
+                    memory_service = await get_memory_service()
+                    relevant_memories = await memory_service.get_relevant(
+                        query=request.message,
+                        user_id=user.user_id,
+                        top_k=5,  # Get top 5 relevant memories
+                    )
+
+                    if relevant_memories:
+                        # Format memories as context
+                        memory_lines = []
+                        for mem in relevant_memories:
+                            if hasattr(mem, 'content'):
+                                memory_lines.append(f"- {mem.content}")
+                            elif isinstance(mem, dict):
+                                memory_lines.append(f"- {mem.get('content', str(mem))}")
+
+                        if memory_lines:
+                            memory_context = "Relevant memories from previous conversations:\n" + "\n".join(memory_lines)
+                            logger.info(
+                                "Retrieved memories for context",
+                                user_id=user.user_id,
+                                memory_count=len(memory_lines),
+                            )
+                except Exception as e:
+                    logger.warning("Failed to retrieve memories", error=str(e))
+
+            # Combine temp_context with memory_context
+            combined_context = temp_context
+            if memory_context:
+                if combined_context:
+                    combined_context = f"{memory_context}\n\n{combined_context}"
+                else:
+                    combined_context = memory_context
+
+            # Phase 60: Add KG entity context for enhanced query understanding
+            kg_context = ""
+            if getattr(settings, 'KG_ENABLED', True) and getattr(settings, 'KG_ENABLED_IN_CHAT', True):
+                try:
+                    kg_service = await get_kg_service()
+
+                    # Extract entities from the user's query
+                    entities, relations = await kg_service.extract_entities_from_text(
+                        text=request.message,
+                        document_language=request.language or "en",
+                        use_fast_extraction=True,  # Quick extraction for queries
+                    )
+
+                    if entities:
+                        # Get related context from KG
+                        entity_names = [e.name for e in entities[:5]]  # Top 5 entities
+                        kg_results = await kg_service.search_by_entities(
+                            entity_names=entity_names,
+                            collection=request.first_collection_filter,
+                            max_hops=getattr(settings, 'KG_MAX_HOPS', 2),
+                            limit=3,
+                        )
+
+                        if kg_results:
+                            kg_context = "Knowledge Graph Context:\n"
+                            for result in kg_results[:3]:
+                                kg_context += f"- {result.entity.name}: {result.entity.description or 'Related entity'}\n"
+                            kg_context += "\n"
+
+                            logger.debug(
+                                "KG context added to chat query",
+                                entity_count=len(entities),
+                                kg_results=len(kg_results),
+                            )
+                except Exception as e:
+                    logger.debug("KG context enhancement skipped", error=str(e))
+
+            # Combine all context: memory + temp docs + KG
+            if kg_context:
+                if combined_context:
+                    combined_context = f"{kg_context}{combined_context}"
+                else:
+                    combined_context = kg_context
+
+            # Phase 66: Get personalized prompt additions based on user preferences
+            personalization_additions = ""
+            if getattr(app_settings, "ENABLE_USER_PERSONALIZATION", True):
+                try:
+                    personalization_service = get_personalization_service()
+                    personalization_additions = await personalization_service.get_personalized_prompt_additions(
+                        user_id=user.user_id
+                    )
+                    if personalization_additions:
+                        logger.debug(
+                            "Applied user personalization",
+                            user_id=user.user_id[:8] if user.user_id else "unknown",
+                            has_additions=bool(personalization_additions),
+                        )
+                except Exception as e:
+                    logger.debug("Personalization skipped", error=str(e))
+
+            # Add personalization to combined context
+            if personalization_additions:
+                if combined_context:
+                    combined_context = f"{combined_context}\n\nUser preferences:\n{personalization_additions}"
+                else:
+                    combined_context = f"User preferences:\n{personalization_additions}"
+
             response = await rag_service.query(
                 question=request.message,
                 session_id=str(session_id) if not request.query_only else None,
@@ -624,7 +736,7 @@ async def create_chat_completion(
                 access_tier=user.access_tier_level,  # User's access tier for RLS
                 user_id=user.user_id,  # User ID for private document access
                 include_collection_context=request.include_collection_context,
-                additional_context=temp_context,  # Include temporary document context if available
+                additional_context=combined_context,  # Include temp docs + memory context
                 top_k=request.top_k,  # Per-query document count override
                 folder_id=request.folder_id,  # Folder-scoped query
                 include_subfolders=request.include_subfolders,
@@ -705,6 +817,54 @@ async def create_chat_completion(
                     confidence_level=response.confidence_level,
                 )
 
+                # PHASE 40/48: Extract and save important information to memory
+                if getattr(app_settings, "ENABLE_AGENT_MEMORY", False):
+                    try:
+                        from backend.services.mem0_memory import get_memory_service, MemoryType
+
+                        memory_service = await get_memory_service()
+
+                        # Extract and save context from the conversation
+                        # Only save if the response has high confidence and contains useful info
+                        if response.confidence_score and response.confidence_score > 0.7:
+                            # Save conversation context as memory
+                            await memory_service.add(
+                                user_id=user.user_id,
+                                content=f"Q: {request.message[:200]}... A: {response.content[:500]}...",
+                                memory_type=MemoryType.CONTEXT,
+                                metadata={
+                                    "session_id": str(session_id),
+                                    "confidence": response.confidence_score,
+                                    "collection": request.first_collection_filter,
+                                },
+                            )
+                            logger.debug(
+                                "Saved conversation to memory",
+                                user_id=user.user_id,
+                                session_id=str(session_id),
+                            )
+                    except Exception as e:
+                        logger.warning("Failed to save memory", error=str(e))
+
+                # Phase 66: Record query for personalization learning
+                if getattr(app_settings, "ENABLE_USER_PERSONALIZATION", True):
+                    try:
+                        personalization_service = get_personalization_service()
+                        # Extract topics from KG entities if available
+                        detected_topics = None
+                        if kg_context:
+                            # Simple topic extraction from KG entities mentioned
+                            detected_topics = [e.strip() for e in kg_context.split("- ")[1:] if ":" in e]
+                            detected_topics = [t.split(":")[0] for t in detected_topics[:5]]
+
+                        await personalization_service.record_query(
+                            user_id=user.user_id,
+                            query=request.message,
+                            topics=detected_topics,
+                        )
+                    except Exception as e:
+                        logger.debug("Failed to record query for personalization", error=str(e))
+
             # Convert context sufficiency result to API format
             context_sufficiency_info = None
             if response.context_sufficiency:
@@ -733,7 +893,7 @@ async def create_chat_completion(
     except Exception as e:
         import traceback
         logger.error("Chat completion failed", error=str(e), traceback=traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Chat completion failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Chat completion failed: {str(e)}")
 
 
 @router.post("/completions/stream")
@@ -1108,7 +1268,7 @@ async def list_sessions(
 
     except Exception as e:
         logger.error("Failed to list sessions", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to list sessions: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to list sessions: {str(e)}")
 
 
 @router.get("/sessions/{session_id}", response_model=SessionMessagesResponse)
@@ -1133,7 +1293,7 @@ async def get_session(
             session = result.scalar_one_or_none()
 
             if not session:
-                raise HTTPException(status_code=404, detail="Session not found")
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
             # Convert messages to response format
             messages = []
@@ -1167,7 +1327,7 @@ async def get_session(
         raise
     except Exception as e:
         logger.error("Failed to get session", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to get session: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get session: {str(e)}")
 
 
 @router.delete("/sessions/{session_id}")
@@ -1188,7 +1348,7 @@ async def delete_session(
             session = result.scalar_one_or_none()
 
             if not session:
-                raise HTTPException(status_code=404, detail="Session not found")
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
             # Delete the session (cascade will delete messages)
             await db.delete(session)
@@ -1200,7 +1360,7 @@ async def delete_session(
         raise
     except Exception as e:
         logger.error("Failed to delete session", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to delete session: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete session: {str(e)}")
 
 
 @router.delete("/sessions")
@@ -1217,7 +1377,7 @@ async def delete_all_sessions(
 
     if not confirm:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Must confirm deletion with confirm=true query parameter"
         )
 
@@ -1240,7 +1400,7 @@ async def delete_all_sessions(
         raise
     except Exception as e:
         logger.error("Failed to delete all sessions", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to delete all sessions: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete all sessions: {str(e)}")
 
 
 class BulkDeleteRequest(BaseModel):
@@ -1283,7 +1443,7 @@ async def bulk_delete_sessions(
 
     except Exception as e:
         logger.error("Failed to bulk delete sessions", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to bulk delete sessions: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to bulk delete sessions: {str(e)}")
 
 
 @router.patch("/sessions/{session_id}/title")
@@ -1305,7 +1465,7 @@ async def update_session_title(
             session = result.scalar_one_or_none()
 
             if not session:
-                raise HTTPException(status_code=404, detail="Session not found")
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
             # Update the title
             session.title = title
@@ -1317,7 +1477,7 @@ async def update_session_title(
         raise
     except Exception as e:
         logger.error("Failed to update session title", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to update title: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to update title: {str(e)}")
 
 
 @router.post("/sessions/new", response_model=SessionResponse)
@@ -1352,7 +1512,7 @@ async def create_session(
 
     except Exception as e:
         logger.error("Failed to create session", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to create session: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create session: {str(e)}")
 
 
 @router.post("/feedback")
@@ -1383,7 +1543,7 @@ async def submit_feedback(
             # Get valid user UUID from the database
             db_user_id = await get_db_user_id(db, user.user_id, user.email)
             if not db_user_id:
-                raise HTTPException(status_code=400, detail="Could not find user in database")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not find user in database")
 
             # Check if there's an agent trajectory for this message (for agent mode)
             trajectory_id = None
@@ -1427,6 +1587,44 @@ async def submit_feedback(
                 rating=rating,
                 has_trajectory=trajectory_id is not None,
             )
+
+            # Phase 66: Record feedback for personalization learning
+            from backend.core.config import settings as app_settings
+            if getattr(app_settings, "ENABLE_USER_PERSONALIZATION", True):
+                try:
+                    personalization_service = get_personalization_service()
+
+                    # Get the original message to extract query and response details
+                    message_query = select(ChatMessageModel).where(
+                        ChatMessageModel.id == message_id
+                    )
+                    msg_result = await db.execute(message_query)
+                    chat_message = msg_result.scalar_one_or_none()
+
+                    if chat_message:
+                        # Determine response format from content structure
+                        response_format = "prose"
+                        if chat_message.content.startswith(("- ", "* ", "1.")):
+                            response_format = "bullets"
+                        elif "\n## " in chat_message.content or "\n### " in chat_message.content:
+                            response_format = "structured"
+
+                        await personalization_service.record_feedback(
+                            user_id=user.user_id,
+                            query=chat_message.content[:500] if chat_message.role == MessageRole.USER else "",
+                            response_id=str(message_id),
+                            rating=rating,
+                            feedback_text=comment,
+                            response_length=len(chat_message.content),
+                            response_format=response_format,
+                        )
+                        logger.debug(
+                            "Recorded feedback for personalization",
+                            user_id=user.user_id[:8] if user.user_id else "unknown",
+                            rating=rating,
+                        )
+                except Exception as e:
+                    logger.debug("Failed to record personalization feedback", error=str(e))
 
             return {
                 "message": "Feedback submitted",
@@ -1523,7 +1721,7 @@ async def get_session_llm_override(
 
     except Exception as e:
         logger.error("Failed to get session LLM config", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to get session LLM config: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get session LLM config: {str(e)}")
 
 
 @router.put("/sessions/{session_id}/llm", response_model=SessionLLMOverrideResponse)
@@ -1556,7 +1754,7 @@ async def set_session_llm_override(
 
             if not provider:
                 raise HTTPException(
-                    status_code=400,
+                    status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Provider not found or not active",
                 )
 
@@ -1613,7 +1811,7 @@ async def set_session_llm_override(
         raise
     except Exception as e:
         logger.error("Failed to set session LLM override", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to set session LLM override: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to set session LLM override: {str(e)}")
 
 
 @router.delete("/sessions/{session_id}/llm")
@@ -1643,7 +1841,7 @@ async def delete_session_llm_override(
 
             if not override:
                 raise HTTPException(
-                    status_code=404,
+                    status_code=status.HTTP_404_NOT_FOUND,
                     detail="No LLM override found for this session",
                 )
 
@@ -1662,7 +1860,7 @@ async def delete_session_llm_override(
         raise
     except Exception as e:
         logger.error("Failed to delete session LLM override", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to delete session LLM override: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete session LLM override: {str(e)}")
 
 
 # =============================================================================
@@ -1707,7 +1905,7 @@ async def export_chat_session(
             session = result.scalar_one_or_none()
 
             if not session:
-                raise HTTPException(status_code=404, detail="Session not found")
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
             messages = sorted(session.messages, key=lambda m: m.created_at)
 
@@ -1793,7 +1991,7 @@ async def export_chat_session(
         raise
     except Exception as e:
         logger.error("Failed to export session", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Export failed: {str(e)}")
 
 
 @router.get("/sessions/{session_id}/token-count")
@@ -1816,7 +2014,7 @@ async def get_session_token_count(session_id: UUID):
             session = result.scalar_one_or_none()
 
             if not session:
-                raise HTTPException(status_code=404, detail="Session not found")
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
             # Get token sum
             token_query = (
@@ -1845,7 +2043,7 @@ async def get_session_token_count(session_id: UUID):
         raise
     except Exception as e:
         logger.error("Failed to get token count", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to get token count: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get token count: {str(e)}")
 
 
 # =============================================================================
@@ -1986,3 +2184,218 @@ async def parse_mentions(
             for m in parsed.mentions
         ],
     )
+
+
+# =============================================================================
+# Phase 65: Advanced RAG Enhancement Endpoints
+# =============================================================================
+
+
+class LTRFeedbackRequest(BaseModel):
+    """Request to record user click feedback for LTR training."""
+    query: str = Field(..., description="The search query")
+    doc_id: str = Field(..., description="ID of the clicked document/chunk")
+    rank: int = Field(..., description="Original rank position (0-indexed)")
+    clicked: bool = Field(True, description="Whether the result was clicked")
+    dwell_time_seconds: float = Field(0.0, description="Time spent on the result")
+
+
+class LTRFeedbackResponse(BaseModel):
+    """Response from LTR feedback recording."""
+    success: bool
+    message: str
+    total_feedback_samples: int
+
+
+class LTRTrainRequest(BaseModel):
+    """Request to trigger LTR model training."""
+    force: bool = Field(False, description="Force training even if sample threshold not met")
+
+
+class LTRTrainResponse(BaseModel):
+    """Response from LTR training."""
+    success: bool
+    message: str
+    metrics: Optional[dict] = None
+
+
+class Phase65StatsResponse(BaseModel):
+    """Statistics for all Phase 65 features."""
+    initialized: bool
+    config: dict
+    semantic_cache: Optional[dict] = None
+    ltr: Optional[dict] = None
+    spell_correction: Optional[dict] = None
+    gpu_search: Optional[dict] = None
+
+
+class SpellCorrectionRequest(BaseModel):
+    """Request to test spell correction."""
+    query: str = Field(..., description="Query to spell-correct")
+
+
+class SpellCorrectionResponse(BaseModel):
+    """Response from spell correction."""
+    original: str
+    corrected: str
+    is_corrected: bool
+    corrections: list
+    confidence: float
+
+
+@router.post("/ltr/feedback", response_model=LTRFeedbackResponse)
+async def record_ltr_feedback(
+    request: LTRFeedbackRequest,
+    user: AuthenticatedUser = None,
+):
+    """
+    Record user click feedback for Learning-to-Rank model training.
+
+    Phase 65: This endpoint collects implicit feedback (clicks, dwell time)
+    to train an XGBoost-based ranker that learns to predict user preferences.
+
+    Call this when a user clicks on a search result.
+    """
+    try:
+        from backend.services.phase65_integration import get_phase65_pipeline
+
+        pipeline = await get_phase65_pipeline()
+
+        await pipeline.record_click_feedback(
+            query=request.query,
+            doc_id=request.doc_id,
+            rank=request.rank,
+            clicked=request.clicked,
+            dwell_time_seconds=request.dwell_time_seconds,
+        )
+
+        stats = pipeline.get_stats()
+        ltr_samples = stats.get("ltr", {}).get("feedback_samples", 0)
+
+        return LTRFeedbackResponse(
+            success=True,
+            message="Feedback recorded successfully",
+            total_feedback_samples=ltr_samples,
+        )
+
+    except Exception as e:
+        logger.error("Failed to record LTR feedback", error=str(e))
+        return LTRFeedbackResponse(
+            success=False,
+            message=f"Failed to record feedback: {str(e)}",
+            total_feedback_samples=0,
+        )
+
+
+@router.post("/ltr/train", response_model=LTRTrainResponse)
+async def train_ltr_model(
+    request: LTRTrainRequest,
+    user: AuthenticatedUser = None,
+):
+    """
+    Trigger Learning-to-Rank model training.
+
+    Phase 65: Trains an XGBoost ranker on collected click feedback.
+    Requires minimum 100 feedback samples (or force=True to override).
+
+    The trained model improves search result ordering based on user behavior.
+    """
+    try:
+        from backend.services.phase65_integration import get_phase65_pipeline
+
+        pipeline = await get_phase65_pipeline()
+
+        result = await pipeline.train_ltr_model(force=request.force)
+
+        if result.get("status") == "ltr_not_enabled":
+            return LTRTrainResponse(
+                success=False,
+                message="LTR is not enabled in configuration",
+                metrics=None,
+            )
+
+        return LTRTrainResponse(
+            success=result.get("status") == "trained",
+            message=result.get("message", "Training complete"),
+            metrics=result.get("metrics"),
+        )
+
+    except Exception as e:
+        logger.error("Failed to train LTR model", error=str(e))
+        return LTRTrainResponse(
+            success=False,
+            message=f"Training failed: {str(e)}",
+            metrics=None,
+        )
+
+
+@router.get("/phase65/stats", response_model=Phase65StatsResponse)
+async def get_phase65_stats(
+    user: AuthenticatedUser = None,
+):
+    """
+    Get statistics for all Phase 65 features.
+
+    Returns status and metrics for:
+    - Semantic Cache (hit rate, entries)
+    - Learning-to-Rank (trained status, feedback samples)
+    - Spell Correction (vocabulary size)
+    - GPU Search (backend, index size)
+    """
+    try:
+        from backend.services.phase65_integration import get_phase65_pipeline
+
+        pipeline = await get_phase65_pipeline()
+        stats = pipeline.get_stats()
+
+        return Phase65StatsResponse(
+            initialized=stats.get("initialized", False),
+            config=stats.get("config", {}),
+            semantic_cache=stats.get("semantic_cache"),
+            ltr=stats.get("ltr"),
+            spell_correction=stats.get("spell_correction"),
+            gpu_search=stats.get("gpu_search"),
+        )
+
+    except Exception as e:
+        logger.error("Failed to get Phase 65 stats", error=str(e))
+        return Phase65StatsResponse(
+            initialized=False,
+            config={"error": str(e)},
+        )
+
+
+@router.post("/spell-correct", response_model=SpellCorrectionResponse)
+async def spell_correct_query(
+    request: SpellCorrectionRequest,
+    user: AuthenticatedUser = None,
+):
+    """
+    Test spell correction on a query.
+
+    Phase 65: Uses BK-tree based spell correction with O(log n) lookup.
+    Supports domain vocabulary learned from the document corpus.
+    """
+    try:
+        from backend.services.spell_correction import get_spell_corrector
+
+        corrector = get_spell_corrector()
+        result = await corrector.correct(request.query)
+
+        return SpellCorrectionResponse(
+            original=result.original,
+            corrected=result.corrected,
+            is_corrected=result.is_corrected,
+            corrections=[(c[0], c[1], c[2]) for c in result.corrections],
+            confidence=result.confidence,
+        )
+
+    except Exception as e:
+        logger.error("Spell correction failed", error=str(e))
+        return SpellCorrectionResponse(
+            original=request.query,
+            corrected=request.query,
+            is_corrected=False,
+            corrections=[],
+            confidence=0.0,
+        )

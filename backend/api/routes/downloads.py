@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse, JSONResponse
 
 router = APIRouter(prefix="/downloads", tags=["downloads"])
@@ -18,7 +18,7 @@ CLI_SOURCE_PATH = Path(__file__).parent.parent.parent.parent / "desktop-clients"
 def create_cli_zip() -> Path:
     """Create a zip file of the CLI tool for download."""
     if not CLI_SOURCE_PATH.exists():
-        raise HTTPException(status_code=404, detail="CLI tool not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CLI tool not found")
 
     # Create temp directory for the zip
     temp_dir = Path(tempfile.gettempdir()) / "mandala-downloads"
@@ -62,14 +62,14 @@ async def download_cli():
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create download: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create download: {str(e)}")
 
 
 @router.get("/cli/info")
 async def get_cli_info():
     """Get information about the CLI tool."""
     if not CLI_SOURCE_PATH.exists():
-        raise HTTPException(status_code=404, detail="CLI tool not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CLI tool not found")
 
     # Read version from pyproject.toml
     pyproject_path = CLI_SOURCE_PATH / "pyproject.toml"

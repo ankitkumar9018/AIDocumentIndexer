@@ -1,0 +1,336 @@
+{
+  "name": "Intelligent Customer Support Workflow",
+  "description": "Multi-agent workflow for handling customer inquiries with escalation, knowledge base search, and sentiment analysis",
+  "version": "1.0.0",
+  "trigger": "WEBHOOK",
+
+  "metadata": {
+    "category": "customer_service",
+    "complexity": "intermediate",
+    "patterns_used": ["react", "routing", "consensus_validation", "human_escalation"],
+    "estimated_response_time_seconds": "5-30"
+  },
+
+  "variables": {
+    "input": {
+      "customer_message": {"type": "string", "required": true},
+      "customer_id": {"type": "string", "required": false},
+      "channel": {"type": "string", "default": "chat", "options": ["chat", "email", "voice"]},
+      "language": {"type": "string", "default": "auto"},
+      "priority": {"type": "string", "default": "normal", "options": ["low", "normal", "high", "urgent"]}
+    }
+  },
+
+  "config": {
+    "max_response_time_seconds": 30,
+    "enable_memory": true,
+    "enable_sentiment_analysis": true,
+    "escalation_threshold": 0.3
+  },
+
+  "nodes": [
+    {
+      "id": "start",
+      "type": "START",
+      "name": "Receive Customer Message",
+      "next": ["analyze_intent"]
+    },
+
+    {
+      "id": "analyze_intent",
+      "type": "AGENT",
+      "name": "Intent & Sentiment Analyzer",
+      "description": "Analyze customer intent and emotional state",
+      "config": {
+        "agent_type": "analyzer",
+        "parameters": {
+          "message": "{{input.customer_message}}",
+          "detect_intent": true,
+          "detect_sentiment": true,
+          "detect_urgency": true,
+          "detect_language": true
+        },
+        "llm_config": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.1
+        },
+        "output": {
+          "intent": "string",
+          "sentiment_score": "number",
+          "urgency": "string",
+          "detected_language": "string",
+          "topics": "array"
+        }
+      },
+      "next": ["route_by_intent"]
+    },
+
+    {
+      "id": "route_by_intent",
+      "type": "CONDITION",
+      "name": "Route by Intent",
+      "description": "Route to appropriate handler based on detected intent",
+      "config": {
+        "conditions": [
+          {"condition": "{{runtime.intent}} == 'complaint' || {{runtime.sentiment_score}} < 0.3", "branch": "handle_complaint"},
+          {"condition": "{{runtime.intent}} == 'question'", "branch": "search_knowledge_base"},
+          {"condition": "{{runtime.intent}} == 'request'", "branch": "handle_request"},
+          {"condition": "{{runtime.intent}} == 'feedback'", "branch": "handle_feedback"}
+        ],
+        "default_branch": "general_response"
+      }
+    },
+
+    {
+      "id": "search_knowledge_base",
+      "type": "AGENT",
+      "name": "Knowledge Base Search",
+      "description": "ReAct pattern: Search documents and knowledge base for answers",
+      "config": {
+        "agent_type": "researcher",
+        "task": "knowledge_search",
+        "parameters": {
+          "query": "{{input.customer_message}}",
+          "search_collections": ["faq", "documentation", "policies"],
+          "max_results": 5,
+          "use_graphrag": true
+        },
+        "tools": ["document_search", "knowledge_graph_query", "web_search"],
+        "llm_config": {
+          "model": "gpt-4o",
+          "temperature": 0.3
+        }
+      },
+      "next": ["check_answer_confidence"]
+    },
+
+    {
+      "id": "check_answer_confidence",
+      "type": "CONDITION",
+      "name": "Check Answer Confidence",
+      "config": {
+        "conditions": [
+          {"condition": "{{runtime.confidence}} >= 0.7", "branch": "generate_response"},
+          {"condition": "{{runtime.confidence}} >= 0.4", "branch": "request_clarification"}
+        ],
+        "default_branch": "escalate_to_human"
+      }
+    },
+
+    {
+      "id": "handle_complaint",
+      "type": "AGENT",
+      "name": "Complaint Handler",
+      "description": "Empathetic handling of customer complaints",
+      "config": {
+        "agent_type": "specialist",
+        "task": "complaint_handling",
+        "parameters": {
+          "message": "{{input.customer_message}}",
+          "customer_id": "{{input.customer_id}}",
+          "sentiment": "{{runtime.sentiment_score}}",
+          "use_empathy_template": true,
+          "offer_compensation": "{{runtime.urgency}} == 'high'"
+        },
+        "llm_config": {
+          "model": "gpt-4o",
+          "temperature": 0.5,
+          "system_prompt": "You are an empathetic customer service agent. Acknowledge the customer's frustration, apologize sincerely, and offer concrete solutions. Never be defensive."
+        }
+      },
+      "next": ["check_escalation_needed"]
+    },
+
+    {
+      "id": "check_escalation_needed",
+      "type": "CONDITION",
+      "name": "Check Escalation",
+      "config": {
+        "condition": "{{runtime.sentiment_score}} < {{config.escalation_threshold}} || {{runtime.requires_human}} == true",
+        "true_branch": "escalate_to_human",
+        "false_branch": "generate_response"
+      }
+    },
+
+    {
+      "id": "handle_request",
+      "type": "AGENT",
+      "name": "Request Handler",
+      "config": {
+        "agent_type": "processor",
+        "task": "handle_request",
+        "parameters": {
+          "request": "{{input.customer_message}}",
+          "customer_id": "{{input.customer_id}}"
+        },
+        "tools": ["create_ticket", "update_account", "process_refund", "schedule_callback"]
+      },
+      "next": ["generate_response"]
+    },
+
+    {
+      "id": "handle_feedback",
+      "type": "AGENT",
+      "name": "Feedback Handler",
+      "config": {
+        "agent_type": "collector",
+        "task": "process_feedback",
+        "parameters": {
+          "feedback": "{{input.customer_message}}",
+          "sentiment": "{{runtime.sentiment_score}}",
+          "store_feedback": true
+        }
+      },
+      "next": ["generate_response"]
+    },
+
+    {
+      "id": "general_response",
+      "type": "AGENT",
+      "name": "General Response Agent",
+      "config": {
+        "agent_type": "responder",
+        "task": "general_conversation",
+        "parameters": {
+          "message": "{{input.customer_message}}",
+          "use_memory": true
+        },
+        "llm_config": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.7
+        }
+      },
+      "next": ["generate_response"]
+    },
+
+    {
+      "id": "request_clarification",
+      "type": "ACTION",
+      "name": "Request Clarification",
+      "config": {
+        "action": "generate_clarification_question",
+        "parameters": {
+          "context": "{{runtime.search_results}}",
+          "ambiguous_topics": "{{runtime.ambiguous_topics}}"
+        }
+      },
+      "next": ["send_response"]
+    },
+
+    {
+      "id": "escalate_to_human",
+      "type": "HUMAN_APPROVAL",
+      "name": "Escalate to Human Agent",
+      "config": {
+        "escalation_type": "transfer",
+        "priority": "{{input.priority}}",
+        "context": {
+          "customer_message": "{{input.customer_message}}",
+          "sentiment": "{{runtime.sentiment_score}}",
+          "intent": "{{runtime.intent}}",
+          "ai_analysis": "{{runtime.analysis_summary}}"
+        },
+        "message": "Customer requires human assistance",
+        "timeout_minutes": 5
+      },
+      "next": ["end"]
+    },
+
+    {
+      "id": "generate_response",
+      "type": "AGENT",
+      "name": "Response Generator",
+      "description": "Generate final customer-facing response",
+      "config": {
+        "agent_type": "generator",
+        "task": "generate_response",
+        "parameters": {
+          "context": "{{runtime.context}}",
+          "tone": "{{runtime.sentiment_score}} < 0.5 ? 'empathetic' : 'friendly'",
+          "language": "{{runtime.detected_language}}",
+          "channel": "{{input.channel}}",
+          "include_next_steps": true
+        },
+        "llm_config": {
+          "model": "gpt-4o",
+          "temperature": 0.6,
+          "max_tokens": 500
+        },
+        "validation": {
+          "check_profanity": true,
+          "check_pii": true,
+          "check_promises": true
+        }
+      },
+      "next": ["consensus_validation"]
+    },
+
+    {
+      "id": "consensus_validation",
+      "type": "AGENT",
+      "name": "Response Validator",
+      "description": "Consensus pattern: Validate response quality before sending",
+      "config": {
+        "agent_type": "validator",
+        "task": "validate_response",
+        "parameters": {
+          "response": "{{runtime.generated_response}}",
+          "original_query": "{{input.customer_message}}",
+          "validation_criteria": ["relevance", "helpfulness", "tone", "accuracy"]
+        },
+        "llm_config": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.1
+        }
+      },
+      "next": ["send_response"]
+    },
+
+    {
+      "id": "send_response",
+      "type": "ACTION",
+      "name": "Send Response",
+      "config": {
+        "action": "send_customer_response",
+        "parameters": {
+          "response": "{{runtime.final_response}}",
+          "channel": "{{input.channel}}",
+          "customer_id": "{{input.customer_id}}"
+        }
+      },
+      "next": ["log_interaction"]
+    },
+
+    {
+      "id": "log_interaction",
+      "type": "ACTION",
+      "name": "Log Interaction",
+      "config": {
+        "action": "log_customer_interaction",
+        "parameters": {
+          "customer_id": "{{input.customer_id}}",
+          "message": "{{input.customer_message}}",
+          "response": "{{runtime.final_response}}",
+          "intent": "{{runtime.intent}}",
+          "sentiment": "{{runtime.sentiment_score}}",
+          "resolution_status": "{{runtime.resolution_status}}"
+        }
+      },
+      "next": ["end"]
+    },
+
+    {
+      "id": "end",
+      "type": "END",
+      "name": "Complete"
+    }
+  ],
+
+  "error_handling": {
+    "on_error": {
+      "action": "fallback_response",
+      "message": "I apologize, but I'm having trouble processing your request. Let me connect you with a human agent who can help.",
+      "escalate": true
+    }
+  }
+}

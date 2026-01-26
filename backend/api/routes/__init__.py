@@ -13,6 +13,8 @@ from backend.api.routes.agent import router as agent_router
 from backend.api.routes.folders import router as folders_router
 from backend.api.routes.preferences import router as preferences_router
 from backend.api.routes.content_review import router as content_review_router
+from backend.api.routes.evaluation import router as evaluation_router
+from backend.api.routes.cost_optimization import router as cost_optimization_router
 
 __all__ = [
     "documents_router",
@@ -23,4 +25,6 @@ __all__ = [
     "folders_router",
     "preferences_router",
     "content_review_router",
+    "evaluation_router",
+    "cost_optimization_router",
 ]

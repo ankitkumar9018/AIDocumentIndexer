@@ -35,6 +35,7 @@ class OCRManager:
         self._paddle_engine: Optional[Any] = None
         self._tesseract_engine: Optional[Any] = None
         self._easyocr_engine: Optional[Any] = None
+        self._mistral_engine: Optional[Any] = None  # Phase 68: Mistral OCR 3
         self._initialized_provider: Optional[str] = None
 
     async def get_model_info(self) -> Dict[str, Any]:
@@ -278,6 +279,10 @@ class OCRManager:
             if provider in ["tesseract", "auto"]:
                 self._initialize_tesseract()
 
+            # Phase 68: Mistral OCR 3 - highest accuracy for complex documents
+            if provider in ["mistral", "mistral-ocr", "auto"]:
+                await self._initialize_mistral_ocr()
+
             self._initialized_provider = provider
             logger.info("OCR engine initialized", provider=provider)
 
@@ -370,11 +375,47 @@ class OCRManager:
             logger.error("EasyOCR initialization failed", error=str(e))
             raise RuntimeError(f"EasyOCR initialization failed: {e}")
 
+    async def _initialize_mistral_ocr(self) -> None:
+        """Initialize Mistral OCR 3 engine.
+
+        Phase 68: Mistral OCR 3 provides 74% win rate over previous versions
+        with superior handling of forms, tables, and handwriting.
+        """
+        try:
+            from backend.services.mistral_ocr import MistralOCRService, MistralOCRModel
+        except ImportError:
+            raise ImportError(
+                "Mistral OCR service not available. Check mistral_ocr.py module."
+            )
+
+        settings = await self.settings_service.get_all_settings()
+
+        # Get model from settings (default to OCR 3)
+        model_name = settings.get("ocr.mistral.model", "mistral-ocr-3")
+        model = MistralOCRModel.OCR_3 if "3" in model_name else MistralOCRModel.OCR_2
+
+        # Initialize service
+        api_key = settings.get("ocr.mistral.api_key") or os.getenv("MISTRAL_API_KEY")
+
+        if not api_key:
+            logger.warning(
+                "Mistral API key not configured. "
+                "Set MISTRAL_API_KEY env var or ocr.mistral.api_key setting."
+            )
+            return
+
+        self._mistral_engine = MistralOCRService(
+            api_key=api_key,
+            model=model,
+        )
+
+        logger.info("Mistral OCR initialized", model=model.value)
+
     def get_ocr_engine(self) -> Any:
         """Get the initialized OCR engine.
 
         Returns:
-            OCR engine instance (PaddleOCR, EasyOCR, or pytesseract)
+            OCR engine instance (PaddleOCR, EasyOCR, pytesseract, or MistralOCR)
 
         Raises:
             RuntimeError: If OCR not initialized
@@ -399,6 +440,12 @@ class OCRManager:
                 raise RuntimeError("Tesseract engine not available")
             return self._tesseract_engine
 
+        # Phase 68: Mistral OCR 3
+        if self._initialized_provider in ["mistral", "mistral-ocr"]:
+            if self._mistral_engine is None:
+                raise RuntimeError("Mistral OCR engine not available")
+            return self._mistral_engine
+
         raise RuntimeError(f"Unknown OCR provider: {self._initialized_provider}")
 
     def get_paddle_engine(self) -> Optional[Any]:
@@ -413,6 +460,13 @@ class OCRManager:
         """Get Tesseract engine if available."""
         return self._tesseract_engine
 
+    def get_mistral_engine(self) -> Optional[Any]:
+        """Get Mistral OCR engine if available.
+
+        Phase 68: Returns MistralOCRService instance.
+        """
+        return self._mistral_engine
+
     async def check_model_updates(self) -> Dict[str, Any]:
         """Check if newer PaddleOCR models are available.
 
@@ -420,8 +474,9 @@ class OCRManager:
             dict: Update information including available versions
         """
         try:
-            import requests
+            import httpx
             from packaging import version as pkg_version
+            from backend.services.http_client import get_http_client
 
             # Check PaddleOCR version
             try:
@@ -433,11 +488,12 @@ class OCRManager:
                     "message": "PaddleOCR not installed",
                 }
 
-            # Check PyPI for latest version
+            # Check PyPI for latest version using async client
             try:
-                response = requests.get(
+                client = await get_http_client()
+                response = await client.get(
                     "https://pypi.org/pypi/paddleocr/json",
-                    timeout=5
+                    timeout=5.0
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -457,7 +513,7 @@ class OCRManager:
                         "status": "error",
                         "message": f"Failed to fetch version info: HTTP {response.status_code}",
                     }
-            except requests.RequestException as e:
+            except httpx.HTTPError as e:
                 return {
                     "status": "error",
                     "message": f"Network error: {str(e)}",
@@ -525,5 +581,6 @@ class OCRManager:
         self._paddle_engine = None
         self._easyocr_engine = None
         self._tesseract_engine = None
+        self._mistral_engine = None  # Phase 68
         self._initialized_provider = None
         logger.info("OCR resources cleaned up")

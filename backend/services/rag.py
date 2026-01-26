@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import traceback
 import structlog
 
 # Token counting
@@ -35,11 +36,12 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-# LangChain chains (modern import paths for v0.3+)
+# LangChain chains (correct import paths for v0.3+)
 from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 
-# LangChain memory
+# LangChain memory (Phase 87 audit: still valid in 0.3.x;
+# future migration to langgraph state management recommended)
 from langchain.memory import ConversationBufferWindowMemory
 
 # Vector store and retrieval
@@ -96,6 +98,75 @@ from backend.services.self_rag import (
     SelfRAGResult,
     get_self_rag,
 )
+# Phase 66: Adaptive Router for intelligent query routing
+from backend.services.adaptive_router import (
+    AdaptiveRouter,
+    RoutingDecision,
+    RetrievalStrategy,
+    QueryComplexity,
+    get_adaptive_router,
+)
+# Phase 66: Advanced RAG utilities (RAG-Fusion, context compression, etc.)
+from backend.services.advanced_rag_utils import (
+    RAGFusion,
+    ContextCompressor,
+    ContextReorderer,
+    StepBackPrompter,
+    apply_rag_fusion,
+    compress_context,
+    reorder_for_attention,
+    apply_stepback_prompting,
+    FusionResult,
+    CompressedContext,
+    StepBackResult,
+)
+# Phase 66: LazyGraphRAG for cost-efficient knowledge graph retrieval (99% cost reduction)
+from backend.services.lazy_graphrag import (
+    LazyGraphRAGService,
+    LazyGraphRAGConfig,
+    LazyGraphContext,
+    get_lazy_graphrag_service,
+    lazy_graph_retrieve,
+)
+# Phase 58: HybridRetriever for LightRAG + RAPTOR + WARP + ColPali fusion
+from backend.services.hybrid_retriever import (
+    HybridRetriever,
+    HybridConfig,
+    HybridResult,
+    get_hybrid_retriever,
+)
+# Phase 59: Multilingual cross-lingual search
+try:
+    from backend.services.multilingual_search import (
+        CrossLingualRetriever,
+        MultilingualEmbeddingService,
+        MultilingualSearchConfig,
+        Language,
+        get_cross_lingual_retriever,
+    )
+    MULTILINGUAL_SEARCH_AVAILABLE = True
+except ImportError:
+    MULTILINGUAL_SEARCH_AVAILABLE = False
+    CrossLingualRetriever = None
+    Language = None
+
+# Phase 65: Advanced enhancements (spell correction, semantic cache, LTR, streaming citations)
+try:
+    from backend.services.phase65_integration import (
+        Phase65Pipeline,
+        Phase65Config,
+        get_phase65_pipeline,
+        get_phase65_pipeline_sync,
+        preprocess_query as phase65_preprocess_query,
+        rerank_results as phase65_rerank_results,
+        cache_query_result as phase65_cache_result,
+    )
+    PHASE65_AVAILABLE = True
+except ImportError:
+    PHASE65_AVAILABLE = False
+    Phase65Pipeline = None
+    Phase65Config = None
+
 # Note: KnowledgeGraphService is imported lazily inside _enhance_with_knowledge_graph
 # to avoid circular imports (knowledge_graph -> llm -> services.__init__ -> rag)
 
@@ -142,7 +213,188 @@ from backend.services.rag_module.prompts import (
     DEEPSEEK_SMALL_TEMPLATE,
 )
 
+# Phase 70: Resilience patterns for LLM calls
+from backend.services.resilience import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitBreakerOpen,
+    retry_with_backoff,
+    RetryConfig,
+)
+
 logger = structlog.get_logger(__name__)
+
+
+# =============================================================================
+# Phase 82: Anthropic Prompt Caching Helper
+# =============================================================================
+
+def _make_system_message(content: str, model_name: Optional[str] = None) -> SystemMessage:
+    """
+    Create a SystemMessage with Anthropic prompt caching when applicable.
+
+    Anthropic's prompt caching caches the system prompt prefix, saving 50-60%
+    on repeated calls with the same system prompt. The `cache_control` block
+    marks the system message as cacheable for up to 5 minutes.
+
+    Args:
+        content: System prompt text
+        model_name: Model name to detect Anthropic models
+
+    Returns:
+        SystemMessage with cache_control if using Anthropic
+    """
+    is_anthropic = model_name and any(
+        k in model_name.lower() for k in ("claude", "anthropic")
+    )
+    if is_anthropic and len(content) > 100:
+        return SystemMessage(
+            content=content,
+            additional_kwargs={"cache_control": {"type": "ephemeral"}},
+        )
+    return SystemMessage(content=content)
+
+
+# =============================================================================
+# Phase 70: Resilient LLM Call Wrapper
+# =============================================================================
+
+# Circuit breakers for different LLM providers (prevent cascading failures)
+_llm_circuit_breakers: Dict[str, CircuitBreaker] = {}
+_llm_circuit_breaker_lock = asyncio.Lock()
+
+
+async def _get_llm_circuit_breaker(provider: str) -> CircuitBreaker:
+    """Get or create a circuit breaker for an LLM provider."""
+    async with _llm_circuit_breaker_lock:
+        if provider not in _llm_circuit_breakers:
+            config = CircuitBreakerConfig(
+                failure_threshold=int(os.getenv("LLM_CIRCUIT_BREAKER_THRESHOLD", "5")),
+                recovery_timeout=float(os.getenv("LLM_CIRCUIT_BREAKER_RECOVERY", "60.0")),
+                success_threshold=2,
+                timeout=float(os.getenv("LLM_CALL_TIMEOUT", "120.0")),
+            )
+            _llm_circuit_breakers[provider] = CircuitBreaker(f"llm_{provider}", config)
+        return _llm_circuit_breakers[provider]
+
+
+async def resilient_llm_invoke(
+    llm: Any,
+    messages: List[Any],
+    provider: str = "default",
+    **kwargs,
+) -> Any:
+    """
+    Invoke LLM with circuit breaker and retry patterns.
+
+    Provides:
+    - Circuit breaker: Prevents cascading failures when LLM service is down
+    - Retry with exponential backoff: Handles transient failures
+    - Timeout handling: Prevents hanging on slow responses
+
+    Args:
+        llm: The LangChain LLM instance
+        messages: Messages to send to the LLM
+        provider: Provider name for circuit breaker isolation
+        **kwargs: Additional arguments for LLM invocation
+
+    Returns:
+        LLM response
+
+    Raises:
+        CircuitBreakerOpen: If provider circuit is open
+        Exception: If all retries fail
+    """
+    cb = await _get_llm_circuit_breaker(provider)
+
+    # Define the actual LLM call
+    async def _invoke():
+        return await llm.ainvoke(messages, **kwargs)
+
+    # Configure retry for transient failures
+    retry_config = RetryConfig(
+        max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
+        base_delay=float(os.getenv("LLM_RETRY_BASE_DELAY", "1.0")),
+        max_delay=float(os.getenv("LLM_RETRY_MAX_DELAY", "30.0")),
+        jitter=True,
+    )
+
+    # Apply circuit breaker with retry inside
+    async def _invoke_with_retry():
+        return await retry_with_backoff(_invoke, config=retry_config)
+
+    return await cb.call(_invoke_with_retry)
+
+
+def get_llm_circuit_breaker_stats() -> Dict[str, Any]:
+    """Get stats for all LLM circuit breakers."""
+    return {
+        name: cb.get_stats()
+        for name, cb in _llm_circuit_breakers.items()
+    }
+
+
+async def resilient_llm_stream(
+    llm: Any,
+    messages: List[Any],
+    provider: str = "default",
+    **kwargs,
+) -> Any:
+    """
+    Create LLM stream with circuit breaker protection.
+
+    For streaming, we check the circuit breaker before starting the stream.
+    If the circuit is open, we fail fast. Otherwise, we track the success/failure
+    of the stream initiation.
+
+    Args:
+        llm: The LangChain LLM instance
+        messages: Messages to send to the LLM
+        provider: Provider name for circuit breaker isolation
+        **kwargs: Additional arguments for LLM streaming
+
+    Returns:
+        Async generator of stream chunks
+
+    Raises:
+        CircuitBreakerOpen: If provider circuit is open
+    """
+    cb = await _get_llm_circuit_breaker(provider)
+
+    # Check circuit state before starting stream
+    if cb.state.value == "open":
+        raise CircuitBreakerOpen(
+            f"Circuit breaker '{cb.name}' is open. "
+            f"Service unavailable, will retry after {cb.config.recovery_timeout}s"
+        )
+
+    try:
+        # Create the stream - this is where connection issues typically occur
+        stream = llm.astream(messages, **kwargs)
+
+        # Wrap the stream to track success on first chunk
+        first_chunk = True
+
+        async def tracked_stream():
+            nonlocal first_chunk
+            try:
+                async for chunk in stream:
+                    if first_chunk:
+                        # First chunk received = success
+                        await cb._record_success()
+                        first_chunk = True  # Only record once
+                    yield chunk
+            except Exception as e:
+                # Stream failed mid-way
+                await cb._record_failure(e)
+                raise
+
+        return tracked_stream()
+
+    except Exception as e:
+        # Failed to create stream (connection error)
+        await cb._record_failure(e)
+        raise
 
 
 # NOTE: Source, RAGResponse, StreamChunk, RAGConfig are now imported from
@@ -179,9 +431,9 @@ class SearchResultCache:
         self._cache: Dict[str, Tuple[List[Any], datetime]] = {}
 
     def _make_key(self, query: str, collection: Optional[str], access_tier: int, top_k: int) -> str:
-        """Create cache key from query parameters."""
+        """Create cache key from query parameters (SHA-256 for collision resistance)."""
         key_data = f"{query}|{collection or ''}|{access_tier}|{top_k}"
-        return hashlib.md5(key_data.encode()).hexdigest()
+        return hashlib.sha256(key_data.encode()).hexdigest()
 
     def get(
         self,
@@ -317,9 +569,12 @@ class RAGService:
             cleanup_stale_after_hours=24.0,
         )
 
-        # Cache for session-specific LLM instances
+        # Cache for session-specific LLM instances (TTL + max size to prevent unbounded growth)
         self._session_llm_cache: Dict[str, Any] = {}
         self._session_config_cache: Dict[str, LLMConfigResult] = {}
+        self._session_cache_times: Dict[str, float] = {}
+        self._SESSION_CACHE_TTL = 3600  # 1 hour
+        self._SESSION_CACHE_MAX_SIZE = 200
 
         # Initialize custom vector store if enabled
         if use_custom_vectorstore and vector_store is None:
@@ -413,6 +668,54 @@ class RAGService:
                 enable_regeneration=self.config.self_rag_enable_regeneration,
             )
 
+        # Phase 58: Initialize HybridRetriever for LightRAG + RAPTOR fusion
+        # HybridRetriever is used when LightRAG or RAPTOR is enabled
+        from backend.core.config import settings as core_settings
+        self._hybrid_retriever: Optional[HybridRetriever] = None
+        self._use_hybrid_retriever = (
+            getattr(core_settings, 'ENABLE_LIGHTRAG', False) or
+            getattr(core_settings, 'ENABLE_RAPTOR', False) or
+            getattr(core_settings, 'ENABLE_WARP', False) or
+            getattr(core_settings, 'ENABLE_COLPALI', False)
+        )
+        # HybridRetriever is initialized lazily in _retrieve_with_custom_store
+        # to avoid circular dependencies and allow async initialization
+
+        # Phase 65: Initialize unified pipeline for spell correction, semantic cache, LTR, citations
+        # Pipeline is initialized lazily (async) on first use, but we prepare config here
+        self._phase65_pipeline: Optional["Phase65Pipeline"] = None
+        self._phase65_enabled = PHASE65_AVAILABLE and getattr(
+            core_settings, 'ENABLE_PHASE65', True
+        )
+        if self._phase65_enabled and PHASE65_AVAILABLE:
+            # Initialize synchronously (without calling async initialize)
+            # Full initialization happens on first query
+            self._phase65_pipeline = get_phase65_pipeline_sync()
+
+        # Phase 66: Initialize Adaptive Router for intelligent query routing
+        # Routes queries to optimal strategies (DIRECT, HYBRID, TWO_STAGE, AGENTIC, GRAPH)
+        self._adaptive_router: Optional[AdaptiveRouter] = None
+        self._enable_adaptive_routing = getattr(core_settings, 'ENABLE_ADAPTIVE_ROUTING', True)
+        if self._enable_adaptive_routing:
+            self._adaptive_router = get_adaptive_router(
+                query_classifier=self._query_classifier,
+            )
+
+        # Phase 66: Advanced RAG utilities
+        self._rag_fusion: Optional[RAGFusion] = None
+        self._context_compressor: Optional[ContextCompressor] = None
+        self._stepback_prompter: Optional[StepBackPrompter] = None
+        self._enable_rag_fusion = getattr(core_settings, 'ENABLE_RAG_FUSION', True)
+        self._enable_context_compression = getattr(core_settings, 'ENABLE_CONTEXT_COMPRESSION', True)
+        self._enable_stepback_prompting = getattr(core_settings, 'ENABLE_STEPBACK_PROMPTING', True)
+        self._enable_context_reordering = getattr(core_settings, 'ENABLE_CONTEXT_REORDERING', True)
+
+        # Phase 66: LazyGraphRAG for cost-efficient knowledge graph retrieval
+        # Uses query-time community summarization instead of index-time (99% cost reduction)
+        self._lazy_graphrag: Optional[LazyGraphRAGService] = None
+        self._enable_lazy_graphrag = getattr(core_settings, 'ENABLE_LAZY_GRAPHRAG', True)
+        self._last_lazy_graphrag_context: Optional[LazyGraphContext] = None
+
         logger.info(
             "Initialized RAG service",
             chat_provider=self.config.chat_provider,
@@ -433,6 +736,7 @@ class RAGService:
             knowledge_graph=self.config.enable_knowledge_graph,
             smart_filter=self.config.enable_smart_filter,
             self_rag=self.config.enable_self_rag,
+            hybrid_retriever=self._use_hybrid_retriever,
         )
 
     async def get_runtime_settings(self) -> Dict[str, Any]:
@@ -495,10 +799,20 @@ class RAGService:
         if not self.use_db_config:
             return self.llm, None
 
-        # Check cache first
+        # Check cache first (with TTL validation)
+        import time as _cache_time
         cache_key = session_id or "_default"
+        now = _cache_time.time()
+
         if cache_key in self._session_llm_cache:
-            return self._session_llm_cache[cache_key], self._session_config_cache.get(cache_key)
+            cached_at = self._session_cache_times.get(cache_key, 0)
+            if (now - cached_at) < self._SESSION_CACHE_TTL:
+                return self._session_llm_cache[cache_key], self._session_config_cache.get(cache_key)
+            else:
+                # TTL expired — evict stale entry
+                self._session_llm_cache.pop(cache_key, None)
+                self._session_config_cache.pop(cache_key, None)
+                self._session_cache_times.pop(cache_key, None)
 
         try:
             llm, config = await EnhancedLLMFactory.get_chat_model_for_operation(
@@ -507,9 +821,17 @@ class RAGService:
                 user_id=user_id,
             )
 
-            # Cache the result
+            # Evict oldest entries if cache is full
+            if len(self._session_llm_cache) >= self._SESSION_CACHE_MAX_SIZE:
+                oldest_key = min(self._session_cache_times, key=self._session_cache_times.get)
+                self._session_llm_cache.pop(oldest_key, None)
+                self._session_config_cache.pop(oldest_key, None)
+                self._session_cache_times.pop(oldest_key, None)
+
+            # Cache the result with timestamp
             self._session_llm_cache[cache_key] = llm
             self._session_config_cache[cache_key] = config
+            self._session_cache_times[cache_key] = now
 
             logger.debug(
                 "Got LLM for session",
@@ -534,9 +856,11 @@ class RAGService:
         if session_id:
             self._session_llm_cache.pop(session_id, None)
             self._session_config_cache.pop(session_id, None)
+            self._session_cache_times.pop(session_id, None)
         else:
             self._session_llm_cache.clear()
             self._session_config_cache.clear()
+            self._session_cache_times.clear()
 
     @property
     def embeddings(self):
@@ -701,6 +1025,7 @@ class RAGService:
         enhance_query: Optional[bool] = None,  # Per-query override for query enhancement (expansion + HyDE)
         organization_id: Optional[str] = None,  # Organization ID for multi-tenant isolation
         is_superadmin: bool = False,  # Whether user is a superadmin
+        use_multilingual_search: bool = False,  # Phase 59: Enable cross-lingual search
     ) -> RAGResponse:
         """
         Query the RAG system.
@@ -757,6 +1082,66 @@ class RAGService:
             vectorstore_stats=vectorstore_stats,
         )
 
+        # =============================================================================
+        # Phase 65: Query Preprocessing (Spell Correction + Semantic Cache)
+        # =============================================================================
+        original_question = question  # Preserve original for logging
+        phase65_cache_hit = None
+        query_embedding_for_cache = None
+
+        if self._phase65_enabled and self._phase65_pipeline:
+            try:
+                # Initialize pipeline if not already done (lazy async init)
+                if not self._phase65_pipeline._initialized:
+                    await self._phase65_pipeline.initialize()
+
+                # Get query embedding for semantic cache (reuse later for retrieval)
+                embedding_service = await self._get_embeddings()
+                if embedding_service:
+                    try:
+                        query_embedding_for_cache = await embedding_service.embed_query(question)
+                    except (ValueError, RuntimeError, ConnectionError, TimeoutError) as e:
+                        logger.debug("Could not get query embedding for cache", error=str(e), error_type=type(e).__name__)
+
+                # Preprocess: spell correction + semantic cache check
+                question, phase65_cache_hit = await self._phase65_pipeline.preprocess_query(
+                    question, query_embedding_for_cache
+                )
+
+                if question != original_question:
+                    logger.info(
+                        "Phase 65: Query spell-corrected",
+                        original=original_question[:50],
+                        corrected=question[:50],
+                    )
+
+                if phase65_cache_hit is not None:
+                    logger.info("Phase 65: Semantic cache hit - returning cached result")
+                    # Cache hit returns the full RAGResponse
+                    if isinstance(phase65_cache_hit, RAGResponse):
+                        phase65_cache_hit.metadata = phase65_cache_hit.metadata or {}
+                        phase65_cache_hit.metadata["phase65_cache_hit"] = True
+                        return phase65_cache_hit
+                    # If it's a dict, reconstruct RAGResponse
+                    elif isinstance(phase65_cache_hit, dict):
+                        return RAGResponse(
+                            content=phase65_cache_hit.get("content", ""),
+                            sources=phase65_cache_hit.get("sources", []),
+                            query=original_question,
+                            model=phase65_cache_hit.get("model", "cached"),
+                            confidence_score=phase65_cache_hit.get("confidence_score"),
+                            confidence_level=phase65_cache_hit.get("confidence_level"),
+                            metadata={"phase65_cache_hit": True},
+                        )
+
+            except (ValueError, RuntimeError, ConnectionError, TimeoutError, KeyError, TypeError) as e:
+                logger.warning(
+                    "Phase 65 preprocessing failed, continuing with original query",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
+                question = original_question  # Restore original on error
+
         # PHASE 14: Query classification for adaptive retrieval and prompt selection
         # Classify query intent to optimize retrieval settings and prompt templates
         query_classification: Optional[QueryClassification] = None
@@ -780,9 +1165,103 @@ class RAGService:
                     suggested_top_k=query_classification.suggested_top_k,
                     prompt_template=query_classification.prompt_template,
                 )
-        except Exception as e:
-            logger.warning("Query classification failed, using defaults", error=str(e))
+        except (ValueError, RuntimeError, AttributeError, KeyError) as e:
+            logger.warning("Query classification failed, using defaults", error=str(e), error_type=type(e).__name__)
             query_classification = None
+
+        # =============================================================================
+        # Phase 66: Adaptive Query Routing
+        # =============================================================================
+        # Routes queries to optimal retrieval strategies based on complexity analysis
+        routing_decision: Optional[RoutingDecision] = None
+        use_rag_fusion_for_query = False
+        use_stepback_for_query = False
+        use_context_compression = False
+        use_context_reordering = self._enable_context_reordering
+
+        if self._adaptive_router and self._enable_adaptive_routing:
+            try:
+                # Get adaptive routing settings from database
+                adaptive_routing_enabled = await settings_svc.get_setting("rag.adaptive_routing_enabled")
+                if adaptive_routing_enabled is None:
+                    adaptive_routing_enabled = True  # Default enabled
+
+                if adaptive_routing_enabled:
+                    routing_decision = await self._adaptive_router.route(
+                        query=question,
+                        context={
+                            "session_id": session_id,
+                            "collection_filter": collection_filter,
+                            "query_classification": query_classification.intent.value if query_classification else None,
+                            "max_sources": top_k,
+                        },
+                    )
+
+                    # Apply routing decision to retrieval settings
+                    if routing_decision:
+                        # Override top_k if router suggests different value
+                        if top_k is None or routing_decision.top_k > top_k:
+                            top_k = routing_decision.top_k
+
+                        # Apply advanced RAG techniques based on routing decision
+                        use_rag_fusion_for_query = (
+                            routing_decision.use_rag_fusion and
+                            self._enable_rag_fusion and
+                            await settings_svc.get_setting("rag.rag_fusion_enabled") != False
+                        )
+                        use_stepback_for_query = (
+                            routing_decision.use_step_back and
+                            self._enable_stepback_prompting and
+                            await settings_svc.get_setting("rag.stepback_prompting_enabled") != False
+                        )
+                        use_context_compression = (
+                            self._enable_context_compression and
+                            await settings_svc.get_setting("rag.context_compression_enabled") != False
+                        )
+
+                        # Log routing decision
+                        logger.info(
+                            "Phase 66: Adaptive routing decision",
+                            complexity=routing_decision.complexity.value,
+                            strategy=routing_decision.strategy.value,
+                            top_k=routing_decision.top_k,
+                            use_reranking=routing_decision.use_reranking,
+                            use_hyde=routing_decision.use_hyde,
+                            use_rag_fusion=use_rag_fusion_for_query,
+                            use_stepback=use_stepback_for_query,
+                            confidence=routing_decision.confidence,
+                            reasoning=routing_decision.reasoning[:100] if routing_decision.reasoning else None,
+                        )
+
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, AttributeError) as e:
+                logger.warning("Phase 66: Adaptive routing failed, using defaults", error=str(e), error_type=type(e).__name__)
+                routing_decision = None
+
+        # Phase 62: Tree of Thoughts for complex analytical queries
+        # Use runtime settings for hot-reload (no server restart needed)
+        from backend.services.settings import get_settings_service
+        settings_svc = get_settings_service()
+        tot_enabled = await settings_svc.get_setting("rag.tree_of_thoughts_enabled") or False
+        if (
+            tot_enabled
+            and query_classification
+            and query_classification.intent in [QueryIntent.ANALYTICAL, QueryIntent.MULTI_HOP]
+        ):
+            try:
+                from backend.services.tree_of_thoughts import TreeOfThoughts, ToTConfig
+                tot_max_depth = await settings_svc.get_setting("rag.tot_max_depth") or 3
+                tot_branching = await settings_svc.get_setting("rag.tot_branching_factor") or 3
+                tot = TreeOfThoughts(ToTConfig(
+                    max_depth=tot_max_depth,
+                    branching_factor=tot_branching,
+                    search_strategy='beam',
+                ))
+                tot_result = await tot.solve(problem=question, context=context)
+                if tot_result and tot_result.confidence > 0.7:
+                    logger.info("ToT produced high-confidence answer", confidence=tot_result.confidence)
+                    # ToT provides reasoning path, continue with RAG for citation support
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
+                logger.warning("Tree of Thoughts failed, continuing with standard RAG", error=str(e), error_type=type(e).__name__)
 
         # Check if this is an aggregation query (e.g., "total spending by Company A")
         # Route to specialized handler for numerical extraction and calculation
@@ -825,8 +1304,8 @@ class RAGService:
                         sub_queries=decomposed_query.sub_queries,
                         query_type=decomposed_query.query_type,
                     )
-            except Exception as e:
-                logger.warning("Query decomposition failed", error=str(e))
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
+                logger.warning("Query decomposition failed", error=str(e), error_type=type(e).__name__)
                 decomposed_query = None
 
         # Get LLM for this session (with database-driven config)
@@ -877,9 +1356,106 @@ class RAGService:
                     confidence_level="low",
                 )
 
+        # =============================================================================
+        # Phase 66: RAG-Fusion (Multi-Query with Reciprocal Rank Fusion)
+        # =============================================================================
+        rag_fusion_result: Optional[FusionResult] = None
+        if use_rag_fusion_for_query and self._custom_vectorstore:
+            try:
+                logger.info("Phase 66: Applying RAG-Fusion with multi-query retrieval")
+
+                # Initialize RAG-Fusion if needed
+                if self._rag_fusion is None:
+                    num_variations = await settings_svc.get_setting("rag.rag_fusion_variations") or 4
+                    self._rag_fusion = RAGFusion(
+                        num_variations=num_variations,
+                        rrf_k=60,
+                        include_original=True,
+                    )
+
+                # Generate query variations and fuse results
+                rag_fusion_result = await self._rag_fusion.fuse_results(
+                    query=question,
+                    retriever=self._custom_vectorstore,
+                    session=None,  # Not needed for our vectorstore
+                    top_k=top_k,
+                    llm=llm,
+                )
+
+                logger.info(
+                    "Phase 66: RAG-Fusion complete",
+                    query_variations=len(rag_fusion_result.query_variations),
+                    fused_results=len(rag_fusion_result.fused_results),
+                )
+
+            except Exception as e:
+                logger.warning("Phase 66: RAG-Fusion failed, falling back to standard retrieval", error=str(e))
+                rag_fusion_result = None
+
+        # =============================================================================
+        # Phase 66: Step-Back Prompting (Abstract reasoning for complex queries)
+        # =============================================================================
+        stepback_result: Optional[StepBackResult] = None
+        stepback_context = ""
+        if use_stepback_for_query and self._custom_vectorstore:
+            try:
+                logger.info("Phase 66: Applying Step-Back prompting for complex query")
+
+                # Initialize step-back prompter if needed
+                if self._stepback_prompter is None:
+                    max_background = await settings_svc.get_setting("rag.stepback_max_background") or 3
+                    self._stepback_prompter = StepBackPrompter(max_background_chunks=max_background)
+
+                stepback_result = await self._stepback_prompter.retrieve_with_stepback(
+                    query=question,
+                    retriever=self._custom_vectorstore,
+                    session=None,
+                    llm=llm,
+                    top_k=top_k,
+                )
+
+                # Use combined context (background + specific) as additional context
+                stepback_context = stepback_result.combined_context
+
+                logger.info(
+                    "Phase 66: Step-Back prompting complete",
+                    stepback_query=stepback_result.stepback_query[:50] if stepback_result.stepback_query else None,
+                    background_length=len(stepback_result.background_context),
+                )
+
+            except Exception as e:
+                logger.warning("Phase 66: Step-Back prompting failed", error=str(e))
+                stepback_result = None
+
         # Retrieve relevant documents
+        # Phase 66: If RAG-Fusion was used, convert its results to retrieved_docs format
+        if rag_fusion_result and rag_fusion_result.fused_results:
+            # Convert FusionResult to (Document, score) format
+            retrieved_docs = []
+            for result in rag_fusion_result.fused_results[:top_k]:
+                # SearchResult has content, chunk_id, metadata, similarity_score
+                score = getattr(result, 'similarity_score', 0.5)
+                # Create a Document-like object
+                from langchain_core.documents import Document as LCDocument
+                doc = LCDocument(
+                    page_content=getattr(result, 'content', str(result)),
+                    metadata={
+                        "chunk_id": getattr(result, 'chunk_id', ''),
+                        "document_name": getattr(result, 'document_title', ''),
+                        "document_filename": getattr(result, 'document_filename', ''),
+                        "collection": getattr(result, 'collection', ''),
+                        **(getattr(result, 'metadata', {}) or {}),
+                    },
+                )
+                retrieved_docs.append((doc, score))
+
+            logger.info(
+                "Phase 66: Using RAG-Fusion results",
+                count=len(retrieved_docs),
+                query_variations=len(rag_fusion_result.query_variations),
+            )
         # If query was decomposed, retrieve for each sub-query and merge
-        if decomposed_query and len(decomposed_query.sub_queries) > 1:
+        elif decomposed_query and len(decomposed_query.sub_queries) > 1:
             all_retrieved_docs = []
             seen_chunk_ids = set()
 
@@ -894,6 +1470,8 @@ class RAGService:
                     organization_id=organization_id,
                     user_id=user_id,
                     is_superadmin=is_superadmin,
+                    use_multilingual_search=use_multilingual_search,
+                    target_language=language,
                 )
                 # Deduplicate by chunk_id
                 for doc in sub_docs:
@@ -921,6 +1499,8 @@ class RAGService:
                 user_id=user_id,
                 is_superadmin=is_superadmin,
                 query_classification=query_classification,
+                use_multilingual_search=use_multilingual_search,
+                target_language=language,
             )
             # PHASE 12: Enhanced logging for RAG search troubleshooting
             if not retrieved_docs:
@@ -940,6 +1520,86 @@ class RAGService:
                     top_doc_name=retrieved_docs[0][0].metadata.get("document_name", "unknown")[:50] if retrieved_docs else None,
                 )
 
+        # =============================================================================
+        # Phase 66: Context Reordering (Lost-in-the-Middle Mitigation)
+        # =============================================================================
+        if use_context_reordering and retrieved_docs and len(retrieved_docs) > 2:
+            try:
+                reorder_strategy = await settings_svc.get_setting("rag.context_reorder_strategy") or "sandwich"
+
+                # Create wrapper objects with similarity_score for reordering
+                class ScoreWrapper:
+                    def __init__(self, doc_tuple):
+                        self.doc, self.similarity_score = doc_tuple
+                        self.original_tuple = doc_tuple
+
+                wrapped = [ScoreWrapper(dt) for dt in retrieved_docs]
+                reordered = reorder_for_attention(wrapped, strategy=reorder_strategy)
+                retrieved_docs = [w.original_tuple for w in reordered]
+
+                logger.debug(
+                    "Phase 66: Context reordered for better attention",
+                    strategy=reorder_strategy,
+                    count=len(retrieved_docs),
+                )
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.warning("Phase 66: Context reordering failed", error=str(e), error_type=type(e).__name__)
+
+        # =============================================================================
+        # Phase 65: Learning-to-Rank Reranking
+        # =============================================================================
+        if self._phase65_enabled and self._phase65_pipeline and retrieved_docs:
+            try:
+                # Check if LTR is enabled via settings
+                ltr_enabled = await settings_svc.get_setting("rag.ltr_enabled") if settings_svc else False
+                if ltr_enabled is None:
+                    ltr_enabled = True  # Default to enabled if setting not found
+
+                if ltr_enabled:
+                    # Convert retrieved docs to candidate format for LTR
+                    candidates = []
+                    for doc, score in retrieved_docs:
+                        candidates.append({
+                            "chunk_id": doc.metadata.get("chunk_id", ""),
+                            "content": doc.page_content,
+                            "score": score,
+                            "document_title": doc.metadata.get("document_name", ""),
+                            "document_filename": doc.metadata.get("document_filename", ""),
+                            "collection": doc.metadata.get("collection", ""),
+                            "metadata": doc.metadata,
+                        })
+
+                    # Apply LTR reranking
+                    ltr_results = await self._phase65_pipeline.rerank_with_ltr(question, candidates)
+
+                    if ltr_results:
+                        # Rebuild retrieved_docs with LTR ordering
+                        # Create a map from chunk_id to original (doc, score) tuples
+                        doc_map = {
+                            doc.metadata.get("chunk_id", ""): (doc, score)
+                            for doc, score in retrieved_docs
+                        }
+
+                        # Reorder based on LTR results
+                        reranked_docs = []
+                        for ltr_result in ltr_results:
+                            if ltr_result.doc_id in doc_map:
+                                doc, _ = doc_map[ltr_result.doc_id]
+                                # Use LTR score as new score
+                                reranked_docs.append((doc, ltr_result.ltr_score))
+
+                        if reranked_docs:
+                            retrieved_docs = reranked_docs
+                            logger.info(
+                                "Phase 65: LTR reranking applied",
+                                original_count=len(candidates),
+                                reranked_count=len(reranked_docs),
+                                top_ltr_score=reranked_docs[0][1] if reranked_docs else None,
+                            )
+
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, KeyError) as e:
+                logger.warning("Phase 65 LTR reranking failed, using original order", error=str(e), error_type=type(e).__name__)
+
         # Verify retrieved documents if enabled
         verification_result = None
         if self.verifier is not None:
@@ -958,14 +1618,38 @@ class RAGService:
                     relevant=verification_result.num_relevant,
                     filtered=verification_result.num_filtered,
                 )
-            except Exception as e:
-                # Log error but continue without verification
-                logger.warning("Verification failed, continuing without filtering", error=str(e))
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
+                logger.warning("Verification failed, continuing without filtering", error=str(e), error_type=type(e).__name__)
                 verification_result = None
 
         # Format context from retrieved documents
         context, sources = self._format_context(retrieved_docs, include_collection_context)
         logger.debug("Formatted context", context_length=len(context), sources_count=len(sources))
+
+        # Phase 79: Graph-O1 enhanced reasoning (beam search over knowledge graph)
+        from backend.core.config import settings as _go1_settings
+        if getattr(_go1_settings, 'KG_ENABLED', False):
+            try:
+                graph_o1_enabled = await settings_svc.get_setting("rag.graph_o1_enabled") if settings_svc else False
+                if graph_o1_enabled:
+                    from backend.services.graph_o1 import reason_over_graph
+                    go1_result = await reason_over_graph(
+                        query=question,
+                        context=context[:2000],
+                    )
+                    if go1_result and go1_result.confidence > 0.5 and go1_result.evidence:
+                        go1_context = "\n[Graph-O1 Reasoning]\n"
+                        go1_context += f"Confidence: {go1_result.confidence:.2f}\n"
+                        go1_context += "\n".join(go1_result.evidence[:5])
+                        context = context + "\n" + go1_context
+                        logger.info(
+                            "Graph-O1 reasoning added to context",
+                            confidence=go1_result.confidence,
+                            evidence_count=len(go1_result.evidence),
+                            hops=go1_result.hops_used,
+                        )
+            except Exception as e:
+                logger.debug("Graph-O1 reasoning skipped", error=str(e))
 
         # PHASE 2: Context sufficiency check (reduces hallucinations by 25-40%)
         # Check if retrieved contexts are sufficient to answer the query
@@ -1002,6 +1686,211 @@ class RAGService:
         if additional_context:
             context = f"--- Uploaded Documents ---\n{additional_context}\n\n--- Library Documents ---\n{context}"
             logger.debug("Added additional context", additional_context_length=len(additional_context))
+
+        # =============================================================================
+        # Phase 66: Add Step-Back Context (Background knowledge for complex queries)
+        # =============================================================================
+        if stepback_context and stepback_result:
+            # Prepend background context from step-back prompting
+            context = f"--- Background Knowledge ---\n{stepback_context}\n\n--- Specific Information ---\n{context}"
+            logger.debug(
+                "Phase 66: Added step-back background context",
+                background_length=len(stepback_result.background_context),
+                stepback_query=stepback_result.stepback_query[:50] if stepback_result.stepback_query else None,
+            )
+
+        # =============================================================================
+        # Phase 66: Context Compression (Token-efficient context for LLM)
+        # Applied before TTT compression as an alternative/complementary approach
+        # =============================================================================
+        if use_context_compression and len(context) > 4000:  # Only compress if context is large
+            try:
+                context_compression_enabled = await settings_svc.get_setting("rag.context_compression_enabled")
+                if context_compression_enabled != False:  # Default enabled
+                    # Initialize compressor if needed
+                    if self._context_compressor is None:
+                        target_tokens = await settings_svc.get_setting("rag.context_compression_target_tokens") or 2000
+                        self._context_compressor = ContextCompressor(
+                            target_tokens=target_tokens,
+                            use_llm_compression=True,
+                        )
+
+                    # Compress context
+                    compressed = await self._context_compressor.compress(
+                        query=question,
+                        contexts=[context],
+                        llm=llm if await settings_svc.get_setting("rag.context_compression_use_llm") else None,
+                    )
+
+                    if compressed.compression_ratio < 0.9:  # Only use if significantly compressed
+                        logger.info(
+                            "Phase 66: Context compression applied",
+                            original_tokens=compressed.original_tokens,
+                            compressed_tokens=compressed.compressed_tokens,
+                            compression_ratio=compressed.compression_ratio,
+                            method=compressed.method,
+                        )
+                        context = compressed.compressed_context
+
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
+                logger.warning("Phase 66: Context compression failed", error=str(e), error_type=type(e).__name__)
+
+        # =============================================================================
+        # Phase 79: AttentionRAG Compression (6.3x better than LLMLingua)
+        # Alternative/complementary to Phase 66 context compression
+        # =============================================================================
+        if len(context) > 4000:
+            try:
+                attention_rag_enabled = await settings_svc.get_setting("rag.attention_rag_enabled")
+                if attention_rag_enabled:
+                    from backend.services.attention_rag import compress_context_with_attention, AttentionCompressionMode
+                    mode_str = await settings_svc.get_setting("rag.attention_rag_mode") or "moderate"
+                    mode_map = {
+                        "light": AttentionCompressionMode.LIGHT,
+                        "moderate": AttentionCompressionMode.MODERATE,
+                        "aggressive": AttentionCompressionMode.AGGRESSIVE,
+                    }
+                    mode = mode_map.get(mode_str, AttentionCompressionMode.MODERATE)
+                    compressed_text = await compress_context_with_attention(
+                        query=question, context=context, mode=mode,
+                    )
+                    if compressed_text and len(compressed_text) < len(context) * 0.9:
+                        logger.info(
+                            "Phase 79: AttentionRAG compression applied",
+                            original_len=len(context),
+                            compressed_len=len(compressed_text),
+                            ratio=len(compressed_text) / len(context),
+                        )
+                        context = compressed_text
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, ImportError) as e:
+                logger.warning("Phase 79: AttentionRAG compression failed", error=str(e), error_type=type(e).__name__)
+
+        # =============================================================================
+        # Phase 63: Advanced Sufficiency Checker (ICLR 2025)
+        # Use runtime settings for hot-reload (no server restart needed)
+        # =============================================================================
+        from backend.services.settings import get_settings_service
+        settings_svc = get_settings_service()
+        sufficiency_enabled = await settings_svc.get_setting("rag.sufficiency_checker_enabled") or False
+        if sufficiency_enabled:
+            try:
+                from backend.services.sufficiency_checker import SufficiencyChecker, SufficiencyLevel
+                adv_checker = SufficiencyChecker()
+                sufficiency = await adv_checker.check(query=question, context=context)
+                if sufficiency.level == SufficiencyLevel.SUFFICIENT:
+                    logger.info(
+                        "Advanced sufficiency check: context is sufficient",
+                        confidence=sufficiency.confidence,
+                        reasoning=sufficiency.reasoning[:100] if sufficiency.reasoning else None,
+                    )
+                elif sufficiency.level == SufficiencyLevel.PARTIAL:
+                    logger.info(
+                        "Advanced sufficiency check: context is partial",
+                        missing_info=sufficiency.missing_information[:3] if sufficiency.missing_information else [],
+                    )
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
+                logger.warning("Advanced sufficiency checker failed", error=str(e), error_type=type(e).__name__)
+
+        # =============================================================================
+        # Phase 63: TTT Context Compression for Long Contexts
+        # Use runtime settings for hot-reload (no server restart needed)
+        # =============================================================================
+        from backend.core.config import settings
+        max_context_len = getattr(settings, 'MAX_CONTEXT_LENGTH', 100000)
+        ttt_enabled = await settings_svc.get_setting("rag.ttt_compression_enabled") or False
+        if ttt_enabled and len(context) > max_context_len:
+            try:
+                from backend.services.ttt_compression import TTTCompressionService
+                compressor = TTTCompressionService()
+                original_len = len(context)
+                compressed = await compressor.compress(context, target_ratio=0.5)
+                context = compressed.compressed_text if hasattr(compressed, 'compressed_text') else str(compressed)
+                logger.info(
+                    "Context compressed via TTT",
+                    original_len=original_len,
+                    compressed_len=len(context),
+                    ratio=len(context) / original_len,
+                )
+            except Exception as e:
+                logger.warning("TTT compression failed, using original context", error=str(e))
+
+        # =============================================================================
+        # PHASE 51: RLM Integration for Large Context Queries
+        # =============================================================================
+        # Check if context exceeds RLM threshold (default 100K tokens)
+        # RLM excels at processing 10M+ token contexts with O(log N) complexity
+        from backend.core.config import settings
+        rlm_enabled = getattr(settings, 'ENABLE_RLM', True)
+        rlm_threshold = getattr(settings, 'RLM_THRESHOLD_TOKENS', 100000)
+
+        # Estimate context tokens (rough estimate: 4 chars per token)
+        estimated_context_tokens = len(context) // 4
+
+        use_rlm = (
+            rlm_enabled
+            and estimated_context_tokens > rlm_threshold
+            and not getattr(runtime_settings, 'disable_rlm', False)
+        )
+
+        if use_rlm:
+            logger.info(
+                "Context exceeds RLM threshold - using Recursive Language Model",
+                estimated_tokens=estimated_context_tokens,
+                threshold=rlm_threshold,
+            )
+            try:
+                from backend.services.recursive_lm import RecursiveLMService, RLMConfig
+
+                # Configure RLM
+                rlm_config = RLMConfig(
+                    root_model=getattr(settings, 'RLM_ROOT_MODEL', 'gpt-4o'),
+                    recursive_model=getattr(settings, 'RLM_RECURSIVE_MODEL', 'gpt-4o-mini'),
+                    max_iterations=getattr(settings, 'RLM_MAX_ITERATIONS', 20),
+                    timeout_seconds=getattr(settings, 'RLM_TIMEOUT_SECONDS', 120.0),
+                    log_trajectory=getattr(settings, 'RLM_LOG_TRAJECTORY', False),
+                )
+
+                # Process with RLM
+                rlm_service = RecursiveLMService(config=rlm_config)
+                rlm_result = await rlm_service.process(
+                    query=question,
+                    context=context,
+                )
+
+                if rlm_result.success:
+                    processing_time_ms = rlm_result.execution_time_ms
+
+                    # Return RLM response
+                    return RAGResponse(
+                        content=rlm_result.answer,
+                        sources=sources,
+                        query=question,
+                        model=f"RLM({rlm_config.root_model})",
+                        confidence_score=0.85,  # RLM provides high confidence for large contexts
+                        confidence_level="high",
+                        processing_time_ms=processing_time_ms,
+                        suggested_questions=[],
+                        context_used=min(len(context), 2000),  # Preview only
+                        rlm_metadata={
+                            "iterations": rlm_result.iterations,
+                            "tokens_processed": rlm_result.tokens_processed,
+                            "sandbox_type": rlm_result.sandbox_type,
+                            "reasoning_steps": rlm_result.reasoning_steps[:3] if rlm_result.reasoning_steps else [],
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "RLM processing failed, falling back to standard RAG",
+                        error=rlm_result.error,
+                    )
+                    # Continue with standard RAG below
+
+            except Exception as e:
+                logger.warning(
+                    "RLM integration error, falling back to standard RAG",
+                    error=str(e),
+                )
+                # Continue with standard RAG below
 
         # Build prompt with language instruction
         # Support "auto" mode: respond in the same language as the question
@@ -1098,26 +1987,134 @@ class RAGService:
         if language_instruction:
             system_prompt = f"{system_prompt}\n{language_instruction}"
 
+        from backend.core.config import settings as app_settings
+
         if session_id:
             # Use conversational prompt with history
             memory = self._get_memory(session_id)
             chat_history = memory.load_memory_variables({}).get("chat_history", [])
 
-            messages = [
-                SystemMessage(content=system_prompt),
-                *chat_history,
-                HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
-            ]
+            # PHASE 38: Apply context compression for long conversations
+            compressed_context = ""
+            if getattr(app_settings, "ENABLE_CONTEXT_COMPRESSION", False) and len(chat_history) > 10:
+                try:
+                    from backend.services.context_compression import get_context_compressor
+
+                    compressor = await get_context_compressor()
+
+                    # Convert chat_history to list of dicts
+                    history_dicts = []
+                    for msg in chat_history:
+                        role = "user" if hasattr(msg, 'type') and msg.type == "human" else "assistant"
+                        content = msg.content if hasattr(msg, 'content') else str(msg)
+                        history_dicts.append({"role": role, "content": content})
+
+                    compression_result = await compressor.compress_conversation(
+                        messages=history_dicts,
+                        session_id=session_id,
+                    )
+
+                    if compression_result.compressed_context:
+                        compressed_context = compression_result.compressed_context
+                        # Use compressed context instead of full history
+                        chat_history = []  # Clear - we'll use compressed_context instead
+                        logger.info(
+                            "Applied context compression",
+                            original_tokens=compression_result.original_tokens,
+                            compressed_tokens=compression_result.compressed_tokens,
+                            compression_ratio=compression_result.compression_ratio,
+                        )
+                except Exception as e:
+                    logger.warning("Context compression failed", error=str(e))
+
+            # Build messages with optional compressed context
+            # Phase 82: Use _make_system_message for Anthropic prompt caching
+            if compressed_context:
+                messages = [
+                    _make_system_message(f"{system_prompt}\n\nPrevious Conversation Summary:\n{compressed_context}", model_name),
+                    HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
+                ]
+            else:
+                messages = [
+                    _make_system_message(system_prompt, model_name),
+                    *chat_history,
+                    HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
+                ]
         else:
             # Single-turn query with adaptive template
             messages = [
-                SystemMessage(content=system_prompt),
+                _make_system_message(system_prompt, model_name),
                 HumanMessage(content=prompt_template.format(context=context, question=question)),
             ]
 
         # Generate response with research-backed sampling parameters
         # Apply temperature, top_p, top_k, repeat_penalty based on model characteristics
         # Research shows this dramatically reduces hallucinations in small models
+
+        # PHASE 42: GenerativeCache - Check cache before LLM generation
+        cache_hit = False
+        cached_response = None
+        if getattr(app_settings, "ENABLE_GENERATIVE_CACHE", False):
+            try:
+                from backend.services.generative_cache import get_generative_cache, ContentType
+
+                gen_cache = await get_generative_cache()
+
+                # Map query intent to cache content type
+                cache_content_type = ContentType.DEFAULT
+                if query_classification:
+                    intent_map = {
+                        "factual": ContentType.FACTUAL,
+                        "analytical": ContentType.ANALYTICAL,
+                        "creative": ContentType.CREATIVE,
+                        "code": ContentType.CODE,
+                        "conversational": ContentType.CONVERSATIONAL,
+                    }
+                    cache_content_type = intent_map.get(
+                        query_classification.intent.value if query_classification.intent else "default",
+                        ContentType.DEFAULT,
+                    )
+
+                cache_result = await gen_cache.get(
+                    query=question,
+                    context=context[:2000] if context else None,  # Use truncated context for cache key
+                    content_type=cache_content_type,
+                )
+
+                if cache_result.hit:
+                    cache_hit = True
+                    cached_response = cache_result.response
+                    logger.info(
+                        "GenerativeCache hit",
+                        tier=cache_result.tier.value,
+                        similarity=cache_result.similarity,
+                        lookup_time_ms=cache_result.lookup_time_ms,
+                    )
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, KeyError) as e:
+                logger.warning("GenerativeCache lookup failed", error=str(e), error_type=type(e).__name__)
+
+        # If cache hit, return cached response directly
+        if cache_hit and cached_response:
+            processing_time_ms = (time.time() - start_time) * 1000
+
+            # Parse suggested questions from cached response
+            content, suggested_questions = _parse_suggested_questions(cached_response)
+
+            # Get model name from config or fallback
+            model_name_result = llm_config.model if llm_config else (self.config.chat_model or "default")
+
+            return RAGResponse(
+                content=content,
+                sources=sources,
+                query=question,
+                model=f"{model_name_result} (cached)",
+                confidence_score=confidence_score,
+                confidence_level=confidence_level,
+                processing_time_ms=processing_time_ms,
+                suggested_questions=suggested_questions,
+                context_used=len(context) if context else 0,
+                cache_hit=True,
+            )
 
         # PHASE 15 OPTIONAL ENHANCEMENTS: Advanced optimizations
         from backend.services.rag_module.advanced_optimizations import (
@@ -1166,9 +2163,20 @@ class RAGService:
                     llm, messages, model_name, num_samples=3, **invoke_kwargs
                 )
             else:
-                # Standard invocation
-                response = await llm.ainvoke(messages, **invoke_kwargs)
-                raw_content = response.content if hasattr(response, 'content') else str(response)
+                # Standard invocation with Phase 70 resilience patterns
+                provider_name = llm_config.provider_type if llm_config else "default"
+                try:
+                    response = await resilient_llm_invoke(
+                        llm, messages, provider=provider_name, **invoke_kwargs
+                    )
+                    raw_content = response.content if hasattr(response, 'content') else str(response)
+                except CircuitBreakerOpen as e:
+                    logger.error("LLM circuit breaker open", provider=provider_name, error=str(e))
+                    raise
+                except (ValueError, RuntimeError, TimeoutError, ConnectionError, asyncio.TimeoutError) as e:
+                    logger.warning("Resilient LLM invoke failed, using direct call", error=str(e), error_type=type(e).__name__)
+                    response = await llm.ainvoke(messages, **invoke_kwargs)
+                    raw_content = response.content if hasattr(response, 'content') else str(response)
 
         except TypeError:
             # Fallback if LLM doesn't support these parameters
@@ -1176,11 +2184,86 @@ class RAGService:
                 "LLM does not support sampling parameters, using defaults",
                 model=model_name,
             )
-            response = await llm.ainvoke(messages)
-            raw_content = response.content if hasattr(response, 'content') else str(response)
+            # Phase 70: Use resilient invocation even for fallback
+            provider_name = llm_config.provider_type if llm_config else "default"
+            try:
+                response = await resilient_llm_invoke(llm, messages, provider=provider_name)
+                raw_content = response.content if hasattr(response, 'content') else str(response)
+            except CircuitBreakerOpen:
+                raise
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, asyncio.TimeoutError):
+                response = await llm.ainvoke(messages)
+                raw_content = response.content if hasattr(response, 'content') else str(response)
+
+        # Phase 62: Answer Refinement
+        # Use runtime settings for hot-reload (no server restart needed)
+        from backend.services.settings import get_settings_service
+        settings_svc = get_settings_service()
+        refiner_enabled = await settings_svc.get_setting("rag.answer_refiner_enabled") or False
+        if refiner_enabled and raw_content:
+            try:
+                from backend.services.answer_refiner import AnswerRefiner, RefinerConfig
+                refiner_strategy = await settings_svc.get_setting("rag.answer_refiner_strategy") or "self_refine"
+                refiner_max_iter = await settings_svc.get_setting("rag.answer_refiner_max_iterations") or 2
+                refiner = AnswerRefiner(RefinerConfig(
+                    strategy=refiner_strategy,
+                    max_iterations=refiner_max_iter,
+                ))
+                refine_result = await refiner.refine(
+                    query=question,
+                    answer=raw_content,
+                    context=context if context else "",
+                )
+                if refine_result.improvement_score > 0.1:
+                    raw_content = refine_result.refined_answer
+                    logger.info(
+                        "Answer refined",
+                        improvement=refine_result.improvement_score,
+                        iterations=refine_result.iterations,
+                        strategy=refiner_strategy,
+                    )
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
+                logger.warning("Answer refinement failed", error=str(e), error_type=type(e).__name__)
 
         # Parse suggested questions from the response
         content, suggested_questions = _parse_suggested_questions(raw_content)
+
+        # PHASE 42: Cache the generated response for future use
+        if getattr(app_settings, "ENABLE_GENERATIVE_CACHE", False) and not cache_hit:
+            try:
+                from backend.services.generative_cache import get_generative_cache, ContentType
+
+                gen_cache = await get_generative_cache()
+
+                # Map query intent to cache content type
+                cache_content_type = ContentType.DEFAULT
+                if query_classification:
+                    intent_map = {
+                        "factual": ContentType.FACTUAL,
+                        "analytical": ContentType.ANALYTICAL,
+                        "creative": ContentType.CREATIVE,
+                        "code": ContentType.CODE,
+                        "conversational": ContentType.CONVERSATIONAL,
+                    }
+                    cache_content_type = intent_map.get(
+                        query_classification.intent.value if query_classification.intent else "default",
+                        ContentType.DEFAULT,
+                    )
+
+                await gen_cache.set(
+                    query=question,
+                    response=raw_content,  # Cache raw content including suggested questions
+                    context=context[:2000] if context else None,
+                    content_type=cache_content_type,
+                    metadata={
+                        "model": model_name,
+                        "collection": collection_name,
+                        "session_id": session_id,
+                    },
+                )
+                logger.debug("Response cached in GenerativeCache")
+            except Exception as e:
+                logger.warning("Failed to cache response", error=str(e))
 
         processing_time_ms = (time.time() - start_time) * 1000
 
@@ -1383,6 +2466,38 @@ class RAGService:
             used_multi_sampling=use_multi_sampling,
         )
 
+        # =============================================================================
+        # Phase 65: Cache the result in semantic cache for future similar queries
+        # =============================================================================
+        if self._phase65_enabled and self._phase65_pipeline and not phase65_cache_hit:
+            try:
+                # Cache the full response for semantic matching
+                cache_data = {
+                    "content": content,
+                    "sources": [
+                        {
+                            "document_id": s.document_id,
+                            "document_name": s.document_name,
+                            "chunk_id": s.chunk_id,
+                            "snippet": s.snippet,
+                            "relevance_score": s.relevance_score,
+                            "collection": s.collection,
+                        }
+                        for s in sources
+                    ] if sources else [],
+                    "model": model_name,
+                    "confidence_score": confidence_score,
+                    "confidence_level": confidence_level,
+                }
+                await self._phase65_pipeline.cache_result(
+                    original_question,  # Use original (pre-spell-corrected) for cache key
+                    cache_data,
+                    query_embedding_for_cache,
+                )
+                logger.debug("Phase 65: Cached result in semantic cache")
+            except Exception as e:
+                logger.debug("Phase 65: Failed to cache result", error=str(e))
+
         return RAGResponse(
             content=content,
             sources=sources if self.config.include_sources else [],
@@ -1558,13 +2673,13 @@ class RAGService:
             chat_history = memory.load_memory_variables({}).get("chat_history", [])
 
             messages = [
-                SystemMessage(content=system_prompt),
+                _make_system_message(system_prompt, model_name),
                 *chat_history,
                 HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
             ]
         else:
             messages = [
-                SystemMessage(content=system_prompt),
+                _make_system_message(system_prompt, model_name),
                 HumanMessage(content=prompt_template.format(context=context, question=question)),
             ]
 
@@ -1582,21 +2697,101 @@ class RAGService:
             if sampling_config.get("repeat_penalty") is not None and sampling_config["repeat_penalty"] != 1.0:
                 stream_kwargs["repeat_penalty"] = sampling_config["repeat_penalty"]
 
+            # Phase 70: Use resilient streaming with circuit breaker
+            provider_name = llm_config.provider_type if llm_config else "default"
             try:
-                stream = llm.astream(messages, **stream_kwargs)
+                stream = await resilient_llm_stream(llm, messages, provider=provider_name, **stream_kwargs)
+            except CircuitBreakerOpen as e:
+                logger.error("LLM circuit breaker open for streaming", provider=provider_name, error=str(e))
+                yield StreamChunk(type="error", data=f"Service temporarily unavailable: {str(e)}")
+                return
             except TypeError:
                 # Fallback if LLM doesn't support these parameters
                 logger.warning(
                     "LLM does not support sampling parameters in streaming, using defaults",
                     model=model_name,
                 )
-                stream = llm.astream(messages)
+                try:
+                    stream = await resilient_llm_stream(llm, messages, provider=provider_name)
+                except CircuitBreakerOpen as e:
+                    yield StreamChunk(type="error", data=f"Service temporarily unavailable: {str(e)}")
+                    return
 
-            async for chunk in stream:
-                content = chunk.content if hasattr(chunk, 'content') else str(chunk)
-                if content:
-                    response_buffer.write(content)
-                    yield StreamChunk(type="content", data=content)
+            # =============================================================================
+            # Phase 65: Streaming with Citations (optional)
+            # =============================================================================
+            from backend.services.settings import get_settings_service
+            settings_svc = get_settings_service()
+            streaming_citations_enabled = await settings_svc.get_setting("rag.streaming_citations_enabled") or False
+
+            if streaming_citations_enabled and self._phase65_enabled and self._phase65_pipeline and sources:
+                try:
+                    # Convert sources to dict format for citation matcher
+                    source_dicts = [
+                        {
+                            "chunk_id": s.chunk_id,
+                            "id": s.chunk_id,
+                            "content": s.full_content or s.snippet,
+                            "document_title": s.document_name,
+                            "title": s.document_name,
+                            "document_filename": s.document_name,
+                        }
+                        for s in sources
+                    ]
+
+                    # Create async generator from LLM stream
+                    async def token_generator():
+                        async for chunk in stream:
+                            token = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                            if token:
+                                yield token
+
+                    # Wrap with citation matcher
+                    async for enriched_chunk in self._phase65_pipeline.stream_with_citations(
+                        token_generator(),
+                        source_dicts,
+                    ):
+                        token = enriched_chunk.get("token", "")
+                        citations = enriched_chunk.get("citations", [])
+                        is_complete = enriched_chunk.get("is_complete", False)
+
+                        if token:
+                            response_buffer.write(token)
+                            # Include citation info in chunk data
+                            chunk_data = {
+                                "content": token,
+                                "citations": citations,
+                                "is_cited": enriched_chunk.get("is_cited", False),
+                            }
+                            yield StreamChunk(type="content_with_citations", data=chunk_data)
+
+                        if is_complete:
+                            # Send citation footer if available
+                            footer = enriched_chunk.get("footer")
+                            if footer:
+                                yield StreamChunk(type="citation_footer", data=footer)
+
+                            summary = enriched_chunk.get("summary")
+                            if summary:
+                                yield StreamChunk(type="citation_summary", data=summary)
+
+                    logger.info("Phase 65: Streaming with citations complete")
+
+                except Exception as e:
+                    logger.warning("Phase 65: Streaming citations failed, falling back to plain streaming", error=str(e))
+                    # Fallback to plain streaming
+                    async for chunk in stream:
+                        content = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                        if content:
+                            response_buffer.write(content)
+                            yield StreamChunk(type="content", data=content)
+            else:
+                # Standard streaming without citations
+                async for chunk in stream:
+                    content = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                    if content:
+                        response_buffer.write(content)
+                        yield StreamChunk(type="content", data=content)
 
             # Send sources after content
             if self.config.include_sources and sources:
@@ -1891,6 +3086,8 @@ class RAGService:
         user_id: Optional[str] = None,
         is_superadmin: bool = False,
         query_classification: Optional[QueryClassification] = None,
+        use_multilingual_search: bool = False,
+        target_language: Optional[str] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve relevant documents for query.
@@ -1923,6 +3120,81 @@ class RAGService:
                 result_count=len(cached_results),
             )
             return cached_results
+
+        # Phase 59: Multilingual cross-lingual search
+        # Enables search across language barriers using multilingual embeddings
+        if use_multilingual_search and MULTILINGUAL_SEARCH_AVAILABLE:
+            try:
+                logger.info(
+                    "Using multilingual cross-lingual search",
+                    query_preview=query[:50],
+                    target_language=target_language,
+                )
+
+                # Get LLM for translations (optional)
+                llm = None
+                try:
+                    llm, _ = await self.get_llm_for_session()
+                except Exception:
+                    pass  # Translation is optional
+
+                # Create or get cross-lingual retriever
+                ml_retriever = get_cross_lingual_retriever(
+                    embedding_service=self._embedding_service,
+                    vectorstore=self._custom_vectorstore,
+                    llm=llm,
+                )
+
+                # Convert target_language to Language enum if provided
+                user_lang = None
+                if target_language and Language:
+                    for lang in Language:
+                        if lang.value == target_language:
+                            user_lang = lang
+                            break
+
+                # Perform cross-lingual search
+                async with async_session_context() as session:
+                    ml_results = await ml_retriever.search(
+                        query=query,
+                        session=session,
+                        top_k=top_k,
+                        translate_results=True,
+                        user_language=user_lang,
+                    )
+
+                # Convert CrossLingualSearchResult to (Document, score) tuples
+                results = []
+                for r in ml_results:
+                    doc = Document(
+                        page_content=r.translated_content or r.content,
+                        metadata={
+                            "document_id": r.document_id,
+                            "chunk_id": r.chunk_id,
+                            "source_language": r.source_language.value if r.source_language else "unknown",
+                            "original_content": r.content if r.translated_content else None,
+                            **r.metadata,
+                        },
+                    )
+                    results.append((doc, r.similarity_score))
+
+                logger.info(
+                    "Multilingual search complete",
+                    result_count=len(results),
+                    languages_found=list(set(
+                        r.source_language.value for r in ml_results if r.source_language
+                    )),
+                )
+
+                # Cache results
+                self._search_cache.set(query, collection_filter, access_tier, top_k, results)
+                return results
+
+            except Exception as e:
+                logger.warning(
+                    "Multilingual search failed, falling back to standard retrieval",
+                    error=str(e),
+                )
 
         logger.debug(
             "Starting retrieval",
@@ -1977,6 +3249,39 @@ class RAGService:
                     )
             except Exception as e:
                 logger.warning("Query expansion failed, using original query", error=str(e))
+
+        # Phase 60: KG-based query expansion with related entities
+        from backend.core.config import settings as app_settings
+        if (
+            getattr(app_settings, 'KG_ENABLED', True)
+            and getattr(app_settings, 'KG_QUERY_EXPANSION_ENABLED', True)
+        ):
+            try:
+                from backend.services.knowledge_graph import get_kg_service
+                kg_service = await get_kg_service()
+
+                # Extract entities from query
+                entities, _ = await kg_service.extract_entities_from_text(
+                    text=query,
+                    use_fast_extraction=True,
+                )
+
+                if entities:
+                    # Get related entity names for query expansion
+                    max_entities = getattr(app_settings, 'KG_EXPANSION_MAX_ENTITIES', 5)
+                    entity_names = [e.name for e in entities[:max_entities]]
+
+                    # Create expanded query with entity names
+                    kg_expansion = f"{query} {' '.join(entity_names)}"
+                    if kg_expansion not in queries_to_search:
+                        queries_to_search.append(kg_expansion)
+                        logger.debug(
+                            "KG-based query expansion applied",
+                            original=query,
+                            added_entities=entity_names,
+                        )
+            except Exception as e:
+                logger.debug("KG query expansion skipped", error=str(e))
 
         # Collect results from all queries in PARALLEL for better performance
         all_results: List[Tuple[Document, float]] = []
@@ -2092,6 +3397,31 @@ class RAGService:
                 unique_results=len(all_results),
                 returning=min(top_k, len(all_results)),
             )
+
+        # PHASE 43: Apply tiered reranking if enabled
+        # Multi-stage pipeline: ColBERT -> Cross-Encoder -> (optional) LLM
+        from backend.core.config import settings as app_settings
+        if getattr(app_settings, "ENABLE_TIERED_RERANKING", False) and len(all_results) > 3:
+            try:
+                from backend.services.tiered_reranking import get_tiered_reranker
+
+                reranker = await get_tiered_reranker()
+                rerank_result = await reranker.rerank(
+                    query=query,
+                    documents=all_results,
+                    top_k=top_k,
+                )
+
+                if rerank_result.reranked_documents:
+                    all_results = rerank_result.reranked_documents
+                    logger.info(
+                        "Tiered reranking applied",
+                        original_count=len(all_results),
+                        stages_used=rerank_result.stages_used,
+                        latency_ms=rerank_result.latency_ms,
+                    )
+            except Exception as e:
+                logger.warning("Tiered reranking failed, using original order", error=str(e))
 
         final_results = all_results[:top_k]
 
@@ -2300,19 +3630,103 @@ class RAGService:
                             "Smart pre-filter returned no candidates, using full search"
                         )
 
-            # Perform search - use two-stage (ColBERT) or hierarchical retrieval if enabled
-            # Two-stage takes priority as it includes reranking for better precision
+            # Perform search - use hybrid (LightRAG/RAPTOR), two-stage (ColBERT), or hierarchical retrieval
+            # Priority: HybridRetriever > Two-stage > Hierarchical > Standard
             logger.info(
                 "Calling vectorstore search",
                 query_length=len(query),
                 has_embedding=query_embedding is not None and len(query_embedding) > 0,
                 search_type=search_type.value,
                 document_ids_count=len(document_ids) if document_ids else 0,
+                hybrid=self._use_hybrid_retriever,
                 two_stage=self._two_stage_retriever is not None,
                 hierarchical=self._hierarchical_retriever is not None,
             )
 
-            if self._two_stage_retriever is not None:
+            # Phase 58: Use HybridRetriever for LightRAG + RAPTOR + WARP + ColPali fusion
+            if self._use_hybrid_retriever:
+                try:
+                    # Lazy initialization of HybridRetriever
+                    if self._hybrid_retriever is None:
+                        self._hybrid_retriever = await get_hybrid_retriever(
+                            vectorstore=self._custom_vectorstore,
+                        )
+
+                    hybrid_results, metrics = await self._hybrid_retriever.retrieve(
+                        query=query,
+                        query_embedding=query_embedding,
+                        top_k=top_k,
+                        document_ids=document_ids,
+                        access_tier_level=access_tier,
+                        vector_weight=vector_weight,
+                        keyword_weight=keyword_weight,
+                    )
+
+                    # Convert HybridResult to SearchResult format
+                    from backend.services.vectorstore import SearchResult
+                    results = []
+                    for hr in hybrid_results:
+                        results.append(SearchResult(
+                            chunk_id=hr.chunk_id,
+                            document_id=hr.document_id,
+                            content=hr.content,
+                            score=hr.score,
+                            similarity_score=hr.rerank_score or hr.score,
+                            document_title=hr.document_title,
+                            document_filename=hr.document_filename,
+                            page_number=hr.page_number,
+                            section_title=hr.section_title,
+                            metadata={
+                                **hr.metadata,
+                                "retrieval_sources": [s.value for s in hr.sources],
+                                "source_scores": hr.source_scores,
+                            },
+                        ))
+
+                    logger.info(
+                        "HybridRetriever search complete",
+                        total_results=len(results),
+                        sources_used=metrics.sources_used,
+                        total_time_ms=round(metrics.total_time_ms, 2),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "HybridRetriever failed, falling back to standard search",
+                        error=str(e),
+                    )
+                    # Fall through to standard search
+                    results = None
+
+                if results is not None:
+                    pass  # Use hybrid results
+                elif self._two_stage_retriever is not None:
+                    # Fallback to two-stage
+                    results = await self._two_stage_retriever.retrieve(
+                        query=query,
+                        query_embedding=query_embedding,
+                        search_type=search_type,
+                        top_k=top_k,
+                        access_tier_level=access_tier,
+                        document_ids=document_ids,
+                        vector_weight=vector_weight,
+                        keyword_weight=keyword_weight,
+                    )
+                else:
+                    # Fallback to standard
+                    results = await self._custom_vectorstore.search(
+                        query=query,
+                        query_embedding=query_embedding,
+                        search_type=search_type,
+                        top_k=top_k,
+                        access_tier_level=access_tier,
+                        document_ids=document_ids,
+                        vector_weight=vector_weight,
+                        keyword_weight=keyword_weight,
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        is_superadmin=is_superadmin,
+                    )
+            elif self._two_stage_retriever is not None:
                 # Use two-stage retrieval with ColBERT reranking for better precision
                 results = await self._two_stage_retriever.retrieve(
                     query=query,
@@ -2423,6 +3837,21 @@ class RAGService:
                     user_id=user_id,
                     is_superadmin=is_superadmin,
                 )
+
+            # Phase 66: LazyGraphRAG for efficient community-level context
+            # Provides high-level community summaries alongside chunk-level retrieval
+            lazy_graphrag_context: Optional[LazyGraphContext] = None
+            if self._enable_lazy_graphrag and should_use_kg:
+                langchain_results, lazy_graphrag_context = await self._enhance_with_lazy_graphrag(
+                    query=query,
+                    existing_results=langchain_results,
+                    top_k=top_k,
+                    organization_id=organization_id,
+                    collection_filter=collection_filter,
+                )
+                # Store context for later use in prompt building
+                if lazy_graphrag_context:
+                    self._last_lazy_graphrag_context = lazy_graphrag_context
 
             # PHASE 14: Apply MMR for diversity if query classification recommends it
             # MMR helps with comparison queries, summary queries where diverse sources are valuable
@@ -2916,6 +4345,76 @@ class RAGService:
             )
             return existing_results
 
+    async def _enhance_with_lazy_graphrag(
+        self,
+        query: str,
+        existing_results: List[Tuple[Document, float]],
+        top_k: int = 5,
+        organization_id: Optional[str] = None,
+        collection_filter: Optional[str] = None,
+    ) -> Tuple[List[Tuple[Document, float]], Optional[LazyGraphContext]]:
+        """
+        Enhance retrieval with LazyGraphRAG for cost-efficient knowledge graph context.
+
+        LazyGraphRAG performs query-time community summarization instead of index-time,
+        achieving 99% cost reduction compared to standard GraphRAG while maintaining
+        similar or better answer quality.
+
+        Key features:
+        - Identifies query-relevant entities
+        - Discovers their communities on-demand
+        - Summarizes only relevant communities (lazy evaluation)
+        - Returns community context for LLM generation
+
+        Args:
+            query: Search query
+            existing_results: Results from vector search
+            top_k: Maximum chunks to consider
+            organization_id: Optional organization ID for multi-tenant isolation
+            collection_filter: Optional collection filter
+
+        Returns:
+            Tuple of (enhanced results, LazyGraphContext with community summaries)
+        """
+        if not self._enable_lazy_graphrag:
+            return existing_results, None
+
+        try:
+            from backend.db.database import async_session_context
+
+            async with async_session_context() as db:
+                # Initialize LazyGraphRAG service if needed
+                if self._lazy_graphrag is None:
+                    self._lazy_graphrag = get_lazy_graphrag_service()
+
+                # Retrieve lazy graph context
+                lazy_context: LazyGraphContext = await lazy_graph_retrieve(
+                    query=query,
+                    session=db,
+                    collection_filter=collection_filter,
+                    organization_id=organization_id,
+                )
+
+                logger.info(
+                    "LazyGraphRAG enhancement complete",
+                    query=query[:50],
+                    entities=lazy_context.total_entities,
+                    relations=lazy_context.total_relations,
+                    communities_summarized=len(lazy_context.community_summaries),
+                    cost_saved_pct=f"{lazy_context.cost_saved_percentage:.1f}%",
+                )
+
+                # LazyGraphRAG provides context for generation, not additional chunks
+                # The community summaries and entity context enhance the LLM prompt
+                return existing_results, lazy_context
+
+        except Exception as e:
+            logger.warning(
+                "LazyGraphRAG enhancement failed, continuing without it",
+                error=str(e),
+            )
+            return existing_results, None
+
     def _semantic_dedupe(
         self,
         results: List[Tuple[Document, float]],
@@ -3147,6 +4646,35 @@ class RAGService:
             sources.append(source)
 
         context = "\n".join(context_parts)
+
+        # Phase 66: Add LazyGraphRAG community context if available
+        # Community summaries provide high-level thematic context beyond individual chunks
+        if self._last_lazy_graphrag_context and self._last_lazy_graphrag_context.community_summaries:
+            lazy_context = self._last_lazy_graphrag_context
+            community_context_parts = [
+                "\n[Knowledge Graph Community Context]",
+                f"Entities identified: {lazy_context.total_entities}",
+                f"Relationships mapped: {lazy_context.total_relations}",
+                ""
+            ]
+
+            for i, summary in enumerate(lazy_context.community_summaries[:3], 1):
+                community_context_parts.append(f"Community {i}: {summary}")
+
+            if lazy_context.entity_context:
+                community_context_parts.append(f"\n{lazy_context.entity_context}")
+
+            context = context + "\n" + "\n".join(community_context_parts)
+
+            # Clear the context after use to avoid stale data
+            self._last_lazy_graphrag_context = None
+
+            logger.debug(
+                "Added LazyGraphRAG community context to prompt",
+                communities=len(lazy_context.community_summaries),
+                entities=lazy_context.total_entities,
+            )
+
         return context, sources
 
     def set_vector_store(self, vector_store: Any):

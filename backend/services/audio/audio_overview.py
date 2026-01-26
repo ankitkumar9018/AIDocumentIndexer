@@ -687,23 +687,46 @@ class AudioOverviewService(CRUDService[AudioOverview]):
             return await self._get_document_text(document), []
 
     async def _get_entities_for_document(self, document: Document) -> List[Dict[str, Any]]:
-        """Get Knowledge Graph entities associated with a document."""
-        try:
-            from backend.services.knowledge_graph import KnowledgeGraphService
+        """Get Knowledge Graph entities associated with a document.
 
-            session = await self.get_session()
-            kg = KnowledgeGraphService(session)
+        Phase 60: Uses settings-controlled KG integration for audio overview.
+        """
+        # Phase 60: Check if KG is enabled for audio
+        from backend.core.config import settings
+        if not getattr(settings, 'KG_ENABLED', True) or not getattr(settings, 'KG_ENABLED_IN_AUDIO', True):
+            logger.debug("KG disabled for audio overview")
+            return []
+
+        try:
+            from backend.services.knowledge_graph import get_kg_service
+
+            # Use singleton KG service
+            kg = await get_kg_service()
 
             # Get entities mentioned in this document's chunks
             entities = await kg.find_entities_for_document(str(document.id))
+
+            # Phase 60: Score entities by importance for audio overview
+            # Prioritize entities with more mentions and higher confidence
+            scored_entities = []
+            for e in entities:
+                score = (
+                    (e.mention_count or 1) * 0.5 +
+                    (e.confidence or 0.5) * 0.5
+                )
+                scored_entities.append((e, score))
+
+            # Sort by score and take top entities
+            scored_entities.sort(key=lambda x: x[1], reverse=True)
 
             return [
                 {
                     "name": e.canonical_name,
                     "type": e.entity_type.value if hasattr(e.entity_type, 'value') else str(e.entity_type),
                     "aliases": e.aliases[:3] if e.aliases else [],
+                    "importance": score,  # Include score for script generation
                 }
-                for e in entities[:15]  # Limit to top 15 entities
+                for e, score in scored_entities[:15]  # Limit to top 15 entities
             ]
         except ImportError:
             logger.debug("Knowledge Graph service not available")

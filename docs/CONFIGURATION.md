@@ -843,3 +843,87 @@ Contextual chunking prepends LLM-generated context to each chunk before embeddin
 **Research shows 49-67% reduction in failed retrievals.**
 
 See [FEATURES.md](./FEATURES.md#contextual-chunking) for full guide
+
+---
+
+## Advanced RAG (Phase 66)
+
+### User Personalization
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ENABLE_USER_PERSONALIZATION` | Enable preference learning from feedback | `true` |
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.user_personalization_enabled` | Enable user preference learning | `true` |
+
+### Adaptive RAG Routing
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.adaptive_routing_enabled` | Enable query-dependent strategy routing | `true` |
+| `rag.routing_strategy` | Default routing (DIRECT/HYBRID/TWO_STAGE/AGENTIC/GRAPH_ENHANCED) | `auto` |
+
+### RAG-Fusion
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.fusion_enabled` | Enable multi-query RAG-Fusion | `true` |
+| `rag.fusion_query_count` | Number of query variations to generate | `3` |
+
+### LazyGraphRAG
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.lazy_graphrag_enabled` | Enable query-time community summarization | `true` |
+| `rag.lazy_graphrag_cache_ttl` | Cache TTL for community summaries (seconds) | `3600` |
+
+### Dependency-Based Entity Extraction
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `kg.dependency_extraction_enabled` | Enable fast spaCy-based extraction | `true` |
+| `kg.complexity_threshold` | Text complexity threshold for LLM fallback (0-1) | `0.7` |
+| `kg.spacy_model` | spaCy model to use | `en_core_web_sm` |
+
+### RAG Evaluation
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.evaluation_enabled` | Enable RAGAS evaluation metrics | `true` |
+| `rag.evaluation_sampling_rate` | Fraction of queries to evaluate (0-1) | `0.1` |
+
+---
+
+## TTS Providers (Phase 66)
+
+> **Note:** Chatterbox and CosyVoice are experimental open-source TTS providers that may require GPU and additional setup. Install optional dependencies:
+> ```bash
+> # From source (recommended):
+> pip install git+https://github.com/resemble-ai/chatterbox.git
+> pip install git+https://github.com/FunAudioLLM/CosyVoice.git
+> ```
+> The system gracefully falls back to HTTP API or other providers if packages are not installed.
+
+### Chatterbox TTS
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CHATTERBOX_ENABLED` | Enable Chatterbox TTS | `true` |
+| `CHATTERBOX_EXAGGERATION` | Emotional exaggeration (0-1) | `0.5` |
+| `CHATTERBOX_CFG_WEIGHT` | CFG weight for generation | `0.5` |
+
+### CosyVoice2
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `COSYVOICE_ENABLED` | Enable CosyVoice2 TTS | `true` |
+
+### TTS Provider Selection
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `tts.default_provider` | Default TTS provider | `openai` |
+| `tts.ultra_fast_provider` | Ultra-fast TTS provider | `cosyvoice` |
+| `tts.fallback_chain` | Fallback provider order | `["cosyvoice", "chatterbox", "fish_speech"]` |

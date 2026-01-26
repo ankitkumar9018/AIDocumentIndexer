@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -166,11 +166,11 @@ async def create_connector(
     try:
         connector_type = ConnectorType(data.connector_type)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"Unknown connector type: {data.connector_type}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown connector type: {data.connector_type}")
 
     connector_class = ConnectorRegistry.get(connector_type)
     if not connector_class:
-        raise HTTPException(status_code=400, detail=f"Connector type not implemented: {data.connector_type}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Connector type not implemented: {data.connector_type}")
 
     # Create instance
     connector = ConnectorInstance(
@@ -222,7 +222,7 @@ async def get_connector(
     connector = result.scalar_one_or_none()
 
     if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
 
     return ConnectorInstanceResponse(
         id=str(connector.id),
@@ -258,7 +258,7 @@ async def update_connector(
     connector = result.scalar_one_or_none()
 
     if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
 
     if data.name is not None:
         connector.name = data.name
@@ -304,7 +304,7 @@ async def delete_connector(
     connector = result.scalar_one_or_none()
 
     if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
 
     await session.delete(connector)
     await session.commit()
@@ -337,11 +337,11 @@ async def get_oauth_url(
     connector_instance = result.scalar_one_or_none()
 
     if not connector_instance:
-        raise HTTPException(status_code=404, detail="Connector not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
 
     connector_class = ConnectorRegistry.get(ConnectorType(connector_instance.connector_type))
     if not connector_class:
-        raise HTTPException(status_code=400, detail="Unknown connector type")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown connector type")
 
     # Create connector instance
     connector = connector_class(
@@ -362,7 +362,7 @@ async def get_oauth_url(
         if url:
             return OAuthUrlResponse(url=url, state=state)
 
-    raise HTTPException(status_code=400, detail="Connector does not support OAuth")
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connector does not support OAuth")
 
 
 @router.get("/oauth/callback")
@@ -380,7 +380,7 @@ async def oauth_callback(
         connector_id_str, _ = state.split(":", 1)
         connector_id = uuid.UUID(connector_id_str)
     except (ValueError, AttributeError):
-        raise HTTPException(status_code=400, detail="Invalid state parameter")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid state parameter")
 
     result = await session.execute(
         select(ConnectorInstance).where(ConnectorInstance.id == connector_id)
@@ -388,11 +388,11 @@ async def oauth_callback(
     connector_instance = result.scalar_one_or_none()
 
     if not connector_instance:
-        raise HTTPException(status_code=404, detail="Connector not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
 
     connector_class = ConnectorRegistry.get(ConnectorType(connector_instance.connector_type))
     if not connector_class:
-        raise HTTPException(status_code=400, detail="Unknown connector type")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown connector type")
 
     # Create connector instance
     connector = connector_class(
@@ -418,7 +418,7 @@ async def oauth_callback(
         # Redirect to frontend
         return {"status": "success", "connector_id": str(connector_id)}
 
-    raise HTTPException(status_code=400, detail="Connector does not support OAuth callback")
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connector does not support OAuth callback")
 
 
 # =============================================================================
@@ -447,10 +447,10 @@ async def trigger_sync(
     connector = result.scalar_one_or_none()
 
     if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
 
     if not connector.is_active:
-        raise HTTPException(status_code=400, detail="Connector is not active")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connector is not active")
 
     # Trigger sync in background
     scheduler = get_scheduler()
@@ -492,7 +492,7 @@ async def get_sync_history(
     connector = result.scalar_one_or_none()
 
     if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
 
     scheduler = get_scheduler()
     jobs = scheduler.get_job_history(
@@ -543,14 +543,14 @@ async def browse_resources(
     connector_instance = result.scalar_one_or_none()
 
     if not connector_instance:
-        raise HTTPException(status_code=404, detail="Connector not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
 
     if not connector_instance.is_active:
-        raise HTTPException(status_code=400, detail="Connector is not active")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connector is not active")
 
     connector_class = ConnectorRegistry.get(ConnectorType(connector_instance.connector_type))
     if not connector_class:
-        raise HTTPException(status_code=400, detail="Unknown connector type")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown connector type")
 
     connector = connector_class(
         config=ConnectorConfig(
@@ -563,7 +563,7 @@ async def browse_resources(
 
     # Authenticate
     if not await connector.authenticate():
-        raise HTTPException(status_code=401, detail="Connector authentication failed")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Connector authentication failed")
 
     # List resources
     resources, next_token = await connector.list_resources(

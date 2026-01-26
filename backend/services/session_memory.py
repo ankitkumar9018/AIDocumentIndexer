@@ -17,6 +17,8 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 import structlog
 
+# Phase 87 audit: still valid in langchain 0.3.x;
+# future migration to langgraph state management recommended
 from langchain.memory import ConversationBufferWindowMemory
 
 

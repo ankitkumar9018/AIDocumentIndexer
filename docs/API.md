@@ -1651,11 +1651,406 @@ All errors follow this format:
 
 ---
 
+## RAG Evaluation Endpoints
+
+### POST /evaluation/evaluate
+
+Evaluate a single RAG response using RAGAS metrics.
+
+**Request:**
+```json
+{
+  "query": "What is machine learning?",
+  "answer": "Machine learning is a branch of AI...",
+  "contexts": ["Retrieved document content 1...", "Retrieved document content 2..."],
+  "ground_truth": "Optional expected answer for recall calculation"
+}
+```
+
+**Response:**
+```json
+{
+  "query": "What is machine learning?",
+  "answer": "Machine learning is a branch of AI...",
+  "contexts": ["..."],
+  "metrics": {
+    "context_relevance": 0.85,
+    "faithfulness": 0.92,
+    "answer_relevance": 0.88,
+    "context_recall": 0.80,
+    "overall_score": 0.88,
+    "quality_level": "excellent",
+    "evaluation_time_ms": 1250.5
+  },
+  "ground_truth": null,
+  "issues": [],
+  "suggestions": [],
+  "timestamp": "2026-01-24T10:30:00Z"
+}
+```
+
+### POST /evaluation/evaluate-query
+
+Evaluate a RAG query by running it through the RAG service first.
+
+**Request:**
+```json
+{
+  "query": "What is machine learning?",
+  "session_id": "optional-session-id",
+  "ground_truth": "Optional expected answer"
+}
+```
+
+**Response:** Same as `/evaluation/evaluate`
+
+### POST /evaluation/benchmark
+
+Run a benchmark suite with multiple test cases.
+
+**Request:**
+```json
+{
+  "test_cases": [
+    {
+      "query": "Query 1...",
+      "ground_truth": "Expected answer 1...",
+      "contexts": ["Optional pre-defined contexts..."]
+    },
+    {
+      "query": "Query 2...",
+      "ground_truth": "Expected answer 2..."
+    }
+  ],
+  "collection_filter": "optional-collection-name",
+  "use_rag_service": true
+}
+```
+
+**Response:**
+```json
+{
+  "test_count": 2,
+  "passing_rate": 0.85,
+  "duration_ms": 5230.5,
+  "aggregate_metrics": {
+    "context_relevance": 0.82,
+    "context_relevance_std": 0.05,
+    "faithfulness": 0.89,
+    "faithfulness_std": 0.03,
+    "answer_relevance": 0.85,
+    "answer_relevance_std": 0.04,
+    "overall_score": 0.85,
+    "overall_score_std": 0.04
+  },
+  "timestamp": "2026-01-24T10:30:00Z"
+}
+```
+
+### GET /evaluation/metrics/recent
+
+Get recent evaluation metrics summary.
+
+**Query Parameters:**
+- `hours` (int): Number of hours to look back (default: 24)
+
+**Response:**
+```json
+{
+  "count": 150,
+  "avg_overall": 0.84,
+  "avg_faithfulness": 0.87,
+  "avg_relevance": 0.82,
+  "period_hours": 24
+}
+```
+
+### GET /evaluation/metrics/trend
+
+Get evaluation metrics trend over time.
+
+**Query Parameters:**
+- `metric` (string): Metric to track (default: "overall_score")
+- `periods` (int): Number of time periods (default: 7)
+- `period_hours` (int): Hours per period (default: 24)
+
+**Response:**
+```json
+{
+  "metric": "overall_score",
+  "periods": 7,
+  "period_hours": 24,
+  "trend": [0.82, 0.83, 0.85, 0.84, 0.86, 0.85, 0.87],
+  "average": 0.846,
+  "direction": "improving"
+}
+```
+
+### GET /evaluation/health
+
+Check evaluation service health.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "tracker_size": 150,
+  "llm_available": true,
+  "embedding_service_available": true
+}
+```
+
+---
+
+## Agentic RAG Endpoints (Phase 72+)
+
+### POST /agentic/query
+
+Execute an agentic RAG query with multi-step reasoning (DRAGIN/FLARE dynamic retrieval).
+
+**Request:**
+```json
+{
+  "query": "Compare the financial performance across all quarterly reports",
+  "session_id": "optional-session-id",
+  "max_iterations": 5,
+  "collection_filter": "financial-reports"
+}
+```
+
+**Response:**
+```json
+{
+  "answer": "Based on the quarterly reports...",
+  "reasoning_steps": [...],
+  "sub_queries": [...],
+  "sources": [...],
+  "iterations_used": 3,
+  "token_budget_used": 4500
+}
+```
+
+### GET /agentic/status
+
+Get agentic RAG service status and configuration.
+
+---
+
+## Cache Management Endpoints (Phase 75)
+
+### GET /cache/stats
+
+Get cache statistics across all cache tiers (semantic, generative, embedding, query).
+
+**Response:**
+```json
+{
+  "semantic_cache": { "hits": 1234, "misses": 567, "hit_rate": 0.685, "size": 5000 },
+  "generative_cache": { "hits": 890, "misses": 234, "hit_rate": 0.792, "size": 3000 },
+  "embedding_cache": { "hits": 45000, "misses": 2000, "hit_rate": 0.957 },
+  "redis_connected": true
+}
+```
+
+### POST /cache/invalidate
+
+Invalidate cache entries by type and optional key pattern.
+
+**Request:**
+```json
+{
+  "cache_type": "semantic",
+  "pattern": "collection:finance*",
+  "reason": "documents updated"
+}
+```
+
+### POST /cache/clear
+
+Clear all caches (admin only). Returns count of cleared entries.
+
+---
+
+## Reranking Endpoints (Phase 74)
+
+### POST /reranking/rerank
+
+Apply tiered reranking to a set of search results.
+
+**Request:**
+```json
+{
+  "query": "What is the revenue?",
+  "results": [
+    { "content": "...", "score": 0.85 },
+    { "content": "...", "score": 0.72 }
+  ],
+  "stages": ["bm25", "cross_encoder", "colbert", "llm"]
+}
+```
+
+### GET /reranking/config
+
+Get current reranking pipeline configuration (stages, models, thresholds).
+
+---
+
+## Compression Endpoints (Phase 66+)
+
+### POST /compression/compress
+
+Compress context using available compression methods.
+
+**Request:**
+```json
+{
+  "query": "summary query",
+  "context": "long context text...",
+  "method": "attention_rag",
+  "target_ratio": 0.3
+}
+```
+
+**Methods:** `attention_rag`, `llmlingua`, `ttt`, `oscar`, `rcc`
+
+### GET /compression/stats
+
+Get compression statistics and method performance.
+
+---
+
+## Vision Processing Endpoints (Phase 76)
+
+### POST /vision/process
+
+Process an image through the vision pipeline (OCR, captioning, table extraction).
+
+**Request:** `multipart/form-data` with `file` field.
+
+### POST /vision/caption
+
+Generate a caption for an uploaded image.
+
+### GET /vision/status
+
+Get vision processing service status and available models.
+
+---
+
+## RAG Security Endpoints (Phase 84-85)
+
+### POST /security/scan
+
+Scan a query for prompt injection and other security threats.
+
+**Request:**
+```json
+{
+  "query": "user query text",
+  "scan_types": ["prompt_injection", "pii", "jailbreak"]
+}
+```
+
+**Response:**
+```json
+{
+  "safe": true,
+  "threats_detected": [],
+  "confidence": 0.95,
+  "scan_time_ms": 12
+}
+```
+
+### GET /security/config
+
+Get current security configuration (threat detection thresholds, enabled checks).
+
+---
+
+## Experiments & Feature Flags Endpoints (Phase 82)
+
+### GET /experiments
+
+List all available experiments and their status.
+
+**Response:**
+```json
+{
+  "experiments": [
+    { "name": "attention_rag", "enabled": true, "description": "6.3x context compression" },
+    { "name": "graph_o1", "enabled": false, "description": "Beam search GraphRAG reasoning" }
+  ]
+}
+```
+
+### PUT /experiments/{experiment_name}
+
+Toggle an experiment on/off (admin only).
+
+**Request:**
+```json
+{
+  "enabled": true
+}
+```
+
+---
+
+## Diagnostics Endpoints (Phase 88)
+
+### GET /diagnostics/health
+
+Comprehensive health check for all external services.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "services": {
+    "postgresql": { "connected": true, "latency_ms": 5 },
+    "redis": { "connected": true, "latency_ms": 2 },
+    "ollama": { "connected": true, "models": 3 },
+    "ray": { "connected": false, "reason": "not configured" },
+    "chromadb": { "connected": true, "collections": 5 }
+  },
+  "uptime_seconds": 86400
+}
+```
+
+### GET /diagnostics/circuit-breakers
+
+Get circuit breaker status for all providers.
+
+### GET /diagnostics/rate-limits
+
+Get current rate limit status for all LLM providers.
+
+---
+
+## Late Chunking Endpoints (Phase 66)
+
+### POST /late-chunking/process
+
+Process text using late chunking (context-preserving chunking with +15-25% accuracy).
+
+**Request:**
+```json
+{
+  "text": "long document text...",
+  "chunk_size": 512,
+  "model": "jina-embeddings-v3"
+}
+```
+
+---
+
 ## Rate Limiting
 
 API requests are limited to:
 - 100 requests per minute for authenticated users
 - 10 requests per minute for unauthenticated endpoints
+- 10 login attempts per minute per IP (Phase 85)
+- 5 registration attempts per hour per IP (Phase 85)
 
 Rate limit headers are included in responses:
 - `X-RateLimit-Limit`: Maximum requests allowed

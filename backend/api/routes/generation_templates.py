@@ -8,7 +8,7 @@ CRUD endpoints for managing document generation templates.
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -258,7 +258,7 @@ async def get_template(
 
     template = await service.get_template(template_id, user_id)
     if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
 
     return TemplateResponse(
         id=str(template.id),
@@ -337,7 +337,7 @@ async def update_template(
 
     template = await service.update_template(template_id, user_id, **updates)
     if not template:
-        raise HTTPException(status_code=404, detail="Template not found or not owned by user")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found or not owned by user")
 
     return TemplateResponse(
         id=str(template.id),
@@ -370,7 +370,7 @@ async def delete_template(
 
     deleted = await service.delete_template(template_id, user_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Template not found or not owned by user")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found or not owned by user")
 
 
 @router.post("/{template_id}/duplicate", response_model=TemplateResponse, status_code=201)
@@ -390,7 +390,7 @@ async def duplicate_template(
         new_name=request.new_name,
     )
     if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
 
     return TemplateResponse(
         id=str(template.id),
@@ -433,7 +433,7 @@ async def seed_system_templates(
     """
     # Check if admin
     if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
 
     service = GenerationTemplateService(db)
     count = await service.seed_system_templates()

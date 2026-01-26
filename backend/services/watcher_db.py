@@ -758,7 +758,10 @@ class FileWatcherServiceDB:
             logger.warning("Watcher already running")
             return
 
-        self._event_loop = event_loop or asyncio.get_event_loop()
+        try:
+            self._event_loop = event_loop or asyncio.get_running_loop()
+        except RuntimeError:
+            self._event_loop = asyncio.new_event_loop()
 
         logger.info("Starting file watcher service")
 

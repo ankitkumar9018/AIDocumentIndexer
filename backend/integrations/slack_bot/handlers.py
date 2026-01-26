@@ -118,8 +118,8 @@ class SlackEventHandler:
                 timestamp=event.get("ts"),
                 name="thinking_face",
             )
-        except:
-            pass
+        except Exception:
+            pass  # Reaction failures are non-critical
 
         try:
             response = await self._process_query(query, user, channel)
@@ -142,8 +142,8 @@ class SlackEventHandler:
                     timestamp=event.get("ts"),
                     name="white_check_mark",
                 )
-            except:
-                pass
+            except Exception:
+                pass  # Reaction failures are non-critical
 
         except Exception as e:
             logger.error("Failed to process mention", error=str(e))

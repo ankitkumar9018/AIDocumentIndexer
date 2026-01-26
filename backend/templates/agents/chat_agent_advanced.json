@@ -1,0 +1,162 @@
+{
+  "name": "Advanced Document Assistant",
+  "description": "AI-powered chat agent with RAG, memory, and multi-modal capabilities",
+  "type": "CHATBOT",
+  "version": "1.0.0",
+
+  "system_prompt": "You are a knowledgeable AI assistant with access to the user's document library. You provide accurate, well-sourced answers by searching through uploaded documents. Always cite your sources and ask clarifying questions when needed. Be conversational but professional.",
+
+  "capabilities": {
+    "rag_enabled": true,
+    "memory_enabled": true,
+    "vision_enabled": true,
+    "web_search_enabled": false,
+    "code_execution_enabled": false
+  },
+
+  "enhancements": {
+    "query_enhancement": {
+      "enabled": true,
+      "description": "Expand and improve user queries for better retrieval",
+      "options": {
+        "query_expansion": true,
+        "hyde_generation": true,
+        "spell_correction": true,
+        "query_decomposition": true
+      }
+    },
+
+    "retrieval_enhancement": {
+      "enabled": true,
+      "description": "Advanced retrieval with multiple strategies",
+      "options": {
+        "hybrid_search": {
+          "enabled": true,
+          "vector_weight": 0.7,
+          "keyword_weight": 0.3
+        },
+        "tiered_reranking": {
+          "enabled": true,
+          "stages": ["colbert", "cross_encoder", "llm"],
+          "stage1_top_k": 100,
+          "stage2_top_k": 20,
+          "final_top_k": 5
+        },
+        "graphrag": {
+          "enabled": true,
+          "max_hops": 2,
+          "include_community_summaries": true
+        },
+        "colpali_visual": {
+          "enabled": false,
+          "description": "Enable for visual document retrieval"
+        },
+        "warp_engine": {
+          "enabled": false,
+          "description": "3x faster search for large collections"
+        }
+      }
+    },
+
+    "answer_enhancement": {
+      "enabled": true,
+      "description": "Improve answer quality and reduce hallucinations",
+      "options": {
+        "self_refine": {
+          "enabled": true,
+          "max_iterations": 2
+        },
+        "chain_of_verification": {
+          "enabled": true,
+          "verify_facts": true
+        },
+        "confidence_scoring": {
+          "enabled": true,
+          "show_low_confidence_warning": true,
+          "threshold": 0.3
+        },
+        "source_citation": {
+          "enabled": true,
+          "citation_style": "inline",
+          "include_page_numbers": true
+        }
+      }
+    },
+
+    "memory_enhancement": {
+      "enabled": true,
+      "description": "Persistent memory across conversations",
+      "options": {
+        "provider": "mem0",
+        "memory_types": ["facts", "preferences", "context"],
+        "max_memories": 1000,
+        "decay_enabled": true,
+        "decay_half_life_days": 30
+      }
+    },
+
+    "context_management": {
+      "enabled": true,
+      "description": "Efficient context handling for long conversations",
+      "options": {
+        "compression": {
+          "enabled": true,
+          "level": "moderate",
+          "keep_recent_turns": 10,
+          "anchor_important_facts": true
+        },
+        "recursive_lm": {
+          "enabled": false,
+          "description": "Enable for 10M+ token contexts",
+          "threshold_tokens": 100000
+        }
+      }
+    },
+
+    "caching": {
+      "enabled": true,
+      "description": "Cache responses for faster repeat queries",
+      "options": {
+        "generative_cache": {
+          "enabled": true,
+          "similarity_threshold": 0.92,
+          "max_entries": 10000,
+          "ttl_hours": 24
+        }
+      }
+    }
+  },
+
+  "llm_config": {
+    "provider": "openai",
+    "model": "gpt-4o",
+    "temperature": 0.7,
+    "max_tokens": 4096,
+    "fallback_models": ["gpt-4o-mini", "claude-3-haiku"]
+  },
+
+  "embedding_config": {
+    "provider": "openai",
+    "model": "text-embedding-3-large",
+    "dimensions": 3072,
+    "fallback_models": ["text-embedding-3-small", "voyage-3-large"]
+  },
+
+  "ui_config": {
+    "theme": "auto",
+    "show_sources": true,
+    "show_confidence": true,
+    "show_suggested_questions": true,
+    "enable_feedback": true,
+    "max_sources_display": 5,
+    "typing_indicator": true
+  },
+
+  "rate_limits": {
+    "requests_per_minute": 20,
+    "tokens_per_day": 100000
+  },
+
+  "languages": ["en", "de", "es", "fr", "it", "pt", "zh", "ja", "ko"],
+  "default_language": "auto"
+}

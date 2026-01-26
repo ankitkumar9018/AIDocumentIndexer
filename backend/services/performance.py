@@ -97,7 +97,7 @@ async def process_batch_async(
                     )
                 else:
                     # Run sync function in thread pool
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     result = await asyncio.wait_for(
                         loop.run_in_executor(None, processor, item),
                         timeout=timeout_per_item,
@@ -496,7 +496,7 @@ class TaskExecutor:
 
         try:
             future = ray_wrapper.remote(func, *args, **kwargs)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
                 lambda: ray.get(future, timeout=timeout),
@@ -538,7 +538,7 @@ class TaskExecutor:
         if asyncio.iscoroutinefunction(func):
             return await asyncio.wait_for(func(*args, **kwargs), timeout=timeout)
         else:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             return await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: func(*args, **kwargs)),
                 timeout=timeout,

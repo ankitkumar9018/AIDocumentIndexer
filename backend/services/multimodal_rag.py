@@ -737,7 +737,8 @@ Respond with just the category name in uppercase."""
                         rows.append(row)
 
                 tables.append(ExtractedTable(headers=headers, rows=rows))
-            except Exception:
+            except (ValueError, IndexError) as e:
+                logger.debug("Table extraction failed for block", error=str(e))
                 continue
 
         # Pattern 2: Tab-separated

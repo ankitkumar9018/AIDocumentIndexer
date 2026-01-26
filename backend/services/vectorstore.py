@@ -6,6 +6,8 @@ Provides vector storage and similarity search using PostgreSQL + pgvector.
 Supports hybrid search (vector + keyword) with access tier filtering.
 """
 
+import asyncio
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -213,6 +215,263 @@ class VectorStoreConfig:
     mmr_lambda: float = 0.5  # Balance: 0=max diversity, 1=max relevance
     mmr_fetch_k: int = 20  # Fetch more candidates for MMR selection
 
+    # HNSW Index Optimization (Phase 57 + Phase 65 Scale Enhancement)
+    hnsw_ef_search: int = 40  # Default ef_search for normal queries
+    hnsw_ef_search_high_precision: int = 100  # ef_search for high-precision queries
+    pgvector_iterative_scan: str = "relaxed_order"  # off, strict_order, relaxed_order
+
+    # Phase 68: Allowed values for SQL injection prevention
+    ALLOWED_ITERATIVE_SCAN_VALUES = frozenset({"off", "strict_order", "relaxed_order"})
+
+    # Phase 65: Scale-aware HNSW (auto-tuned based on corpus size)
+    hnsw_auto_tune: bool = True  # Auto-adjust params based on corpus size
+    hnsw_ef_construction: int = 200  # Build-time parameter (higher = better recall)
+    hnsw_m: int = 32  # Number of connections per layer (16-64 typical)
+
+    # Phase 65: BM25 Scoring (better than TF-IDF for term saturation)
+    enable_bm25: bool = True  # Enable BM25 scoring for keyword search
+    bm25_k1: float = 1.5  # Term frequency saturation parameter (1.2-2.0 typical)
+    bm25_b: float = 0.75  # Length normalization parameter (0.0-1.0)
+
+    # Phase 65: Field Boosting (search-engine quality ranking)
+    enable_field_boosting: bool = True  # Boost matches in titles/sections
+    field_weight_section_title: float = 3.0  # Section title matches
+    field_weight_document_title: float = 2.5  # Document title matches
+    field_weight_enhanced_summary: float = 1.5  # LLM summary matches
+    field_weight_content: float = 1.0  # Regular content matches
+
+    # Phase 65: Freshness Boosting
+    enable_freshness_boost: bool = False  # Boost recently updated documents
+    freshness_decay_rate: float = 0.1  # Decay rate per day
+
+    # Phase 92: Binary Quantization (32x memory reduction for large-scale search)
+    enable_binary_quantization: bool = False  # Master toggle (reads from admin setting)
+    binary_rerank_factor: int = 10  # Fetch N*rerank_factor candidates for pgvector reranking
+    binary_min_corpus_size: int = 1000  # Minimum corpus size before binary search activates
+    binary_use_matryoshka: bool = False  # Multi-resolution search (64→256→768 dims)
+
+
+# =============================================================================
+# BM25 Scorer (Phase 65 - Search Engine Quality)
+# =============================================================================
+
+class BM25Scorer:
+    """
+    BM25 scoring implementation for search-engine quality ranking.
+
+    BM25 (Best Matching 25) is superior to TF-IDF because:
+    1. Term frequency saturation - frequent terms don't dominate
+    2. Document length normalization - fair comparison across lengths
+    3. Proven effectiveness in search engines (Elasticsearch, Lucene)
+
+    Formula:
+    BM25(d, Q) = Σ IDF(qi) * (f(qi, d) * (k1 + 1)) / (f(qi, d) + k1 * (1 - b + b * |d|/avgdl))
+
+    Where:
+    - f(qi, d) = frequency of term qi in document d
+    - |d| = document length (in terms)
+    - avgdl = average document length
+    - k1 = term frequency saturation (1.2-2.0, default 1.5)
+    - b = length normalization (0.0-1.0, default 0.75)
+    - IDF(qi) = log((N - n(qi) + 0.5) / (n(qi) + 0.5) + 1)
+    """
+
+    def __init__(
+        self,
+        k1: float = 1.5,
+        b: float = 0.75,
+        avg_doc_length: float = 500.0,
+        total_docs: int = 1000,
+    ):
+        """
+        Initialize BM25 scorer.
+
+        Args:
+            k1: Term frequency saturation parameter
+            b: Length normalization parameter
+            avg_doc_length: Average document length in terms
+            total_docs: Total number of documents (for IDF calculation)
+        """
+        self.k1 = k1
+        self.b = b
+        self.avg_doc_length = avg_doc_length
+        self.total_docs = total_docs
+        self._doc_freq_cache: Dict[str, int] = {}
+
+    def update_stats(
+        self,
+        avg_doc_length: float,
+        total_docs: int,
+        doc_freq: Optional[Dict[str, int]] = None,
+    ) -> None:
+        """Update corpus statistics for accurate IDF calculation."""
+        self.avg_doc_length = avg_doc_length
+        self.total_docs = total_docs
+        if doc_freq:
+            self._doc_freq_cache = doc_freq
+
+    def _tokenize(self, text: str) -> List[str]:
+        """Simple tokenization - lowercase and split on non-alphanumeric."""
+        import re
+        return re.findall(r'\b[a-z0-9]+\b', text.lower())
+
+    def _idf(self, term: str, doc_freq: Optional[int] = None) -> float:
+        """
+        Calculate Inverse Document Frequency for a term.
+
+        Uses BM25's IDF variant which handles edge cases better:
+        IDF = log((N - n(qi) + 0.5) / (n(qi) + 0.5) + 1)
+        """
+        import math
+
+        if doc_freq is None:
+            doc_freq = self._doc_freq_cache.get(term, 1)
+
+        # BM25 IDF formula - always positive
+        numerator = self.total_docs - doc_freq + 0.5
+        denominator = doc_freq + 0.5
+        return math.log(numerator / denominator + 1)
+
+    def score(
+        self,
+        query: str,
+        document: str,
+        doc_freq: Optional[Dict[str, int]] = None,
+    ) -> float:
+        """
+        Calculate BM25 score for a query-document pair.
+
+        Args:
+            query: Search query string
+            document: Document text to score
+            doc_freq: Optional dict of term -> document frequency
+
+        Returns:
+            BM25 score (higher is better)
+        """
+        query_terms = self._tokenize(query)
+        doc_terms = self._tokenize(document)
+
+        if not query_terms or not doc_terms:
+            return 0.0
+
+        doc_length = len(doc_terms)
+        doc_term_freq: Dict[str, int] = {}
+        for term in doc_terms:
+            doc_term_freq[term] = doc_term_freq.get(term, 0) + 1
+
+        score = 0.0
+        for term in set(query_terms):
+            if term not in doc_term_freq:
+                continue
+
+            freq = doc_term_freq[term]
+
+            # Get IDF
+            if doc_freq and term in doc_freq:
+                idf = self._idf(term, doc_freq[term])
+            else:
+                idf = self._idf(term)
+
+            # BM25 term score
+            # (f(qi, d) * (k1 + 1)) / (f(qi, d) + k1 * (1 - b + b * |d|/avgdl))
+            numerator = freq * (self.k1 + 1)
+            length_norm = 1 - self.b + self.b * (doc_length / self.avg_doc_length)
+            denominator = freq + self.k1 * length_norm
+
+            score += idf * (numerator / denominator)
+
+        return score
+
+    def score_batch(
+        self,
+        query: str,
+        documents: List[str],
+        doc_freq: Optional[Dict[str, int]] = None,
+    ) -> List[float]:
+        """Score multiple documents against a query."""
+        return [self.score(query, doc, doc_freq) for doc in documents]
+
+
+# =============================================================================
+# Field Boosting (Phase 65 - Search Engine Quality)
+# =============================================================================
+
+FIELD_WEIGHTS = {
+    "section_title": 3.0,
+    "document_title": 2.5,
+    "enhanced_summary": 1.5,
+    "content": 1.0,
+}
+
+
+def calculate_field_boost(
+    query: str,
+    section_title: Optional[str] = None,
+    document_title: Optional[str] = None,
+    enhanced_summary: Optional[str] = None,
+    content: Optional[str] = None,
+    weights: Optional[Dict[str, float]] = None,
+) -> float:
+    """
+    Calculate field-based boost score for a search result.
+
+    This implements search-engine style field boosting where matches
+    in titles/sections are weighted more heavily than content matches.
+
+    Args:
+        query: Search query string
+        section_title: Section title of the chunk
+        document_title: Document title
+        enhanced_summary: LLM-generated summary
+        content: Chunk content
+        weights: Optional custom weights (defaults to FIELD_WEIGHTS)
+
+    Returns:
+        Field boost score (multiplier, typically 1.0-3.0)
+    """
+    weights = weights or FIELD_WEIGHTS
+    query_lower = query.lower()
+    query_terms = set(query_lower.split())
+
+    boost = 0.0
+    match_count = 0
+
+    # Check each field for matches
+    fields = [
+        ("section_title", section_title),
+        ("document_title", document_title),
+        ("enhanced_summary", enhanced_summary),
+        ("content", content),
+    ]
+
+    for field_name, field_value in fields:
+        if not field_value:
+            continue
+
+        field_lower = field_value.lower()
+        weight = weights.get(field_name, 1.0)
+
+        # Exact phrase match (highest boost)
+        if query_lower in field_lower:
+            boost += weight * 1.0
+            match_count += 1
+        else:
+            # Partial term match
+            field_terms = set(field_lower.split())
+            overlap = len(query_terms & field_terms)
+            if overlap > 0:
+                # Scale by proportion of terms matched
+                partial_boost = weight * (overlap / len(query_terms)) * 0.5
+                boost += partial_boost
+                match_count += 1
+
+    # Normalize: if matches found, return boost + 1.0 base
+    # If no matches, return 1.0 (neutral)
+    if match_count > 0:
+        return 1.0 + (boost / match_count)
+    return 1.0
+
 
 # =============================================================================
 # Vector Store Service
@@ -227,6 +486,7 @@ class VectorStore:
     - Hybrid search with full-text keywords
     - Access tier filtering (RLS-compatible)
     - Batch operations for efficiency
+    - HNSW index optimization (Phase 57)
     """
 
     def __init__(self, config: Optional[VectorStoreConfig] = None):
@@ -239,6 +499,7 @@ class VectorStore:
         self.config = config or VectorStoreConfig()
         self._has_pgvector = HAS_PGVECTOR
         self._reranker = None
+        self._pgvector_version: Optional[str] = None
 
         if not self._has_pgvector:
             logger.warning("pgvector not available, vector search will be limited")
@@ -256,6 +517,743 @@ class VectorStore:
 
         # ColBERT reranker (lazy-loaded when setting is enabled)
         self._colbert_reranker = None
+
+        # Phase 92: Binary Quantization (in-memory pre-filter for large corpora)
+        self._binary_quantizer = None
+        self._binary_index_built: bool = False
+        self._binary_chunk_ids: Optional[List[str]] = None
+        self._binary_corpus_size: int = 0
+        self._binary_index_lock = asyncio.Lock()
+
+        # Phase 65: Initialize BM25 scorer for search-engine quality ranking
+        self._bm25_scorer: Optional[BM25Scorer] = None
+        self._bm25_stats_loaded: bool = False
+        if self.config.enable_bm25:
+            self._bm25_scorer = BM25Scorer(
+                k1=self.config.bm25_k1,
+                b=self.config.bm25_b,
+            )
+            logger.info(
+                "Initialized BM25 scorer",
+                k1=self.config.bm25_k1,
+                b=self.config.bm25_b,
+            )
+
+    # =========================================================================
+    # Phase 92: Binary Quantization Pre-Filter
+    # =========================================================================
+
+    async def _build_binary_index(
+        self,
+        force_rebuild: bool = False,
+        session: Optional[AsyncSession] = None,
+    ) -> bool:
+        """
+        Build the in-memory binary quantization index from pgvector embeddings.
+
+        Loads all chunk embeddings, quantizes to binary for fast Hamming-distance
+        pre-filtering. The full-precision vectors remain in pgvector for final ranking.
+
+        Args:
+            force_rebuild: Force rebuild even if index exists
+            session: Optional database session
+
+        Returns:
+            True if index was built successfully
+        """
+        if self._binary_index_built and not force_rebuild:
+            return True
+
+        async with self._binary_index_lock:
+            # Double-check after acquiring lock
+            if self._binary_index_built and not force_rebuild:
+                return True
+
+            async def _load_and_index(db: AsyncSession):
+                import numpy as np
+
+                # Count embeddings to check minimum corpus size
+                count_result = await db.execute(
+                    select(func.count(Chunk.id)).where(Chunk.embedding.isnot(None))
+                )
+                embedded_count = count_result.scalar() or 0
+
+                if embedded_count < self.config.binary_min_corpus_size:
+                    logger.info(
+                        "Corpus too small for binary quantization",
+                        embedded_count=embedded_count,
+                        min_required=self.config.binary_min_corpus_size,
+                    )
+                    return False
+
+                # Load all embeddings in batches
+                batch_size = 10000
+                all_embeddings = []
+                all_chunk_ids = []
+                offset = 0
+
+                while True:
+                    result = await db.execute(
+                        select(Chunk.id, Chunk.embedding)
+                        .where(Chunk.embedding.isnot(None))
+                        .order_by(Chunk.id)
+                        .offset(offset)
+                        .limit(batch_size)
+                    )
+                    rows = result.all()
+                    if not rows:
+                        break
+
+                    for chunk_id, embedding in rows:
+                        all_chunk_ids.append(str(chunk_id))
+                        all_embeddings.append(embedding)
+
+                    offset += batch_size
+
+                if not all_embeddings:
+                    return False
+
+                # Build binary index (store_full=False: pgvector handles reranking)
+                from backend.services.binary_quantization import (
+                    BinaryQuantizer,
+                    BinaryQuantizationConfig,
+                )
+                corpus = np.array(all_embeddings, dtype=np.float32)
+
+                config = BinaryQuantizationConfig(
+                    rerank_factor=self.config.binary_rerank_factor,
+                    use_matryoshka=self.config.binary_use_matryoshka,
+                )
+                self._binary_quantizer = BinaryQuantizer(config)
+                index_stats = self._binary_quantizer.index_corpus(corpus, store_full=False)
+
+                self._binary_chunk_ids = all_chunk_ids
+                self._binary_corpus_size = len(all_chunk_ids)
+                self._binary_index_built = True
+
+                logger.info(
+                    "Built binary quantization index",
+                    **index_stats,
+                )
+                return True
+
+            try:
+                if session:
+                    return await _load_and_index(session)
+                else:
+                    async with async_session_context() as db:
+                        return await _load_and_index(db)
+            except Exception as e:
+                logger.warning("Failed to build binary index", error=str(e))
+                return False
+
+    async def _binary_prefilter(
+        self,
+        query_embedding: List[float],
+        top_k: int,
+    ) -> Optional[List[str]]:
+        """
+        Use binary quantization to pre-filter search candidates.
+
+        Returns chunk IDs of top candidates via Hamming-distance search,
+        or None if binary index is unavailable (caller falls back to full search).
+
+        Args:
+            query_embedding: Full-precision query embedding
+            top_k: Number of final results desired
+
+        Returns:
+            List of candidate chunk IDs, or None if unavailable
+        """
+        # Check admin setting
+        try:
+            from backend.services.settings import get_settings_service
+            settings_service = get_settings_service()
+            enabled = await settings_service.get_setting("vectorstore.binary_quantization_enabled")
+            if not enabled:
+                return None
+        except Exception:
+            if not self.config.enable_binary_quantization:
+                return None
+
+        if not self._binary_index_built:
+            built = await self._build_binary_index()
+            if not built:
+                return None
+
+        try:
+            import numpy as np
+
+            query = np.array(query_embedding, dtype=np.float32)
+            n_candidates = top_k * self.config.binary_rerank_factor
+
+            # Use matryoshka if configured and corpus has full vectors
+            if self.config.binary_use_matryoshka and self._binary_quantizer._corpus_full is not None:
+                results = await self._binary_quantizer.search_matryoshka(
+                    query=query,
+                    corpus_full=self._binary_quantizer._corpus_full,
+                    top_k=n_candidates,
+                )
+            else:
+                results = await self._binary_quantizer.search_binary(
+                    query=query,
+                    top_k=n_candidates,
+                )
+
+            # Map binary indices back to chunk IDs
+            candidate_ids = []
+            for result in results:
+                if result.index < len(self._binary_chunk_ids):
+                    candidate_ids.append(self._binary_chunk_ids[result.index])
+
+            logger.debug(
+                "Binary pre-filter completed",
+                candidates=len(candidate_ids),
+                top_k=top_k,
+                corpus_size=self._binary_corpus_size,
+            )
+
+            return candidate_ids if candidate_ids else None
+
+        except Exception as e:
+            logger.warning("Binary pre-filter failed, falling back to full search", error=str(e))
+            return None
+
+    # =========================================================================
+    # HNSW Index Optimization (Phase 57)
+    # =========================================================================
+
+    # Cache for scale-aware HNSW config (Phase 65)
+    _cached_hnsw_config: Optional[Dict[str, Any]] = None
+    _hnsw_config_cached_at: Optional[datetime] = None
+
+    async def _apply_hnsw_settings(
+        self,
+        db: AsyncSession,
+        high_precision: bool = False
+    ) -> None:
+        """
+        Apply HNSW index optimization settings before search.
+
+        This sets pgvector session parameters for optimal search performance:
+        - hnsw.ef_search: Higher values = better recall, slower speed
+        - hnsw.iterative_scan: relaxed_order provides ~9x speedup with 95-99% accuracy
+
+        Phase 65: Now supports scale-aware auto-tuning.
+
+        Args:
+            db: Database session
+            high_precision: If True, use higher ef_search for better recall
+        """
+        try:
+            # Phase 65: Use scale-aware config if auto-tune enabled
+            if self.config.hnsw_auto_tune:
+                # Cache config for 5 minutes to avoid repeated DB queries
+                cache_valid = (
+                    self._cached_hnsw_config is not None
+                    and self._hnsw_config_cached_at is not None
+                    and (datetime.utcnow() - self._hnsw_config_cached_at).seconds < 300
+                )
+
+                if not cache_valid:
+                    self._cached_hnsw_config = await self.get_optimal_hnsw_config()
+                    self._hnsw_config_cached_at = datetime.utcnow()
+
+                config = self._cached_hnsw_config
+                ef_search = (
+                    config.get("ef_search_high", self.config.hnsw_ef_search_high_precision)
+                    if high_precision
+                    else config.get("ef_search", self.config.hnsw_ef_search)
+                )
+            else:
+                ef_search = (
+                    self.config.hnsw_ef_search_high_precision
+                    if high_precision
+                    else self.config.hnsw_ef_search
+                )
+
+            # Set ef_search for this session
+            # Phase 68: Validate ef_search is a positive integer to prevent SQL injection
+            if not isinstance(ef_search, int) or ef_search < 1 or ef_search > 10000:
+                logger.warning("Invalid ef_search value, using default", ef_search=ef_search)
+                ef_search = 40
+            await db.execute(text(f"SET hnsw.ef_search = {ef_search}"))
+
+            # Set iterative scan mode (pgvector 0.8.0+)
+            # relaxed_order provides best speed/accuracy tradeoff
+            iterative_scan = self.config.pgvector_iterative_scan
+            # Phase 68: Validate against allowed values to prevent SQL injection
+            if iterative_scan and iterative_scan in VectorStoreConfig.ALLOWED_ITERATIVE_SCAN_VALUES:
+                if iterative_scan != "off":
+                    try:
+                        await db.execute(
+                            text(f"SET hnsw.iterative_scan = '{iterative_scan}'")
+                        )
+                    except Exception:
+                        # pgvector < 0.8.0 doesn't support this setting
+                        pass
+            elif iterative_scan:
+                logger.warning("Invalid iterative_scan value ignored", value=iterative_scan)
+
+            logger.debug(
+                "Applied HNSW settings",
+                ef_search=ef_search,
+                iterative_scan=iterative_scan,
+                high_precision=high_precision,
+                auto_tuned=self.config.hnsw_auto_tune,
+            )
+        except Exception as e:
+            # Don't fail searches if settings can't be applied
+            logger.debug("Could not apply HNSW settings", error=str(e))
+
+    # Phase 65: Scale-aware HNSW configuration
+    HNSW_SCALE_CONFIGS = {
+        "small": {  # <10K vectors
+            "ef_construction": 128,
+            "m": 16,
+            "ef_search": 64,
+            "ef_search_high": 100,
+        },
+        "medium": {  # 10K-100K vectors
+            "ef_construction": 200,
+            "m": 32,
+            "ef_search": 100,
+            "ef_search_high": 200,
+        },
+        "large": {  # 100K-1M vectors
+            "ef_construction": 256,
+            "m": 48,
+            "ef_search": 150,
+            "ef_search_high": 300,
+        },
+        "xlarge": {  # >1M vectors
+            "ef_construction": 300,
+            "m": 64,
+            "ef_search": 200,
+            "ef_search_high": 400,
+        },
+    }
+
+    async def get_optimal_hnsw_config(
+        self,
+        vector_count: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get optimal HNSW configuration based on corpus size.
+
+        For 1M+ document scale, higher M and ef values improve recall
+        at the cost of memory and build time. This method returns
+        recommended parameters based on the current vector count.
+
+        Args:
+            vector_count: Optional explicit count, otherwise queries DB
+
+        Returns:
+            Dict with optimal HNSW parameters
+        """
+        if not self.config.hnsw_auto_tune:
+            return {
+                "ef_construction": self.config.hnsw_ef_construction,
+                "m": self.config.hnsw_m,
+                "ef_search": self.config.hnsw_ef_search,
+                "ef_search_high": self.config.hnsw_ef_search_high_precision,
+                "scale": "manual",
+            }
+
+        # Get vector count if not provided
+        if vector_count is None:
+            try:
+                stats = await self.get_stats()
+                vector_count = stats.get("embedded_chunks", 0)
+            except Exception:
+                vector_count = 10000  # Default to medium scale
+
+        # Determine scale tier
+        if vector_count < 10000:
+            scale = "small"
+        elif vector_count < 100000:
+            scale = "medium"
+        elif vector_count < 1000000:
+            scale = "large"
+        else:
+            scale = "xlarge"
+
+        config = self.HNSW_SCALE_CONFIGS[scale].copy()
+        config["scale"] = scale
+        config["vector_count"] = vector_count
+
+        logger.debug(
+            "Determined HNSW scale config",
+            scale=scale,
+            vector_count=vector_count,
+            config=config,
+        )
+
+        return config
+
+    async def get_recommended_index_ddl(
+        self,
+        vector_count: Optional[int] = None,
+    ) -> str:
+        """
+        Get recommended CREATE INDEX DDL for the current scale.
+
+        Returns optimized HNSW index creation SQL based on corpus size.
+
+        Args:
+            vector_count: Optional explicit count
+
+        Returns:
+            SQL DDL for creating the optimal index
+        """
+        config = await self.get_optimal_hnsw_config(vector_count)
+
+        ddl = f"""
+-- Optimal HNSW index for {config.get('scale', 'unknown')} scale ({config.get('vector_count', 'unknown')} vectors)
+-- Run with: SET maintenance_work_mem = '2GB'; SET max_parallel_maintenance_workers = 4;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chunks_embedding_hnsw
+ON chunks USING hnsw (embedding vector_cosine_ops)
+WITH (
+    m = {config['m']},
+    ef_construction = {config['ef_construction']}
+);
+
+-- After creation, set search parameters:
+-- SET hnsw.ef_search = {config['ef_search']};
+"""
+        return ddl.strip()
+
+    async def get_pgvector_version(self) -> Optional[str]:
+        """
+        Get the installed pgvector version.
+
+        Returns:
+            Version string (e.g., "0.8.0") or None if not available
+        """
+        if self._pgvector_version:
+            return self._pgvector_version
+
+        try:
+            async with async_session_context() as db:
+                result = await db.execute(
+                    text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+                )
+                row = result.fetchone()
+                if row:
+                    self._pgvector_version = row[0]
+                    return self._pgvector_version
+        except Exception as e:
+            logger.debug("Could not get pgvector version", error=str(e))
+
+        return None
+
+    async def get_index_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about vector indexes.
+
+        Returns:
+            Dictionary with index statistics
+        """
+        stats = {
+            "pgvector_version": await self.get_pgvector_version(),
+            "indexes": [],
+            "total_vectors": 0,
+        }
+
+        try:
+            async with async_session_context() as db:
+                # Get index information
+                result = await db.execute(text("""
+                    SELECT
+                        i.relname as index_name,
+                        t.relname as table_name,
+                        pg_size_pretty(pg_relation_size(i.oid)) as index_size,
+                        pg_relation_size(i.oid) as index_size_bytes
+                    FROM pg_class i
+                    JOIN pg_index ix ON i.oid = ix.indexrelid
+                    JOIN pg_class t ON t.oid = ix.indrelid
+                    WHERE i.relname LIKE '%embedding%hnsw%'
+                       OR i.relname LIKE '%vector%'
+                    ORDER BY pg_relation_size(i.oid) DESC
+                """))
+                for row in result:
+                    stats["indexes"].append({
+                        "name": row[0],
+                        "table": row[1],
+                        "size": row[2],
+                        "size_bytes": row[3],
+                    })
+
+                # Get total vector count
+                result = await db.execute(
+                    text("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL")
+                )
+                row = result.fetchone()
+                if row:
+                    stats["total_vectors"] = row[0]
+
+        except Exception as e:
+            logger.warning("Could not get index stats", error=str(e))
+
+        return stats
+
+    # =========================================================================
+    # BM25 Statistics (Phase 65)
+    # =========================================================================
+
+    async def _load_bm25_stats(self, db: AsyncSession) -> None:
+        """
+        Load corpus statistics for BM25 scoring.
+
+        This computes:
+        - Average document length (for length normalization)
+        - Total document count (for IDF calculation)
+        - Term document frequencies (optional, for accurate IDF)
+        """
+        if not self._bm25_scorer or self._bm25_stats_loaded:
+            return
+
+        try:
+            # Get average chunk length and count
+            result = await db.execute(text("""
+                SELECT
+                    COUNT(*) as total_docs,
+                    AVG(char_count) as avg_length
+                FROM chunks
+                WHERE content IS NOT NULL
+            """))
+            row = result.fetchone()
+
+            if row and row[0] > 0:
+                total_docs = int(row[0])
+                avg_length = float(row[1]) if row[1] else 500.0
+
+                # Convert char count to approximate word count
+                # (average English word is ~5 characters + space)
+                avg_doc_length = avg_length / 6.0
+
+                self._bm25_scorer.update_stats(
+                    avg_doc_length=avg_doc_length,
+                    total_docs=total_docs,
+                )
+                self._bm25_stats_loaded = True
+
+                logger.debug(
+                    "Loaded BM25 corpus stats",
+                    total_docs=total_docs,
+                    avg_doc_length=avg_doc_length,
+                )
+
+        except Exception as e:
+            logger.warning("Could not load BM25 stats", error=str(e))
+
+    async def calculate_bm25_scores(
+        self,
+        query: str,
+        results: List[SearchResult],
+        session: Optional[AsyncSession] = None,
+    ) -> List[SearchResult]:
+        """
+        Calculate BM25 scores for search results.
+
+        This post-processes results with BM25 scoring to get more
+        accurate relevance scores than PostgreSQL's ts_rank.
+
+        Args:
+            query: Search query
+            results: List of results to score
+            session: Optional database session
+
+        Returns:
+            Results with updated scores based on BM25
+        """
+        if not self._bm25_scorer or not results:
+            return results
+
+        async def _calc(db: AsyncSession) -> List[SearchResult]:
+            # Ensure stats are loaded
+            await self._load_bm25_stats(db)
+
+            # Calculate BM25 score for each result
+            for result in results:
+                bm25_score = self._bm25_scorer.score(query, result.content)
+                result.metadata["bm25_score"] = bm25_score
+
+                # Blend BM25 with existing score
+                # BM25 typically 0-15, normalize to 0-1 range
+                normalized_bm25 = min(bm25_score / 10.0, 1.0)
+
+                # Weighted average: 60% BM25, 40% ts_rank
+                original_score = result.score
+                result.score = 0.6 * normalized_bm25 + 0.4 * original_score
+
+            # Re-sort by new scores
+            results.sort(key=lambda r: r.score, reverse=True)
+
+            return results
+
+        if session:
+            return await _calc(session)
+        else:
+            async with async_session_context() as db:
+                return await _calc(db)
+
+    async def apply_field_boosting(
+        self,
+        query: str,
+        results: List[SearchResult],
+    ) -> List[SearchResult]:
+        """
+        Apply field-based boosting to search results.
+
+        Boosts results where query terms match in titles/sections.
+
+        Args:
+            query: Search query
+            results: List of results to boost
+
+        Returns:
+            Results with updated scores based on field matches
+        """
+        if not self.config.enable_field_boosting or not results:
+            return results
+
+        # Build custom weights from config
+        weights = {
+            "section_title": self.config.field_weight_section_title,
+            "document_title": self.config.field_weight_document_title,
+            "enhanced_summary": self.config.field_weight_enhanced_summary,
+            "content": self.config.field_weight_content,
+        }
+
+        for result in results:
+            boost = calculate_field_boost(
+                query=query,
+                section_title=result.section_title,
+                document_title=result.document_title,
+                enhanced_summary=result.enhanced_summary,
+                content=result.content[:500] if result.content else None,  # Sample
+                weights=weights,
+            )
+
+            # Apply boost as a multiplier
+            result.score *= boost
+            result.metadata["field_boost"] = boost
+            result.metadata["field_boosting_applied"] = True
+
+        # Re-sort by boosted scores
+        results.sort(key=lambda r: r.score, reverse=True)
+
+        logger.debug(
+            "Applied field boosting",
+            result_count=len(results),
+            avg_boost=sum(r.metadata.get("field_boost", 1.0) for r in results) / len(results),
+        )
+
+        return results
+
+    # Phase 68: Regex pattern for PostgreSQL memory settings (SQL injection prevention)
+    _VALID_MEMORY_PATTERN = re.compile(r'^[0-9]+\s*(kB|MB|GB|TB)?$', re.IGNORECASE)
+
+    async def apply_index_build_settings(
+        self,
+        db: AsyncSession,
+        maintenance_work_mem: str = "2GB",
+        parallel_workers: int = 4
+    ) -> None:
+        """
+        Apply settings for faster index builds.
+
+        Should be called before CREATE INDEX for optimal performance.
+        These settings apply to the current session only.
+
+        Args:
+            db: Database session
+            maintenance_work_mem: Memory for index builds (e.g., "2GB", "512MB")
+            parallel_workers: Number of parallel workers (0-7)
+        """
+        try:
+            # Phase 68: Validate maintenance_work_mem format to prevent SQL injection
+            if not maintenance_work_mem or not self._VALID_MEMORY_PATTERN.match(maintenance_work_mem):
+                logger.warning(
+                    "Invalid maintenance_work_mem format, using default",
+                    value=maintenance_work_mem,
+                )
+                maintenance_work_mem = "2GB"
+
+            # Set maintenance_work_mem for faster index builds
+            await db.execute(text(f"SET maintenance_work_mem = '{maintenance_work_mem}'"))
+
+            # Phase 68: Validate parallel_workers is in valid range
+            if not isinstance(parallel_workers, int) or parallel_workers < 0:
+                parallel_workers = 0
+
+            # Set parallel workers for index creation
+            if parallel_workers > 0:
+                await db.execute(
+                    text(f"SET max_parallel_maintenance_workers = {min(parallel_workers, 7)}")
+                )
+
+            logger.info(
+                "Applied index build settings",
+                maintenance_work_mem=maintenance_work_mem,
+                parallel_workers=parallel_workers
+            )
+        except Exception as e:
+            logger.warning("Could not apply index build settings", error=str(e))
+
+    # Phase 68: Regex pattern for valid PostgreSQL identifiers (SQL injection prevention)
+    _VALID_IDENTIFIER_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+
+    async def reindex_with_optimization(
+        self,
+        index_name: str,
+        concurrent: bool = True
+    ) -> bool:
+        """
+        Reindex a vector index with optimized settings.
+
+        This applies performance settings before reindexing.
+
+        Args:
+            index_name: Name of the index to rebuild (must be valid PostgreSQL identifier)
+            concurrent: If True, use REINDEX CONCURRENTLY (non-blocking)
+
+        Returns:
+            True if successful
+        """
+        # Phase 68: Validate index_name to prevent SQL injection
+        if not index_name or not self._VALID_IDENTIFIER_PATTERN.match(index_name):
+            logger.error(
+                "Invalid index name - must be valid PostgreSQL identifier",
+                index_name=index_name,
+            )
+            return False
+
+        # Additional length check (PostgreSQL identifier max length is 63)
+        if len(index_name) > 63:
+            logger.error("Index name too long", index_name=index_name)
+            return False
+
+        try:
+            async with async_session_context() as db:
+                # Apply build settings
+                await self.apply_index_build_settings(db)
+
+                # Reindex with validated identifier
+                concurrently = "CONCURRENTLY " if concurrent else ""
+                await db.execute(
+                    text(f"REINDEX INDEX {concurrently}{index_name}")
+                )
+                await db.commit()
+
+                logger.info("Reindexed successfully", index_name=index_name)
+                return True
+
+        except Exception as e:
+            logger.error("Failed to reindex", index_name=index_name, error=str(e))
+            return False
 
     # =========================================================================
     # Storage Operations
@@ -318,6 +1316,11 @@ class VectorStore:
             chunk_count=len(chunk_ids),
         )
 
+        # Phase 92: Invalidate binary index (will rebuild on next search)
+        if self._binary_index_built:
+            self._binary_index_built = False
+            logger.debug("Binary index invalidated after adding chunks")
+
         return chunk_ids
 
     async def delete_document_chunks(
@@ -349,6 +1352,12 @@ class VectorStore:
                 count = await _delete(db)
 
         logger.info("Deleted document chunks", document_id=document_id, count=count)
+
+        # Phase 92: Invalidate binary index (will rebuild on next search)
+        if self._binary_index_built:
+            self._binary_index_built = False
+            logger.debug("Binary index invalidated after deleting chunks")
+
         return count
 
     async def update_chunk_embedding(
@@ -426,6 +1435,9 @@ class VectorStore:
             return []
 
         async def _search(db: AsyncSession) -> List[SearchResult]:
+            # Apply HNSW index optimization settings (Phase 57)
+            await self._apply_hnsw_settings(db, high_precision=False)
+
             # Build the query using pgvector's cosine similarity
             # 1 - (embedding <=> query) gives similarity (higher is better)
             similarity_expr = 1 - Chunk.embedding.cosine_distance(query_embedding)
@@ -485,6 +1497,15 @@ class VectorStore:
             if document_ids:
                 doc_uuids = [uuid.UUID(d) for d in document_ids]
                 query = query.where(Document.id.in_(doc_uuids))
+
+            # Phase 92: Binary quantization pre-filter (narrow candidates before pgvector)
+            binary_candidate_ids = await self._binary_prefilter(
+                query_embedding=query_embedding,
+                top_k=top_k,
+            )
+            if binary_candidate_ids:
+                candidate_uuids = [uuid.UUID(cid) for cid in binary_candidate_ids]
+                query = query.where(Chunk.id.in_(candidate_uuids))
 
             # Apply similarity threshold and ordering
             query = (
@@ -665,11 +1686,22 @@ class VectorStore:
 
             return results
 
+        # Execute search
         if session:
-            return await _search(session)
+            results = await _search(session)
         else:
             async with async_session_context() as db:
-                return await _search(db)
+                results = await _search(db)
+
+        # Phase 65: Apply BM25 scoring for better ranking
+        if self.config.enable_bm25 and self._bm25_scorer and results:
+            results = await self.calculate_bm25_scores(
+                query=query,
+                results=results,
+                session=session,
+            )
+
+        return results
 
     async def enhanced_metadata_search(
         self,
@@ -998,6 +2030,23 @@ class VectorStore:
             enhanced_count=len(enhanced_results),
             final_count=len(final_results),
         )
+
+        # Phase 65: Apply BM25 scoring for search-engine quality
+        if self.config.enable_bm25 and self._bm25_scorer:
+            final_results = await self.calculate_bm25_scores(
+                query=query,
+                results=final_results,
+                session=session,
+            )
+            logger.debug("Applied BM25 scoring", result_count=len(final_results))
+
+        # Phase 65: Apply field boosting for title/section matches
+        if self.config.enable_field_boosting:
+            final_results = await self.apply_field_boosting(
+                query=query,
+                results=final_results,
+            )
+            logger.debug("Applied field boosting", result_count=len(final_results))
 
         # Apply reranking if enabled and available
         if self.config.enable_reranking and query:
@@ -1573,6 +2622,10 @@ class VectorStore:
                     (embedded_count / chunk_count * 100) if chunk_count else 0
                 ),
                 "has_pgvector": self._has_pgvector,
+                # Phase 92: Binary quantization stats
+                "binary_quantization_enabled": self.config.enable_binary_quantization,
+                "binary_index_built": self._binary_index_built,
+                "binary_index_size": self._binary_corpus_size,
             }
 
         if session:

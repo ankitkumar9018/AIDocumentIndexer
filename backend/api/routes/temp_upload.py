@@ -11,7 +11,7 @@ import tempfile
 from typing import Optional, List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status
 from pydantic import BaseModel, Field
 import structlog
 
@@ -88,7 +88,7 @@ async def create_temp_session(
     session = await service.get_session(session_id)
 
     if not session:
-        raise HTTPException(status_code=500, detail="Failed to create session")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create session")
 
     return CreateSessionResponse(
         session_id=session_id,
@@ -106,11 +106,11 @@ async def get_session_info(
     info = await service.get_session_info(session_id)
 
     if not info:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found or expired")
 
     # Verify ownership
     if info["user_id"] != user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this session")
 
     return SessionInfoResponse(
         id=info["id"],
@@ -143,14 +143,14 @@ async def upload_temp_document(
     # Verify session exists and belongs to user
     session = await service.get_session(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found or expired")
 
     if session.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this session")
 
     # Validate file
     if not file.filename:
-        raise HTTPException(status_code=400, detail="No filename provided")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No filename provided")
 
     # Save to temp file
     temp_dir = tempfile.mkdtemp(prefix="temp_upload_")
@@ -170,7 +170,7 @@ async def upload_temp_document(
         )
 
         if not doc:
-            raise HTTPException(status_code=400, detail="Failed to process document")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to process document")
 
         # Check if document fits in context
         MAX_CONTEXT = 100000
@@ -190,7 +190,7 @@ async def upload_temp_document(
         raise
     except Exception as e:
         logger.error("Upload failed", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Upload failed: {str(e)}")
 
 
 @router.delete("/sessions/{session_id}/documents/{doc_id}")
@@ -203,14 +203,14 @@ async def remove_temp_document(
     """Remove a document from a temporary session."""
     session = await service.get_session(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found or expired")
 
     if session.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this session")
 
     success = await service.remove_document(session_id, doc_id)
     if not success:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     return {"message": "Document removed"}
 
@@ -231,10 +231,10 @@ async def promote_document(
     """
     session = await service.get_session(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found or expired")
 
     if session.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this session")
 
     permanent_id = await service.promote_to_permanent(
         session_id=session_id,
@@ -245,7 +245,7 @@ async def promote_document(
     )
 
     if not permanent_id:
-        raise HTTPException(status_code=500, detail="Failed to save document")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save document")
 
     return PromoteResponse(
         permanent_doc_id=permanent_id,
@@ -262,14 +262,14 @@ async def delete_session(
     """Delete a temporary session and all its documents."""
     session = await service.get_session(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found or expired")
 
     if session.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this session")
 
     success = await service.delete_session(session_id)
     if not success:
-        raise HTTPException(status_code=500, detail="Failed to delete session")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete session")
 
     return {"message": "Session deleted"}
 
@@ -290,10 +290,10 @@ async def get_session_context(
     """
     session = await service.get_session(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found or expired")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found or expired")
 
     if session.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this session")
 
     context = await service.get_context(
         session_id=session_id,

@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import structlog
@@ -201,7 +201,7 @@ async def update_privacy_preferences(
     update_dict = {k: v for k, v in updates.model_dump().items() if v is not None}
 
     if not update_dict:
-        raise HTTPException(status_code=400, detail="No preferences to update")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No preferences to update")
 
     async with async_session_context() as db:
         prefs = await service.update_preferences(db, user.user_id, update_dict)
@@ -276,7 +276,7 @@ async def delete_chat_session(
 
         if not success:
             raise HTTPException(
-                status_code=404,
+                status_code=status.HTTP_404_NOT_FOUND,
                 detail="Session not found or you don't have permission to delete it"
             )
 
@@ -296,7 +296,7 @@ async def delete_all_chat_history(
     """
     if not confirm:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="You must pass confirm=true to delete all chat history"
         )
 
@@ -390,7 +390,7 @@ async def delete_memory(
         success = await service.delete_memory(db, user.user_id, memory_id)
 
         if not success:
-            raise HTTPException(status_code=404, detail="Memory not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
 
         return {"success": True, "message": "Memory deleted"}
 
@@ -408,7 +408,7 @@ async def clear_all_memories(
     """
     if not confirm:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="You must pass confirm=true to clear all memories"
         )
 
@@ -449,7 +449,7 @@ async def request_data_export(
         export_type = ExportType(request.export_type)
     except ValueError:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid export_type. Must be one of: {[e.value for e in ExportType]}"
         )
 
@@ -457,7 +457,7 @@ async def request_data_export(
         export_format = ExportFormat(request.format)
     except ValueError:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid format. Must be one of: {[e.value for e in ExportFormat]}"
         )
 
@@ -517,7 +517,7 @@ async def download_data_export(
         export_format = ExportFormat(format)
     except ValueError:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid format. Must be one of: {[e.value for e in ExportFormat]}"
         )
 

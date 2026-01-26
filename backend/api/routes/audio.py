@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, status
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -204,7 +204,7 @@ async def create_audio_overview(
         format_enum = AudioOverviewFormat(request.format)
     except ValueError:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid format: {request.format}. Valid formats: {[f.value for f in AudioOverviewFormat]}",
         )
 
@@ -212,7 +212,7 @@ async def create_audio_overview(
         tts_provider = TTSProvider(request.tts_provider)
     except ValueError:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid TTS provider: {request.tts_provider}. Valid providers: {[p.value for p in TTSProvider]}",
         )
 
@@ -227,7 +227,7 @@ async def create_audio_overview(
     # Validate duration preference
     if request.duration_preference not in DURATION_PREFERENCES:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid duration preference: {request.duration_preference}. Valid options: {DURATION_PREFERENCES}",
         )
 
@@ -275,12 +275,12 @@ async def list_audio_overviews(
         try:
             filters["status"] = AudioOverviewStatus(status)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid status: {status}")
     if format:
         try:
             filters["format"] = AudioOverviewFormat(format)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid format: {format}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid format: {format}")
 
     if document_id:
         # Use document-specific listing
@@ -321,7 +321,7 @@ async def get_audio_overview(
 
     overview = await service.get_by_id(uuid.UUID(overview_id))
     if not overview:
-        raise HTTPException(status_code=404, detail="Audio overview not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio overview not found")
 
     return to_response(overview)
 
@@ -349,7 +349,7 @@ async def generate_audio_overview(
 
     overview = await service.get_by_id(uuid.UUID(overview_id))
     if not overview:
-        raise HTTPException(status_code=404, detail="Audio overview not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio overview not found")
 
     # Only return early if status is ready AND audio file actually exists
     if overview.status == AudioOverviewStatus.READY.value and overview.storage_path:
@@ -363,7 +363,7 @@ async def generate_audio_overview(
 
     if overview.status in [AudioOverviewStatus.GENERATING_SCRIPT.value, AudioOverviewStatus.GENERATING_AUDIO.value]:
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Generation already in progress",
         )
 
@@ -395,7 +395,7 @@ async def generate_audio_overview_stream(
 
     overview = await service.get_by_id(uuid.UUID(overview_id))
     if not overview:
-        raise HTTPException(status_code=404, detail="Audio overview not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio overview not found")
 
     async def generate():
         async for event in service.generate_overview_streaming(uuid.UUID(overview_id)):
@@ -437,7 +437,7 @@ async def update_audio_overview(
     # Check if the overview can be modified
     if overview.status not in [AudioOverviewStatus.PENDING.value, AudioOverviewStatus.FAILED.value, "pending", "failed"]:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Can only update pending or failed audio overviews",
         )
 
@@ -448,7 +448,7 @@ async def update_audio_overview(
             overview.tts_provider = tts_provider.value
         except ValueError:
             raise HTTPException(
-                status_code=400,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid TTS provider: {request.tts_provider}. Valid providers: {[p.value for p in TTSProvider]}",
             )
 
@@ -509,13 +509,13 @@ async def serve_audio_file(
     file_path = storage_path / filename
 
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"Audio file not found: {file_path}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Audio file not found: {file_path}")
 
     # Validate file is within storage path (security)
     try:
         file_path.resolve().relative_to(storage_path.resolve())
     except ValueError:
-        raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     return FileResponse(
         path=file_path,
@@ -590,7 +590,7 @@ async def list_available_voices(
             provider_enum = TTSProvider(provider)
         except ValueError:
             raise HTTPException(
-                status_code=400,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid provider: {provider}. Valid: {[p.value for p in TTSProvider]}",
             )
 
@@ -609,12 +609,12 @@ async def estimate_generation_cost(
     try:
         format_enum = AudioOverviewFormat(request.format)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid format: {request.format}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid format: {request.format}")
 
     try:
         tts_provider = TTSProvider(request.tts_provider)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid TTS provider: {request.tts_provider}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid TTS provider: {request.tts_provider}")
 
     service = AudioOverviewService(
         session=session,
@@ -738,7 +738,7 @@ async def update_tts_settings(
     valid_providers = ["edge", "openai", "elevenlabs", "coqui"]
     if request.default_provider not in valid_providers:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid provider. Must be one of: {', '.join(valid_providers)}",
         )
 
@@ -840,7 +840,7 @@ async def list_coqui_models(
         return models
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to list models: {str(e)}")
 
 
 @router.post("/settings/tts/coqui/models/download", response_model=CoquiModelActionResponse)
@@ -851,7 +851,7 @@ async def download_coqui_model(
     """Download a Coqui TTS model."""
     if not _check_coqui_available():
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Coqui TTS is not installed. Install with: pip install TTS",
         )
 
@@ -959,4 +959,228 @@ async def list_tts_providers(
         "setup_instructions": "Install with: pip install TTS" if not has_coqui else None,
     })
 
+    # PHASE 45: Ultra-Fast TTS providers
+    # Murf Falcon (55ms latency)
+    has_murf = bool(os.getenv("MURF_API_KEY"))
+    providers.append({
+        "id": "murf",
+        "name": "Murf Falcon (Ultra-Fast)",
+        "status": "available" if has_murf else "needs_api_key",
+        "requires_setup": not has_murf,
+        "setup_instructions": "Set MURF_API_KEY environment variable" if not has_murf else None,
+        "features": ["55ms latency", "$0.01/min", "Ultra-low latency"],
+    })
+
+    # Smallest.ai Lightning (RTF 0.01)
+    has_smallest = bool(os.getenv("SMALLEST_API_KEY"))
+    providers.append({
+        "id": "smallest",
+        "name": "Smallest.ai Lightning (Fastest)",
+        "status": "available" if has_smallest else "needs_api_key",
+        "requires_setup": not has_smallest,
+        "setup_instructions": "Set SMALLEST_API_KEY environment variable" if not has_smallest else None,
+        "features": ["RTF 0.01", "Fastest TTS available", "Sub-100ms synthesis"],
+    })
+
+    # Fish Speech (ELO 1339)
+    has_fish = bool(os.getenv("FISH_API_KEY"))
+    providers.append({
+        "id": "fish_speech",
+        "name": "Fish Speech 1.5",
+        "status": "available" if has_fish else "needs_api_key",
+        "requires_setup": not has_fish,
+        "setup_instructions": "Set FISH_API_KEY environment variable" if not has_fish else None,
+        "features": ["ELO 1339", "DualAR architecture", "High quality"],
+    })
+
     return {"providers": providers}
+
+
+# =============================================================================
+# PHASE 45: Ultra-Fast TTS Endpoints
+# =============================================================================
+
+class UltraFastTTSRequest(BaseModel):
+    """Request for ultra-fast TTS synthesis."""
+    text: str = Field(..., description="Text to synthesize", max_length=5000)
+    provider: str = Field(default="smallest", description="Ultra-fast TTS provider: murf, smallest, fish_speech")
+    voice_id: Optional[str] = Field(None, description="Voice ID for the provider")
+    stream: bool = Field(default=False, description="Enable streaming response")
+
+
+class UltraFastTTSResponse(BaseModel):
+    """Response from ultra-fast TTS synthesis."""
+    audio_url: Optional[str] = None
+    audio_data_base64: Optional[str] = None
+    latency_ms: float
+    provider: str
+    sample_rate: int
+    duration_estimate_ms: Optional[float] = None
+
+
+@router.post("/ultra-fast/synthesize", response_model=UltraFastTTSResponse)
+async def ultra_fast_tts_synthesize(
+    request: UltraFastTTSRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Synthesize text using ultra-fast TTS providers (Phase 45).
+
+    Providers:
+    - murf: Murf Falcon (55ms latency, $0.01/min)
+    - smallest: Smallest.ai Lightning (RTF 0.01, fastest available)
+    - fish_speech: Fish Speech 1.5 (ELO 1339, high quality)
+    """
+    import base64
+    import time
+    from backend.core.config import settings
+
+    # Check if ultra-fast TTS is enabled
+    if not getattr(settings, "ENABLE_ULTRA_FAST_TTS", False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ultra-fast TTS is not enabled. Set ENABLE_ULTRA_FAST_TTS=true in config.",
+        )
+
+    start_time = time.time()
+
+    try:
+        from backend.services.audio.ultra_fast_tts import get_ultra_fast_tts, UltraFastTTSProvider
+
+        # Validate provider
+        try:
+            provider_enum = UltraFastTTSProvider(request.provider)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid provider: {request.provider}. Valid: murf, smallest, fish_speech",
+            )
+
+        tts_service = await get_ultra_fast_tts(provider=provider_enum)
+
+        # Synthesize
+        audio_data = await tts_service.synthesize(
+            text=request.text,
+            voice_id=request.voice_id,
+        )
+
+        latency_ms = (time.time() - start_time) * 1000
+
+        # Encode audio as base64
+        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+
+        # Estimate duration (rough: ~150 words/min at 24kHz)
+        word_count = len(request.text.split())
+        duration_estimate_ms = (word_count / 150) * 60 * 1000
+
+        return UltraFastTTSResponse(
+            audio_data_base64=audio_base64,
+            latency_ms=latency_ms,
+            provider=request.provider,
+            sample_rate=24000,
+            duration_estimate_ms=duration_estimate_ms,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"TTS synthesis failed: {str(e)}")
+
+
+@router.post("/ultra-fast/stream")
+async def ultra_fast_tts_stream(
+    request: UltraFastTTSRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Stream ultra-fast TTS audio in real-time.
+
+    Returns audio chunks as they are generated for minimal latency.
+    """
+    from backend.core.config import settings
+
+    if not getattr(settings, "ENABLE_ULTRA_FAST_TTS", False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ultra-fast TTS is not enabled. Set ENABLE_ULTRA_FAST_TTS=true in config.",
+        )
+
+    async def generate_audio_stream():
+        try:
+            from backend.services.audio.ultra_fast_tts import get_ultra_fast_tts, UltraFastTTSProvider
+
+            provider_enum = UltraFastTTSProvider(request.provider)
+            tts_service = await get_ultra_fast_tts(provider=provider_enum)
+
+            async for chunk in tts_service.stream(
+                text=request.text,
+                voice_id=request.voice_id,
+            ):
+                yield chunk.audio_data
+
+        except Exception as e:
+            # Log error but don't break the stream
+            import structlog
+            logger = structlog.get_logger(__name__)
+            logger.error("Stream error", error=str(e))
+
+    return StreamingResponse(
+        generate_audio_stream(),
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-TTS-Provider": request.provider,
+        },
+    )
+
+
+@router.get("/ultra-fast/providers")
+async def list_ultra_fast_providers(
+    current_user: dict = Depends(get_current_user),
+):
+    """List available ultra-fast TTS providers with status."""
+    import os
+    from backend.core.config import settings
+
+    enabled = getattr(settings, "ENABLE_ULTRA_FAST_TTS", False)
+
+    providers = []
+
+    # Murf Falcon
+    has_murf = bool(os.getenv("MURF_API_KEY"))
+    providers.append({
+        "id": "murf",
+        "name": "Murf Falcon",
+        "available": enabled and has_murf,
+        "latency_ms": 55,
+        "cost_per_min": 0.01,
+        "features": ["Ultra-low latency", "Natural voices", "130ms TTFA"],
+    })
+
+    # Smallest.ai
+    has_smallest = bool(os.getenv("SMALLEST_API_KEY"))
+    providers.append({
+        "id": "smallest",
+        "name": "Smallest.ai Lightning",
+        "available": enabled and has_smallest,
+        "latency_ms": 30,
+        "cost_per_min": 0.02,
+        "features": ["Fastest TTS", "RTF 0.01", "Sub-100ms synthesis"],
+    })
+
+    # Fish Speech
+    has_fish = bool(os.getenv("FISH_API_KEY"))
+    providers.append({
+        "id": "fish_speech",
+        "name": "Fish Speech 1.5",
+        "available": enabled and has_fish,
+        "latency_ms": 100,
+        "cost_per_min": 0.01,
+        "features": ["High quality", "ELO 1339", "DualAR architecture"],
+    })
+
+    return {
+        "enabled": enabled,
+        "providers": providers,
+        "default_provider": getattr(settings, "ULTRA_FAST_TTS_PROVIDER", "smallest"),
+    }

@@ -20,13 +20,23 @@ logger = get_task_logger(__name__)
 
 
 def run_async(coro):
-    """Helper to run async code in Celery tasks."""
+    """Helper to run async code in Celery tasks.
+
+    Handles both cases where there is or isn't a running event loop.
+    Uses asyncio.run() in most cases (recommended by Python docs).
+    """
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+        # No running loop, use asyncio.run() which handles loop lifecycle
+        return asyncio.run(coro)
+    else:
+        # Loop is already running - use thread executor to avoid blocking
+        # This happens when called from within async context
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
 
 
 @shared_task(bind=True, name="backend.tasks.document_tasks.process_document_task")
@@ -354,25 +364,32 @@ def embedding_task(
     texts: List[str],
     chunk_ids: List[str],
     model: Optional[str] = None,
+    use_ray: bool = True,
 ) -> Dict[str, Any]:
     """
     Generate embeddings for a batch of text chunks.
+
+    Uses Ray for parallel embedding when available (2-4x speedup for large batches).
 
     Args:
         texts: List of text chunks to embed
         chunk_ids: Corresponding chunk IDs
         model: Optional embedding model to use
+        use_ray: Whether to use Ray for parallel processing (default True)
 
     Returns:
         Dict with embedding results
     """
-    logger.info(f"Starting embedding task: {len(texts)} chunks")
+    batch_size = len(texts)
+    # Ray provides 2-4x speedup for batches >= 50 texts
+    should_use_ray = use_ray and batch_size >= 50
+    logger.info(f"Starting embedding task: {batch_size} chunks, use_ray={should_use_ray}")
 
     try:
         from backend.services.embeddings import get_embedding_service
 
         async def _embed():
-            service = get_embedding_service()
+            service = get_embedding_service(use_ray=should_use_ray)
             embeddings = await service.embed_texts(texts, model=model)
             return embeddings
 
@@ -383,8 +400,312 @@ def embedding_task(
             "count": len(embeddings),
             "chunk_ids": chunk_ids,
             "dimensions": len(embeddings[0]) if embeddings else 0,
+            "used_ray": should_use_ray,
         }
 
     except Exception as e:
         logger.error(f"Embedding task failed: {str(e)}")
         raise
+
+
+# =============================================================================
+# Parallel Bulk Upload Tasks
+# =============================================================================
+
+@shared_task(bind=True, name="backend.tasks.document_tasks.process_bulk_upload_task")
+def process_bulk_upload_task(
+    self,
+    batch_id: str,
+    file_infos: List[Dict[str, Any]],
+    user_id: str,
+    collection: Optional[str] = None,
+    access_tier: int = 1,
+    max_concurrent: int = 4,
+) -> Dict[str, Any]:
+    """
+    Process multiple documents in parallel using a worker pool.
+
+    This task spawns individual document processing tasks and tracks
+    their progress through the bulk progress tracker.
+
+    Args:
+        batch_id: Batch ID for progress tracking
+        file_infos: List of dicts with file_path, original_filename
+        user_id: ID of the user who uploaded
+        collection: Optional collection/tag for all files
+        access_tier: Access tier level for all files
+        max_concurrent: Maximum concurrent processing tasks
+
+    Returns:
+        Dict with batch results
+    """
+    from celery import group
+    import time
+
+    total = len(file_infos)
+    logger.info(f"Starting parallel bulk upload: {total} documents, batch_id={batch_id}")
+
+    # Initialize progress tracking
+    async def _init_progress():
+        from backend.services.bulk_progress import get_progress_tracker, FileStatus
+        tracker = await get_progress_tracker()
+
+        # Add all files to tracking
+        for file_info in file_infos:
+            await tracker.add_file(
+                batch_id=batch_id,
+                file_id=file_info.get("file_id", file_info["original_filename"]),
+                filename=file_info["original_filename"],
+                file_size=file_info.get("file_size"),
+            )
+
+    run_async(_init_progress())
+
+    # Create task signatures for all documents
+    task_signatures = []
+    for file_info in file_infos:
+        sig = process_document_with_progress.s(
+            file_path=file_info["file_path"],
+            original_filename=file_info["original_filename"],
+            user_id=user_id,
+            collection=collection,
+            access_tier=access_tier,
+            metadata=file_info.get("metadata"),
+            batch_id=batch_id,
+            file_id=file_info.get("file_id", file_info["original_filename"]),
+        )
+        task_signatures.append(sig)
+
+    # Execute in parallel batches
+    results = {
+        "batch_id": batch_id,
+        "total": total,
+        "successful": 0,
+        "failed": 0,
+        "documents": [],
+        "errors": [],
+    }
+
+    # Process in chunks of max_concurrent
+    for i in range(0, len(task_signatures), max_concurrent):
+        chunk = task_signatures[i:i + max_concurrent]
+
+        # Execute chunk in parallel
+        job = group(chunk)
+        group_result = job.apply_async()
+
+        # Wait for this chunk to complete
+        try:
+            chunk_results = group_result.get(timeout=600 * max_concurrent)
+
+            for result in chunk_results:
+                if result.get("status") == "success":
+                    results["successful"] += 1
+                    results["documents"].append(result)
+                else:
+                    results["failed"] += 1
+                    results["errors"].append(result)
+
+        except Exception as e:
+            logger.error(f"Chunk processing failed: {str(e)}")
+            # Mark remaining as failed
+            for _ in chunk:
+                results["failed"] += 1
+
+        # Update overall progress
+        progress = int(((i + len(chunk)) / total) * 100)
+        self.update_state(
+            state="PROGRESS",
+            meta={
+                "progress": progress,
+                "completed": results["successful"] + results["failed"],
+                "total": total,
+                "batch_id": batch_id,
+            }
+        )
+
+    logger.info(
+        f"Bulk upload complete: {results['successful']}/{total} successful, batch_id={batch_id}"
+    )
+    return results
+
+
+@shared_task(bind=True, name="backend.tasks.document_tasks.process_document_with_progress")
+def process_document_with_progress(
+    self,
+    file_path: str,
+    original_filename: str,
+    user_id: str,
+    collection: Optional[str] = None,
+    access_tier: int = 1,
+    metadata: Optional[Dict[str, Any]] = None,
+    batch_id: Optional[str] = None,
+    file_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Process a single document with progress tracking for bulk uploads.
+
+    Updates the bulk progress tracker at each processing stage.
+    """
+    logger.info(f"Processing document: {original_filename} (batch={batch_id})")
+
+    file_id = file_id or original_filename
+
+    async def _update_progress(stage, error=None, document_id=None, chunk_count=0):
+        """Helper to update progress tracker."""
+        if not batch_id:
+            return
+
+        from backend.services.bulk_progress import (
+            get_progress_tracker,
+            ProcessingStage,
+            FileStatus,
+        )
+
+        tracker = await get_progress_tracker()
+
+        if error:
+            await tracker.update_file_status(
+                batch_id, file_id, FileStatus.FAILED, error=error
+            )
+        elif stage == ProcessingStage.COMPLETED:
+            await tracker.update_file_status(
+                batch_id, file_id, FileStatus.COMPLETED,
+                document_id=document_id, chunk_count=chunk_count
+            )
+        else:
+            await tracker.update_file_stage(batch_id, file_id, stage)
+
+    try:
+        from backend.db.database import async_session_context
+        from backend.services.pipeline import DocumentPipeline
+        from backend.services.bulk_progress import ProcessingStage
+
+        async def _process():
+            pipeline = DocumentPipeline()
+
+            # Stage: Extracting
+            run_async(_update_progress(ProcessingStage.EXTRACTING))
+
+            # Read file content
+            with open(file_path, "rb") as f:
+                file_content = f.read()
+
+            # Stage: Chunking
+            run_async(_update_progress(ProcessingStage.CHUNKING))
+
+            # Process the document
+            async with async_session_context() as session:
+                # Stage: Embedding (happens inside pipeline)
+                run_async(_update_progress(ProcessingStage.EMBEDDING))
+
+                result = await pipeline.process_document(
+                    file_content=file_content,
+                    filename=original_filename,
+                    user_id=user_id,
+                    collection=collection,
+                    access_tier=access_tier,
+                    metadata=metadata,
+                    session=session,
+                )
+
+            # Stage: Storing
+            run_async(_update_progress(ProcessingStage.STORING))
+
+            return result
+
+        result = run_async(_process())
+
+        # Clean up temp file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        # Stage: Completed
+        document_id = str(result.document_id) if hasattr(result, "document_id") else None
+        chunk_count = result.chunk_count if hasattr(result, "chunk_count") else 0
+
+        run_async(_update_progress(
+            ProcessingStage.COMPLETED,
+            document_id=document_id,
+            chunk_count=chunk_count,
+        ))
+
+        logger.info(f"Document processed: {original_filename}")
+        return {
+            "status": "success",
+            "document_id": document_id,
+            "filename": original_filename,
+            "chunks": chunk_count,
+        }
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Document processing failed: {original_filename} - {error_msg}")
+
+        # Clean up temp file on error
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        # Update progress with error
+        run_async(_update_progress(ProcessingStage.FAILED, error=error_msg))
+
+        return {
+            "status": "failed",
+            "filename": original_filename,
+            "error": error_msg,
+        }
+
+
+@shared_task(bind=True, name="backend.tasks.document_tasks.extract_kg_task")
+def extract_kg_task(
+    self,
+    document_id: str,
+    user_id: str,
+    batch_id: Optional[str] = None,
+    file_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Extract knowledge graph from a document (background task).
+
+    This runs in the background queue after document processing is complete.
+    """
+    logger.info(f"Starting KG extraction: document_id={document_id}")
+
+    try:
+        from backend.services.knowledge_graph import get_kg_service
+
+        async def _extract_kg():
+            kg_service = await get_kg_service()
+            result = await kg_service.extract_from_document(document_id)
+            return result
+
+        result = run_async(_extract_kg())
+
+        # Update progress if part of batch
+        if batch_id and file_id:
+            async def _update():
+                from backend.services.bulk_progress import (
+                    get_progress_tracker,
+                    ProcessingStage,
+                )
+                tracker = await get_progress_tracker()
+                await tracker.update_file_stage(
+                    batch_id, file_id, ProcessingStage.KG_EXTRACTION
+                )
+
+            run_async(_update())
+
+        return {
+            "status": "success",
+            "document_id": document_id,
+            "entities": result.get("entity_count", 0) if result else 0,
+            "relationships": result.get("relationship_count", 0) if result else 0,
+        }
+
+    except Exception as e:
+        logger.error(f"KG extraction failed: document_id={document_id} - {str(e)}")
+        return {
+            "status": "failed",
+            "document_id": document_id,
+            "error": str(e),
+        }

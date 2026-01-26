@@ -1816,8 +1816,8 @@ async def upload_pptx_template(
                         "primary": str(theme.accent1) if hasattr(theme, 'accent1') else None,
                         "secondary": str(theme.accent2) if hasattr(theme, 'accent2') else None,
                     }
-        except Exception:
-            pass  # Theme extraction is optional
+        except Exception as e:
+            logger.debug("Theme extraction failed (optional)", error=str(e))
 
         logger.info(
             "PPTX template uploaded",

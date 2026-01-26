@@ -726,6 +726,62 @@ The AIDocumentIndexer API provides 197 endpoints across 11 categories. All endpo
 | **Agentic RAG** | `services/agentic_rag.py` | Query decomposition and ReAct loop |
 | **Multimodal RAG** | `services/multimodal_rag.py` | Image captioning and table extraction |
 | **Real-Time Indexer** | `services/realtime_indexer.py` | Incremental indexing and freshness tracking |
+| **Adaptive Router** | `services/adaptive_router.py` | Query-dependent strategy selection (Phase 66) |
+| **Advanced RAG Utils** | `services/advanced_rag_utils.py` | RAG-Fusion, step-back prompting (Phase 66) |
+| **LazyGraphRAG** | `services/lazy_graphrag.py` | Query-time community summarization (Phase 66) |
+| **User Personalization** | `services/user_personalization.py` | Preference learning from feedback (Phase 66) |
+| **Dependency Extractor** | `services/dependency_entity_extractor.py` | Fast spaCy-based entity extraction (Phase 66) |
+
+#### Adaptive RAG Pipeline (Phase 66)
+
+The adaptive router selects optimal retrieval strategy based on query analysis.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Adaptive RAG Pipeline                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  User Query                                                             │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌─────────────────┐                                                    │
+│  │ Query Analyzer  │                                                    │
+│  │ - Complexity    │                                                    │
+│  │ - Entity count  │                                                    │
+│  │ - Intent type   │                                                    │
+│  └────────┬────────┘                                                    │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                    Adaptive Router                                │   │
+│  │                                                                   │   │
+│  │  Simple ──▶ DIRECT (fast, single retrieval)                      │   │
+│  │  Standard ──▶ HYBRID (vector + keyword)                          │   │
+│  │  Complex ──▶ TWO_STAGE (retrieval + reranking)                   │   │
+│  │  Multi-step ──▶ AGENTIC (decomposition + ReAct)                  │   │
+│  │  Entity-rich ──▶ GRAPH_ENHANCED (knowledge graph)                │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────┐                                                    │
+│  │ RAG-Fusion      │ ← Optional: generates 3-5 query variations        │
+│  │ (RRF Merge)     │   and merges results                              │
+│  └────────┬────────┘                                                    │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────┐                                                    │
+│  │ User            │ ← Personalizes response format based on           │
+│  │ Personalization │   learned preferences                             │
+│  └────────┬────────┘                                                    │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────┐                                                    │
+│  │ RAGAS Evaluation│ ← Context relevance, faithfulness, answer         │
+│  │ (Sampling)      │   relevance metrics                               │
+│  └─────────────────┘                                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 #### GraphRAG Architecture
 
@@ -897,6 +953,57 @@ Enables incremental updates without full re-indexing.
 - `freshness_threshold_days` (30): Content aging warning
 - `stale_threshold_days` (90): Content marked as stale
 - Freshness indicators shown in UI
+
+#### TTS Provider Architecture (Phase 66)
+
+The TTS service supports multiple providers with automatic fallback.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         TTS Provider Chain                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Audio Request                                                          │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                    Provider Selection                             │   │
+│  │                                                                   │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │   │
+│  │  │ CosyVoice2  │  │ Chatterbox  │  │ Fish Speech │              │   │
+│  │  │ 150ms       │  │ Emotional   │  │ Multilingual│              │   │
+│  │  │ Streaming   │  │ Expressive  │  │ Fast        │              │   │
+│  │  │ Free        │  │ Free        │  │ Free        │              │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘              │   │
+│  │                                                                   │   │
+│  │  ┌─────────────┐  ┌─────────────┐                                │   │
+│  │  │ OpenAI TTS  │  │ ElevenLabs  │                                │   │
+│  │  │ High Quality│  │ Premium     │                                │   │
+│  │  │ Paid        │  │ Paid        │                                │   │
+│  │  └─────────────┘  └─────────────┘                                │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│           │                                                             │
+│           ▼                                                             │
+│  ┌─────────────────┐                                                    │
+│  │ Fallback Chain  │ ← Automatic fallback if primary fails             │
+│  │ cosyvoice →     │                                                    │
+│  │ chatterbox →    │                                                    │
+│  │ fish_speech →   │                                                    │
+│  │ openai          │                                                    │
+│  └─────────────────┘                                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Provider Comparison:**
+
+| Provider | Latency | Quality | Cost | Best For |
+|----------|---------|---------|------|----------|
+| CosyVoice2 | 150ms | Good | Free | Real-time streaming |
+| Chatterbox | 800ms | High | Free | Emotional expressiveness |
+| Fish Speech | 200ms | Good | Free | Multilingual support |
+| OpenAI TTS | 500ms | High | $0.015/1K | Production quality |
+| ElevenLabs | 300ms | Highest | $0.03/1K | Premium audio |
 
 #### RAG Verification Levels
 
@@ -1135,4 +1242,44 @@ Confidence levels:
 
 ---
 
-*Last updated: 2025-12-21*
+## Recent Architecture Updates (Phase 78-83, January 2026)
+
+### Pipeline Integration (Phase 81)
+
+The RAG pipeline now integrates the following services in order:
+
+```
+Query → Adaptive Router → Retrieval Strategy
+      → KG Query Expansion → Graph-O1 Reasoning (optional)
+      → Hybrid Search → Tiered Reranking (BM25→CrossEncoder→ColBERT→LLM)
+      → Context Compression (LLMLingua / AttentionRAG)
+      → Sufficiency Check → LLM Generation (with Anthropic prompt caching)
+      → Generative Cache → Answer Refinement → Response
+```
+
+### Key Services Added
+
+| Service | File | Purpose |
+|---------|------|---------|
+| AttentionRAG | `attention_rag.py` | 6.3x compression via attention scores |
+| Graph-O1 | `graph_o1.py` | Beam search reasoning over KG |
+| Human-in-the-Loop | `human_in_loop.py` | Agent workflow approval interrupts |
+| Anthropic Prompt Caching | `rag.py` | 50-60% cost savings on Claude calls |
+| OpenAI Structured Outputs | `llm.py` | JSON schema-validated extraction |
+
+### Stability Improvements
+
+- **Session LLM cache**: TTL (1 hour) + max size (200) prevents memory leaks
+- **FAISS concurrency**: `asyncio.Lock` prevents concurrent index rebuilds
+- **Settings cache invalidation**: All settings caches have 5-minute TTL
+- **Entity graph safety**: Cycle detection prevents infinite traversal loops
+- **Hash upgrade**: Cache keys use SHA-256 instead of MD5
+
+### Test Coverage
+
+- Import smoke test (`tests/test_imports.py`): Verifies all 145 service modules and 48 route modules import cleanly
+- CI command: `pytest backend/tests/test_imports.py -v`
+
+---
+
+*Last updated: 2026-01-25*

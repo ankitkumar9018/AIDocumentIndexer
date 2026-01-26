@@ -10,7 +10,7 @@ import asyncio
 import uuid
 import time
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 import structlog
 from sqlalchemy import select, and_, or_, func
@@ -24,8 +24,17 @@ from backend.api.websocket import (
     notify_kg_extraction_progress,
     notify_kg_extraction_complete,
 )
+from backend.core.config import settings
 
 logger = structlog.get_logger(__name__)
+
+# Phase 60: Ray support for distributed KG extraction
+RAY_AVAILABLE = False
+try:
+    import ray
+    RAY_AVAILABLE = True
+except ImportError:
+    pass
 
 
 # Global registry of running jobs (for cancellation)
@@ -346,6 +355,557 @@ class KGExtractionJobRunner:
         result = await self.db.execute(query)
         return list(result.scalars().all())
 
+    async def _should_skip_document(self, doc: Document) -> Tuple[bool, str]:
+        """
+        Pre-filter documents to skip those unlikely to benefit from KG extraction.
+
+        Returns:
+            Tuple of (should_skip, reason)
+        """
+        if not settings.KG_PRE_FILTER_ENABLED:
+            return False, ""
+
+        # Skip very small documents (< 500 chars) - unlikely to have meaningful entities
+        if doc.content_length and doc.content_length < 500:
+            return True, "document_too_small"
+
+        # Skip documents with no chunks
+        chunk_count = await self.db.execute(
+            select(func.count(Chunk.id)).where(Chunk.document_id == doc.id)
+        )
+        chunk_count = chunk_count.scalar() or 0
+        if chunk_count == 0:
+            return True, "no_chunks"
+
+        # Skip certain document types that are typically lists/tables without prose
+        simple_types = {"csv", "tsv", "xlsx", "xls"}
+        if doc.file_type and doc.file_type.lower() in simple_types:
+            return True, "tabular_data"
+
+        return False, ""
+
+    async def _process_single_document(
+        self,
+        doc: Document,
+        job: KGExtractionJob,
+        semaphore: asyncio.Semaphore,
+        stats_lock: asyncio.Lock,
+        processing_times: List[float],
+    ) -> Dict[str, Any]:
+        """
+        Process a single document with semaphore-controlled concurrency.
+
+        Returns:
+            Dict with status, entities, relations, error info
+        """
+        async with semaphore:
+            # Check for cancellation before processing
+            if self._cancelled:
+                return {"status": "cancelled", "doc_id": str(doc.id)}
+
+            # Check for pause
+            while self._paused and not self._cancelled:
+                await asyncio.sleep(PAUSE_CHECK_INTERVAL)
+
+            if self._cancelled:
+                return {"status": "cancelled", "doc_id": str(doc.id)}
+
+            start_time = time.time()
+            result = {
+                "doc_id": str(doc.id),
+                "doc_name": doc.filename or str(doc.id),
+                "status": "pending",
+                "entities": 0,
+                "relations": 0,
+                "error": None,
+            }
+
+            try:
+                # Check pre-filter
+                should_skip, skip_reason = await self._should_skip_document(doc)
+                if should_skip:
+                    result["status"] = "skipped"
+                    result["skip_reason"] = skip_reason
+                    logger.debug(
+                        "Skipping document for KG extraction",
+                        doc_id=str(doc.id),
+                        reason=skip_reason,
+                    )
+                    return result
+
+                # Update document status to processing
+                doc.kg_extraction_status = "processing"
+                await self.db.commit()
+
+                # Send WebSocket notification
+                await notify_kg_extraction_started(
+                    job_id=str(self.job_id),
+                    document_id=str(doc.id),
+                    document_name=doc.filename or str(doc.id),
+                )
+
+                # Create KG service and process
+                llm_service = None
+                if self.provider_id:
+                    from backend.services.llm import LLMConfigManager, LLMFactory
+                    config = await LLMConfigManager.get_config_for_provider_id(self.provider_id)
+                    if config:
+                        llm_service = LLMFactory.get_chat_model(
+                            provider=config.provider_type,
+                            model=config.model,
+                            temperature=config.temperature,
+                        )
+
+                kg_service = KnowledgeGraphService(self.db, llm_service=llm_service)
+                stats = await kg_service.process_document_for_graph(doc.id)
+
+                # Update document with results
+                doc.kg_extraction_status = "completed"
+                doc.kg_extracted_at = datetime.now(timezone.utc)
+                doc.kg_entity_count = stats.get("entities", 0)
+                doc.kg_relation_count = stats.get("relations", 0)
+                await self.db.commit()
+
+                processing_time = time.time() - start_time
+
+                # Thread-safe update of processing times
+                async with stats_lock:
+                    processing_times.append(processing_time)
+
+                result["status"] = "completed"
+                result["entities"] = stats.get("entities", 0)
+                result["relations"] = stats.get("relations", 0)
+                result["processing_time"] = processing_time
+
+                logger.info(
+                    "Processed document for KG (parallel)",
+                    job_id=str(self.job_id),
+                    document_id=str(doc.id),
+                    entities=stats.get("entities", 0),
+                    relations=stats.get("relations", 0),
+                    processing_time=processing_time,
+                )
+
+            except Exception as e:
+                logger.error(
+                    "Failed to process document for KG (parallel)",
+                    job_id=str(self.job_id),
+                    document_id=str(doc.id),
+                    error=str(e),
+                    exc_info=True,
+                )
+
+                doc.kg_extraction_status = "failed"
+                await self.db.commit()
+
+                result["status"] = "failed"
+                result["error"] = str(e)
+
+            return result
+
+    async def run_parallel(self):
+        """
+        Execute the extraction job with parallel document processing.
+
+        Uses semaphore-controlled concurrency to process multiple documents
+        simultaneously while respecting the KG_EXTRACTION_CONCURRENCY setting.
+        """
+        job = await self._get_job()
+        if not job:
+            logger.error("Job not found", job_id=str(self.job_id))
+            return
+
+        # Register for cancellation
+        async with _running_jobs_lock:
+            _running_jobs[str(self.job_id)] = self
+
+        try:
+            # Update status to running
+            job.status = "running"
+            job.started_at = datetime.now(timezone.utc)
+            job.last_activity_at = datetime.now(timezone.utc)
+            await self.db.commit()
+
+            # Get documents to process
+            documents = await self._get_documents_for_job(job)
+
+            job.total_documents = len(documents)
+            await self.db.commit()
+
+            logger.info(
+                "Starting parallel KG extraction job",
+                job_id=str(self.job_id),
+                total_documents=len(documents),
+                concurrency=settings.KG_EXTRACTION_CONCURRENCY,
+            )
+
+            if not documents:
+                job.status = "completed"
+                job.completed_at = datetime.now(timezone.utc)
+                await self.db.commit()
+                await notify_kg_extraction_complete(
+                    job_id=str(self.job_id),
+                    total_entities=0,
+                    total_relations=0,
+                )
+                return
+
+            # Create semaphore for concurrency control
+            semaphore = asyncio.Semaphore(settings.KG_EXTRACTION_CONCURRENCY)
+            stats_lock = asyncio.Lock()
+            processing_times: List[float] = []
+
+            # Process documents in parallel batches
+            batch_size = settings.KG_EXTRACTION_CONCURRENCY * 2  # 2x concurrency for better utilization
+            total_entities = 0
+            total_relations = 0
+            processed_count = 0
+            failed_count = 0
+            skipped_count = 0
+
+            for batch_start in range(0, len(documents), batch_size):
+                if self._cancelled:
+                    break
+
+                # Wait for pause if needed
+                while self._paused and not self._cancelled:
+                    job.status = "paused"
+                    await self.db.commit()
+                    await asyncio.sleep(PAUSE_CHECK_INTERVAL)
+                    await self.db.refresh(job)
+                    if job.status == "running":
+                        self._paused = False
+                    elif job.status == "cancelled":
+                        self._cancelled = True
+
+                if self._cancelled:
+                    break
+
+                job.status = "running"
+                batch = documents[batch_start:batch_start + batch_size]
+
+                # Process batch concurrently
+                tasks = [
+                    self._process_single_document(doc, job, semaphore, stats_lock, processing_times)
+                    for doc in batch
+                ]
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Aggregate results
+                for result in results:
+                    if isinstance(result, Exception):
+                        failed_count += 1
+                        logger.error("Unexpected error in parallel processing", error=str(result))
+                        continue
+
+                    if result["status"] == "completed":
+                        processed_count += 1
+                        total_entities += result.get("entities", 0)
+                        total_relations += result.get("relations", 0)
+                    elif result["status"] == "failed":
+                        failed_count += 1
+                        # Add to error log
+                        error_log = job.error_log or []
+                        error_log.append({
+                            "doc_id": result["doc_id"],
+                            "doc_name": result["doc_name"],
+                            "error": result.get("error", "Unknown error"),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+                        job.error_log = error_log
+                    elif result["status"] == "skipped":
+                        skipped_count += 1
+                    elif result["status"] == "cancelled":
+                        break
+
+                # Update job progress
+                job.processed_documents = processed_count
+                job.failed_documents = failed_count
+                job.total_entities = total_entities
+                job.total_relations = total_relations
+                job.last_activity_at = datetime.now(timezone.utc)
+
+                if processing_times:
+                    job.avg_doc_processing_time = sum(processing_times) / len(processing_times)
+
+                await self.db.commit()
+
+                # Send WebSocket progress notification
+                total_done = processed_count + failed_count + skipped_count
+                progress_pct = (total_done / job.total_documents * 100) if job.total_documents > 0 else 0
+                await notify_kg_extraction_progress(
+                    job_id=str(self.job_id),
+                    entities_found=total_entities,
+                    relations_found=total_relations,
+                    progress=progress_pct,
+                )
+
+                logger.info(
+                    "Batch processed",
+                    job_id=str(self.job_id),
+                    batch_start=batch_start,
+                    batch_size=len(batch),
+                    processed=processed_count,
+                    failed=failed_count,
+                    skipped=skipped_count,
+                    progress_pct=progress_pct,
+                )
+
+            # Mark job as completed
+            if self._cancelled:
+                job.status = "cancelled"
+            elif failed_count > 0:
+                job.status = "completed_with_errors"
+            else:
+                job.status = "completed"
+
+            job.completed_at = datetime.now(timezone.utc)
+            job.current_document_id = None
+            job.current_document_name = None
+            await self.db.commit()
+
+            logger.info(
+                "Parallel KG extraction job completed",
+                job_id=str(self.job_id),
+                processed=processed_count,
+                failed=failed_count,
+                skipped=skipped_count,
+                total_entities=total_entities,
+                total_relations=total_relations,
+            )
+
+            await notify_kg_extraction_complete(
+                job_id=str(self.job_id),
+                total_entities=total_entities,
+                total_relations=total_relations,
+            )
+
+        except Exception as e:
+            logger.error(
+                "Parallel KG extraction job failed",
+                job_id=str(self.job_id),
+                error=str(e),
+                exc_info=True,
+            )
+            job.status = "failed"
+            job.completed_at = datetime.now(timezone.utc)
+            await self.db.commit()
+
+        finally:
+            async with _running_jobs_lock:
+                _running_jobs.pop(str(self.job_id), None)
+
+    async def run_with_ray(self):
+        """
+        Execute the extraction job using Ray distributed processing.
+
+        Phase 60: Uses Ray actors for true distributed parallelism across
+        multiple workers/machines for large-scale KG extraction.
+        """
+        if not RAY_AVAILABLE:
+            logger.warning("Ray not available, falling back to parallel mode")
+            return await self.run_parallel()
+
+        job = await self._get_job()
+        if not job:
+            logger.error("Job not found", job_id=str(self.job_id))
+            return
+
+        # Register for cancellation
+        async with _running_jobs_lock:
+            _running_jobs[str(self.job_id)] = self
+
+        try:
+            # Initialize Ray if not already done
+            if not ray.is_initialized():
+                ray.init(ignore_reinit_error=True)
+
+            # Update status to running
+            job.status = "running"
+            job.started_at = datetime.now(timezone.utc)
+            job.last_activity_at = datetime.now(timezone.utc)
+            await self.db.commit()
+
+            # Get documents to process
+            documents = await self._get_documents_for_job(job)
+            job.total_documents = len(documents)
+            await self.db.commit()
+
+            logger.info(
+                "Starting Ray-distributed KG extraction job",
+                job_id=str(self.job_id),
+                total_documents=len(documents),
+                concurrency=settings.KG_EXTRACTION_CONCURRENCY,
+            )
+
+            if not documents:
+                job.status = "completed"
+                job.completed_at = datetime.now(timezone.utc)
+                await self.db.commit()
+                await notify_kg_extraction_complete(
+                    job_id=str(self.job_id),
+                    total_entities=0,
+                    total_relations=0,
+                )
+                return
+
+            # Define Ray remote function for document processing
+            @ray.remote
+            def process_document_ray(doc_id: str, provider_id: Optional[str] = None) -> Dict[str, Any]:
+                """Process a single document for KG extraction using Ray."""
+                import asyncio
+
+                async def _process():
+                    from backend.db.database import get_async_session_factory
+                    from backend.services.knowledge_graph import KnowledgeGraphService
+
+                    session_factory = get_async_session_factory()
+                    async with session_factory() as session:
+                        try:
+                            # Get the document
+                            from backend.db.models import Document
+                            result = await session.execute(
+                                select(Document).where(Document.id == uuid.UUID(doc_id))
+                            )
+                            doc = result.scalar_one_or_none()
+                            if not doc:
+                                return {"success": False, "error": "Document not found", "doc_id": doc_id}
+
+                            # Create KG service
+                            llm_service = None
+                            if provider_id:
+                                from backend.services.llm import LLMConfigManager, LLMFactory
+                                config = await LLMConfigManager.get_config_for_provider_id(provider_id)
+                                if config:
+                                    llm_service = LLMFactory.get_chat_model(
+                                        provider=config.provider_type,
+                                        model=config.model,
+                                        temperature=config.temperature,
+                                    )
+
+                            kg_service = KnowledgeGraphService(session, llm_service=llm_service)
+                            stats = await kg_service.process_document_for_graph(uuid.UUID(doc_id))
+
+                            return {
+                                "success": True,
+                                "doc_id": doc_id,
+                                "entities": stats.get("entities", 0),
+                                "relations": stats.get("relations", 0),
+                            }
+                        except Exception as e:
+                            return {"success": False, "error": str(e), "doc_id": doc_id}
+
+                return asyncio.run(_process())
+
+            # Process documents in batches using Ray
+            batch_size = settings.KG_EXTRACTION_CONCURRENCY * 2
+            total_entities = 0
+            total_relations = 0
+            processed_count = 0
+            failed_count = 0
+
+            for batch_start in range(0, len(documents), batch_size):
+                if self._cancelled:
+                    break
+
+                # Handle pause
+                while self._paused and not self._cancelled:
+                    job.status = "paused"
+                    await self.db.commit()
+                    await asyncio.sleep(PAUSE_CHECK_INTERVAL)
+                    await self.db.refresh(job)
+                    if job.status == "running":
+                        self._paused = False
+                    elif job.status == "cancelled":
+                        self._cancelled = True
+
+                if self._cancelled:
+                    break
+
+                batch = documents[batch_start:batch_start + batch_size]
+
+                # Submit batch to Ray
+                futures = [
+                    process_document_ray.remote(str(doc.id), self.provider_id)
+                    for doc in batch
+                ]
+
+                # Wait for results
+                results = ray.get(futures)
+
+                # Process results
+                for doc, result in zip(batch, results):
+                    if result.get("success"):
+                        doc.kg_extraction_status = "completed"
+                        doc.kg_extracted_at = datetime.now(timezone.utc)
+                        doc.kg_entity_count = result.get("entities", 0)
+                        doc.kg_relation_count = result.get("relations", 0)
+                        total_entities += result.get("entities", 0)
+                        total_relations += result.get("relations", 0)
+                        processed_count += 1
+                    else:
+                        doc.kg_extraction_status = "failed"
+                        failed_count += 1
+                        logger.warning(
+                            "Ray KG extraction failed for document",
+                            doc_id=result.get("doc_id"),
+                            error=result.get("error"),
+                        )
+
+                # Update job progress
+                job.processed_documents = processed_count
+                job.failed_documents = failed_count
+                job.total_entities = total_entities
+                job.total_relations = total_relations
+                job.last_activity_at = datetime.now(timezone.utc)
+                await self.db.commit()
+
+                # Send progress notification
+                progress_pct = (processed_count / len(documents) * 100) if documents else 0
+                await notify_kg_extraction_progress(
+                    job_id=str(self.job_id),
+                    entities_found=total_entities,
+                    relations_found=total_relations,
+                    progress=progress_pct,
+                )
+
+            # Mark job as completed
+            job.status = "completed" if not self._cancelled else "cancelled"
+            job.completed_at = datetime.now(timezone.utc)
+            await self.db.commit()
+
+            await notify_kg_extraction_complete(
+                job_id=str(self.job_id),
+                total_entities=total_entities,
+                total_relations=total_relations,
+            )
+
+            logger.info(
+                "Ray KG extraction job completed",
+                job_id=str(self.job_id),
+                total_documents=len(documents),
+                processed=processed_count,
+                failed=failed_count,
+                total_entities=total_entities,
+                total_relations=total_relations,
+            )
+
+        except Exception as e:
+            logger.error(
+                "Ray KG extraction job failed",
+                job_id=str(self.job_id),
+                error=str(e),
+                exc_info=True,
+            )
+            job.status = "failed"
+            job.completed_at = datetime.now(timezone.utc)
+            await self.db.commit()
+
+        finally:
+            async with _running_jobs_lock:
+                _running_jobs.pop(str(self.job_id), None)
+
 
 class KGExtractionJobService:
     """
@@ -412,6 +972,7 @@ class KGExtractionJobService:
         self,
         job_id: uuid.UUID,
         background_task_runner=None,
+        use_parallel: bool = True,
     ) -> KGExtractionJob:
         """
         Start running an extraction job.
@@ -419,6 +980,7 @@ class KGExtractionJobService:
         Args:
             job_id: Job to start
             background_task_runner: Optional background task runner (e.g., FastAPI BackgroundTasks)
+            use_parallel: Use parallel processing (default True, uses KG_EXTRACTION_CONCURRENCY)
 
         Returns:
             The updated job
@@ -445,7 +1007,21 @@ class KGExtractionJobService:
                         organization_id=org_id,
                         provider_id=provider_id,
                     )
-                    await runner.run()
+                    # Phase 60: Choose processing method based on settings and availability
+                    # Priority: Ray (if enabled) > Parallel (asyncio) > Sequential
+                    use_ray = (
+                        RAY_AVAILABLE
+                        and getattr(settings, 'USE_RAY_FOR_KG', True)
+                        and use_parallel
+                    )
+
+                    if use_ray:
+                        logger.info("Using Ray distributed processing for KG extraction", job_id=str(job_id))
+                        await runner.run_with_ray()
+                    elif use_parallel:
+                        await runner.run_parallel()
+                    else:
+                        await runner.run()
             except Exception as e:
                 logger.error(
                     "Background extraction task crashed",
