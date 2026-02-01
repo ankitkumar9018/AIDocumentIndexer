@@ -1,0 +1,921 @@
+2026-02-01 21:33:06 [info     ] Running in LOCAL_MODE - using SQLite at sqlite:////Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/data/aidocindexer.db
+2026-02-01 21:33:09 [info     ] LLMGraphTransformer not available - using standard extraction
+2026-02-01 21:33:12 [info     ] Service registry initialized
+[2m2026-02-01T20:33:14.337516Z[0m [[33m[1mwarning  [0m] [1mDEBUG mode: Mock users enabled. Do not use in production![0m [[0m[1m[34mbackend.api.routes.auth[0m][0m
+/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/crawler.py:42: UserWarning: Field name "schema" in "CrawlWithExtractionRequest" shadows an attribute in parent "BaseModel"
+  class CrawlWithExtractionRequest(BaseModel):
+INFO:     Started server process [78981]
+INFO:     Waiting for application startup.
+2026-02-01 21:33:21,910 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:21,911 INFO sqlalchemy.engine.Engine SELECT 1
+2026-02-01 21:33:21,911 INFO sqlalchemy.engine.Engine [generated in 0.00020s] ()
+2026-02-01 21:33:21,912 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:21,912 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:21,913 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("access_tiers")
+2026-02-01 21:33:21,913 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,919 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("organizations")
+2026-02-01 21:33:21,919 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,919 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("organization_members")
+2026-02-01 21:33:21,919 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,919 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("users")
+2026-02-01 21:33:21,919 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,919 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("documents")
+2026-02-01 21:33:21,919 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,920 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("chunks")
+2026-02-01 21:33:21,920 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,920 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("scraped_content")
+2026-02-01 21:33:21,920 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,920 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("chat_sessions")
+2026-02-01 21:33:21,920 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("chat_messages")
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("chat_feedback")
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("audit_log")
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("processing_queue")
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("upload_jobs")
+2026-02-01 21:33:21,921 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,922 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("system_settings")
+2026-02-01 21:33:21,922 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,922 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("llm_providers")
+2026-02-01 21:33:21,922 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,922 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("database_connections")
+2026-02-01 21:33:21,922 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,922 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("llm_operation_configs")
+2026-02-01 21:33:21,922 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,923 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("chat_session_llm_overrides")
+2026-02-01 21:33:21,923 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,923 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("llm_usage_logs")
+2026-02-01 21:33:21,923 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,923 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("rate_limit_configs")
+2026-02-01 21:33:21,923 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,924 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("user_cost_limits")
+2026-02-01 21:33:21,924 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,924 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("cost_alerts")
+2026-02-01 21:33:21,924 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,924 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("provider_health_logs")
+2026-02-01 21:33:21,924 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,924 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("provider_health_cache")
+2026-02-01 21:33:21,924 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,925 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("response_cache")
+2026-02-01 21:33:21,925 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,925 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("cache_settings")
+2026-02-01 21:33:21,925 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,925 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("prompt_templates")
+2026-02-01 21:33:21,925 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,925 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("skills")
+2026-02-01 21:33:21,925 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("skill_executions")
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("reports")
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("research_results")
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("mood_boards")
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("agent_definitions")
+2026-02-01 21:33:21,926 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,927 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("agent_prompt_versions")
+2026-02-01 21:33:21,927 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,927 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("agent_trajectories")
+2026-02-01 21:33:21,927 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,927 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("agent_execution_plans")
+2026-02-01 21:33:21,927 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,927 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("prompt_optimization_jobs")
+2026-02-01 21:33:21,927 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("dspy_training_examples")
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("dspy_optimization_jobs")
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("execution_mode_preferences")
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("user_preferences")
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("entities")
+2026-02-01 21:33:21,928 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,929 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("entity_mentions")
+2026-02-01 21:33:21,929 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,929 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("entity_relations")
+2026-02-01 21:33:21,929 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,929 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("kg_extraction_jobs")
+2026-02-01 21:33:21,929 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,930 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("ocr_metrics")
+2026-02-01 21:33:21,930 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,930 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("folders")
+2026-02-01 21:33:21,930 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,930 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("folder_permissions")
+2026-02-01 21:33:21,930 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,930 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("generation_templates")
+2026-02-01 21:33:21,930 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,931 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("workflows")
+2026-02-01 21:33:21,931 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,931 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("workflow_nodes")
+2026-02-01 21:33:21,931 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,931 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("workflow_edges")
+2026-02-01 21:33:21,931 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,933 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("workflow_executions")
+2026-02-01 21:33:21,933 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,933 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("workflow_node_executions")
+2026-02-01 21:33:21,933 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,934 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("audio_overviews")
+2026-02-01 21:33:21,934 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,934 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("bot_connections")
+2026-02-01 21:33:21,934 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,935 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("connector_instances")
+2026-02-01 21:33:21,935 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,935 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("synced_resources")
+2026-02-01 21:33:21,935 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,935 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("budgets")
+2026-02-01 21:33:21,935 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,935 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("virtual_api_keys")
+2026-02-01 21:33:21,935 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,936 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("generated_images")
+2026-02-01 21:33:21,936 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,936 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("watched_directories")
+2026-02-01 21:33:21,936 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,936 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("file_watcher_events")
+2026-02-01 21:33:21,936 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,937 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("file_watcher_config")
+2026-02-01 21:33:21,937 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,937 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("external_database_connections")
+2026-02-01 21:33:21,937 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,937 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("database_query_history")
+2026-02-01 21:33:21,937 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,938 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("text_to_sql_examples")
+2026-02-01 21:33:21,938 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,938 INFO sqlalchemy.engine.Engine PRAGMA main.table_info("analyzed_images")
+2026-02-01 21:33:21,938 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-02-01 21:33:21,939 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:21,943 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:22,025 INFO sqlalchemy.engine.Engine SELECT agent_definitions.agent_type 
+FROM agent_definitions
+2026-02-01 21:33:22,025 INFO sqlalchemy.engine.Engine [generated in 0.00014s] ()
+2026-02-01 21:33:22,026 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:22,030 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:22,031 INFO sqlalchemy.engine.Engine SELECT access_tiers.name 
+FROM access_tiers
+2026-02-01 21:33:22,031 INFO sqlalchemy.engine.Engine [generated in 0.00013s] ()
+2026-02-01 21:33:22,032 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:22,032 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:22,033 INFO sqlalchemy.engine.Engine SELECT access_tiers.name, access_tiers.level, access_tiers.description, access_tiers.color, access_tiers.id, access_tiers.created_at, access_tiers.updated_at 
+FROM access_tiers 
+WHERE access_tiers.name = ?
+2026-02-01 21:33:22,033 INFO sqlalchemy.engine.Engine [generated in 0.00007s] ('admin',)
+2026-02-01 21:33:22,034 INFO sqlalchemy.engine.Engine SELECT users.email, users.password_hash, users.name, users.is_active, users.last_login_at, users.is_superadmin, users.current_organization_id, users.use_folder_permissions_only, users.access_tier_id, users.created_by_id, users.id, users.created_at, users.updated_at 
+FROM users 
+WHERE users.email = ?
+2026-02-01 21:33:22,034 INFO sqlalchemy.engine.Engine [generated in 0.00007s] ('admin@example.com',)
+2026-02-01 21:33:22,034 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:23,821 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:23,822 INFO sqlalchemy.engine.Engine SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status != ? AND upload_jobs.file_hash IN (SELECT documents.file_hash 
+FROM documents 
+WHERE documents.processing_status = ?)
+2026-02-01 21:33:23,822 INFO sqlalchemy.engine.Engine [generated in 0.00011s] ('COMPLETED', 'COMPLETED')
+2026-02-01 21:33:23,826 INFO sqlalchemy.engine.Engine SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status IN (?, ?, ?, ?, ?) AND upload_jobs.updated_at < ?
+2026-02-01 21:33:23,826 INFO sqlalchemy.engine.Engine [generated in 0.00013s] ('VALIDATING', 'EXTRACTING', 'CHUNKING', 'EMBEDDING', 'INDEXING', '2026-02-01 20:28:23.825809')
+2026-02-01 21:33:23,826 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:23,835 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:23,836 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:23,836 INFO sqlalchemy.engine.Engine [generated in 0.00007s] ('processing.ray_enabled',)
+2026-02-01 21:33:23,837 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:23,837 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:23,837 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:23,837 INFO sqlalchemy.engine.Engine [cached since 0.001615s ago] ('processing.ray_address',)
+2026-02-01 21:33:23,837 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:23,838 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:23,838 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:23,838 INFO sqlalchemy.engine.Engine [cached since 0.002258s ago] ('processing.ray_num_cpus',)
+2026-02-01 21:33:23,838 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:23,838 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:23,838 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:23,838 INFO sqlalchemy.engine.Engine [cached since 0.002814s ago] ('processing.ray_num_gpus',)
+2026-02-01 21:33:23,839 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:23,839 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:23,839 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:23,839 INFO sqlalchemy.engine.Engine [cached since 0.003411s ago] ('processing.ray_memory_limit_gb',)
+2026-02-01 21:33:23,839 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:23,839 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:23,839 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:23,839 INFO sqlalchemy.engine.Engine [cached since 0.003972s ago] ('processing.ray_num_workers',)
+2026-02-01 21:33:23,840 INFO sqlalchemy.engine.Engine COMMIT
+SIGTERM handler is not set because current thread is not the main thread.
+/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/ray/_private/worker.py:2062: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+  warnings.warn(
+2026-02-01 21:33:33,850 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:33,851 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:33,851 INFO sqlalchemy.engine.Engine [cached since 10.02s ago] ('queue.celery_enabled',)
+2026-02-01 21:33:33,853 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:33,854 INFO sqlalchemy.engine.Engine SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status = ?
+2026-02-01 21:33:33,854 INFO sqlalchemy.engine.Engine [generated in 0.00017s] ('QUEUED',)
+2026-02-01 21:33:33,855 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:33,856 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:33,856 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:33,856 INFO sqlalchemy.engine.Engine [cached since 10.02s ago] ('queue.celery_enabled',)
+2026-02-01 21:33:33,857 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:33,857 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:33,857 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:33,857 INFO sqlalchemy.engine.Engine [cached since 10.02s ago] ('queue.redis_url',)
+2026-02-01 21:33:33,858 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:33,858 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:33,858 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:33,858 INFO sqlalchemy.engine.Engine [cached since 10.02s ago] ('queue.celery_enabled',)
+2026-02-01 21:33:33,859 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:33,859 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:33,859 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings 
+WHERE system_settings."key" = ?
+2026-02-01 21:33:33,859 INFO sqlalchemy.engine.Engine [cached since 10.02s ago] ('queue.redis_url',)
+2026-02-01 21:33:33,860 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:33,867 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:36,044 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:36,044 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings
+2026-02-01 21:33:36,044 INFO sqlalchemy.engine.Engine [generated in 0.00012s] ()
+2026-02-01 21:33:36,051 INFO sqlalchemy.engine.Engine COMMIT
+2026-02-01 21:33:36,052 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-02-01 21:33:36,052 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings
+2026-02-01 21:33:36,052 INFO sqlalchemy.engine.Engine [cached since 0.007656s ago] ()
+2026-02-01 21:33:36,055 INFO sqlalchemy.engine.Engine COMMIT
+[33mChecking connectivity to the model hosters, this may take a while. To bypass this check, set `DISABLE_MODEL_SOURCE_CHECK` to `True`.[0m
+/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/paddle/utils/cpp_extension/extension_utils.py:718: UserWarning: No ccache found. Please be aware that recompiling all source files may be required. You can download and install ccache from: https://github.com/ccache/ccache/blob/master/doc/INSTALL.md
+  warnings.warn(warning_message)
+[32mCreating model: ('PP-LCNet_x1_0_textline_ori', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `/Users/ankit/.paddlex/official_models/PP-LCNet_x1_0_textline_ori`.[0m
+[32mCreating model: ('PP-OCRv5_server_det', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `/Users/ankit/.paddlex/official_models/PP-OCRv5_server_det`.[0m
+[32mCreating model: ('en_PP-OCRv5_mobile_rec', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `/Users/ankit/.paddlex/official_models/en_PP-OCRv5_mobile_rec`.[0m
+[32mCreating model: ('PP-LCNet_x1_0_textline_ori', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `/Users/ankit/.paddlex/official_models/PP-LCNet_x1_0_textline_ori`.[0m
+[32mCreating model: ('PP-OCRv5_server_det', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `/Users/ankit/.paddlex/official_models/PP-OCRv5_server_det`.[0m
+[32mCreating model: ('latin_PP-OCRv5_mobile_rec', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `/Users/ankit/.paddlex/official_models/latin_PP-OCRv5_mobile_rec`.[0m
+2026-02-01 21:33:58,681 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+[2026-02-01 21:33:58,681] [    INFO] base.py:2710 - BEGIN (implicit)
+2026-02-01 21:33:58,682 INFO sqlalchemy.engine.Engine SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings
+[2026-02-01 21:33:58,682] [    INFO] base.py:1846 - SELECT system_settings."key", system_settings.value, system_settings.category, system_settings.description, system_settings.value_type, system_settings.id, system_settings.created_at, system_settings.updated_at 
+FROM system_settings
+2026-02-01 21:33:58,682 INFO sqlalchemy.engine.Engine [cached since 22.64s ago] ()
+[2026-02-01 21:33:58,682] [    INFO] base.py:1846 - [cached since 22.64s ago] ()
+2026-02-01 21:33:58,684 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+[2026-02-01 21:33:58,684] [    INFO] base.py:2710 - BEGIN (implicit)
+2026-02-01 21:33:58,685 INFO sqlalchemy.engine.Engine SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status = ?
+[2026-02-01 21:33:58,685] [    INFO] base.py:1846 - SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status = ?
+2026-02-01 21:33:58,685 INFO sqlalchemy.engine.Engine [cached since 24.83s ago] ('QUEUED',)
+[2026-02-01 21:33:58,685] [    INFO] base.py:1846 - [cached since 24.83s ago] ('QUEUED',)
+2026-02-01 21:33:58,690 INFO sqlalchemy.engine.Engine COMMIT
+[2026-02-01 21:33:58,690] [    INFO] base.py:2716 - COMMIT
+2026-02-01 21:33:58,696 INFO sqlalchemy.engine.Engine COMMIT
+[2026-02-01 21:33:58,696] [    INFO] base.py:2716 - COMMIT
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-02-01 21:34:28,702 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+[2026-02-01 21:34:28,702] [    INFO] base.py:2710 - BEGIN (implicit)
+2026-02-01 21:34:28,704 INFO sqlalchemy.engine.Engine SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status = ?
+[2026-02-01 21:34:28,704] [    INFO] base.py:1846 - SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status = ?
+2026-02-01 21:34:28,704 INFO sqlalchemy.engine.Engine [cached since 54.85s ago] ('QUEUED',)
+[2026-02-01 21:34:28,704] [    INFO] base.py:1846 - [cached since 54.85s ago] ('QUEUED',)
+2026-02-01 21:34:28,706 INFO sqlalchemy.engine.Engine COMMIT
+[2026-02-01 21:34:28,706] [    INFO] base.py:2716 - COMMIT
+2026-02-01 21:34:32,114 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+[2026-02-01 21:34:32,114] [    INFO] base.py:2710 - BEGIN (implicit)
+2026-02-01 21:34:32,120 INFO sqlalchemy.engine.Engine SELECT count(*) AS count_1 
+FROM (SELECT documents.organization_id AS organization_id, documents.file_hash AS file_hash, documents.filename AS filename, documents.original_filename AS original_filename, documents.file_path AS file_path, documents.file_type AS file_type, documents.file_size AS file_size, documents.mime_type AS mime_type, documents.processing_status AS processing_status, documents.processing_mode AS processing_mode, documents.storage_mode AS storage_mode, documents.processing_error AS processing_error, documents.processed_at AS processed_at, documents.title AS title, documents.description AS description, documents.language AS language, documents.page_count AS page_count, documents.word_count AS word_count, documents.tags AS tags, documents.enhanced_metadata AS enhanced_metadata, documents.source_path AS source_path, documents.is_auto_indexed AS is_auto_indexed, documents.is_private AS is_private, documents.image_analysis_status AS image_analysis_status, documents.image_analysis_completed_at AS image_analysis_completed_at, documents.images_extracted_count AS images_extracted_count, documents.images_analyzed_count AS images_analyzed_count, documents.image_analysis_error AS image_analysis_error, documents.access_tier_id AS access_tier_id, documents.uploaded_by_id AS uploaded_by_id, documents.folder_id AS folder_id, documents.kg_extraction_status AS kg_extraction_status, documents.kg_extracted_at AS kg_extracted_at, documents.kg_entity_count AS kg_entity_count, documents.kg_relation_count AS kg_relation_count, documents.id AS id, documents.created_at AS created_at, documents.updated_at AS updated_at 
+FROM documents JOIN access_tiers ON documents.access_tier_id = access_tiers.id 
+WHERE access_tiers.level <= ? AND NOT (documents.processing_status = ? AND documents.processing_error = ?)) AS anon_1
+[2026-02-01 21:34:32,120] [    INFO] base.py:1846 - SELECT count(*) AS count_1 
+FROM (SELECT documents.organization_id AS organization_id, documents.file_hash AS file_hash, documents.filename AS filename, documents.original_filename AS original_filename, documents.file_path AS file_path, documents.file_type AS file_type, documents.file_size AS file_size, documents.mime_type AS mime_type, documents.processing_status AS processing_status, documents.processing_mode AS processing_mode, documents.storage_mode AS storage_mode, documents.processing_error AS processing_error, documents.processed_at AS processed_at, documents.title AS title, documents.description AS description, documents.language AS language, documents.page_count AS page_count, documents.word_count AS word_count, documents.tags AS tags, documents.enhanced_metadata AS enhanced_metadata, documents.source_path AS source_path, documents.is_auto_indexed AS is_auto_indexed, documents.is_private AS is_private, documents.image_analysis_status AS image_analysis_status, documents.image_analysis_completed_at AS image_analysis_completed_at, documents.images_extracted_count AS images_extracted_count, documents.images_analyzed_count AS images_analyzed_count, documents.image_analysis_error AS image_analysis_error, documents.access_tier_id AS access_tier_id, documents.uploaded_by_id AS uploaded_by_id, documents.folder_id AS folder_id, documents.kg_extraction_status AS kg_extraction_status, documents.kg_extracted_at AS kg_extracted_at, documents.kg_entity_count AS kg_entity_count, documents.kg_relation_count AS kg_relation_count, documents.id AS id, documents.created_at AS created_at, documents.updated_at AS updated_at 
+FROM documents JOIN access_tiers ON documents.access_tier_id = access_tiers.id 
+WHERE access_tiers.level <= ? AND NOT (documents.processing_status = ? AND documents.processing_error = ?)) AS anon_1
+2026-02-01 21:34:32,120 INFO sqlalchemy.engine.Engine [generated in 0.00021s] (100, 'FAILED', 'Deleted by user')
+[2026-02-01 21:34:32,120] [    INFO] base.py:1846 - [generated in 0.00021s] (100, 'FAILED', 'Deleted by user')
+2026-02-01 21:34:32,127 INFO sqlalchemy.engine.Engine SELECT documents.organization_id, documents.file_hash, documents.filename, documents.original_filename, documents.file_path, documents.file_type, documents.file_size, documents.mime_type, documents.processing_status, documents.processing_mode, documents.storage_mode, documents.processing_error, documents.processed_at, documents.title, documents.description, documents.language, documents.page_count, documents.word_count, documents.tags, documents.enhanced_metadata, documents.source_path, documents.is_auto_indexed, documents.is_private, documents.image_analysis_status, documents.image_analysis_completed_at, documents.images_extracted_count, documents.images_analyzed_count, documents.image_analysis_error, documents.access_tier_id, documents.uploaded_by_id, documents.folder_id, documents.kg_extraction_status, documents.kg_extracted_at, documents.kg_entity_count, documents.kg_relation_count, documents.id, documents.created_at, documents.updated_at 
+FROM documents JOIN access_tiers ON documents.access_tier_id = access_tiers.id 
+WHERE access_tiers.level <= ? AND NOT (documents.processing_status = ? AND documents.processing_error = ?) ORDER BY documents.created_at DESC
+ LIMIT ? OFFSET ?
+[2026-02-01 21:34:32,127] [    INFO] base.py:1846 - SELECT documents.organization_id, documents.file_hash, documents.filename, documents.original_filename, documents.file_path, documents.file_type, documents.file_size, documents.mime_type, documents.processing_status, documents.processing_mode, documents.storage_mode, documents.processing_error, documents.processed_at, documents.title, documents.description, documents.language, documents.page_count, documents.word_count, documents.tags, documents.enhanced_metadata, documents.source_path, documents.is_auto_indexed, documents.is_private, documents.image_analysis_status, documents.image_analysis_completed_at, documents.images_extracted_count, documents.images_analyzed_count, documents.image_analysis_error, documents.access_tier_id, documents.uploaded_by_id, documents.folder_id, documents.kg_extraction_status, documents.kg_extracted_at, documents.kg_entity_count, documents.kg_relation_count, documents.id, documents.created_at, documents.updated_at 
+FROM documents JOIN access_tiers ON documents.access_tier_id = access_tiers.id 
+WHERE access_tiers.level <= ? AND NOT (documents.processing_status = ? AND documents.processing_error = ?) ORDER BY documents.created_at DESC
+ LIMIT ? OFFSET ?
+2026-02-01 21:34:32,127 INFO sqlalchemy.engine.Engine [generated in 0.00014s] (100, 'FAILED', 'Deleted by user', 1, 0)
+[2026-02-01 21:34:32,127] [    INFO] base.py:1846 - [generated in 0.00014s] (100, 'FAILED', 'Deleted by user', 1, 0)
+2026-02-01 21:34:32,129 INFO sqlalchemy.engine.Engine SELECT access_tiers.id AS access_tiers_id, access_tiers.name AS access_tiers_name, access_tiers.level AS access_tiers_level, access_tiers.description AS access_tiers_description, access_tiers.color AS access_tiers_color, access_tiers.created_at AS access_tiers_created_at, access_tiers.updated_at AS access_tiers_updated_at 
+FROM access_tiers 
+WHERE access_tiers.id IN (?)
+[2026-02-01 21:34:32,129] [    INFO] base.py:1846 - SELECT access_tiers.id AS access_tiers_id, access_tiers.name AS access_tiers_name, access_tiers.level AS access_tiers_level, access_tiers.description AS access_tiers_description, access_tiers.color AS access_tiers_color, access_tiers.created_at AS access_tiers_created_at, access_tiers.updated_at AS access_tiers_updated_at 
+FROM access_tiers 
+WHERE access_tiers.id IN (?)
+2026-02-01 21:34:32,129 INFO sqlalchemy.engine.Engine [generated in 0.00016s] ('72eb5aac-c6ff-43ed-936b-99c47a343745',)
+[2026-02-01 21:34:32,129] [    INFO] base.py:1846 - [generated in 0.00016s] ('72eb5aac-c6ff-43ed-936b-99c47a343745',)
+2026-02-01 21:34:32,130 INFO sqlalchemy.engine.Engine SELECT chunks.document_id, count(chunks.id) AS count_1 
+FROM chunks 
+WHERE chunks.document_id IN (?) GROUP BY chunks.document_id
+[2026-02-01 21:34:32,130] [    INFO] base.py:1846 - SELECT chunks.document_id, count(chunks.id) AS count_1 
+FROM chunks 
+WHERE chunks.document_id IN (?) GROUP BY chunks.document_id
+2026-02-01 21:34:32,131 INFO sqlalchemy.engine.Engine [generated in 0.00009s] ('ed163b1a-e138-4aaa-a262-b3dd2e0d2a83',)
+[2026-02-01 21:34:32,131] [    INFO] base.py:1846 - [generated in 0.00009s] ('ed163b1a-e138-4aaa-a262-b3dd2e0d2a83',)
+2026-02-01 21:34:32,132 INFO sqlalchemy.engine.Engine SELECT chunks.document_id, count(chunks.id) AS count_1 
+FROM chunks 
+WHERE chunks.document_id IN (?) AND chunks.has_embedding = 1 GROUP BY chunks.document_id
+[2026-02-01 21:34:32,132] [    INFO] base.py:1846 - SELECT chunks.document_id, count(chunks.id) AS count_1 
+FROM chunks 
+WHERE chunks.document_id IN (?) AND chunks.has_embedding = 1 GROUP BY chunks.document_id
+2026-02-01 21:34:32,132 INFO sqlalchemy.engine.Engine [generated in 0.00011s] ('ed163b1a-e138-4aaa-a262-b3dd2e0d2a83',)
+[2026-02-01 21:34:32,132] [    INFO] base.py:1846 - [generated in 0.00011s] ('ed163b1a-e138-4aaa-a262-b3dd2e0d2a83',)
+INFO:     127.0.0.1:61889 - "GET /api/v1/documents?page_size=1 HTTP/1.1" 200 OK
+2026-02-01 21:34:32,416 INFO sqlalchemy.engine.Engine COMMIT
+[2026-02-01 21:34:32,416] [    INFO] base.py:2716 - COMMIT
+2026-02-01 21:34:39,605 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+[2026-02-01 21:34:39,605] [    INFO] base.py:2710 - BEGIN (implicit)
+2026-02-01 21:34:39,606 INFO sqlalchemy.engine.Engine SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.file_hash = ? AND upload_jobs.status = ? ORDER BY upload_jobs.created_at DESC
+ LIMIT ? OFFSET ?
+[2026-02-01 21:34:39,606] [    INFO] base.py:1846 - SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.file_hash = ? AND upload_jobs.status = ? ORDER BY upload_jobs.created_at DESC
+ LIMIT ? OFFSET ?
+2026-02-01 21:34:39,607 INFO sqlalchemy.engine.Engine [generated in 0.00021s] ('b4b809c85c7a5457b72b5de21a2c485a99677b12e6e9fece1a71718b6136e55e', 'COMPLETED', 1, 0)
+[2026-02-01 21:34:39,607] [    INFO] base.py:1846 - [generated in 0.00021s] ('b4b809c85c7a5457b72b5de21a2c485a99677b12e6e9fece1a71718b6136e55e', 'COMPLETED', 1, 0)
+2026-02-01 21:34:39,609 INFO sqlalchemy.engine.Engine SELECT documents.organization_id, documents.file_hash, documents.filename, documents.original_filename, documents.file_path, documents.file_type, documents.file_size, documents.mime_type, documents.processing_status, documents.processing_mode, documents.storage_mode, documents.processing_error, documents.processed_at, documents.title, documents.description, documents.language, documents.page_count, documents.word_count, documents.tags, documents.enhanced_metadata, documents.source_path, documents.is_auto_indexed, documents.is_private, documents.image_analysis_status, documents.image_analysis_completed_at, documents.images_extracted_count, documents.images_analyzed_count, documents.image_analysis_error, documents.access_tier_id, documents.uploaded_by_id, documents.folder_id, documents.kg_extraction_status, documents.kg_extracted_at, documents.kg_entity_count, documents.kg_relation_count, documents.id, documents.created_at, documents.updated_at 
+FROM documents 
+WHERE documents.file_hash = ?
+ LIMIT ? OFFSET ?
+[2026-02-01 21:34:39,609] [    INFO] base.py:1846 - SELECT documents.organization_id, documents.file_hash, documents.filename, documents.original_filename, documents.file_path, documents.file_type, documents.file_size, documents.mime_type, documents.processing_status, documents.processing_mode, documents.storage_mode, documents.processing_error, documents.processed_at, documents.title, documents.description, documents.language, documents.page_count, documents.word_count, documents.tags, documents.enhanced_metadata, documents.source_path, documents.is_auto_indexed, documents.is_private, documents.image_analysis_status, documents.image_analysis_completed_at, documents.images_extracted_count, documents.images_analyzed_count, documents.image_analysis_error, documents.access_tier_id, documents.uploaded_by_id, documents.folder_id, documents.kg_extraction_status, documents.kg_extracted_at, documents.kg_entity_count, documents.kg_relation_count, documents.id, documents.created_at, documents.updated_at 
+FROM documents 
+WHERE documents.file_hash = ?
+ LIMIT ? OFFSET ?
+2026-02-01 21:34:39,609 INFO sqlalchemy.engine.Engine [generated in 0.00013s] ('b4b809c85c7a5457b72b5de21a2c485a99677b12e6e9fece1a71718b6136e55e', 1, 0)
+[2026-02-01 21:34:39,609] [    INFO] base.py:1846 - [generated in 0.00013s] ('b4b809c85c7a5457b72b5de21a2c485a99677b12e6e9fece1a71718b6136e55e', 1, 0)
+2026-02-01 21:34:39,610 INFO sqlalchemy.engine.Engine ROLLBACK
+[2026-02-01 21:34:39,610] [    INFO] base.py:2713 - ROLLBACK
+/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/structlog/_base.py:173: UserWarning: Remove `format_exc_info` from your processor chain if you want pretty exceptions.
+  event_dict = proc(self._logger, method_name, event_dict)
+[2026-02-01 21:34:39,740] [   ERROR] errors.py:277 - [2m2026-02-01T20:34:39.612194Z[0m [[31m[1merror    [0m] [1mUnhandled exception           [0m [[0m[1m[34mbackend.api.errors[0m][0m [36merror[0m=[35m"'Document' object has no attribute 'name'"[0m [36merror_type[0m=[35mAttributeError[0m [36mpath[0m=[35m/api/v1/upload/single[0m [36mrequest_id[0m=[35me994a852-c84e-4fe0-abdd-26551e67974f[0m
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 79, in collapse_excgroups
+  |     yield
+  |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 192, in __call__
+  |     async with anyio.create_task_group() as task_group:
+  |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 783, in __aexit__
+  |     raise BaseExceptionGroup(
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    |     await self.app(scope, receive, _send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    |     with recv_stream, send_stream, collapse_excgroups():
+    |   File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    |     self.gen.throw(typ, value, traceback)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    |     response = await self.dispatch_func(request, call_next)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/core/monitoring.py", line 301, in dispatch
+    |     response = await call_next(request)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    |     raise app_exc from app_exc.__cause__ or app_exc.__context__
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    |     await self.app(scope, receive_or_disconnect, send_no_error)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/cors.py", line 85, in __call__
+    |     await self.app(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    |     with recv_stream, send_stream, collapse_excgroups():
+    |   File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    |     self.gen.throw(typ, value, traceback)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    |     response = await self.dispatch_func(request, call_next)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/middleware/request_id.py", line 67, in dispatch
+    |     response = await call_next(request)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    |     raise app_exc from app_exc.__cause__ or app_exc.__context__
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    |     await self.app(scope, receive_or_disconnect, send_no_error)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    |     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    |     await app(scope, receive, sender)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    |     await self.app(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 716, in __call__
+    |     await self.middleware_stack(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 736, in app
+    |     await route.handle(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 290, in handle
+    |     await self.app(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    |     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    |     await app(scope, receive, sender)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 106, in app
+    |     response = await f(request)
+    |                ^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 430, in app
+    |     raw_response = await run_endpoint_function(
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 316, in run_endpoint_function
+    |     return await dependant.call(**values)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 1111, in upload_single_file
+    |     existing = await check_duplicate_upload(file_hash)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 687, in check_duplicate_upload
+    |     "filename": existing_doc.name,
+    |                 ^^^^^^^^^^^^^^^^^
+    | AttributeError: 'Document' object has no attribute 'name'
+    +------------------------------------
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    with recv_stream, send_stream, collapse_excgroups():
+  File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    response = await self.dispatch_func(request, call_next)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/core/monitoring.py", line 301, in dispatch
+    response = await call_next(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    with recv_stream, send_stream, collapse_excgroups():
+  File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    response = await self.dispatch_func(request, call_next)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/middleware/request_id.py", line 67, in dispatch
+    response = await call_next(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 106, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 430, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 316, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 1111, in upload_single_file
+    existing = await check_duplicate_upload(file_hash)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 687, in check_duplicate_upload
+    "filename": existing_doc.name,
+                ^^^^^^^^^^^^^^^^^
+AttributeError: 'Document' object has no attribute 'name'
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 79, in collapse_excgroups
+  |     yield
+  |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 192, in __call__
+  |     async with anyio.create_task_group() as task_group:
+  |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 783, in __aexit__
+  |     raise BaseExceptionGroup(
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    |     await self.app(scope, receive, _send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    |     with recv_stream, send_stream, collapse_excgroups():
+    |   File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    |     self.gen.throw(typ, value, traceback)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    |     response = await self.dispatch_func(request, call_next)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/core/monitoring.py", line 301, in dispatch
+    |     response = await call_next(request)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    |     raise app_exc from app_exc.__cause__ or app_exc.__context__
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    |     await self.app(scope, receive_or_disconnect, send_no_error)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/cors.py", line 85, in __call__
+    |     await self.app(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    |     with recv_stream, send_stream, collapse_excgroups():
+    |   File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    |     self.gen.throw(typ, value, traceback)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    |     response = await self.dispatch_func(request, call_next)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/middleware/request_id.py", line 67, in dispatch
+    |     response = await call_next(request)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    |     raise app_exc from app_exc.__cause__ or app_exc.__context__
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    |     await self.app(scope, receive_or_disconnect, send_no_error)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    |     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    |     await app(scope, receive, sender)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    |     await self.app(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 716, in __call__
+    |     await self.middleware_stack(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 736, in app
+    |     await route.handle(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 290, in handle
+    |     await self.app(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    |     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    |     await app(scope, receive, sender)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 106, in app
+    |     response = await f(request)
+    |                ^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 430, in app
+    |     raw_response = await run_endpoint_function(
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 316, in run_endpoint_function
+    |     return await dependant.call(**values)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 1111, in upload_single_file
+    |     existing = await check_duplicate_upload(file_hash)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 687, in check_duplicate_upload
+    |     "filename": existing_doc.name,
+    |                 ^^^^^^^^^^^^^^^^^
+    | AttributeError: 'Document' object has no attribute 'name'
+    +------------------------------------
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    with recv_stream, send_stream, collapse_excgroups():
+  File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    response = await self.dispatch_func(request, call_next)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/core/monitoring.py", line 301, in dispatch
+    response = await call_next(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    with recv_stream, send_stream, collapse_excgroups():
+  File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    response = await self.dispatch_func(request, call_next)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/middleware/request_id.py", line 67, in dispatch
+    response = await call_next(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 106, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 430, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 316, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 1111, in upload_single_file
+    existing = await check_duplicate_upload(file_hash)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 687, in check_duplicate_upload
+    "filename": existing_doc.name,
+                ^^^^^^^^^^^^^^^^^
+AttributeError: 'Document' object has no attribute 'name'
+INFO:     127.0.0.1:61899 - "POST /api/v1/upload/single HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+  + Exception Group Traceback (most recent call last):
+  |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 79, in collapse_excgroups
+  |     yield
+  |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 192, in __call__
+  |     async with anyio.create_task_group() as task_group:
+  |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/anyio/_backends/_asyncio.py", line 783, in __aexit__
+  |     raise BaseExceptionGroup(
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 409, in run_asgi
+    |     result = await app(  # type: ignore[func-returns-value]
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 60, in __call__
+    |     return await self.app(scope, receive, send)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/applications.py", line 1139, in __call__
+    |     await super().__call__(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/applications.py", line 107, in __call__
+    |     await self.middleware_stack(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    |     await self.app(scope, receive, _send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    |     with recv_stream, send_stream, collapse_excgroups():
+    |   File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    |     self.gen.throw(typ, value, traceback)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    |     response = await self.dispatch_func(request, call_next)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/core/monitoring.py", line 301, in dispatch
+    |     response = await call_next(request)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    |     raise app_exc from app_exc.__cause__ or app_exc.__context__
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    |     await self.app(scope, receive_or_disconnect, send_no_error)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/cors.py", line 85, in __call__
+    |     await self.app(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    |     with recv_stream, send_stream, collapse_excgroups():
+    |   File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    |     self.gen.throw(typ, value, traceback)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    |     response = await self.dispatch_func(request, call_next)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/middleware/request_id.py", line 67, in dispatch
+    |     response = await call_next(request)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    |     raise app_exc from app_exc.__cause__ or app_exc.__context__
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    |     await self.app(scope, receive_or_disconnect, send_no_error)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    |     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    |     await app(scope, receive, sender)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    |     await self.app(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 716, in __call__
+    |     await self.middleware_stack(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 736, in app
+    |     await route.handle(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 290, in handle
+    |     await self.app(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    |     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    |     raise exc
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    |     await app(scope, receive, sender)
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 106, in app
+    |     response = await f(request)
+    |                ^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 430, in app
+    |     raw_response = await run_endpoint_function(
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 316, in run_endpoint_function
+    |     return await dependant.call(**values)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 1111, in upload_single_file
+    |     existing = await check_duplicate_upload(file_hash)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 687, in check_duplicate_upload
+    |     "filename": existing_doc.name,
+    |                 ^^^^^^^^^^^^^^^^^
+    | AttributeError: 'Document' object has no attribute 'name'
+    +------------------------------------
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/uvicorn/protocols/http/httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/applications.py", line 1139, in __call__
+    await super().__call__(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/applications.py", line 107, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    with recv_stream, send_stream, collapse_excgroups():
+  File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    response = await self.dispatch_func(request, call_next)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/core/monitoring.py", line 301, in dispatch
+    response = await call_next(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 191, in __call__
+    with recv_stream, send_stream, collapse_excgroups():
+  File "/Users/ankit/.local/share/uv/python/cpython-3.11.12-macos-aarch64-none/lib/python3.11/contextlib.py", line 158, in __exit__
+    self.gen.throw(typ, value, traceback)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_utils.py", line 85, in collapse_excgroups
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 193, in __call__
+    response = await self.dispatch_func(request, call_next)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/middleware/request_id.py", line 67, in dispatch
+    response = await call_next(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 120, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 106, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 430, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 316, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 1111, in upload_single_file
+    existing = await check_duplicate_upload(file_hash)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ankit/ankit_private/programs/mandala/AIDocumentIndexer/backend/api/routes/upload.py", line 687, in check_duplicate_upload
+    "filename": existing_doc.name,
+                ^^^^^^^^^^^^^^^^^
+AttributeError: 'Document' object has no attribute 'name'
+2026-02-01 21:34:58,710 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+[2026-02-01 21:34:58,710] [    INFO] base.py:2710 - BEGIN (implicit)
+2026-02-01 21:34:58,711 INFO sqlalchemy.engine.Engine SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status = ?
+[2026-02-01 21:34:58,711] [    INFO] base.py:1846 - SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status = ?
+2026-02-01 21:34:58,711 INFO sqlalchemy.engine.Engine [cached since 84.86s ago] ('QUEUED',)
+[2026-02-01 21:34:58,711] [    INFO] base.py:1846 - [cached since 84.86s ago] ('QUEUED',)
+2026-02-01 21:34:58,714 INFO sqlalchemy.engine.Engine COMMIT
+[2026-02-01 21:34:58,714] [    INFO] base.py:2716 - COMMIT
+2026-02-01 21:35:28,718 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+[2026-02-01 21:35:28,718] [    INFO] base.py:2710 - BEGIN (implicit)
+2026-02-01 21:35:28,720 INFO sqlalchemy.engine.Engine SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status = ?
+[2026-02-01 21:35:28,720] [    INFO] base.py:1846 - SELECT upload_jobs.filename, upload_jobs.file_path, upload_jobs.file_hash, upload_jobs.file_size, upload_jobs.status, upload_jobs.progress, upload_jobs.current_step, upload_jobs.error_message, upload_jobs.collection, upload_jobs.access_tier, upload_jobs.enable_ocr, upload_jobs.enable_image_analysis, upload_jobs.auto_generate_tags, upload_jobs.chunk_count, upload_jobs.word_count, upload_jobs.document_id, upload_jobs.id, upload_jobs.created_at, upload_jobs.updated_at 
+FROM upload_jobs 
+WHERE upload_jobs.status = ?
+2026-02-01 21:35:28,720 INFO sqlalchemy.engine.Engine [cached since 114.9s ago] ('QUEUED',)
+[2026-02-01 21:35:28,720] [    INFO] base.py:1846 - [cached since 114.9s ago] ('QUEUED',)
+2026-02-01 21:35:28,721 INFO sqlalchemy.engine.Engine COMMIT
+[2026-02-01 21:35:28,721] [    INFO] base.py:2716 - COMMIT

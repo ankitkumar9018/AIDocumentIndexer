@@ -334,6 +334,6 @@ VLM_MODEL=claude
 
 ## Next Steps
 
-- [Advanced RAG Tutorial](09-advanced-rag.md) - Combine visual with text search
+- [Advanced RAG Tutorial](11-advanced-rag.md) - Combine visual with text search
 - [Bulk Processing Tutorial](06-bulk-processing.md) - Process many visual documents
-- [Ray Scaling Tutorial](08-ray-scaling.md) - Distribute VLM workloads
+- [Ray Scaling Tutorial](10-ray-scaling.md) - Distribute VLM workloads

@@ -19,6 +19,7 @@ This document provides a **complete code-level reference** for developers to und
 5. [Complete Class Reference](#complete-class-reference)
 6. [Complete Function Reference](#complete-function-reference)
 7. [Database Operations Reference](#database-operations-reference)
+8. [Phase 84-96 Service Reference](#phase-84-96-service-reference)
 
 ---
 
@@ -1971,6 +1972,398 @@ class ManagerAgent(BaseAgent):
         """
 ```
 
+#### Phase 84-96 Service Classes
+
+##### BinaryQuantizationManager (`backend/services/rag.py`)
+
+```python
+class BinaryQuantizationManager:
+    """
+    INT8/binary vector quantization for 32x storage savings.
+
+    Converts float32 embeddings to INT8 or binary representations,
+    dramatically reducing memory and storage requirements while
+    maintaining retrieval accuracy through a reranking step.
+    """
+
+    def quantize_vectors(
+        self,
+        vectors: List[List[float]],
+        mode: str = "binary"           # "int8" or "binary"
+    ) -> Any:
+        """Quantize float32 vectors to INT8 or binary format"""
+
+    def search_quantized(
+        self,
+        query_vector: List[float],
+        top_k: int = 100
+    ) -> List[Dict]:
+        """Fast approximate search using quantized vectors"""
+
+    def rerank_candidates(
+        self,
+        query_vector: List[float],
+        candidates: List[Dict],
+        top_k: int = 10
+    ) -> List[Dict]:
+        """Rerank quantized search candidates with full-precision vectors"""
+```
+
+##### ColBERTRetriever (`backend/services/rag.py`)
+
+```python
+class ColBERTRetriever:
+    """
+    Late interaction retrieval with per-token matching (ColBERT).
+
+    Implements MaxSim scoring between query and document token
+    embeddings for higher accuracy than single-vector retrieval.
+    Includes WARP engine for 3x faster multi-vector retrieval.
+    """
+
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 10
+    ) -> List[Dict]:
+        """Retrieve documents using ColBERT late interaction scoring"""
+```
+
+##### ContentFreshnessScorer (`backend/services/rag.py`)
+
+```python
+class ContentFreshnessScorer:
+    """
+    Time-decay scoring for document relevance.
+
+    Applies freshness boosts to recently updated documents and
+    staleness penalties to old documents. Configurable via settings:
+    - freshness_decay_days: Days before freshness boost decays
+    - freshness_boost_factor: Multiplier for fresh documents
+    - freshness_penalty_factor: Multiplier for stale documents
+    """
+
+    def score(
+        self,
+        document_age_days: float,
+        base_score: float
+    ) -> float:
+        """Apply freshness-adjusted score to a document"""
+```
+
+##### CircuitBreaker (`backend/services/rag.py`)
+
+```python
+class CircuitBreaker:
+    """
+    Fault tolerance for external service calls.
+
+    Implements the circuit breaker pattern with three states:
+    - CLOSED: Normal operation, requests pass through
+    - OPEN: Service is down, requests fail fast
+    - HALF_OPEN: Testing recovery, limited requests allowed
+
+    Configurable failure thresholds and recovery timeouts prevent
+    cascading failures when external services (LLM APIs, etc.) are
+    unavailable.
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 30.0,
+        half_open_max_calls: int = 1
+    ):
+        """Initialize circuit breaker with configurable thresholds"""
+
+    async def call(
+        self,
+        func: Callable,
+        *args,
+        **kwargs
+    ) -> Any:
+        """Execute function with circuit breaker protection"""
+```
+
+##### AgenticRAGEngine (`backend/services/rag.py`)
+
+```python
+class AgenticRAGEngine:
+    """
+    Multi-step reasoning with tool use for complex queries.
+
+    Extends standard RAG with:
+    - Agent routing: Determines if query needs agentic processing
+    - Query decomposition: Breaks complex queries into sub-queries
+    - Iterative retrieval: Multiple search rounds with refinement
+    - Tool use: Integrates search, calculation, and other tools
+    """
+
+    async def process(
+        self,
+        query: str,
+        context: Dict = None
+    ) -> Dict:
+        """Process query with agentic reasoning pipeline"""
+```
+
+##### CitationEngine (`backend/services/rag.py`)
+
+```python
+class CitationEngine:
+    """
+    Numbered source references in LLM responses.
+
+    Injects [1], [2], [3] inline citation markers into generated
+    responses, with verification that citations map to actual sources.
+    Supports hover popovers showing source document name, page,
+    similarity score, and snippet.
+    """
+
+    def inject_citations(
+        self,
+        response: str,
+        sources: List[Dict]
+    ) -> str:
+        """Add numbered citation markers to response text"""
+
+    def verify_citations(
+        self,
+        cited_response: str,
+        sources: List[Dict]
+    ) -> Dict:
+        """Verify all citations map to valid sources"""
+```
+
+##### EmbeddingQuantizer (`backend/services/rag.py`)
+
+```python
+class EmbeddingQuantizer:
+    """
+    INT8/binary quantization for embeddings with Matryoshka support.
+
+    Supports Matryoshka embeddings (variable-dimension embeddings)
+    and quantization to INT8 or binary formats for reduced storage
+    and faster similarity computation.
+    """
+
+    def quantize(
+        self,
+        embeddings: List[List[float]],
+        target_format: str = "int8"    # "int8" or "binary"
+    ) -> Any:
+        """Quantize embeddings to target format"""
+```
+
+##### DSPyOptimizer (`backend/services/rag.py`)
+
+```python
+class DSPyOptimizer:
+    """
+    Automated prompt compilation using DSPy framework.
+
+    Optimizes RAG prompts using demonstration-based compilation:
+    - BootstrapFewShot: Few-shot example selection
+    - MIPRO: Multi-instruction prompt optimization
+    - BayesianSignatureOptimizer: Bayesian prompt tuning
+
+    Settings:
+    - dspy_optimization_enabled: Enable/disable optimization
+    - dspy_default_optimizer: Which optimizer to use
+    - dspy_min_examples: Minimum examples before optimization
+    """
+
+    async def optimize(
+        self,
+        module: Any,
+        train_data: List[Dict],
+        optimizer_name: str = "BootstrapFewShot"
+    ) -> Any:
+        """Compile/optimize a DSPy module with training data"""
+```
+
+##### HallucinationDetector (`backend/services/rag.py`)
+
+```python
+class HallucinationDetector:
+    """
+    Reranker-based grounding check for LLM responses.
+
+    Scores responses on a 0-1 scale where 0 = fully grounded
+    and 1 = fully hallucinated. Uses reranker cross-encoder scores
+    to evaluate how well each claim is supported by retrieved sources.
+    """
+
+    def compute_hallucination_score(
+        self,
+        response: str,
+        sources: List[Dict]
+    ) -> float:
+        """Compute hallucination score (0=grounded, 1=hallucinated)"""
+
+    def compute_confidence_score(
+        self,
+        source_count: int,
+        rerank_scores: List[float],
+        retrieval_density: float
+    ) -> float:
+        """Multi-signal confidence from source count, rerank scores, retrieval density"""
+```
+
+##### SettingsService (`backend/services/settings.py`)
+
+```python
+class SettingsService:
+    """
+    Centralized settings management with 180+ settings.
+
+    Provides unified access to all application settings with:
+    - SettingDefinition dataclass with validation, categories, UI metadata
+    - 19 frontend settings tab categories with vertical navigation
+    - Type validation (str, int, float, bool, json)
+    - Default values with database override
+    - Category-based organization for admin UI
+
+    Frontend tab categories:
+    - providers-tab: LLM provider configuration
+    - rag-tab: RAG pipeline settings
+    - security-tab: Authentication and access control
+    - generation-tab: Document generation options
+    - notifications-tab: Alert and notification settings
+    - audio-tab: TTS provider configuration
+    - ingestion-tab: Document processing settings
+    - scraper-tab: Web scraper configuration
+    """
+
+    async def get_setting(
+        self,
+        key: str,
+        default: Any = None
+    ) -> Any:
+        """Get setting value with fallback to default"""
+
+    async def set_setting(
+        self,
+        key: str,
+        value: Any
+    ) -> None:
+        """Set setting value with type validation"""
+
+    def get_definitions_by_category(
+        self,
+        category: str
+    ) -> List:
+        """Get all setting definitions for a category"""
+```
+
+##### Enhanced WebScraperService (`backend/services/web_crawler.py`)
+
+```python
+class WebScraperService:
+    """
+    Enhanced web scraping service with crawl4ai v0.8.0.
+
+    Phase 96 enhancements:
+    - ProxyManager: Proxy rotation with round_robin/random strategies
+    - Sitemap crawling: XML sitemap parsing with gzip and sitemapindex recursion
+    - robots.txt compliance: urllib.robotparser integration
+    - Search-based crawling: DuckDuckGo-based URL discovery
+    - Crash recovery: JSON state persistence for interrupted crawls
+    - Jina Reader fallback: Alternative extraction via Jina API
+    """
+
+    async def crawl_sitemap(
+        self,
+        sitemap_url: str,
+        max_pages: int = 100
+    ) -> List[Dict]:
+        """Parse XML sitemap with gzip support and sitemapindex recursion"""
+
+    def parse_robots_txt(
+        self,
+        robots_url: str
+    ) -> Dict:
+        """Parse robots.txt for compliance using urllib.robotparser"""
+
+    async def search_and_crawl(
+        self,
+        query: str,
+        max_results: int = 10
+    ) -> List[Dict]:
+        """DuckDuckGo-based URL discovery and crawling"""
+
+    async def crawl_with_recovery(
+        self,
+        urls: List[str],
+        state_file: str = None
+    ) -> List[Dict]:
+        """Crawl with crash recovery via JSON state persistence"""
+
+    async def _crawl_with_jina(
+        self,
+        url: str
+    ) -> Dict:
+        """Jina Reader API fallback for failed crawls"""
+
+
+class ProxyManager:
+    """
+    Proxy rotation for web scraping.
+
+    Strategies:
+    - round_robin: Cycle through proxies sequentially
+    - random: Select proxy randomly
+    """
+
+    def get_next_proxy(self) -> str:
+        """Get next proxy based on rotation strategy"""
+```
+
+##### CrawlSchedulerService (`backend/services/crawl_scheduler.py`)
+
+```python
+class CrawlSchedulerService:
+    """
+    Celery Beat scheduled crawl management.
+
+    Provides CRUD operations for scheduled crawl jobs that run
+    on configurable intervals via Celery Beat.
+    """
+
+    async def create_schedule(
+        self,
+        url: str,
+        interval: str,
+        config: Dict = None
+    ) -> Dict:
+        """Create a new scheduled crawl job"""
+
+    async def list_schedules(self) -> List[Dict]:
+        """List all scheduled crawl jobs"""
+
+    async def delete_schedule(
+        self,
+        schedule_id: str
+    ) -> None:
+        """Delete a scheduled crawl job"""
+```
+
+##### _SafeDatetime (`backend/services/text_to_sql/service.py`)
+
+```python
+class _SafeDatetime:
+    """
+    Safe datetime wrapper for sandbox execution.
+
+    Prevents sandbox escape via datetime.__class__.__bases__[0].__subclasses__()
+    by only exposing safe static methods:
+    - now(), utcnow(), fromisoformat(), strptime(), today()
+
+    AST-level blocked_attrs prevents access to dunder attributes
+    in sandboxed code execution.
+    """
+```
+
 ---
 
 ## Complete Function Reference
@@ -2451,6 +2844,13 @@ PYTHONPATH=. alembic history
 | API client | `frontend/lib/api/client.ts` |
 | React hooks | `frontend/lib/api/hooks.ts` |
 | UI components | `frontend/components/ui/` |
+| RAG pipeline classes (Phases 84-95) | `backend/services/rag.py` |
+| Settings service (Phase 94) | `backend/services/settings.py` |
+| Web scraper enhancements (Phase 96) | `backend/services/web_crawler.py` |
+| Crawl scheduler (Phase 96) | `backend/services/crawl_scheduler.py` |
+| Scraper API routes (Phase 96) | `backend/api/routes/scraper.py` |
+| SQL sandbox hardening (Phase 91) | `backend/services/text_to_sql/service.py` |
+| Settings UI tabs (Phase 94) | `frontend/app/dashboard/admin/settings/components/` |
 
 ---
 
@@ -2850,6 +3250,255 @@ ENABLE_HYDE=true
 # Knowledge Graph
 ENABLE_KNOWLEDGE_GRAPH=false
 ```
+
+---
+
+## Phase 84-96 Service Reference
+
+This section provides a consolidated reference for all services and enhancements introduced in Phases 84 through 96.
+
+### Phase 84: Binary Quantization
+
+**File:** `backend/services/rag.py`
+
+`BinaryQuantizationManager` provides INT8/binary vector quantization for 32x storage savings. Converts float32 embeddings (6 KB per vector) to binary (192 bytes per vector), enabling massive index compression with minimal accuracy loss through a rerank step.
+
+**Key Methods:**
+- `quantize_vectors(vectors, mode)` - Quantize to INT8 or binary
+- `search_quantized(query_vector, top_k)` - Fast approximate search on quantized index
+- `rerank_candidates(query_vector, candidates, top_k)` - Rerank with full-precision vectors
+
+### Phase 85: Late Interaction Models (ColBERT)
+
+**File:** `backend/services/rag.py`
+
+`ColBERTRetriever` implements late interaction retrieval with per-token matching. Instead of compressing documents into single vectors, ColBERT retains per-token embeddings and computes MaxSim scores between query and document tokens for higher accuracy.
+
+**Key Features:**
+- Per-token embedding storage and MaxSim scoring
+- WARP engine for 3x faster multi-vector retrieval
+- Integration with existing hybrid search pipeline
+
+### Phase 86: Content Freshness Scoring
+
+**File:** `backend/services/rag.py`
+
+`ContentFreshnessScorer` applies time-decay scoring to document relevance, boosting recently updated content and penalizing stale documents.
+
+**Settings:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.content_freshness_enabled` | Enable freshness scoring | `true` |
+| `rag.freshness_decay_days` | Days before freshness boost decays | `30` |
+| `rag.freshness_boost_factor` | Multiplier for fresh documents | `1.05` |
+| `rag.freshness_penalty_factor` | Multiplier for stale documents (>180 days) | `0.95` |
+
+### Phase 87: Dependency Updates & Stability
+
+**File:** `backend/pyproject.toml`
+
+Comprehensive dependency audit and update:
+- **google-genai migration**: Replaced deprecated `google-generativeai` with unified `google-genai` SDK
+- **Upper bounds on critical deps**: FastAPI, Pydantic, SQLAlchemy, Ray pinned with upper bounds
+- **Ray 2.10+**: Updated for better async support and memory management
+- **LangChain 0.3.x audit**: All imports verified correct
+
+### Phase 88: Circuit Breaker Pattern
+
+**File:** `backend/services/rag.py`
+
+`CircuitBreaker` implements fault tolerance for external service calls (LLM APIs, embedding services, etc.).
+
+**States:**
+| State | Behavior |
+|-------|----------|
+| **CLOSED** | Normal operation; requests pass through. Transitions to OPEN after N consecutive failures. |
+| **OPEN** | Fast-fail mode; requests rejected immediately. Transitions to HALF_OPEN after recovery timeout. |
+| **HALF_OPEN** | Recovery testing; limited requests allowed. Returns to CLOSED on success, OPEN on failure. |
+
+**Configuration:**
+- `failure_threshold`: Number of failures before opening circuit (default: 5)
+- `recovery_timeout`: Seconds to wait before testing recovery (default: 30)
+- `half_open_max_calls`: Max calls in half-open state (default: 1)
+
+### Phase 89: Agentic RAG
+
+**File:** `backend/services/rag.py`
+
+`AgenticRAGEngine` extends standard RAG with multi-step reasoning and tool use for complex queries that require iterative retrieval or computation.
+
+**Pipeline:**
+1. **Agent Routing** - Classifies whether query needs agentic processing vs. standard RAG
+2. **Query Decomposition** - Breaks complex queries into sub-queries
+3. **Iterative Retrieval** - Multiple search rounds with refinement based on intermediate results
+4. **Tool Use** - Integrates search, calculation, and other tools
+5. **Response Synthesis** - Combines results from all sub-queries
+
+### Phase 90: Inline Citations
+
+**File:** `backend/services/rag.py`
+
+`CitationEngine` adds numbered source references (`[1]`, `[2]`, `[3]`) inline in LLM responses with verification that citations map to actual retrieved sources.
+
+**Features:**
+- Numbered superscript citation badges inline in responses
+- Citation verification ensuring all markers map to real sources
+- Source mapping with document name, page number, similarity score, and snippet
+- Frontend hover popovers and click-to-navigate to source
+
+### Phase 91: Sandbox Hardening
+
+**File:** `backend/services/text_to_sql/service.py`
+
+Enhanced SQL sandbox security with `_SafeDatetime` wrapper and AST-level attribute blocking.
+
+**Security Measures:**
+- `_SafeDatetime`: Wraps `datetime` module to prevent `.__class__.__bases__[0].__subclasses__()` sandbox escape
+- Only safe static methods exposed: `now()`, `utcnow()`, `fromisoformat()`, `strptime()`, `today()`
+- AST-level `blocked_attrs` list prevents access to dunder attributes in sandboxed code
+- Blocks `getattr`, `setattr`, `delattr`, `globals`, `locals`, `vars`, `dir`, `breakpoint`
+
+### Phase 92: Embedding Quantization
+
+**File:** `backend/services/rag.py`
+
+`EmbeddingQuantizer` provides INT8/binary quantization for embeddings with Matryoshka embeddings support.
+
+**Features:**
+- INT8 quantization: 4x storage reduction with minimal accuracy loss
+- Binary quantization: 32x storage reduction for large-scale indices
+- Matryoshka embeddings: Variable-dimension embeddings that allow trading off accuracy for speed by truncating embedding dimensions
+
+### Phase 93: DSPy Prompt Optimization
+
+**File:** `backend/services/rag.py`
+
+`DSPyOptimizer` automates prompt compilation using the DSPy framework, replacing hand-crafted prompts with data-driven optimized versions.
+
+**Optimizers:**
+| Optimizer | Description |
+|-----------|-------------|
+| `BootstrapFewShot` | Selects optimal few-shot examples from training data |
+| `MIPRO` | Multi-instruction prompt optimization via search |
+| `BayesianSignatureOptimizer` | Bayesian tuning of prompt signatures and instructions |
+
+**Settings:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.dspy_optimization_enabled` | Enable DSPy optimization | `false` |
+| `rag.dspy_default_optimizer` | Default optimizer to use | `BootstrapFewShot` |
+| `rag.dspy_min_examples` | Minimum examples before optimization runs | `10` |
+| `rag.dspy_inference_enabled` | Use compiled DSPy modules in inference | `false` |
+
+### Phase 94: Settings Service Overhaul
+
+**File:** `backend/services/settings.py`
+
+`SettingsService` provides centralized management for 180+ application settings with type validation, categories, and UI metadata.
+
+**Architecture:**
+- `SettingDefinition` dataclass with key, type, default, description, category, UI metadata
+- Database-backed overrides with in-memory caching (5-minute TTL)
+- 19 frontend settings tab categories organized into groups
+
+**Frontend Components:**
+| Component | File | Purpose |
+|-----------|------|---------|
+| `providers-tab` | `frontend/app/dashboard/admin/settings/components/providers-tab.tsx` | LLM provider configuration |
+| `rag-tab` | `frontend/app/dashboard/admin/settings/components/rag-tab.tsx` | RAG pipeline settings |
+| `security-tab` | `frontend/app/dashboard/admin/settings/components/security-tab.tsx` | Authentication and access control |
+| `generation-tab` | `frontend/app/dashboard/admin/settings/components/generation-tab.tsx` | Document generation options |
+| `notifications-tab` | `frontend/app/dashboard/admin/settings/components/notifications-tab.tsx` | Alert and notification settings |
+| `audio-tab` | `frontend/app/dashboard/admin/settings/components/audio-tab.tsx` | TTS provider configuration |
+| `ingestion-tab` | `frontend/app/dashboard/admin/settings/components/ingestion-tab.tsx` | Document processing settings |
+| `scraper-tab` | `frontend/app/dashboard/admin/settings/components/scraper-tab.tsx` | Web scraper configuration |
+
+**Settings Page:** `frontend/app/dashboard/admin/settings/page.tsx` - Vertical sidebar navigation with category grouping (System, AI & Models, Processing, Intelligence, Integrations, Security).
+
+### Phase 95: Multi-feature Release
+
+**File:** `backend/services/rag.py` and frontend components
+
+#### Phase 95J: Hallucination Scoring
+`HallucinationDetector` in `rag.py` provides reranker-based grounding checks:
+- `_compute_hallucination_score()`: Scores 0 (grounded) to 1 (hallucinated)
+- `_compute_confidence_score()`: Multi-signal confidence from source count, rerank scores, retrieval density
+- Scores injected into RAG response metadata
+
+#### Phase 95K: Content Freshness
+Time-based document scoring with configurable freshness boost (default 1.05x within 30 days) and staleness penalty (default 0.95x after 180 days). Controlled by `rag.content_freshness_enabled`.
+
+#### Phase 95L: Conversation-Aware Retrieval
+Enriches retrieval query with last 3 user messages from conversation history, improving embedding quality for follow-up questions. Original question preserved for LLM prompt generation.
+
+#### Phase 95O: Agent Insights
+Per-agent analytics component showing usage metrics:
+- 4 metric cards: total queries, avg response time, satisfaction %, active users
+- Time period selector (7d, 30d, all time)
+- Recent activity list with query summaries and feedback indicators
+
+#### Phase 95R: BYOK (Bring Your Own Key)
+Client-side API key management for per-provider keys:
+- Supported providers: OpenAI, Anthropic, Google AI, Mistral, Groq, Together
+- Key validation testing, status badges (Active/Invalid/Untested)
+- Encrypted localStorage storage with master BYOK toggle
+
+#### Phase 95S: Prompt Library
+Full CRUD management for reusable prompt templates:
+- Card grid with search, category filter, use count badges
+- Template variables with `{{variable}}` syntax and runtime substitution
+- Public/private sharing, system templates, duplicate functionality
+
+#### Phase 95T: Canvas Panel
+Side-by-side artifact viewing and editing:
+- Sheet panel for AI-generated code and content
+- View mode with line numbers, edit mode with monospace textarea
+- Copy to clipboard, download as file, AI edit request input
+
+### Phase 96: Web Scraper Upgrade
+
+**Files:** `backend/services/web_crawler.py`, `backend/services/crawl_scheduler.py`, `backend/api/routes/scraper.py`, `backend/services/settings.py`
+
+Major upgrade to the web scraping infrastructure with crawl4ai v0.8.0.
+
+#### Enhanced WebScraperService (`services/web_crawler.py`)
+
+| Method | Description |
+|--------|-------------|
+| `crawl_sitemap()` | XML sitemap parsing with gzip support and sitemapindex recursion |
+| `parse_robots_txt()` | robots.txt compliance using `urllib.robotparser` |
+| `search_and_crawl()` | DuckDuckGo-based URL discovery and crawling |
+| `crawl_with_recovery()` | Crash recovery with JSON state persistence |
+| `_crawl_with_jina()` | Jina Reader API fallback for failed crawls |
+
+**ProxyManager:** Proxy rotation with `round_robin` and `random` strategies for anti-detection.
+
+#### CrawlSchedulerService (`services/crawl_scheduler.py`)
+Celery Beat integration for scheduled crawl jobs with CRUD management.
+
+#### New API Endpoints (`api/routes/scraper.py`)
+
+```
+POST   /api/v1/scraper/sitemap-crawl      # Crawl URLs from XML sitemap
+GET    /api/v1/scraper/stream              # SSE streaming for crawl progress
+POST   /api/v1/scraper/search-crawl        # Search-based URL discovery and crawl
+GET    /api/v1/scraper/robots-txt          # Parse robots.txt for a domain
+POST   /api/v1/scraper/schedules           # Create scheduled crawl
+GET    /api/v1/scraper/schedules           # List scheduled crawls
+PUT    /api/v1/scraper/schedules/{id}      # Update scheduled crawl
+DELETE /api/v1/scraper/schedules/{id}      # Delete scheduled crawl
+```
+
+#### New Scraper Settings (`services/settings.py`)
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `scraper.proxy_enabled` | Enable proxy rotation | `false` |
+| `scraper.proxy_list` | JSON array of proxy URLs | `[]` |
+| `scraper.proxy_strategy` | Rotation strategy (`round_robin` / `random`) | `round_robin` |
+| `scraper.jina_fallback_enabled` | Enable Jina Reader API fallback | `false` |
+| `scraper.adaptive_crawling_enabled` | Enable adaptive crawl speed | `true` |
+| `scraper.crash_recovery_enabled` | Enable JSON state persistence | `true` |
 
 ---
 

@@ -24,7 +24,7 @@ from functools import lru_cache
 
 # LangChain embeddings
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings  # Updated from deprecated langchain_community
 from langchain_core.embeddings import Embeddings
 
 # Phase 29: Voyage AI embeddings support
@@ -2812,9 +2812,10 @@ class RayEmbeddingService:
             for batch in batches
         ]
 
-        # Collect results
+        # Collect results with timeout protection
+        ray_timeout = float(os.getenv("RAY_TASK_TIMEOUT", "300"))
         try:
-            all_results = ray.get(futures)
+            all_results = ray.get(futures, timeout=ray_timeout)
 
             # Flatten results
             embeddings = []
@@ -2827,6 +2828,20 @@ class RayEmbeddingService:
             )
 
             return embeddings
+
+        except ray.exceptions.GetTimeoutError:
+            logger.warning(
+                "Ray embedding timed out, cancelling and falling back to local",
+                timeout=ray_timeout,
+                batch_count=len(futures),
+            )
+            # Cancel pending tasks
+            for ref in futures:
+                try:
+                    ray.cancel(ref, force=True)
+                except Exception:
+                    pass
+            # Fall through to local fallback below
 
         except Exception as e:
             logger.error(

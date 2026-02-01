@@ -59,6 +59,22 @@ export function EmbeddingDashboard() {
   const [stats, setStats] = useState<EmbeddingStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+
+  const handleRegenerateMissing = async () => {
+    try {
+      setRegenerating(true);
+      await api.post("/embeddings/generate-missing", { batch_size: 50 });
+      toast.success("Started generating missing embeddings. This may take a few minutes.");
+      // Refresh stats after a short delay
+      setTimeout(() => fetchStats(), 3000);
+    } catch (error) {
+      console.error("Failed to start embedding generation:", error);
+      toast.error("Failed to start embedding generation");
+    } finally {
+      setRegenerating(false);
+    }
+  };
 
   const fetchStats = async () => {
     try {
@@ -197,9 +213,21 @@ export function EmbeddingDashboard() {
           <Alert>
             <AlertCircle className="h-4 w-4" />
             <AlertTitle>Incomplete Coverage</AlertTitle>
-            <AlertDescription>
-              {stats.total_chunks - stats.chunks_with_embeddings} chunks are missing embeddings.
-              This may affect search quality. Consider running the embedding backfill script.
+            <AlertDescription className="flex items-center justify-between">
+              <span>
+                {stats.total_chunks - stats.chunks_with_embeddings} chunks are missing embeddings.
+                This may affect search quality.
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRegenerateMissing}
+                disabled={regenerating}
+                className="ml-4"
+              >
+                <Zap className={`h-4 w-4 mr-2 ${regenerating ? "animate-pulse" : ""}`} />
+                {regenerating ? "Generating..." : "Generate Missing"}
+              </Button>
             </AlertDescription>
           </Alert>
         )}

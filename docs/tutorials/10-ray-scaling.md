@@ -377,5 +377,5 @@ ray start --head --num-cpus=16 --num-gpus=4
 ## Next Steps
 
 - [Bulk Processing Tutorial](06-bulk-processing.md) - Process 100K+ documents
-- [Advanced RAG Tutorial](09-advanced-rag.md) - Improve retrieval quality
-- [Visual Documents Tutorial](10-visual-documents.md) - VLM processing
+- [Advanced RAG Tutorial](11-advanced-rag.md) - Improve retrieval quality
+- [Visual Documents Tutorial](12-visual-documents.md) - VLM processing

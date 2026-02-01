@@ -1,3 +1,7 @@
+> **ARCHIVED**: This document has been superseded. See [OCR_CONFIGURATION.md](../OCR_CONFIGURATION.md) for the canonical OCR documentation.
+
+---
+
 # OCR Configuration Implementation Summary
 
 **Date**: 2025-12-30

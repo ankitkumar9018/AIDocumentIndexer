@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
 from backend.api.middleware.auth import get_current_user
-from backend.db.database import get_async_session
+from backend.db.database import get_async_session, async_session_context
 from backend.db.models import UserPreferences
 
 logger = structlog.get_logger(__name__)
@@ -177,7 +177,7 @@ async def get_preferences(
 
     Returns default values if no preferences have been saved yet.
     """
-    async for session in get_async_session():
+    async with async_session_context() as session:
         prefs = await get_or_create_preferences(user["sub"], session)
         return prefs_to_response(prefs)
 
@@ -192,7 +192,7 @@ async def update_preferences(
 
     Only updates fields that are provided in the request.
     """
-    async for session in get_async_session():
+    async with async_session_context() as session:
         prefs = await get_or_create_preferences(user["sub"], session)
 
         # Update only provided fields
@@ -235,7 +235,7 @@ async def add_recent_item(
     """
     MAX_RECENT_ITEMS = 10
 
-    async for session in get_async_session():
+    async with async_session_context() as session:
         prefs = await get_or_create_preferences(user["sub"], session)
 
         if request.item_type == "document":
@@ -274,7 +274,7 @@ async def clear_recent_items(
             detail="item_type must be 'documents' or 'searches'",
         )
 
-    async for session in get_async_session():
+    async with async_session_context() as session:
         prefs = await get_or_create_preferences(user["sub"], session)
 
         if item_type == "documents":
@@ -294,7 +294,7 @@ async def reset_preferences(
     """
     Reset all preferences to defaults.
     """
-    async for session in get_async_session():
+    async with async_session_context() as session:
         result = await session.execute(
             select(UserPreferences).where(UserPreferences.user_id == user["sub"])
         )
@@ -343,7 +343,7 @@ async def list_saved_searches(
     """
     List all saved searches for the current user.
     """
-    async for session in get_async_session():
+    async with async_session_context() as session:
         prefs = await get_or_create_preferences(user["sub"], session)
         saved = prefs.saved_searches or []
 
@@ -379,7 +379,7 @@ async def save_search(
     """
     from datetime import datetime
 
-    async for session in get_async_session():
+    async with async_session_context() as session:
         prefs = await get_or_create_preferences(user["sub"], session)
         saved = prefs.saved_searches or []
 
@@ -443,7 +443,7 @@ async def get_saved_search(
     """
     Get a specific saved search by name.
     """
-    async for session in get_async_session():
+    async with async_session_context() as session:
         prefs = await get_or_create_preferences(user["sub"], session)
         saved = prefs.saved_searches or []
 
@@ -476,7 +476,7 @@ async def delete_saved_search(
     """
     Delete a saved search by name.
     """
-    async for session in get_async_session():
+    async with async_session_context() as session:
         prefs = await get_or_create_preferences(user["sub"], session)
         saved = prefs.saved_searches or []
 

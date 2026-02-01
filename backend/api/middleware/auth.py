@@ -30,8 +30,32 @@ logger = structlog.get_logger(__name__)
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
 JWT_ALGORITHM = "HS256"
 
+# Dev mode bypass (for development only)
+DEV_MODE = os.getenv("DEV_MODE", "false").lower() in ("true", "1", "yes")
+
 # Security scheme
 security = HTTPBearer(auto_error=False)
+
+
+# Fixed UUID for dev user - must be valid UUID format for organization_id fallback
+DEV_USER_UUID = "00000000-0000-0000-0000-000000000001"
+
+
+def _get_dev_user_context() -> "UserContext":
+    """
+    Create a default admin UserContext for development mode.
+    Only used when DEV_MODE=true and token is "dev-token".
+    """
+    from backend.services.permissions import UserContext
+    return UserContext(
+        user_id=DEV_USER_UUID,
+        email="admin@example.com",
+        role="admin",
+        access_tier_level=100,
+        access_tier_name="admin",
+        organization_id=None,
+        is_superadmin=True,
+    )
 
 
 # =============================================================================
@@ -142,6 +166,9 @@ async def get_current_user(
 
     Returns the raw token payload for backward compatibility.
 
+    In development mode (DEV_MODE=true), you can use "dev-token" as the
+    bearer token to bypass JWT validation and get admin access.
+
     Usage:
         @router.get("/items")
         async def get_items(user: dict = Depends(get_current_user)):
@@ -153,6 +180,18 @@ async def get_current_user(
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Dev mode bypass - use "dev-token" for easy development testing
+    if DEV_MODE and credentials.credentials == "dev-token":
+        logger.debug("Dev mode: bypassing JWT validation with dev-token")
+        return {
+            "sub": DEV_USER_UUID,
+            "email": "admin@example.com",
+            "role": "admin",
+            "access_tier_level": 100,
+            "access_tier_name": "admin",
+            "is_superadmin": True,
+        }
 
     payload = decode_jwt_token(credentials.credentials)
 
@@ -192,6 +231,9 @@ async def get_user_context(
     This is the preferred dependency for new endpoints that need
     permission checking.
 
+    In development mode (DEV_MODE=true), you can use "dev-token" as the
+    bearer token to bypass JWT validation and get admin access.
+
     Usage:
         @router.get("/documents")
         async def list_documents(user: UserContext = Depends(get_user_context)):
@@ -204,6 +246,11 @@ async def get_user_context(
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Dev mode bypass - use "dev-token" for easy development testing
+    if DEV_MODE and credentials.credentials == "dev-token":
+        logger.debug("Dev mode: bypassing JWT validation with dev-token")
+        return _get_dev_user_context()
 
     payload = decode_jwt_token(credentials.credentials)
 

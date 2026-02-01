@@ -61,9 +61,11 @@ import {
   useRetryProcessing,
   useSupportedFileTypes,
   useAccessTiers,
+  useVisionStatus,
   ProcessingStatus,
   api,
 } from "@/lib/api";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { FolderSelector } from "@/components/folder-selector";
 
 const getFileIconFromName = (filename: string) => {
@@ -132,6 +134,7 @@ export default function UploadPage() {
     smart_chunking: true,
     detect_duplicates: true,
     auto_generate_tags: false,
+    is_private: false,
     processing_mode: "full" as "full" | "ocr" | "basic",
     access_tier: undefined as number | undefined,
   });
@@ -141,6 +144,7 @@ export default function UploadPage() {
   const { data: supportedTypes } = useSupportedFileTypes();
   const { data: tiersData } = useAccessTiers({ enabled: isAuthenticated });
   const tiers = tiersData?.tiers ?? [];
+  const { data: visionStatus } = useVisionStatus({ enabled: isAuthenticated });
 
   // Mutations
   const uploadFile = useUploadFile();
@@ -223,7 +227,11 @@ export default function UploadPage() {
   };
 
   const handleUpload = async () => {
-    if (selectedFiles.length === 0) return;
+    console.log('[Upload] handleUpload called, selectedFiles:', selectedFiles.length);
+    if (selectedFiles.length === 0) {
+      console.log('[Upload] No files selected, returning early');
+      return;
+    }
 
     // Build upload options including processing settings
     const uploadOptions = {
@@ -231,22 +239,32 @@ export default function UploadPage() {
       ...(selectedFolderId && { folder_id: selectedFolderId }),
       ...processingOptions,
     };
+    console.log('[Upload] Upload options:', uploadOptions);
 
     try {
       if (selectedFiles.length === 1) {
+        console.log('[Upload] Uploading single file:', selectedFiles[0].name);
         const result = await uploadFile.mutateAsync({
           file: selectedFiles[0],
           options: Object.keys(uploadOptions).length > 0 ? uploadOptions : undefined,
         });
-        // Track file ID for WebSocket notifications
-        if (result?.file_id) {
-          const fileId = String(result.file_id);
-          processingFileIds.current.add(fileId);
-          subscribe(fileId);
+        console.log('[Upload] Single file upload result:', result);
+        // Check if file was a duplicate
+        if (result?.status === 'duplicate') {
+          toast.info("Duplicate file detected", {
+            description: "This file already exists in the system. Upload skipped.",
+          });
+        } else {
+          // Track file ID for WebSocket notifications
+          if (result?.file_id) {
+            const fileId = String(result.file_id);
+            processingFileIds.current.add(fileId);
+            subscribe(fileId);
+          }
+          toast.success("File uploaded successfully", {
+            description: "Processing will begin shortly.",
+          });
         }
-        toast.success("File uploaded successfully", {
-          description: "Processing will begin shortly.",
-        });
       } else {
         const result = await uploadBatch.mutateAsync({
           files: selectedFiles,
@@ -502,7 +520,7 @@ export default function UploadPage() {
                   multiple
                   className="hidden"
                   onChange={handleFileSelect}
-                  accept={supportedTypes?.supported_extensions?.join(",") || "*"}
+                  accept={supportedTypes?.supported_extensions?.map((ext: string) => `.${ext}`).join(",") || "*"}
                 />
               </label>
               <p className="text-xs text-muted-foreground mt-4">
@@ -517,6 +535,25 @@ export default function UploadPage() {
                 placeholder="Enter collection name..."
                 value={collection}
                 onChange={(e) => setCollection(e.target.value)}
+              />
+            </div>
+
+            {/* Auto-generate Tags - Visible by default since it's commonly used */}
+            <div className="flex items-center justify-between p-3 rounded-lg border bg-muted/30">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-primary" />
+                <div>
+                  <Label className="text-sm font-medium">Auto-generate Tags</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Use AI to automatically generate relevant tags based on document content
+                  </p>
+                </div>
+              </div>
+              <Switch
+                checked={processingOptions.auto_generate_tags}
+                onCheckedChange={(checked) =>
+                  setProcessingOptions((prev) => ({ ...prev, auto_generate_tags: checked }))
+                }
               />
             </div>
 
@@ -662,22 +699,69 @@ export default function UploadPage() {
 
                   <div className="flex items-center justify-between p-2 rounded-lg bg-muted/50">
                     <div className="flex items-center gap-2">
-                      <Sparkles className="h-4 w-4 text-muted-foreground" />
+                      <Image className="h-4 w-4 text-muted-foreground" />
                       <div>
-                        <Label className="text-sm">Auto-generate Tags</Label>
+                        <Label className="text-sm">AI Image Analysis</Label>
                         <p className="text-xs text-muted-foreground">
-                          Use AI to generate tags (when no collection set)
+                          Describe images for searchability
                         </p>
                       </div>
                     </div>
                     <Switch
-                      checked={processingOptions.auto_generate_tags}
+                      checked={processingOptions.enable_image_analysis}
                       onCheckedChange={(checked) =>
-                        setProcessingOptions((prev) => ({ ...prev, auto_generate_tags: checked }))
+                        setProcessingOptions((prev) => ({ ...prev, enable_image_analysis: checked }))
                       }
-                      disabled={!!collection}
                     />
                   </div>
+
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-muted/50 border border-orange-200 dark:border-orange-800">
+                    <div className="flex items-center gap-2">
+                      <Shield className="h-4 w-4 text-orange-500" />
+                      <div>
+                        <Label className="text-sm">Private Document</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Only visible to you and admins
+                        </p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={processingOptions.is_private}
+                      onCheckedChange={(checked) =>
+                        setProcessingOptions((prev) => ({ ...prev, is_private: checked }))
+                      }
+                    />
+                  </div>
+
+                  {/* Private Document Info */}
+                  {processingOptions.is_private && (
+                    <Alert variant="default" className="border-orange-200 bg-orange-50 dark:bg-orange-950/30">
+                      <Shield className="h-4 w-4 text-orange-500" />
+                      <AlertTitle className="text-orange-700 dark:text-orange-300">Private Document</AlertTitle>
+                      <AlertDescription className="text-orange-600 dark:text-orange-400 text-xs">
+                        This document will only be visible to you and superadmins. Other users won&apos;t see it in searches or document lists.
+                      </AlertDescription>
+                    </Alert>
+                  )}
+
+                  {/* Vision Model Warning */}
+                  {processingOptions.enable_image_analysis && !visionStatus?.available && (
+                    <Alert variant="default" className="border-orange-200 bg-orange-50 dark:bg-orange-950/30">
+                      <AlertCircle className="h-4 w-4 text-orange-500" />
+                      <AlertTitle className="text-orange-700 dark:text-orange-300">Vision Model Not Configured</AlertTitle>
+                      <AlertDescription className="text-orange-600 dark:text-orange-400 text-xs">
+                        Images will be extracted but not analyzed. {visionStatus?.recommendation}
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="p-0 h-auto text-orange-700 dark:text-orange-300 ml-1"
+                          onClick={() => window.location.href = '/dashboard/admin/settings'}
+                        >
+                          Configure in Settings
+                        </Button>
+                      </AlertDescription>
+                    </Alert>
+                  )}
                 </div>
               </CollapsibleContent>
             </Collapsible>

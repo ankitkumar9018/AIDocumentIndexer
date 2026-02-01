@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.db.models import Folder, Document, AccessTier, FolderPermission, FolderPermissionLevel, User
-from backend.db.database import get_async_session
+from backend.db.database import get_async_session, get_async_session_factory
 
 logger = structlog.get_logger(__name__)
 
@@ -38,9 +38,10 @@ class FolderService:
         """Get database session."""
         if self._session:
             return self._session
-        async for session in get_async_session():
-            return session
-        raise RuntimeError("Could not get database session")
+        # Create a new session from factory
+        session_factory = get_async_session_factory()
+        self._session = session_factory()
+        return self._session
 
     async def create_folder(
         self,

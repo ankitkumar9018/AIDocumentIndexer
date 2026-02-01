@@ -44,9 +44,11 @@ import {
   Globe,
   Workflow,
   Play,
+  Square,
   Scan,
   Volume2,
   Mic,
+  GitBranch,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -66,6 +68,11 @@ import { GenerationTab } from "./components/generation-tab";
 import { ExperimentsTab } from "./components/experiments-tab";
 import { CacheTab } from "./components/cache-tab";
 import { EvaluationTab } from "./components/evaluation-tab";
+import { AudioTab } from "./components/audio-tab";
+import { ScraperTab } from "./components/scraper-tab";
+import { IngestionTab } from "./components/ingestion-tab";
+import { InstructionsTab } from "./components/instructions-tab";
+import { RayTab } from "./components/ray-tab";
 import {
   Card,
   CardContent,
@@ -121,9 +128,14 @@ import {
   useUpdateOCRSettings,
   useDownloadOCRModels,
   useOCRModelInfo,
+  useVlmConfig,
+  useUpdateVlmConfig,
+  useTestVlm,
   useRedisStatus,
   useCeleryStatus,
   useInvalidateRedisCache,
+  useStartCeleryWorker,
+  useStopCeleryWorker,
   useTTSSettings,
   useUpdateTTSSettings,
   useCoquiModels,
@@ -265,6 +277,11 @@ export default function AdminSettingsPage() {
   const downloadModels = useDownloadOCRModels();
   const [downloadingModels, setDownloadingModels] = useState(false);
   const [downloadResult, setDownloadResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  // VLM Configuration hooks
+  const { data: vlmConfig, isLoading: vlmLoading } = useVlmConfig({ enabled: isAuthenticated });
+  const updateVlmConfig = useUpdateVlmConfig();
+  const testVlm = useTestVlm();
 
   // Ollama Model Management state
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState("http://localhost:11434");
@@ -896,65 +913,209 @@ export default function AdminSettingsPage() {
       </div>
 
       {/* Tabs Navigation */}
-      <Tabs defaultValue="overview" className="space-y-6">
-        <TabsList className="flex flex-wrap h-auto gap-1 p-1">
-          <TabsTrigger value="overview" className="flex items-center gap-2">
-            <Server className="h-4 w-4" />
-            Overview
-          </TabsTrigger>
-          <TabsTrigger value="providers" className="flex items-center gap-2">
-            <Bot className="h-4 w-4" />
-            LLM Providers
-          </TabsTrigger>
-          <TabsTrigger value="database" className="flex items-center gap-2">
-            <Database className="h-4 w-4" />
-            Database
-          </TabsTrigger>
-          <TabsTrigger value="rag" className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4" />
-            RAG Features
-          </TabsTrigger>
-          <TabsTrigger value="security" className="flex items-center gap-2">
-            <Shield className="h-4 w-4" />
-            Security
-          </TabsTrigger>
-          <TabsTrigger value="notifications" className="flex items-center gap-2">
-            <Bell className="h-4 w-4" />
-            Notifications
-          </TabsTrigger>
-          <TabsTrigger value="analytics" className="flex items-center gap-2">
-            <BarChart3 className="h-4 w-4" />
-            Analytics
-          </TabsTrigger>
-          <TabsTrigger value="ocr" className="flex items-center gap-2">
-            <Scan className="h-4 w-4" />
-            OCR Configuration
-          </TabsTrigger>
-          <TabsTrigger value="models" className="flex items-center gap-2">
-            <Cog className="h-4 w-4" />
-            Model Configuration
-          </TabsTrigger>
-          <TabsTrigger value="jobqueue" className="flex items-center gap-2">
-            <Workflow className="h-4 w-4" />
-            Job Queue
-          </TabsTrigger>
-          <TabsTrigger value="generation" className="flex items-center gap-2">
-            <PenTool className="h-4 w-4" />
-            Document Generation
-          </TabsTrigger>
-          <TabsTrigger value="experiments" className="flex items-center gap-2">
-            <TestTube className="h-4 w-4" />
-            Experiments
-          </TabsTrigger>
-          <TabsTrigger value="cache" className="flex items-center gap-2">
-            <HardDrive className="h-4 w-4" />
-            Cache
-          </TabsTrigger>
-          <TabsTrigger value="evaluation" className="flex items-center gap-2">
-            <BarChart3 className="h-4 w-4" />
-            Evaluation
-          </TabsTrigger>
-        </TabsList>
+      <Tabs defaultValue="overview" orientation="vertical" className="flex gap-6 min-h-[600px]">
+        {/* Vertical Sidebar Navigation */}
+        <div className="hidden md:block w-56 shrink-0">
+          <nav className="sticky top-4 space-y-6">
+            {/* SYSTEM */}
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 px-3">System</p>
+              <TabsList className="flex flex-col h-auto w-full bg-transparent gap-0.5">
+                <TabsTrigger value="overview" className="w-full justify-start gap-2 px-3">
+                  <Server className="h-4 w-4" />
+                  Overview
+                </TabsTrigger>
+                <TabsTrigger value="database" className="w-full justify-start gap-2 px-3">
+                  <Database className="h-4 w-4" />
+                  Database
+                </TabsTrigger>
+                <TabsTrigger value="cache" className="w-full justify-start gap-2 px-3">
+                  <HardDrive className="h-4 w-4" />
+                  Cache
+                </TabsTrigger>
+              </TabsList>
+            </div>
+            {/* AI & MODELS */}
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 px-3">AI & Models</p>
+              <TabsList className="flex flex-col h-auto w-full bg-transparent gap-0.5">
+                <TabsTrigger value="providers" className="w-full justify-start gap-2 px-3">
+                  <Bot className="h-4 w-4" />
+                  LLM Providers
+                </TabsTrigger>
+                <TabsTrigger value="rag" className="w-full justify-start gap-2 px-3">
+                  <Sparkles className="h-4 w-4" />
+                  RAG Features
+                </TabsTrigger>
+                <TabsTrigger value="models" className="w-full justify-start gap-2 px-3">
+                  <Cog className="h-4 w-4" />
+                  Models
+                </TabsTrigger>
+              </TabsList>
+            </div>
+            {/* PROCESSING */}
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 px-3">Processing</p>
+              <TabsList className="flex flex-col h-auto w-full bg-transparent gap-0.5">
+                <TabsTrigger value="ingestion" className="w-full justify-start gap-2 px-3">
+                  <GitBranch className="h-4 w-4" />
+                  Ingestion
+                </TabsTrigger>
+                <TabsTrigger value="ocr" className="w-full justify-start gap-2 px-3">
+                  <Scan className="h-4 w-4" />
+                  OCR
+                </TabsTrigger>
+                <TabsTrigger value="generation" className="w-full justify-start gap-2 px-3">
+                  <PenTool className="h-4 w-4" />
+                  Generation
+                </TabsTrigger>
+                <TabsTrigger value="jobqueue" className="w-full justify-start gap-2 px-3">
+                  <Workflow className="h-4 w-4" />
+                  Job Queue
+                </TabsTrigger>
+                <TabsTrigger value="ray" className="w-full justify-start gap-2 px-3">
+                  <Zap className="h-4 w-4" />
+                  Ray
+                </TabsTrigger>
+              </TabsList>
+            </div>
+            {/* INTELLIGENCE */}
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 px-3">Intelligence</p>
+              <TabsList className="flex flex-col h-auto w-full bg-transparent gap-0.5">
+                <TabsTrigger value="experiments" className="w-full justify-start gap-2 px-3">
+                  <TestTube className="h-4 w-4" />
+                  Experiments
+                </TabsTrigger>
+                <TabsTrigger value="evaluation" className="w-full justify-start gap-2 px-3">
+                  <BarChart3 className="h-4 w-4" />
+                  Evaluation
+                </TabsTrigger>
+                <TabsTrigger value="analytics" className="w-full justify-start gap-2 px-3">
+                  <BarChart3 className="h-4 w-4" />
+                  Analytics
+                </TabsTrigger>
+              </TabsList>
+            </div>
+            {/* INTEGRATIONS */}
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 px-3">Integrations</p>
+              <TabsList className="flex flex-col h-auto w-full bg-transparent gap-0.5">
+                <TabsTrigger value="audio" className="w-full justify-start gap-2 px-3">
+                  <Volume2 className="h-4 w-4" />
+                  Audio / TTS
+                </TabsTrigger>
+                <TabsTrigger value="scraper" className="w-full justify-start gap-2 px-3">
+                  <Globe className="h-4 w-4" />
+                  Scraper
+                </TabsTrigger>
+              </TabsList>
+            </div>
+            {/* SECURITY */}
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 px-3">Security</p>
+              <TabsList className="flex flex-col h-auto w-full bg-transparent gap-0.5">
+                <TabsTrigger value="security" className="w-full justify-start gap-2 px-3">
+                  <Shield className="h-4 w-4" />
+                  Security
+                </TabsTrigger>
+                <TabsTrigger value="notifications" className="w-full justify-start gap-2 px-3">
+                  <Bell className="h-4 w-4" />
+                  Notifications
+                </TabsTrigger>
+                <TabsTrigger value="instructions" className="w-full justify-start gap-2 px-3">
+                  <MessageSquare className="h-4 w-4" />
+                  Instructions
+                </TabsTrigger>
+              </TabsList>
+            </div>
+          </nav>
+        </div>
+
+        {/* Mobile Navigation - Dropdown */}
+        <div className="md:hidden w-full">
+          <TabsList className="flex flex-wrap h-auto gap-1 p-1 w-full">
+            <TabsTrigger value="overview" className="flex items-center gap-1 text-xs">
+              <Server className="h-3 w-3" />
+              Overview
+            </TabsTrigger>
+            <TabsTrigger value="providers" className="flex items-center gap-1 text-xs">
+              <Bot className="h-3 w-3" />
+              Providers
+            </TabsTrigger>
+            <TabsTrigger value="database" className="flex items-center gap-1 text-xs">
+              <Database className="h-3 w-3" />
+              Database
+            </TabsTrigger>
+            <TabsTrigger value="rag" className="flex items-center gap-1 text-xs">
+              <Sparkles className="h-3 w-3" />
+              RAG
+            </TabsTrigger>
+            <TabsTrigger value="security" className="flex items-center gap-1 text-xs">
+              <Shield className="h-3 w-3" />
+              Security
+            </TabsTrigger>
+            <TabsTrigger value="notifications" className="flex items-center gap-1 text-xs">
+              <Bell className="h-3 w-3" />
+              Alerts
+            </TabsTrigger>
+            <TabsTrigger value="analytics" className="flex items-center gap-1 text-xs">
+              <BarChart3 className="h-3 w-3" />
+              Analytics
+            </TabsTrigger>
+            <TabsTrigger value="ocr" className="flex items-center gap-1 text-xs">
+              <Scan className="h-3 w-3" />
+              OCR
+            </TabsTrigger>
+            <TabsTrigger value="models" className="flex items-center gap-1 text-xs">
+              <Cog className="h-3 w-3" />
+              Models
+            </TabsTrigger>
+            <TabsTrigger value="jobqueue" className="flex items-center gap-1 text-xs">
+              <Workflow className="h-3 w-3" />
+              Jobs
+            </TabsTrigger>
+            <TabsTrigger value="generation" className="flex items-center gap-1 text-xs">
+              <PenTool className="h-3 w-3" />
+              Generation
+            </TabsTrigger>
+            <TabsTrigger value="experiments" className="flex items-center gap-1 text-xs">
+              <TestTube className="h-3 w-3" />
+              Experiments
+            </TabsTrigger>
+            <TabsTrigger value="cache" className="flex items-center gap-1 text-xs">
+              <HardDrive className="h-3 w-3" />
+              Cache
+            </TabsTrigger>
+            <TabsTrigger value="evaluation" className="flex items-center gap-1 text-xs">
+              <BarChart3 className="h-3 w-3" />
+              Evaluation
+            </TabsTrigger>
+            <TabsTrigger value="audio" className="flex items-center gap-1 text-xs">
+              <Volume2 className="h-3 w-3" />
+              Audio
+            </TabsTrigger>
+            <TabsTrigger value="scraper" className="flex items-center gap-1 text-xs">
+              <Globe className="h-3 w-3" />
+              Scraper
+            </TabsTrigger>
+            <TabsTrigger value="ingestion" className="flex items-center gap-1 text-xs">
+              <GitBranch className="h-3 w-3" />
+              Ingestion
+            </TabsTrigger>
+            <TabsTrigger value="instructions" className="flex items-center gap-1 text-xs">
+              <MessageSquare className="h-3 w-3" />
+              Instructions
+            </TabsTrigger>
+            <TabsTrigger value="ray" className="flex items-center gap-1 text-xs">
+              <Zap className="h-3 w-3" />
+              Ray
+            </TabsTrigger>
+          </TabsList>
+        </div>
+
+        {/* Tab Content Area */}
+        <div className="flex-1 min-w-0">
 
         {/* Overview Tab */}
         <OverviewTab />
@@ -1087,6 +1248,11 @@ export default function AdminSettingsPage() {
           setDownloadingModels={setDownloadingModels}
           downloadResult={downloadResult}
           setDownloadResult={setDownloadResult}
+          vlmConfig={vlmConfig}
+          vlmLoading={vlmLoading}
+          updateVlmConfig={updateVlmConfig}
+          testVlm={testVlm}
+          visionModels={ollamaLocalModels?.vision_models}
         />
 
         {/* Model Configuration Tab */}
@@ -1119,6 +1285,22 @@ export default function AdminSettingsPage() {
         {/* Evaluation Dashboard Tab (Phase 90) */}
         <EvaluationTab />
 
+        {/* Audio Settings Tab */}
+        <AudioTab localSettings={localSettings} handleSettingChange={handleSettingChange} />
+
+        {/* Web Scraper Settings Tab */}
+        <ScraperTab localSettings={localSettings} handleSettingChange={handleSettingChange} />
+
+        {/* Knowledge Graph Ingestion Tab */}
+        <IngestionTab localSettings={localSettings} handleSettingChange={handleSettingChange} />
+
+        {/* Custom Instructions Tab */}
+        <InstructionsTab localSettings={localSettings} handleSettingChange={handleSettingChange} isLoading={settingsLoading} hasChanges={hasChanges} />
+
+        {/* Ray Distributed Processing Tab */}
+        <RayTab />
+
+        </div> {/* Close flex-1 content area */}
       </Tabs>
 
       {/* Unsaved Changes Warning */}
@@ -1929,6 +2111,8 @@ function JobQueueSettings({
   const { data: redisStatus, isLoading: redisLoading } = useRedisStatus();
   const { data: celeryStatus, isLoading: celeryLoading } = useCeleryStatus();
   const invalidateCache = useInvalidateRedisCache();
+  const startCelery = useStartCeleryWorker();
+  const stopCelery = useStopCeleryWorker();
 
   return (
     <>
@@ -2015,6 +2199,35 @@ function JobQueueSettings({
               {celeryStatus?.message && (
                 <p className="text-xs text-yellow-600 mt-1">{celeryStatus.message}</p>
               )}
+              {/* Start/Stop Buttons */}
+              <div className="flex gap-2 mt-3">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => startCelery.mutate()}
+                  disabled={startCelery.isPending || celeryStatus?.available}
+                >
+                  {startCelery.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                  ) : (
+                    <Play className="h-4 w-4 mr-1" />
+                  )}
+                  Start
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => stopCelery.mutate()}
+                  disabled={stopCelery.isPending || !celeryStatus?.available}
+                >
+                  {stopCelery.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                  ) : (
+                    <Square className="h-4 w-4 mr-1" />
+                  )}
+                  Stop
+                </Button>
+              </div>
             </div>
           </div>
 

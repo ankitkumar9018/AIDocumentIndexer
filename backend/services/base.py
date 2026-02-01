@@ -172,12 +172,11 @@ class BaseService(ABC):
         if self._session is not None:
             return self._session
 
-        # Get new session from generator
-        async for session in get_async_session():
-            self._session = session
-            return session
-
-        raise RuntimeError("Failed to obtain database session")
+        # Create a new session from factory
+        from backend.db.database import get_async_session_factory
+        session_factory = get_async_session_factory()
+        self._session = session_factory()
+        return self._session
 
     def session_context(self):
         """

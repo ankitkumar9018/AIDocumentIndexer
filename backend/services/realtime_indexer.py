@@ -792,12 +792,21 @@ class RealTimeIndexerService:
         for task in tasks_to_process:
             try:
                 if task.task_type == "reindex":
-                    # TODO: Implement full reindex
+                    # Full reindex: delete existing chunks and regenerate
+                    reindex_stats = await self._perform_reindex(task.document_id)
                     stats.documents_checked += 1
+                    stats.documents_updated += reindex_stats.documents_updated
+                    stats.chunks_added += reindex_stats.chunks_added
+                    stats.chunks_deleted += reindex_stats.chunks_deleted
 
                 elif task.task_type == "update_chunks":
-                    # TODO: Implement chunk update
-                    pass
+                    # Partial update: only regenerate specified chunks
+                    update_stats = await self._perform_chunk_update(
+                        task.document_id,
+                        task.chunks_to_update,
+                    )
+                    stats.chunks_modified += update_stats.chunks_modified
+                    stats.documents_updated += 1
 
                 elif task.task_type == "delete":
                     # Delete document and chunks
@@ -821,6 +830,169 @@ class RealTimeIndexerService:
         """Get number of pending indexing tasks."""
         async with self._task_lock:
             return len(self._pending_tasks)
+
+    # -------------------------------------------------------------------------
+    # Reindex and Chunk Update Implementation
+    # -------------------------------------------------------------------------
+
+    async def _perform_reindex(
+        self,
+        document_id: uuid.UUID,
+    ) -> IndexingStats:
+        """
+        Perform full reindex of a document.
+
+        1. Fetch the document
+        2. Delete existing chunks
+        3. Re-chunk and re-embed the content
+        4. Update document status
+
+        Args:
+            document_id: Document to reindex
+
+        Returns:
+            IndexingStats with operation counts
+        """
+        stats = IndexingStats()
+
+        # Get the document
+        result = await self.db.execute(
+            select(Document).where(Document.id == document_id)
+        )
+        doc = result.scalar_one_or_none()
+
+        if not doc:
+            logger.warning("Document not found for reindex", document_id=str(document_id))
+            stats.errors.append(f"Document {document_id} not found")
+            return stats
+
+        try:
+            # Count existing chunks
+            chunk_count_result = await self.db.execute(
+                select(func.count(Chunk.id)).where(Chunk.document_id == document_id)
+            )
+            old_chunk_count = chunk_count_result.scalar() or 0
+
+            # Delete existing chunks
+            await self.db.execute(
+                Chunk.__table__.delete().where(Chunk.document_id == document_id)
+            )
+            stats.chunks_deleted = old_chunk_count
+
+            # Re-chunk the document content
+            from backend.services.chunker import TextChunker
+
+            chunker = TextChunker()
+            content = doc.content or ""
+
+            if content:
+                chunks_data = chunker.chunk_text(
+                    text=content,
+                    metadata={
+                        "document_id": str(document_id),
+                        "filename": doc.filename,
+                        "reindexed_at": datetime.now().isoformat(),
+                    }
+                )
+
+                # Create new chunks
+                for i, chunk_data in enumerate(chunks_data):
+                    chunk = Chunk(
+                        document_id=document_id,
+                        content=chunk_data.get("text", ""),
+                        chunk_index=i,
+                        token_count=len(chunk_data.get("text", "").split()),
+                        metadata=chunk_data.get("metadata", {}),
+                    )
+                    self.db.add(chunk)
+                    stats.chunks_added += 1
+
+            # Update document status
+            doc.processing_status = ProcessingStatus.COMPLETED
+            doc.updated_at = datetime.now()
+            stats.documents_updated = 1
+
+            logger.info(
+                "Document reindexed",
+                document_id=str(document_id),
+                chunks_deleted=stats.chunks_deleted,
+                chunks_added=stats.chunks_added,
+            )
+
+        except Exception as e:
+            logger.error("Reindex failed", document_id=str(document_id), error=str(e))
+            stats.errors.append(f"Reindex failed: {str(e)}")
+            doc.processing_status = ProcessingStatus.FAILED
+
+        return stats
+
+    async def _perform_chunk_update(
+        self,
+        document_id: uuid.UUID,
+        chunk_ids: List[uuid.UUID],
+    ) -> IndexingStats:
+        """
+        Update specific chunks of a document.
+
+        This is more efficient than full reindex when only
+        some chunks need regeneration (e.g., embedding update).
+
+        Args:
+            document_id: Parent document
+            chunk_ids: Specific chunks to update
+
+        Returns:
+            IndexingStats with operation counts
+        """
+        stats = IndexingStats()
+
+        if not chunk_ids:
+            return stats
+
+        # Get the chunks to update
+        result = await self.db.execute(
+            select(Chunk).where(
+                and_(
+                    Chunk.document_id == document_id,
+                    Chunk.id.in_(chunk_ids),
+                )
+            )
+        )
+        chunks = result.scalars().all()
+
+        for chunk in chunks:
+            try:
+                # Regenerate embedding for this chunk
+                from backend.services.embeddings import get_embedding_service
+
+                embedding_service = get_embedding_service()
+                new_embedding = await embedding_service.embed_text(chunk.content)
+
+                # Update the chunk's embedding
+                chunk.embedding = new_embedding
+                chunk.metadata = {
+                    **chunk.metadata,
+                    "embedding_updated_at": datetime.now().isoformat(),
+                }
+
+                stats.chunks_modified += 1
+
+            except Exception as e:
+                logger.error(
+                    "Chunk update failed",
+                    chunk_id=str(chunk.id),
+                    error=str(e),
+                )
+                stats.errors.append(f"Chunk {chunk.id}: {str(e)}")
+
+        if stats.chunks_modified > 0:
+            logger.info(
+                "Chunks updated",
+                document_id=str(document_id),
+                chunks_modified=stats.chunks_modified,
+            )
+
+        return stats
 
     # -------------------------------------------------------------------------
     # Document Touch (Update Timestamp)

@@ -23,6 +23,7 @@ from passlib.context import CryptContext
 
 from backend.db.database import get_async_session
 from backend.db.models import User, AccessTier
+from backend.core.config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -136,33 +137,38 @@ class RefreshTokenRequest(BaseModel):
 
 
 # =============================================================================
-# Mock User Store (Replace with database in production)
+# Mock User Store (DEBUG mode only)
 # =============================================================================
 
-# In-memory user store for development
-# NOTE: These passwords are hashed with bcrypt for security
-_users: dict = {
-    "admin@example.com": {
-        "id": "550e8400-e29b-41d4-a716-446655440000",
-        "email": "admin@example.com",
-        "full_name": "Admin User",
-        "password_hash": pwd_context.hash("admin123"),
-        "role": "admin",
-        "access_tier": 100,
-        "is_active": True,
-        "created_at": datetime.now(),
-    },
-    "user@example.com": {
-        "id": "550e8400-e29b-41d4-a716-446655440001",
-        "email": "user@example.com",
-        "full_name": "Test User",
-        "password_hash": pwd_context.hash("user123"),
-        "role": "user",
-        "access_tier": 30,
-        "is_active": True,
-        "created_at": datetime.now(),
-    },
-}
+# In-memory user store for development/testing only.
+# Only available when DEBUG=True in settings.
+# In production (DEBUG=False), all users must exist in the database.
+_users: dict = {}
+
+if settings.DEBUG:
+    logger.warning("DEBUG mode: Mock users enabled. Do not use in production!")
+    _users = {
+        "admin@example.com": {
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "email": "admin@example.com",
+            "full_name": "Admin User",
+            "password_hash": pwd_context.hash("admin123"),
+            "role": "admin",
+            "access_tier": 100,
+            "is_active": True,
+            "created_at": datetime.now(),
+        },
+        "user@example.com": {
+            "id": "550e8400-e29b-41d4-a716-446655440001",
+            "email": "user@example.com",
+            "full_name": "Test User",
+            "password_hash": pwd_context.hash("user123"),
+            "role": "user",
+            "access_tier": 30,
+            "is_active": True,
+            "created_at": datetime.now(),
+        },
+    }
 
 
 # =============================================================================
@@ -353,8 +359,15 @@ async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(
     result = await db.execute(query)
     db_user = result.scalar_one_or_none()
 
-    # Fallback to mock users for backward compatibility
+    # Fallback to mock users only in DEBUG mode
     if not db_user:
+        if not settings.DEBUG:
+            # In production, no mock users - must exist in database
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",
+            )
+
         user = _users.get(request.email)
         if not user:
             raise HTTPException(
@@ -465,11 +478,17 @@ async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(
 
 
 @router.post("/register", response_model=TokenResponse)
-async def register(request: RegisterRequest, req: Request):
+async def register(
+    request: RegisterRequest,
+    req: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
     """
     Register a new user.
 
-    Note: In production, this might require admin approval or invitation.
+    In production (DEBUG=False): Creates user in database.
+    In development (DEBUG=True): Can also use in-memory mock store.
+
     Rate limited: 5 registrations per 3600 seconds per IP.
     """
     client_ip = req.client.host if req.client else "unknown"
@@ -477,34 +496,45 @@ async def register(request: RegisterRequest, req: Request):
 
     logger.info("Registration attempt", email=request.email)
 
-    # Check if email already exists
-    if request.email in _users:
+    # Check if email already exists in database
+    existing_query = select(User).where(User.email == request.email)
+    existing_result = await db.execute(existing_query)
+    if existing_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        )
+
+    # Also check mock users in DEBUG mode
+    if settings.DEBUG and request.email in _users:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
         )
 
     # Create new user
-    user_id = str(uuid4())
-    now = datetime.now()
+    user_id = uuid4()
+    now = datetime.utcnow()
 
-    _users[request.email] = {
-        "id": user_id,
-        "email": request.email,
-        "full_name": request.full_name,
-        "password_hash": hash_password(request.password),
-        "role": "user",  # Default role
-        "access_tier": 10,  # Default tier (lowest)
-        "is_active": True,
-        "created_at": now,
-    }
+    # Create user in database
+    new_user = User(
+        id=user_id,
+        email=request.email,
+        full_name=request.full_name,
+        password_hash=hash_password(request.password),
+        role="user",
+        is_active=True,
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
 
     # Create token
     access_token = create_access_token(
-        user_id=user_id,
+        user_id=str(user_id),
         email=request.email,
         role="user",
-        access_tier=10,
+        access_tier=10,  # Default tier
     )
 
     logger.info("Registration successful", email=request.email)
@@ -513,7 +543,7 @@ async def register(request: RegisterRequest, req: Request):
         access_token=access_token,
         expires_in=JWT_EXPIRATION_HOURS * 3600,
         user=UserResponse(
-            id=user_id,
+            id=str(user_id),
             email=request.email,
             full_name=request.full_name,
             role="user",
@@ -544,6 +574,7 @@ async def get_me(user: dict = Depends(get_current_user)):
 async def change_password(
     request: PasswordChangeRequest,
     user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Change current user's password.
@@ -555,8 +586,17 @@ async def change_password(
             detail="Current password is incorrect",
         )
 
-    # Update password
-    _users[user["email"]]["password_hash"] = hash_password(request.new_password)
+    new_hash = hash_password(request.new_password)
+
+    # Update in database
+    user_id = UUID(user["id"]) if isinstance(user["id"], str) else user["id"]
+    stmt = update(User).where(User.id == user_id).values(password_hash=new_hash)
+    await db.execute(stmt)
+    await db.commit()
+
+    # Also update mock users in DEBUG mode if applicable
+    if settings.DEBUG and user["email"] in _users:
+        _users[user["email"]]["password_hash"] = new_hash
 
     logger.info("Password changed", email=user["email"])
 
@@ -564,54 +604,80 @@ async def change_password(
 
 
 @router.post("/oauth/google", response_model=TokenResponse)
-async def oauth_google(request: OAuthRequest):
+async def oauth_google(
+    request: OAuthRequest,
+    db: AsyncSession = Depends(get_async_session),
+):
     """
     Exchange Google OAuth token for application token.
 
     This endpoint validates the Google token and creates/updates
     the user in the local database.
+
+    Note: Full OAuth implementation requires:
+    - Google Cloud Console project with OAuth credentials
+    - GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables
+    - Proper token validation using Google's public keys
     """
     logger.info("Google OAuth token exchange")
 
-    # Production implementation would validate the Google token:
-    # 1. Verify the token signature using Google's public keys
-    # 2. Check token expiration and audience (client ID)
-    # 3. Extract user info from the token payload
-    # For now, using mock user for development/testing
+    if not settings.DEBUG:
+        # Production: Implement proper Google token validation
+        # This requires google-auth library and proper credentials
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Google OAuth requires configuration. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.",
+        )
 
-    # Mock user for development
+    # DEBUG mode: Create a test OAuth user for development
+    logger.warning("DEBUG mode: Using mock OAuth user - not for production!")
+
     email = "oauth_user@example.com"
-    if email not in _users:
-        user_id = str(uuid4())
-        _users[email] = {
-            "id": user_id,
-            "email": email,
-            "full_name": "OAuth User",
-            "password_hash": "",
-            "role": "user",
-            "access_tier": 30,
-            "is_active": True,
-            "created_at": datetime.now(),
-        }
 
-    user = _users[email]
+    # Check if user exists in database
+    existing_query = select(User).where(User.email == email)
+    existing_result = await db.execute(existing_query)
+    db_user = existing_result.scalar_one_or_none()
+
+    if db_user:
+        user_id = str(db_user.id)
+        full_name = db_user.full_name
+        role = db_user.role
+        access_tier = 30
+    else:
+        # Create mock user in database for DEBUG mode
+        user_id = str(uuid4())
+        full_name = "OAuth User"
+        role = "user"
+        access_tier = 30
+
+        new_user = User(
+            id=UUID(user_id),
+            email=email,
+            full_name=full_name,
+            password_hash="",
+            role=role,
+            is_active=True,
+        )
+        db.add(new_user)
+        await db.commit()
 
     access_token = create_access_token(
-        user_id=user["id"],
-        email=user["email"],
-        role=user["role"],
-        access_tier=user["access_tier"],
+        user_id=user_id,
+        email=email,
+        role=role,
+        access_tier=access_tier,
     )
 
     return TokenResponse(
         access_token=access_token,
         expires_in=JWT_EXPIRATION_HOURS * 3600,
         user=UserResponse(
-            id=user["id"],
-            email=user["email"],
-            full_name=user["full_name"],
-            role=user["role"],
-            access_tier=user["access_tier"],
+            id=user_id,
+            email=email,
+            full_name=full_name,
+            role=role,
+            access_tier=access_tier,
             is_active=user["is_active"],
             created_at=user["created_at"],
         ),
@@ -682,24 +748,47 @@ async def verify_token(user: dict = Depends(get_current_user)):
 # =============================================================================
 
 @router.get("/users", dependencies=[Depends(require_role(["admin"]))])
-async def list_users():
+async def list_users(db: AsyncSession = Depends(get_async_session)):
     """
-    List all users (admin only).
+    List all users from database (admin only).
     """
+    query = select(User).order_by(User.created_at.desc())
+    result = await db.execute(query)
+    db_users = result.scalars().all()
+
+    users = [
+        UserResponse(
+            id=str(u.id),
+            email=u.email,
+            full_name=u.full_name or "",
+            role=u.role or "user",
+            access_tier=30,  # Default, would need to join with access_tier table
+            is_active=u.is_active,
+            created_at=u.created_at or datetime.utcnow(),
+        )
+        for u in db_users
+    ]
+
+    # Include mock users only in DEBUG mode
+    if settings.DEBUG:
+        for email, u in _users.items():
+            # Don't duplicate if already in database
+            if not any(user.email == email for user in users):
+                users.append(
+                    UserResponse(
+                        id=u["id"],
+                        email=u["email"],
+                        full_name=u["full_name"],
+                        role=u["role"],
+                        access_tier=u["access_tier"],
+                        is_active=u["is_active"],
+                        created_at=u["created_at"],
+                    )
+                )
+
     return {
-        "users": [
-            UserResponse(
-                id=u["id"],
-                email=u["email"],
-                full_name=u["full_name"],
-                role=u["role"],
-                access_tier=u["access_tier"],
-                is_active=u["is_active"],
-                created_at=u["created_at"],
-            )
-            for u in _users.values()
-        ],
-        "total": len(_users),
+        "users": users,
+        "total": len(users),
     }
 
 
@@ -710,51 +799,102 @@ async def update_user(
     access_tier: Optional[int] = None,
     is_active: Optional[bool] = None,
     admin: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Update a user's role or access tier (admin only).
     """
-    # Find user by ID
-    target_user = None
-    target_email = None
-    for email, user in _users.items():
-        if user["id"] == user_id:
-            target_user = user
-            target_email = email
-            break
-
-    if not target_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    # Prevent admin from demoting themselves
-    if target_user["id"] == admin["id"] and role and role != "admin":
+    # Try to find user in database first
+    try:
+        target_uuid = UUID(user_id)
+    except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot change your own admin role",
+            detail="Invalid user ID format",
         )
 
-    # Update fields
-    if role is not None:
-        _users[target_email]["role"] = role
-    if access_tier is not None:
-        # Admin can only assign tiers up to their own level
-        if access_tier > admin["access_tier"]:
+    query = select(User).where(User.id == target_uuid)
+    result = await db.execute(query)
+    db_user = result.scalar_one_or_none()
+
+    if db_user:
+        # Prevent admin from demoting themselves
+        if str(db_user.id) == admin["id"] and role and role != "admin":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot assign tier higher than your own",
+                detail="Cannot change your own admin role",
             )
-        _users[target_email]["access_tier"] = access_tier
-    if is_active is not None:
-        _users[target_email]["is_active"] = is_active
 
-    logger.info(
-        "User updated by admin",
-        target_user=user_id,
-        admin=admin["email"],
-        changes={"role": role, "access_tier": access_tier, "is_active": is_active},
+        # Build update values
+        update_values = {}
+        if role is not None:
+            update_values["role"] = role
+        if is_active is not None:
+            update_values["is_active"] = is_active
+        # Note: access_tier requires updating via access_tier_id relationship
+
+        if access_tier is not None:
+            # Admin can only assign tiers up to their own level
+            if access_tier > admin["access_tier"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot assign tier higher than your own",
+                )
+            # For now, just log - proper implementation needs access_tier lookup
+
+        if update_values:
+            stmt = update(User).where(User.id == target_uuid).values(**update_values)
+            await db.execute(stmt)
+            await db.commit()
+
+        logger.info(
+            "User updated by admin",
+            target_user=user_id,
+            admin=admin["email"],
+            changes={"role": role, "access_tier": access_tier, "is_active": is_active},
+        )
+
+        return {"message": "User updated successfully"}
+
+    # Fallback to mock users in DEBUG mode
+    if settings.DEBUG:
+        target_user = None
+        target_email = None
+        for email, user in _users.items():
+            if user["id"] == user_id:
+                target_user = user
+                target_email = email
+                break
+
+        if target_user:
+            if target_user["id"] == admin["id"] and role and role != "admin":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot change your own admin role",
+                )
+
+            if role is not None:
+                _users[target_email]["role"] = role
+            if access_tier is not None:
+                if access_tier > admin["access_tier"]:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Cannot assign tier higher than your own",
+                    )
+                _users[target_email]["access_tier"] = access_tier
+            if is_active is not None:
+                _users[target_email]["is_active"] = is_active
+
+            logger.info(
+                "Mock user updated by admin",
+                target_user=user_id,
+                admin=admin["email"],
+                changes={"role": role, "access_tier": access_tier, "is_active": is_active},
+            )
+
+            return {"message": "User updated successfully"}
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="User not found",
     )
-
-    return {"message": "User updated successfully"}

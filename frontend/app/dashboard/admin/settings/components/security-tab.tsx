@@ -2,6 +2,7 @@
 
 import { Shield } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Card,
   CardContent,
@@ -36,11 +37,9 @@ export function SecurityTab({ localSettings, handleSettingChange }: SecurityTabP
                 New users must verify their email
               </p>
             </div>
-            <input
-              type="checkbox"
-              className="h-4 w-4"
+            <Switch
               checked={localSettings["security.require_email_verification"] as boolean ?? false}
-              onChange={(e) => handleSettingChange("security.require_email_verification", e.target.checked)}
+              onCheckedChange={(checked) => handleSettingChange("security.require_email_verification", checked)}
             />
           </div>
           <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -50,11 +49,9 @@ export function SecurityTab({ localSettings, handleSettingChange }: SecurityTabP
                 Require 2FA for admin accounts
               </p>
             </div>
-            <input
-              type="checkbox"
-              className="h-4 w-4"
+            <Switch
               checked={localSettings["security.enable_2fa"] as boolean ?? false}
-              onChange={(e) => handleSettingChange("security.enable_2fa", e.target.checked)}
+              onCheckedChange={(checked) => handleSettingChange("security.enable_2fa", checked)}
             />
           </div>
           <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -64,11 +61,9 @@ export function SecurityTab({ localSettings, handleSettingChange }: SecurityTabP
                 Log all user actions for compliance
               </p>
             </div>
-            <input
-              type="checkbox"
-              className="h-4 w-4"
+            <Switch
               checked={localSettings["security.enable_audit_logging"] as boolean ?? true}
-              onChange={(e) => handleSettingChange("security.enable_audit_logging", e.target.checked)}
+              onCheckedChange={(checked) => handleSettingChange("security.enable_audit_logging", checked)}
             />
           </div>
           <div className="space-y-2">

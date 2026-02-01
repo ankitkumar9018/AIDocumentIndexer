@@ -102,6 +102,7 @@ import {
 import type { AgentDefinition, PromptOptimizationJob, AgentTrajectory, AgentToolsConfig, AgentExternalConfig } from "@/lib/api/client";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
+import { AgentInsights } from "@/components/agents/agent-insights";
 
 const agentIcons: Record<string, React.ReactNode> = {
   manager: <Bot className="h-5 w-5" />,
@@ -679,6 +680,7 @@ export default function AgentsAdminPage() {
       <Tabs defaultValue="agents" className="space-y-4">
         <TabsList>
           <TabsTrigger value="agents">Agents</TabsTrigger>
+          <TabsTrigger value="insights">Insights</TabsTrigger>
           <TabsTrigger value="optimizations">
             Optimizations
             {pendingJobs.length > 0 && (
@@ -854,6 +856,19 @@ export default function AgentsAdminPage() {
               )}
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* Insights Tab */}
+        <TabsContent value="insights" className="space-y-4">
+          {agents.length > 0 ? (
+            <AgentInsights agentId={agents[0].id} agentName={agents[0].name} />
+          ) : (
+            <Card>
+              <CardContent className="py-8 text-center text-muted-foreground">
+                No agents configured yet. Create an agent to view insights.
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
 
         {/* Optimizations Tab */}

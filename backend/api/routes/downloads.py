@@ -108,26 +108,30 @@ async def list_available_downloads():
             "available": True
         })
 
-    # Desktop App (placeholder - not yet available)
+    # Desktop App (roadmap item)
     downloads.append({
         "id": "desktop",
         "name": "Mandala Desktop App",
-        "description": "Full-featured desktop application with system tray",
+        "description": "Full-featured desktop application with system tray integration",
         "type": "desktop",
         "platforms": ["macOS", "Windows", "Linux"],
         "download_url": None,
-        "available": False
+        "available": False,
+        "coming_soon": True,
+        "status": "In Development",
     })
 
-    # Browser Extension (placeholder - not yet available)
+    # Browser Extension (roadmap item)
     downloads.append({
         "id": "browser-extension",
         "name": "Mandala Browser Extension",
-        "description": "Browser extension to upload downloaded files",
+        "description": "Browser extension for quick file uploads and web clipping",
         "type": "extension",
         "platforms": ["Chrome", "Firefox", "Edge"],
         "download_url": None,
-        "available": False
+        "available": False,
+        "coming_soon": True,
+        "status": "Planned",
     })
 
     return {"downloads": downloads}

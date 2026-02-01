@@ -40,10 +40,10 @@ dependencies = [
     # Embeddings
     "sentence-transformers>=2.2.2",
     "tiktoken>=0.5.2",
-    "transformers>=4.45.0",  # Phase 68: Required for Qwen3 Embedding
-    "torch>=2.1.0",  # Phase 68: Required for Qwen3 Embedding
-    "google-genai>=1.0.0",  # Phase 87: Unified Google GenAI SDK (replaces deprecated google-generativeai)
-    "faiss-cpu>=1.8.0",  # Phase 68: FAISS index for semantic cache O(log n) search
+    "transformers>=4.45.0", # Phase 68: Required for Qwen3 Embedding
+    "torch>=2.1.0", # Phase 68: Required for Qwen3 Embedding
+    "google-genai>=1.0.0", # Phase 87: Unified Google GenAI SDK (replaces deprecated google-generativeai)
+    "faiss-cpu>=1.8.0", # Phase 68: FAISS index for semantic cache O(log n) search
     # Local Vector Store
     "chromadb>=0.5.0",
     # Document Processing - PDF
@@ -52,6 +52,7 @@ dependencies = [
     # Document Processing - Office
     "python-pptx>=0.6.23",
     "python-docx>=1.1.0",
+    "mammoth>=1.6.0", # DOCX to HTML conversion for preview
     "openpyxl>=3.1.2",
     # Document Processing - Universal
     "unstructured[pdf,docx,pptx,xlsx]>=0.12.0",
@@ -68,7 +69,7 @@ dependencies = [
     # Ray (Distributed Processing) - Phase 87: updated to 2.10+ for better async/memory mgmt
     "ray[default]>=2.10.0,<3.0.0",
     # Web Scraping
-    "crawl4ai>=0.3.0",
+    "crawl4ai>=0.8.0",
     "beautifulsoup4>=4.12.0",
     "lxml>=5.1.0",
     # Caching & Sessions
@@ -120,6 +121,7 @@ dependencies = [
     "pdf2image>=1.17.0",
     # Note: surya-ocr removed due to dependency conflict with fastembed
     # VisionDocumentProcessor uses tesseract or claude for OCR instead
+    "langchain-ollama>=0.3.10",
 ]
 
 [project.optional-dependencies]
@@ -140,6 +142,13 @@ tts-advanced = [
     # Uncomment when packages are available on PyPI:
     # "chatterbox-tts>=0.1.0",
     # "cosyvoice>=0.1.0",
+]
+# Cloud storage and collaboration connectors
+connectors = [
+    "slack-sdk>=3.20.0",
+    "pygithub>=2.1.0",
+    "dropbox>=11.36.0",
+    "boxsdk>=3.9.0",
 ]
 
 [build-system]

@@ -15,6 +15,21 @@ This guide covers the new features introduced in AIDocumentIndexer, including th
 7. [Knowledge Graph](#knowledge-graph)
 8. [Contextual Chunking](#contextual-chunking)
 9. [Settings Presets](#settings-presets)
+10. [Phase 78-83 Features](#phase-78-83-features-january-2026)
+11. [Phase 94: Cross-Section RAG](#cross-section-rag-integration-phase-94)
+12. [Phase 95: UI Overhaul](#phase-95-ui-overhaul--competitor-inspired-features)
+    - [Skills Marketplace](#skills-marketplace-95s)
+    - [Mood Board Creator](#mood-board-creator-95t)
+    - [Deep Research Mode](#deep-research-mode-95u)
+    - [Provider-Aware LLM Selection](#provider-aware-llm-selection-global-feature)
+13. [Phase 97: Performance & Security](#phase-97-performance--security-optimizations-january-2026)
+14. [Recent Enhancements (February 2026)](#recent-enhancements-february-2026)
+    - [Private Documents](#private-documents)
+    - [Memory Manager](#memory-manager-openclaw-inspired)
+    - [Adaptive Chunking](#adaptive-chunking-moltbot-inspired)
+    - [Auto-Tagging](#auto-tagging)
+    - [Duplicate Detection Improvements](#duplicate-detection-improvements)
+15. [Future Roadmap (Research-Based)](#future-roadmap-research-based)
 
 ---
 
@@ -437,6 +452,8 @@ Navigate to **Dashboard > Web Scraper** to scrape web content.
 | **Save to Index** | Scrape and immediately index content into the RAG pipeline (embeddings + vector store + Knowledge Graph). |
 | **Scrape & Query** | Scrape a URL and immediately ask questions about the content using an LLM. |
 | **Extract Links** | Discover all links from a page for later scraping. |
+| **Sitemap Crawl** | Crawl a website using its sitemap.xml for URL discovery. Prioritizes pages by `lastmod` date. |
+| **Search & Crawl** | Search the web via DuckDuckGo, then crawl the top results. Useful for topic-based content acquisition. |
 
 ### Quick Scrape Workflow
 
@@ -485,6 +502,64 @@ Once indexed, the content becomes searchable in:
 2. **Use subpage crawling sparingly**: Start with max_depth=2 to avoid scraping too many pages
 3. **Enable same_domain_only**: Prevents accidentally scraping unrelated sites
 4. **Check for duplicates**: The system tracks content hashes to avoid duplicate storage
+
+### Phase 96 Enhancements
+
+#### Sitemap Crawling
+- Fetches and parses `sitemap.xml` (including sitemap index files and `.xml.gz` compressed sitemaps)
+- Discovers sitemap URLs from `robots.txt` automatically
+- Prioritizes pages by `lastmod` date (newest first)
+- Configurable max pages limit (1-500)
+- Supports permanent storage mode for automatic RAG indexing
+
+#### Search & Crawl
+- Uses DuckDuckGo search (free, no API key required) for URL discovery
+- Enter a search query to find relevant web pages, then automatically crawl the results
+- Configurable max results (1-20)
+- Results can be stored permanently in the knowledge base
+
+#### Scheduled / Recurring Crawls
+- Set up cron-based recurring crawl schedules (e.g., "every 6 hours", "daily at midnight")
+- Powered by Celery Beat task scheduling
+- Content hash tracking between runs — only re-indexes changed content
+- CRUD management via API: create, list, update, delete, and manually trigger schedules
+- Useful for monitoring competitor sites, news sources, or documentation
+
+#### SSE Progress Streaming
+- Real-time crawl progress via Server-Sent Events (SSE)
+- Frontend displays: progress bar, current URL being crawled, pages found/crawled count
+- Event types: `status` (job state changes), `page_complete` (per-page results), `complete` (final summary)
+- Auto-connects when starting job-mode crawls
+
+#### Proxy Rotation
+- Configurable proxy pool with round-robin or random rotation strategies
+- Supports HTTP and SOCKS5 proxy URLs
+- Enable via `scraping.proxy_enabled` setting
+- Helps avoid IP-based rate limiting for large crawl operations
+
+#### Jina Reader Fallback
+- Automatic fallback to Jina Reader API (`r.jina.ai`) when Crawl4AI and basic HTTP scraping fail
+- Zero-infrastructure setup — works without a headless browser
+- High-quality markdown output with automatic boilerplate removal
+- Free tier: up to 1000 requests/day
+- Enable/disable via `scraping.jina_reader_fallback` setting
+
+#### Robots.txt Compliance
+- Full `robots.txt` parsing with `urllib.robotparser`
+- Respects `Disallow` rules and `Crawl-delay` directives
+- API endpoint to inspect a domain's robots.txt rules before crawling
+- Connected to the `scraping.respect_robots_txt` admin setting
+
+#### Crash Recovery
+- Persists crawl state for long-running jobs
+- Resume interrupted crawls without re-crawling already-completed pages
+- Enabled by default via `scraping.crash_recovery_enabled` setting
+
+#### Adaptive Crawling
+- Confidence-based auto-stop using crawl4ai's AdaptiveCrawler
+- Three-layer scoring: content coverage, consistency, and saturation
+- Automatically determines when a site has been sufficiently crawled
+- Enable via `scraping.adaptive_crawling` setting
 
 ---
 
@@ -1085,3 +1160,608 @@ Per-provider token bucket rate limiting prevents API cost overruns and cascading
 - **Narrowed exception handling**: Top 22 broad `except Exception` blocks in critical paths (rag.py, redis_client.py, llm.py) replaced with specific exception types
 - **Structured error context**: All error logs now include `error_type` for easier debugging and monitoring
 - **Redis-specific exceptions**: Cache operations catch `ConnectionError`, `TimeoutError`, `JSONDecodeError` separately for better failure diagnosis
+
+### Cross-Section RAG Integration (Phase 94)
+
+RAG features are now integrated across all major sections, not just chat:
+
+**Document Generation:**
+- Knowledge graph integration fixed (`get_graph_rag_context` wrapper method added)
+- Graph-enhanced source retrieval for section content
+- Entity context used for better source matching
+
+**Web Crawler:**
+- Automatic entity extraction from crawled pages (stored in knowledge graph)
+- Background KG enrichment runs asynchronously to not block crawl responses
+- Controlled by `rag.knowledge_graph_enabled` setting
+
+**Text-to-SQL / Database Queries:**
+- Knowledge graph entity lookup for WHERE clause exact matching
+- Entity aliases resolved for better query accuracy
+- Proper noun context injected into SQL generation prompt
+
+**Knowledge Graph Queries:**
+- Query expansion before entity lookup (finds 20-30% more relevant entities)
+- LRU cache (128 entries) for graph_search results avoids redundant traversals
+- Expanded queries merged with deduplication, capped at 10 entities
+
+**Admin Settings UI:**
+- 13 new RAG feature toggles (Query Intelligence, Advanced Compression, Storage Optimization)
+- 38-step Query Pipeline Visualization with live status indicators
+- Audio Settings tab (TTS providers, Chatterbox/CosyVoice/Fish Speech)
+- Web Scraper Settings tab (Crawl4AI, anti-detection, content extraction)
+- Knowledge Graph Ingestion tab (dependency extraction, spaCy model)
+
+**Sandbox Security Hardening:**
+- Raw `datetime` module replaced with `_SafeDatetime` wrapper in workflow sandbox
+- Prevents `datetime.__class__.__bases__[0].__subclasses__()` sandbox escape
+- Only safe static methods exposed (now, utcnow, fromisoformat, strptime, today)
+
+**DSPy Inference Integration:**
+- Compiled DSPy modules (instructions + few-shot demos) injected into RAG prompt
+- Loaded from DSPyOptimizationJob table with deployed/completed status
+- Controlled by `rag.dspy_inference_enabled` setting
+
+**Default Settings Fixed:**
+- `rag.adaptive_routing_enabled` → True (was silently off due to DB override)
+- `rag.self_rag_enabled` → True (hallucination detection)
+- `rag.sufficiency_checker_enabled` → True (quality gate)
+- `processing.fast_chunking_enabled` → True (33x faster chunking)
+- Adaptive routing fallback added when router is disabled
+
+---
+
+## Phase 95: UI Overhaul + Competitor-Inspired Features
+
+### UI Component Consistency (95A)
+- Replaced all native HTML `<input type="checkbox">` with shadcn/ui `<Switch>` across 12+ settings tabs
+- Replaced all native `<select>` with shadcn/ui `<Select>` across settings and document pages
+- Consistent component library usage throughout the application
+
+### Admin Settings Vertical Navigation (95B)
+- Replaced horizontal tab overflow with vertical sidebar navigation
+- Tabs organized into categories: System, AI & Models, Processing, Intelligence, Integrations, Security
+- Mobile-responsive dropdown fallback
+- URL-persisted active tab state
+
+### Dark Mode Polish (95C)
+- Added `dark:` variants to all hardcoded color classes across dashboard, documents, privacy, and settings pages
+- Consistent color treatment: light `-50`/`-100` backgrounds map to `dark:-950/30`/`-900/30`
+- Text colors: `-600`/`-700` map to `dark:-400`/`-300` for readability
+
+### Inline Source Citations (95D)
+- Numbered `[1]`, `[2]`, `[3]` superscript citation badges inline in AI responses
+- Hover popover showing source document name, page, similarity score, and snippet
+- Click to navigate to source in the sources panel
+- Backend system prompt updated to instruct numbered citation format
+
+### Thinking/Reasoning Transparency (95E)
+- Collapsible "Thinking" block above AI responses showing RAG pipeline steps
+- Per-step timing display: searching, finding chunks, reranking, generating
+- Animated streaming state with bouncing dots during processing
+- Total processing time summary in collapsed header
+
+### Chat Canvas / Artifacts Panel (95N)
+- Side-by-side Sheet panel for viewing and editing AI-generated code and content
+- View mode with line numbers for code, edit mode with monospace textarea
+- Copy to clipboard, download as file, and AI edit request input
+- Auto-detects code blocks and long responses for "Open in Canvas" button
+
+### Document Preview Split Pane (95G)
+- Right-side Sheet panel opens on document click instead of page navigation
+- Tabbed view: Preview (using DocumentPreview component) and Metadata
+- Quick actions: Full View, Download, Edit Tags
+- Displays filename, type, size, collection, tags, creation date, chunk count
+
+### Floating Batch Action Bar (95H)
+- Fixed-position floating bar at bottom-center when documents are selected
+- Backdrop-blur glass effect with slide-up animation
+- Actions: Auto-tag, Enhance, Move, Download, Delete, Clear selection
+- Replaces inline bulk actions for cleaner document management UX
+
+### Prompt Library (95M)
+- Full CRUD page for managing reusable prompt templates
+- Card grid with search, category filter, use count badges
+- Template variables with `{{variable}}` syntax and runtime substitution
+- Public/private sharing, system templates, duplicate functionality
+- Integrated with existing backend PromptTemplate model and API
+
+### Agent Usage Insights (95O)
+- Per-agent analytics component showing usage metrics
+- 4 metric cards: total queries, avg response time, satisfaction %, active users
+- Time period selector (7d, 30d, all time)
+- Recent activity list with query summaries and feedback indicators
+
+### Custom Instructions / System Prompts (95P)
+- Admin settings tab for organization-wide default system prompts
+- Variables support: `{{user_name}}`, `{{user_role}}`, `{{date}}`
+- Append mode configuration: prepend, append, or replace RAG prompt
+- Default response language selection (11 languages)
+- Live preview of final merged system prompt
+
+### Projects / Chat Folders (95Q)
+- Client-side chat organization with project folders
+- Collapsible folder tree with session count badges
+- Drag sessions between projects via dropdown menu
+- Ungrouped section for unassigned chats
+- LocalStorage persistence, search filtering
+
+### BYOK - Bring Your Own Key (95R)
+- Per-provider API key management panel
+- Supported providers: OpenAI, Anthropic, Google AI, Mistral, Groq, Together
+- Key validation testing, status badges (Active/Invalid/Untested)
+- Password-style input with show/hide toggle
+- Encrypted localStorage storage with master BYOK toggle
+
+### Skills Marketplace (95S)
+
+AI-powered skills for document processing, extending the platform with pluggable capabilities.
+
+**Features:**
+- **6 Built-in Skills**: Document Summarizer, Fact Checker, Translator, Sentiment Analyzer, Entity Extractor, Document Comparison
+- **Dynamic LLM Selection**: Only shows models from providers configured in Settings (OpenAI, Anthropic, Google, Ollama)
+- **Multiple Input Types**: Text, Document, File, JSON, Image inputs with appropriate UI controls
+- **Create Custom Skills**: Define custom skills with system prompts and input/output schemas
+- **Import Skills**: Import skill definitions from JSON files or URLs
+- **Execution Tracking**: Usage count, average latency, status indicators
+
+**Skill Categories:**
+| Category | Description |
+|----------|-------------|
+| Analysis | Extract insights from documents |
+| Generation | Create new content |
+| Extraction | Pull specific data |
+| Transformation | Convert formats |
+| Validation | Verify content |
+| Integration | Connect with external services |
+
+**Accessing Skills:**
+Navigate to **Dashboard > Skills** to browse, create, and execute skills.
+
+### Mood Board Creator (95T)
+
+AI-powered visual inspiration board generator for design and branding projects.
+
+**Location:** Available in the **Create** section alongside other document formats (DOCX, PPTX, PDF, etc.)
+
+**Features:**
+- **Color Palette Builder**: Add up to 8 colors with color picker and hex codes
+- **Style Keywords**: Tag-based input for mood descriptors (minimalist, bold, playful, etc.)
+- **Reference Images**: Upload multiple reference images for visual inspiration
+- **AI-Generated Suggestions**: Typography recommendations, complementary colors, mood keywords, and inspiration notes
+
+**How to Use:**
+1. Navigate to **Dashboard > Create**
+2. Select **Mood Board** from the format options
+3. Enter a board name and optional description
+4. Add colors to your palette (click to change, up to 8)
+5. Add style keywords to describe your aesthetic
+6. Optionally upload reference images
+7. Click **Generate AI Mood Board** to get suggestions
+8. Export or save your completed mood board
+
+### Deep Research Mode (95U)
+
+Multi-round verification research with cross-model fact-checking for high-confidence answers.
+
+**Features:**
+- **Multi-LLM Verification**: Select multiple models for cross-checking facts
+- **Dynamic Provider Filtering**: Only shows models from configured providers in Settings
+- **Configurable Rounds**: 1-5 verification rounds for varying thoroughness
+- **Verification Chain**: Visual representation of each verification step with verdict (supported/contradicted/uncertain)
+- **Confidence Scoring**: Aggregate confidence from all verification steps
+- **Conflict Detection**: Alerts when models find contradictory evidence
+
+**Settings Popover:**
+- Select/deselect individual models by provider
+- Reset to default model selection
+- Shows count of selected models
+
+**Verdicts:**
+| Verdict | Meaning | Icon |
+|---------|---------|------|
+| Supported | Evidence confirms the claim | ✓ Green |
+| Contradicted | Evidence refutes the claim | ✗ Red |
+| Uncertain | Insufficient or conflicting evidence | ⚠ Yellow |
+
+### Provider-Aware LLM Selection (Global Feature)
+
+All features with LLM selection now filter available models based on Settings configuration.
+
+**How It Works:**
+1. Admin configures LLM providers in **Dashboard > Settings > Providers**
+2. Each provider has an `is_active` flag
+3. Features (Skills, Deep Research, etc.) fetch the provider list via `useLLMProviders` hook
+4. Model dropdowns only show models from active providers
+5. If no providers are configured, all models are shown as fallback
+
+**Affected Features:**
+- Skills Marketplace (skill execution)
+- Deep Research Mode
+- Agent Configuration
+
+### Backend: Hallucination + Confidence Scoring (95J)
+- `_compute_hallucination_score()`: Reranker-based grounding check (0=grounded, 1=hallucinated)
+- `_compute_confidence_score()`: Multi-signal confidence from source count, rerank scores, retrieval density
+- Scores injected into RAG response metadata
+
+### Backend: Content Freshness Scoring (95K)
+- Configurable freshness boost for recently updated documents (default 1.05x within 30 days)
+- Configurable staleness penalty for old documents (default 0.95x after 180 days)
+- Admin settings: `rag.content_freshness_enabled`, decay days, boost/penalty factors
+
+### Backend: Conversation-Aware Retrieval (95L)
+- Enriches retrieval query with last 3 user messages from conversation history
+- Improves embedding quality for follow-up questions
+- Original question preserved for LLM prompt generation
+
+---
+
+## Phase 97: Performance & Security Optimizations (January 2026)
+
+### Smart Model Routing
+
+Routes queries to cost-optimal LLM models based on query complexity, achieving 40-70% cost reduction.
+
+**How It Works:**
+1. Query classifier analyzes complexity (factual, analytical, multi-hop, creative)
+2. Simple queries → cheaper/faster model (GPT-4o-mini, Claude Haiku)
+3. Complex queries → premium model (GPT-4o, Claude Sonnet)
+4. Moderate queries → default configured model
+
+**Query Tier Classification:**
+| Signal | Simple | Moderate | Complex |
+|--------|--------|----------|---------|
+| Intent | factual, keyword, definition | standard | analytical, multi_hop, creative |
+| Context length | < 2K tokens | 2K-50K | > 50K |
+| Document count | ≤ 3 | 4-15 | > 15 |
+
+**Configuration:**
+```yaml
+rag.smart_model_routing_enabled: true
+rag.smart_routing_simple_model: "openai/gpt-4o-mini"
+rag.smart_routing_complex_model: "openai/gpt-4o"
+```
+
+### Embedding Inversion Defense (OWASP LLM08:2025)
+
+Protects stored embeddings from text reconstruction attacks using three defense techniques.
+
+**Why It Matters:**
+Research has shown that embeddings can be inverted to recover original text, posing privacy risks for sensitive documents. This implementation follows OWASP LLM08:2025 guidance.
+
+**Defense Techniques:**
+1. **Noise Injection**: Adds calibrated Gaussian noise (default σ=0.01) that degrades inversion fidelity while preserving ranking
+2. **Dimension Shuffle**: Secret, deterministic permutation prevents adversaries from mapping dimensions to linguistic features
+3. **Norm Clipping**: Caps L2 norm to bound information leakage per embedding
+
+**Symmetric Application:**
+The same `protect()` transformation is applied at both index time and query time, so cosine similarity between defended vectors is preserved.
+
+**Configuration:**
+```yaml
+security.embedding_defense_enabled: true
+security.defense_noise_scale: 0.01  # Gaussian noise stddev
+security.defense_clip_norm: 1.0     # L2 norm cap
+```
+
+**Environment:**
+```bash
+EMBEDDING_DEFENSE_SECRET=your-secret-key  # Stable permutations across restarts
+```
+
+### Matryoshka Adaptive Retrieval
+
+Two-stage retrieval using Matryoshka representation learning for 5-14x faster search.
+
+**Background:**
+Matryoshka Representation Learning (NeurIPS 2022) trains embeddings where the first N dimensions form valid lower-dimensional representations. Modern models like OpenAI text-embedding-3-* support this natively.
+
+**How It Works:**
+1. **Stage 1 (Fast Pass)**: Truncate embeddings to 128 dimensions, search for broad shortlist
+2. **Stage 2 (Precise Rerank)**: Recompute full-dimensional similarity on shortlist
+
+**Performance:**
+- 128-dim search is ~12x faster than 1536-dim search
+- <2% recall loss when shortlist factor ≥ 5x
+- Works with any Matryoshka-trained embedding model
+
+**Configuration:**
+```yaml
+rag.matryoshka_retrieval_enabled: true
+rag.matryoshka_shortlist_factor: 5   # Retrieve 5x more candidates in stage 1
+rag.matryoshka_fast_dims: 128        # Fast pass dimension count
+```
+
+### Speculative RAG (Google Research ICLR 2025)
+
+Generates draft responses from document subsets in parallel, then selects the best via verification.
+
+**Research Reference:** [Speculative RAG: Enhancing Retrieval Augmented Generation through Drafting](https://arxiv.org/abs/2407.08223)
+
+**How It Works:**
+1. Split retrieved documents into N subsets (default 3)
+2. Generate draft answers in parallel using smaller/faster drafter model
+3. Verifier model evaluates and selects the best draft
+4. Return selected answer with higher confidence
+
+**Benefits:**
+- 15-50% latency reduction (parallel drafting)
+- 5-13% accuracy improvement (best-of-N selection)
+- Better utilization of document subsets
+
+**Configuration:**
+```yaml
+rag.speculative_enabled: true
+rag.speculative_num_drafts: 3  # Number of parallel drafts
+```
+
+### OpenTelemetry RAG Tracing
+
+Distributed tracing for RAG pipeline operations with per-stage latency tracking.
+
+**Traced Operations:**
+| Span | Attributes |
+|------|------------|
+| `rag.query` | query length, session ID, user ID, search type |
+| `rag.retrieval` | top_k, search type, collection, result count |
+| `rag.reranking` | doc count, model, top_n |
+| `rag.generation` | model, doc count, prompt tokens, streaming |
+
+**Integration:**
+```python
+from backend.services.otel_tracing import get_rag_tracer
+
+tracer = get_rag_tracer()
+with tracer.start_query_span(query="What is X?", user_id="123") as span:
+    results = await rag_service.query(...)
+    span.set_attribute("rag.result_count", len(results))
+```
+
+**Configuration:**
+```yaml
+observability.tracing_enabled: true
+observability.tracing_sample_rate: 0.1  # 10% sampling
+observability.otlp_endpoint: "http://jaeger:4317"
+```
+
+**Exporters:**
+- OTLP/gRPC (Jaeger, Tempo, Zipkin)
+- Console (development)
+- Graceful degradation when OpenTelemetry not installed
+
+---
+
+## Recent Enhancements (February 2026)
+
+### Private Documents
+
+Documents can now be marked as **private** during upload, restricting visibility to only the document owner and superadmins.
+
+**How to Use:**
+1. During upload, toggle "Private Document" in the Processing Options
+2. Private documents won't appear in other users' searches or document lists
+3. Knowledge graph entities from private documents are filtered at query time
+
+**API Usage:**
+```bash
+curl -X POST "/api/upload" \
+  -F "file=@sensitive.pdf" \
+  -F "is_private=true"
+```
+
+See [Security Documentation](SECURITY.md#private-documents) for full details.
+
+---
+
+### Memory Manager (OpenClaw-Inspired)
+
+Centralized memory management with dirty tracking and debounced sync, inspired by OpenClaw/Moltbot patterns.
+
+**Features:**
+- **Dirty tracking** with configurable debounce (default 1.5 seconds)
+- **Atomic reindexing** with safe temp file swap
+- **Automatic sync triggers** on settings/model changes
+- **LRU cache pruning** for memory control
+
+**Usage:**
+```python
+from backend.services.memory_manager import get_memory_manager
+
+manager = get_memory_manager()
+
+# Mark data as dirty (triggers debounced sync)
+await manager.mark_dirty("embeddings")
+
+# Force immediate sync
+await manager.sync_now()
+
+# Atomic reindexing with validation
+await manager.atomic_reindex(
+    source_path="path/to/index",
+    build_func=build_new_index,
+    validate_func=validate_index,
+)
+```
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `system.memory_cleanup_interval_minutes` | Memory cleanup frequency | `10` |
+| `system.model_idle_timeout_minutes` | Unload idle models after | `15` |
+
+---
+
+### Adaptive Chunking (Moltbot-Inspired)
+
+Progressive fallback chunking that targets ~400 tokens per chunk with automatic size adjustment.
+
+**Features:**
+- Target token counts with progressive fallback
+- Sentence-aware splitting for natural breaks
+- Long line splitting to keep embeddings under limits
+- Token counting via tiktoken (or character estimation fallback)
+
+**How It Works:**
+1. Start with target chunk size (~400 tokens)
+2. If chunks are too large, reduce by 20% and retry
+3. After max retries, fall back to sentence-based splitting
+4. Always preserve sentence boundaries where possible
+
+**Usage:**
+```python
+from backend.services.adaptive_chunking import AdaptiveChunker
+
+chunker = AdaptiveChunker(
+    target_tokens=400,
+    overlap_tokens=80,
+    max_retries=3,
+)
+chunks = chunker.chunk(text)
+
+# Get statistics
+stats = chunker.get_stats(chunks)
+# {'count': 15, 'avg_tokens': 387, 'max_tokens': 412, ...}
+```
+
+**Configuration:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.adaptive_chunking_enabled` | Enable adaptive chunking | `true` |
+| `rag.adaptive_chunking_target_tokens` | Target tokens per chunk | `400` |
+| `rag.adaptive_chunking_overlap_tokens` | Overlap between chunks | `80` |
+
+---
+
+### Auto-Tagging
+
+LLM-powered automatic document tagging that analyzes document content and generates relevant tags during upload.
+
+**Features:**
+- **Content-Aware Tagging**: Analyzes document name and content sample to generate relevant tags
+- **Existing Collection Suggestions**: Prefers matching existing collections when relevant
+- **Configurable Tag Count**: Generate 1-5 tags per document (default: 5)
+- **Primary Category First**: First tag represents the primary collection/category
+
+**How to Use:**
+1. During upload, enable "Auto-Generate Tags" in Processing Options
+2. Tags are generated after document processing completes
+3. Generated tags are merged with any manually specified tags
+
+**UI Integration:**
+- Toggle available in Upload page under "Processing Options"
+- Checkbox: "Auto-Generate Tags" with description "Use AI to automatically generate relevant tags based on document content"
+
+**API Usage:**
+```bash
+curl -X POST "/api/v1/upload/single" \
+  -F "file=@document.pdf" \
+  -F "auto_generate_tags=true"
+```
+
+**How It Works:**
+1. After document is chunked and processed, first ~2000 characters are extracted
+2. LLM analyzes document name + content sample
+3. Tags are generated focusing on: topic, industry, document type, project/client name
+4. Tags are merged with any existing/manual tags on the document
+
+**Configuration:**
+The LLM provider and model for auto-tagging is configured via Admin UI:
+- Navigate to **Admin > Settings > LLM Configuration**
+- Configure the "auto_tagging" operation under Operation-Level Config
+
+**Example Generated Tags:**
+- For a project management guide: `["Project Management", "Software Development", "Guide", "Best Practices"]`
+- For a marketing presentation: `["Marketing", "FedEx Campaign", "Presentation", "Q4 2023"]`
+
+---
+
+### Duplicate Detection Improvements
+
+Enhanced duplicate file detection that properly handles deleted documents.
+
+**Features:**
+- **Content Hash Detection**: SHA-256 hash of file content for accurate duplicate detection
+- **Deleted Document Awareness**: Re-uploading a previously deleted file no longer flags as duplicate
+- **Upload Job History**: Maintains upload history while respecting document lifecycle
+
+**How It Works:**
+1. On upload, file content hash (SHA-256) is computed
+2. System checks both UploadJob table and Document table for existing hash
+3. If hash exists in UploadJob, verifies the referenced document still exists
+4. If document was deleted, allows re-upload as a new document
+5. If document exists, returns duplicate status with existing document info
+
+**API Response for Duplicates:**
+```json
+{
+  "status": "duplicate",
+  "file_id": "existing-doc-uuid",
+  "filename": "original-filename.pdf",
+  "document_id": "existing-doc-uuid"
+}
+```
+
+**Configuration:**
+```bash
+# Enable/disable duplicate detection during upload
+curl -X POST "/api/v1/upload/single" \
+  -F "file=@document.pdf" \
+  -F "detect_duplicates=true"  # Default: true
+```
+
+---
+
+## Future Roadmap (Research-Based)
+
+The following improvements were identified through research of the current AI/RAG ecosystem. These are documented for future implementation and are NOT yet built.
+
+### Critical (Enterprise Readiness)
+
+1. **NeMo Guardrails** — NVIDIA's framework for prompt injection defense and content safety. Addresses OWASP #1 LLM vulnerability. Would add programmable guardrails for input/output filtering, topic control, and hallucination prevention at the framework level.
+
+2. **Langfuse Integration** — Self-hosted LLM observability platform. Would provide tracing, evaluation, prompt management, and cost tracking across all LLM calls. Biggest operational gap for production deployments.
+
+### High Priority
+
+3. **pgvector 0.8.0+ Upgrade** — Latest pgvector adds iterative index scans, improved HNSW performance, and better filtered vector queries. Would improve search latency and accuracy for filtered retrieval scenarios.
+
+4. **MCP Server/Client** — Expose RAG, search, and knowledge graph capabilities as Model Context Protocol tools. Would allow any MCP-compatible AI assistant to use AIDocumentIndexer as a tool.
+
+5. **LangGraph 1.0 Migration** — LangGraph 1.0 is now GA with durable execution, human-in-the-loop, node caching, deferred nodes, and pre/post model hooks. Migrate current agent implementations for checkpointing, time-travel debugging, and fault tolerance.
+
+6. **BGE-M3 Embeddings** — Single model supporting dense, sparse, and multi-vector retrieval simultaneously. Would simplify the embedding pipeline while maintaining hybrid search quality.
+
+7. **Embedding Quantization (INT8/Binary)** — Apply INT8 and binary quantization to stored embeddings for up to 32x storage savings in pgvector. Complements existing binary quantization work.
+
+8. **NodeRAG** — Novel graph-based RAG paradigm achieving 100% accuracy on MultiHop-RAG benchmark. Heterogeneous graph structure combining nodes, relationships, and communities for superior multi-hop reasoning.
+
+9. **PageIndex (Vectorless RAG)** — Reasoning-based retrieval without vector search, achieving 98.7% accuracy on FinanceBench. Uses LLM reasoning to navigate document pages directly.
+
+### Medium Priority
+
+10. **DSPy Activation** — Activate the existing DSPy prompt optimization infrastructure (Phase 93) for production use with automated evaluation pipelines.
+
+11. **Multimodal RAG via ColPali** — Leverage the existing ColPali engine dependency for end-to-end multimodal retrieval without separate OCR pipelines.
+
+12. **Generative UI** — Stream React components from the backend for rich, interactive answer displays (charts, tables, interactive elements).
+
+13. **Vercel AI SDK v6 Upgrade** — Upgrade to latest AI SDK for improved streaming, tool calling, and multi-modal support.
+
+14. **Human-in-the-Loop for Agents** — Add approval workflows and human checkpoints for agent actions with side effects.
+
+15. **Agent Evaluation & Simulation** — Automated testing framework for agent behaviors using simulated conversations and metrics.
+
+16. **Enhanced Semantic Caching** — Advanced semantic cache strategies showing 68.8% cost reduction in benchmarks. Improve existing GPTCache integration with better similarity thresholds and cache invalidation.
+
+17. **Contextual Memory for Agents** — Add persistent contextual memory to agentic RAG for maintaining long-term context across sessions and improving personalized retrieval.
+
+---
+
+## Cross-References
+
+- **API Documentation**: [API.md](API.md) — Complete REST API reference
+- **Configuration**: [CONFIGURATION.md](CONFIGURATION.md) — All settings with defaults
+- **Security**: [SECURITY.md](SECURITY.md) — Security model and hardening
+- **Architecture**: [TECHNICAL_ARCHITECTURE.md](TECHNICAL_ARCHITECTURE.md) — System architecture
+- **Developer Guide**: [DEVELOPER_ONBOARDING.md](DEVELOPER_ONBOARDING.md) — Getting started as a developer

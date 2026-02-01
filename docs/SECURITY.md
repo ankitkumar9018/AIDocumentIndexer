@@ -14,8 +14,9 @@ This document describes the security architecture, threat model, and hardening m
 6. [Data Protection](#data-protection)
 7. [LLM Provider Security](#llm-provider-security)
 8. [Configuration Security](#configuration-security)
-9. [Audit Logging](#audit-logging)
-10. [Security Hardening Checklist](#security-hardening-checklist)
+9. [DSPy Security Considerations](#dspy-security-considerations-phase-93)
+10. [Audit Logging](#audit-logging)
+11. [Security Hardening Checklist](#security-hardening-checklist)
 
 ---
 
@@ -48,6 +49,47 @@ Documents have an `access_tier` field. Users can only access documents with a ti
 ### Organization-Based Access
 
 Multi-tenant isolation ensures users only see documents belonging to their organization. Superadmins can access all organizations.
+
+### Private Documents
+
+Documents can be marked as **private** during upload, providing an additional layer of access control beyond access tiers.
+
+**How Private Documents Work:**
+
+| Scenario | Can Access? |
+|----------|-------------|
+| Document owner | ✅ Yes |
+| Superadmin | ✅ Yes |
+| Other users in organization | ❌ No |
+| Users in other organizations | ❌ No |
+
+**Setting a Document as Private:**
+
+1. **During Upload:** Toggle "Private Document" in the Processing Options section
+2. **Via API:** Set `is_private: true` in the upload request body
+3. **After Upload:** Edit document properties in the Documents page
+
+**Private Document Behavior:**
+
+- Private documents are **excluded from search results** for other users
+- Private documents **do not appear** in document lists for other users
+- Knowledge graph entities from private documents are **filtered at query time** - entities are still extracted but only visible to authorized users
+- Superadmins can access all private documents for administrative purposes
+
+**API Example:**
+
+```bash
+# Upload a private document
+curl -X POST "/api/upload" \
+  -F "file=@document.pdf" \
+  -F "is_private=true"
+
+# Bulk upload with private flag
+curl -X POST "/api/upload/batch" \
+  -F "files=@doc1.pdf" \
+  -F "files=@doc2.pdf" \
+  -F "is_private=true"
+```
 
 ---
 
@@ -102,6 +144,21 @@ Every RAG query passes through:
 | `security.pii_detection_enabled` | Enable PII detection | `true` |
 | `security.injection_threshold` | Detection confidence threshold (0-1) | `0.7` |
 
+### Hallucination Scoring (Phase 95J)
+
+Multi-signal hallucination detection is integrated into the RAG pipeline to identify and flag responses that are not grounded in retrieved sources:
+
+- **Source Faithfulness:** Each claim in the generated response is scored against the retrieved source chunks. Claims that cannot be attributed to any source receive a low faithfulness score.
+- **Claim Verification:** Individual factual claims are extracted and cross-referenced with the source documents. Unverifiable claims are flagged.
+- **Confidence Scoring:** An overall hallucination confidence score (0-1) is computed from the combined signals. Lower scores indicate higher likelihood of hallucination.
+
+Hallucination scores are exposed in API responses for transparency, allowing downstream consumers to make informed decisions about response trustworthiness. Configurable thresholds enable automated flagging: responses scoring below the configured threshold are annotated with a hallucination warning in the API response payload.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.hallucination_detection_enabled` | Enable hallucination scoring | `true` |
+| `rag.hallucination_threshold` | Score below which responses are flagged (0-1) | `0.5` |
+
 ---
 
 ## Sandbox Execution
@@ -127,12 +184,31 @@ Used for Recursive Language Model code execution:
 #### 3. Workflow Engine (`workflow_engine.py`)
 
 Two execution modes:
-- **RestrictedPython mode:** Uses RestrictedPython compiler with safe wrapper classes (`_SafeMath`, `_SafeJson`, `_SafeRegex`)
+- **RestrictedPython mode:** Uses RestrictedPython compiler with safe wrapper classes (`_SafeMath`, `_SafeJson`, `_SafeRegex`, `_SafeDatetime`)
 - **Basic mode:** AST validation that blocks:
   - `Import`, `ImportFrom` nodes
   - `Exec`, `Eval` function calls
   - Dunder attribute access (`__class__`, `__bases__`, `__subclasses__`, `__globals__`, `__code__`, `__builtins__`, `__import__`, etc.)
   - Dangerous builtins (`exec`, `eval`, `compile`, `__import__`, `open`, `getattr`, `setattr`, `delattr`, `globals`, `locals`, `vars`, `dir`, `breakpoint`)
+
+#### Phase 91/94 Sandbox Hardening
+
+**`_SafeDatetime` Wrapper (Phase 94):**
+The `_SafeDatetime` class wraps all `datetime` module access to prevent sandbox escape via datetime module attributes. Only whitelisted operations (`now`, `utcnow`, `today`, `strftime`, `strptime`, `timedelta`, `date`, `time`, `datetime`) are permitted. Any attempt to access dunder attributes or internal module attributes raises `AttributeError`, closing an escape vector where attackers could traverse `datetime.datetime.__class__.__bases__` to reach the object hierarchy.
+
+**AST-Level `blocked_attrs` List (Phase 91):**
+The AST validator maintains an explicit `blocked_attrs` list that rejects any attribute access node referencing the following dunder attributes:
+- `__class__`, `__bases__`, `__subclasses__`
+- `__globals__`, `__code__`, `__builtins__`
+- `__import__`, `__getattribute__`, `__setattr__`, `__delattr__`
+
+This provides defense-in-depth: even if a safe wrapper is bypassed, the AST validator will reject the code before execution.
+
+**Phase 91 Security Tests:**
+Comprehensive unit tests validate sandbox escape prevention:
+- `test_sandbox.py` — Tests all blocked builtins, import attempts, and attribute traversal attacks
+- `test_security.py` — Tests prompt injection detection, PII masking, and content safety scoring
+- `test_agent_memory.py` — Tests that agent memory operations cannot be exploited for code execution
 
 ### Sandbox Escape Prevention
 
@@ -141,6 +217,18 @@ The following attack vectors are blocked:
 - `json.__builtins__.__import__('os')` → `AttributeError` from `SafeJson.__getattr__`
 - `().__class__.__bases__[0].__subclasses__()` → Blocked by AST attribute chain validation
 - `getattr(str, '__class__')` → `getattr` blocked in builtins
+
+#### Phase 91/94 Blocked Patterns
+
+The following additional escape vectors are blocked by Phase 91 and Phase 94 hardening:
+
+| Attack Pattern | Blocked By | Mechanism |
+|----------------|-----------|-----------|
+| `datetime.datetime.__class__.__bases__` | `_SafeDatetime.__getattr__` | Wrapper rejects all dunder attribute access on datetime objects |
+| `re.compile.__globals__` | `SafeRegex.__getattr__` | Wrapper rejects `__globals__` access on regex function references |
+| `json.dumps.__globals__['__builtins__']` | `SafeJson.__getattr__` | Wrapper rejects `__globals__` traversal to reach builtins |
+
+These safe wrappers operate as a first line of defense. The AST-level `blocked_attrs` validator (Phase 91) acts as a second line, rejecting code containing any `__class__`, `__bases__`, `__subclasses__`, `__globals__`, `__code__`, `__builtins__`, `__import__`, `__getattribute__`, `__setattr__`, or `__delattr__` attribute access before the code is ever executed.
 
 ---
 
@@ -227,6 +315,27 @@ Per-request retry budget prevents compound retries:
 - Maximum 3 total retries per user request across all services
 - Retry counter passed via context to prevent query retry → embedding retry → reranker retry chains
 
+### Bring Your Own Key (BYOK) Security Model (Phase 95R)
+
+BYOK allows users to provide their own LLM provider API keys instead of relying on server-managed keys. This model has specific security properties:
+
+**Supported Providers:** OpenAI, Anthropic, Google AI, Mistral, Groq, Together
+
+**Client-Side Key Storage:**
+- Keys are stored in encrypted `localStorage` with a master BYOK toggle
+- A master toggle enables/disables BYOK mode globally for the user session
+- Password-style input fields with show/hide toggle prevent shoulder surfing during key entry
+
+**Key Isolation:**
+- BYOK keys are **never sent to the backend server** -- they are injected client-side into API requests directly from the browser
+- This eliminates the risk of server-side key leakage, database compromise exposure, or logging of user keys
+- The backend never stores, processes, or has access to user-provided BYOK keys
+
+**Key Validation:**
+- A dedicated key validation endpoint tests keys against the provider's API before saving
+- Invalid or revoked keys are rejected at entry time with clear error messages
+- Validation requests are made directly from the client to the provider (not proxied through the backend)
+
 ---
 
 ## Configuration Security
@@ -262,6 +371,36 @@ Never commit to version control:
 - `SENTRY_DSN`
 
 Use `.env` files (gitignored) or secrets management (HashiCorp Vault, AWS Secrets Manager).
+
+---
+
+## DSPy Security Considerations (Phase 93)
+
+DSPy optimization provides automated prompt tuning and few-shot example management. The following security measures are enforced:
+
+### Access Control
+
+- All DSPy optimization endpoints require **admin-only access** (JWT with `admin` role)
+- Non-admin users cannot trigger optimization jobs, view training data, or access compiled prompts
+- Role enforcement is applied at the API route level via JWT middleware
+
+### Training Data Safety
+
+- Training examples are **validated for content safety** before storage
+- Examples containing prompt injection patterns, PII, or unsafe content are rejected
+- Validation uses the same `rag_security` pipeline applied to user queries
+
+### Compiled Prompt Storage
+
+- Compiled/optimized prompts are stored in the **database as data**, not as executable code
+- Prompts are treated as inert text and are never `eval`/`exec`'d
+- Database storage ensures prompts are subject to the same access control and encryption as other application data
+
+### Resource Limits
+
+- Optimization jobs run with **timeout limits** to prevent resource exhaustion
+- Long-running optimization tasks are terminated after the configured timeout
+- Job status is tracked to prevent concurrent optimization runs from overwhelming system resources
 
 ---
 

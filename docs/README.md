@@ -7,32 +7,31 @@ Welcome to the AIDocumentIndexer documentation. This guide covers everything you
 ### Tutorials (Step-by-Step Guides)
 - [Quick Start](tutorials/01-quick-start.md) - Get up and running in 5 minutes
 - [Bulk Processing](tutorials/06-bulk-processing.md) - Process 100K+ documents
-- [Ray Scaling](tutorials/08-ray-scaling.md) - Horizontal scaling with Ray
-- [Visual Documents](tutorials/10-visual-documents.md) - Process charts, tables, and images
+- [Ray Scaling](tutorials/10-ray-scaling.md) - Horizontal scaling with Ray
+- [Visual Documents](tutorials/12-visual-documents.md) - Process charts, tables, and images
 - [All Tutorials](tutorials/README.md) - Complete tutorial list
 
 ### User Guide
 - [Getting Started](user-guide/getting-started.md) - First steps with AIDocumentIndexer
-- [Uploading Documents](user-guide/uploading-documents.md) - How to upload and manage documents
-- [Querying Documents](user-guide/querying-documents.md) - Search and ask questions
-- [Audio Overviews](user-guide/audio-overviews.md) - Generate audio summaries
-- [Knowledge Graph](user-guide/knowledge-graph.md) - Explore document relationships
-- [AI Agents](user-guide/ai-agents.md) - Create custom chatbots
-- [Troubleshooting](user-guide/troubleshooting.md) - Common issues and solutions
+- [Features](FEATURES.md) - Comprehensive feature documentation
+- [Troubleshooting](TROUBLESHOOTING.md) - Common issues and solutions
 
 ### Developer Guide
-- [Architecture](developer-guide/architecture.md) - System architecture overview
-- [API Reference](developer-guide/api-reference.md) - REST API documentation
-- [Contributing](developer-guide/contributing.md) - How to contribute
-- [Testing](developer-guide/testing.md) - Testing guidelines
-- [Deployment](developer-guide/deployment.md) - Deployment options
+- [Technical Architecture](TECHNICAL_ARCHITECTURE.md) - System architecture overview
+- [API Reference](API.md) - REST API documentation
+- [Developer Onboarding](DEVELOPER_ONBOARDING.md) - Getting started as a developer
+- [Code Reference](CODE_REFERENCE.md) - Codebase navigation guide
+- [Configuration](CONFIGURATION.md) - Configuration reference
+- [Installation](INSTALLATION.md) - Installation instructions
+- [Deployment](DEPLOYMENT.md) - Deployment options
+- [Security](SECURITY.md) - Security documentation
+- [Commands](COMMANDS.md) - CLI commands reference
 
-### Architecture Decision Records
-- [ADR-001: Celery Task Queue](adrs/001-celery-task-queue.md)
-- [ADR-002: ColBERT Retrieval](adrs/002-colbert-retrieval.md)
-- [ADR-003: RLM Integration](adrs/003-rlm-integration.md)
-- [ADR-004: Ray Distributed Computing](adrs/004-ray-distributed.md)
-- [ADR-005: VLM Integration](adrs/005-vlm-integration.md)
+### Specialized Guides
+- [AI Agents](AGENTS.md) - Agent configuration and usage
+- [OCR Configuration](OCR_CONFIGURATION.md) - OCR setup and tuning
+- [Embeddings Guide](embeddings/EMBEDDING_MODELS.md) - Embedding provider reference
+- [Knowledge Graph](knowledge-graph/KNOWLEDGE_GRAPH_COMPLETION.md) - KG implementation details
 
 ## Features Overview
 
@@ -49,6 +48,8 @@ Welcome to the AIDocumentIndexer documentation. This guide covers everything you
 - **Knowledge Graph**: Entity extraction and relationships
 - **RAPTOR**: Hierarchical document understanding
 - **WARP Engine**: 3x faster multi-vector retrieval
+- **Hallucination Detection**: Multi-signal grounding verification
+- **Content Freshness**: Time-based document scoring
 
 ### Answer Quality
 - **Recursive LM**: 10M+ token context with O(log N) complexity
@@ -56,6 +57,8 @@ Welcome to the AIDocumentIndexer documentation. This guide covers everything you
 - **Chain-of-Verification**: Hallucination reduction
 - **Tree of Thoughts**: Complex reasoning
 - **SELF-RAG**: Self-correcting retrieval
+- **DSPy Optimization**: Automated prompt compilation (Phase 93)
+- **Inline Citations**: Numbered source references in responses
 
 ### Audio & Real-Time
 - **Cartesia TTS**: 40ms time-to-first-audio
@@ -68,6 +71,13 @@ Welcome to the AIDocumentIndexer documentation. This guide covers everything you
 - **RBAC**: Role-based access control
 - **Audit Logging**: SOC2/GDPR compliance
 - **AI Agents**: Custom chatbots with APIs
+
+### UI & Developer Experience
+- **Admin Settings**: 19-tab vertical navigation with category grouping
+- **Dark Mode**: Full dark theme coverage
+- **Canvas Panel**: Side-by-side artifact viewing and editing
+- **Prompt Library**: Reusable template management
+- **BYOK**: Bring Your Own API Key support
 
 ### Distributed Computing
 - **Celery + Redis**: Priority task queues
@@ -89,9 +99,9 @@ Welcome to the AIDocumentIndexer documentation. This guide covers everything you
 
 ## Getting Help
 
-- **GitHub Issues**: [Report bugs](https://github.com/anthropics/claude-code/issues)
+- **GitHub Issues**: [Report bugs](https://github.com/anthropics/AIDocumentIndexer/issues)
 - **Documentation**: You're here!
-- **API Reference**: See `/docs/developer-guide/api-reference.md`
+- **API Reference**: See [API.md](API.md)
 
 ## License
 

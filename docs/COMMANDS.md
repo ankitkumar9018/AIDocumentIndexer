@@ -239,6 +239,50 @@ If the backend starts but `curl` times out:
 
 ---
 
+## Background Workers
+
+### Celery Worker
+
+```bash
+# Start Celery worker
+source backend/.venv/bin/activate && PYTHONPATH=$(pwd) celery -A backend.tasks.celery_app worker --loglevel=info
+
+# Start with concurrency limit
+source backend/.venv/bin/activate && PYTHONPATH=$(pwd) celery -A backend.tasks.celery_app worker --loglevel=info --concurrency=4
+
+# Start Celery Beat scheduler
+source backend/.venv/bin/activate && PYTHONPATH=$(pwd) celery -A backend.tasks.celery_app beat --loglevel=info
+```
+
+### Redis
+
+```bash
+# Start Redis (macOS)
+brew services start redis
+
+# Start Redis (Linux)
+sudo systemctl start redis
+
+# Check Redis status
+redis-cli ping
+# Expected: PONG
+```
+
+### Ray (Optional)
+
+```bash
+# Start Ray head node
+ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265
+
+# Check Ray status
+ray status
+
+# Stop Ray
+ray stop
+```
+
+---
+
 ## Docker Alternative
 
 If you prefer Docker, see [DEPLOYMENT.md](DEPLOYMENT.md) for Docker Compose commands:

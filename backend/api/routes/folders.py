@@ -18,7 +18,7 @@ import structlog
 
 from backend.api.middleware.auth import get_current_user, CurrentUser
 from backend.services.folder_service import FolderService, get_folder_service
-from backend.db.database import get_async_session
+from backend.db.database import get_async_session, async_session_context
 from backend.db.models import User
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -566,7 +566,7 @@ async def list_folder_documents(
         )
 
         # Get paginated documents
-        async for session in get_async_session():
+        async with async_session_context() as session:
             if not doc_ids:
                 return {
                     "items": [],

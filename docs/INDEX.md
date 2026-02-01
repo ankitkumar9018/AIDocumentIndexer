@@ -20,7 +20,7 @@
 - [CONTRIBUTING.md](../CONTRIBUTING.md) - Contribution guidelines
 
 ### First Steps
-1. Install dependencies: `npm install` (frontend) + `pip install -r requirements.txt` (backend)
+1. Install dependencies: `npm install` (frontend) + `pip install -e ".[dev]"` (backend)
 2. Configure embeddings: See [Embedding Models Guide](embeddings/EMBEDDING_MODELS.md)
 3. Run the application: `npm run dev` (frontend) + `uvicorn backend.main:app` (backend)
 4. Upload documents and start chatting!
@@ -162,6 +162,58 @@ Generate response with LLM
 
 ---
 
+### 4. DSPy Prompt Optimization (Phase 93) 🎯
+
+**Current Status:** ✅ Available (Admin-only)
+
+**Documentation:**
+- **[Configuration Guide](CONFIGURATION.md#dspy-prompt-optimization-phase-93)** — Settings for optimization and inference
+- **[API Reference](API.md#dspy-prompt-optimization-endpoints-phase-93)** — 8 admin endpoints for DSPy management
+- **[Security](SECURITY.md#dspy-security-considerations-phase-93)** — Access control and training data safety
+
+**Key Features:**
+- ✅ BootstrapFewShot and MIPROv2 optimizers
+- ✅ Compiled prompt storage and deployment
+- ✅ Inference-time few-shot injection into RAG pipeline
+- ✅ Admin-only access control
+
+### 5. Cost Optimization (Phase 68) 💰
+
+**Documentation:**
+- **[API Reference](API.md#cost-optimization-endpoints-phase-68)** — 10 endpoints for cost tracking and budgets
+- **[Configuration Guide](CONFIGURATION.md)** — Budget and rate limit settings
+
+**Key Features:**
+- ✅ Per-provider cost tracking
+- ✅ Budget enforcement with alerts
+- ✅ Token usage analytics
+- ✅ Cost-aware model routing
+
+---
+
+### 6. Web Scraper (Phase 96 Enhancements) 🌐
+
+**Current Status:** ✅ Fully Operational (22 API endpoints)
+
+**New in Phase 96:**
+- ✅ **Sitemap Crawling** — Crawl websites via `sitemap.xml` discovery with lastmod prioritization
+- ✅ **Search & Crawl** — DuckDuckGo-powered URL discovery and automated crawling
+- ✅ **Scheduled Crawls** — Cron-based recurring crawls with Celery Beat and incremental re-indexing
+- ✅ **SSE Progress Streaming** — Real-time crawl progress via Server-Sent Events
+- ✅ **Proxy Rotation** — Configurable proxy pool with round-robin/random strategies
+- ✅ **Jina Reader Fallback** — Zero-infrastructure fallback scraper via Jina Reader API
+- ✅ **Robots.txt Compliance** — Full robots.txt parsing and rule enforcement
+- ✅ **Crash Recovery** — Persist and resume interrupted crawl jobs
+- ✅ **Adaptive Crawling** — Confidence-based auto-stop for site crawls
+
+**Documentation:**
+- **[FEATURES.md — Web Scraper](FEATURES.md#web-scraper)** — Feature overview and usage guide
+- **[API.md — Web Scraper Endpoints](API.md#web-scraper-endpoints)** — REST API reference (22 endpoints)
+- **[CONFIGURATION.md — Web Scraping Settings](CONFIGURATION.md#web-scraping-settings-database)** — All scraping settings
+- **[CODE_REFERENCE.md](CODE_REFERENCE.md)** — Service class documentation
+
+---
+
 ## Configuration
 
 ### Environment Variables
@@ -207,11 +259,10 @@ TOP_K_RESULTS=10
 
 ### For Users
 
-**[Session Summary](guides/SESSION_SUMMARY.md)** (comprehensive overview)
-- What was implemented (embeddings, knowledge graph, flexible dimensions)
-- Current system state (100% coverage, 5,518 embeddings)
-- Expected quality improvements
-- Cost analysis and recommendations
+**[Features Guide](FEATURES.md)** (comprehensive overview)
+- All features across phases (Workflows, Audio, Connectors, RAG, TTS, Security)
+- Phase 94: Cross-section RAG integration
+- Phase 95: UI overhaul and competitor-inspired features
 
 **[UI Embedding Controls Proposal](guides/UI_EMBEDDING_CONTROLS_PROPOSAL.md)**
 - Proposed UI enhancements for embedding control
@@ -284,12 +335,12 @@ Located in `/backend/scripts/`
 ### System Components
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Frontend (Next.js)                       │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │  Upload  │  │   Chat   │  │ Settings │  │  Search  │   │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Frontend (Next.js)                               │
+│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────────┐ ┌───────┐│
+│  │ Upload │ │  Chat  │ │Settings│ │ Search │ │Admin(19tabs)│ │Scraper││
+│  └────────┘ └────────┘ └────────┘ └────────┘ └─────────────┘ └───────┘│
+└─────────────────────────────────────────────────────────────────────────┘
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Backend (FastAPI)                         │
@@ -467,9 +518,49 @@ python backend/scripts/backfill_chunk_embeddings.py
 - ✅ **Web Crawler UI**: Full-featured frontend component
 - ✅ **Natural Language DB Query UI**: Text-to-SQL with auto-visualization
 
+### January 26, 2026 - Phase 94: Cross-Section RAG Integration
+- ✅ Knowledge graph integration in document generation (get_graph_rag_context wrapper)
+- ✅ Web crawler automatic entity extraction (background KG enrichment)
+- ✅ Text-to-SQL knowledge graph entity lookup for WHERE clause matching
+- ✅ Knowledge graph query expansion (20-30% more relevant entities)
+- ✅ Admin settings UI: 13 new RAG toggles, 38-step pipeline visualization
+- ✅ Audio/Scraper/Ingestion settings tabs
+- ✅ Sandbox security hardening (SafeDatetime wrapper)
+- ✅ DSPy inference integration for RAG prompts
+- ✅ Default settings corrected (adaptive routing, self-RAG, sufficiency checker)
+
+### January 26, 2026 - Phase 95: UI Overhaul + Competitor-Inspired Features
+- ✅ **UI Consistency (95A)**: Replaced native HTML inputs with shadcn/ui Switch and Select
+- ✅ **Vertical Nav (95B)**: Admin settings sidebar navigation with category grouping
+- ✅ **Dark Mode (95C)**: Full dark: variant coverage across all pages
+- ✅ **Inline Citations (95D)**: Numbered superscript citation badges with hover popovers
+- ✅ **Thinking Transparency (95E)**: Collapsible RAG pipeline step display with timing
+- ✅ **Chat Canvas (95N)**: Side-by-side artifact panel for code/content viewing and editing
+- ✅ **Document Preview (95G)**: Split-pane document preview with metadata tabs
+- ✅ **Batch Actions (95H)**: Floating batch action bar for document management
+- ✅ **Hallucination Scoring (95J)**: Reranker-based grounding check in backend
+- ✅ **Content Freshness (95K)**: Time-based scoring boost/penalty for documents
+- ✅ **Conversation-Aware Retrieval (95L)**: Multi-turn context enrichment for embeddings
+- ✅ **Prompt Library (95M)**: Full CRUD template management with variable substitution
+- ✅ **Agent Insights (95O)**: Per-agent usage analytics and metrics
+- ✅ **Custom Instructions (95P)**: Organization-wide system prompt configuration
+- ✅ **Chat Folders (95Q)**: Client-side project folders for chat organization
+- ✅ **BYOK (95R)**: Bring Your Own Key per-provider API key management
+
+### January 26, 2026 - Phase 96: Web Scraper Enhancements
+- ✅ **Sitemap Crawling**: `sitemap.xml` discovery with lastmod prioritization
+- ✅ **Search & Crawl**: DuckDuckGo-powered URL discovery and automated crawling
+- ✅ **Scheduled Crawls**: Cron-based recurring crawls with Celery Beat
+- ✅ **SSE Progress Streaming**: Real-time crawl progress via Server-Sent Events
+- ✅ **Proxy Rotation**: Configurable proxy pool with round-robin/random strategies
+- ✅ **Jina Reader Fallback**: Zero-infrastructure fallback scraper via Jina Reader API
+- ✅ **Robots.txt Compliance**: Full robots.txt parsing and rule enforcement
+- ✅ **Crash Recovery**: Persist and resume interrupted crawl jobs
+- ✅ **Adaptive Crawling**: Confidence-based auto-stop for site crawls
+- ✅ **22 API Endpoints**: Comprehensive REST API for all scraper features
+
 ### Upcoming
 - 🔄 Multi-embedding table implementation (Alembic migration)
-- 🔄 UI controls for embedding provider selection
 - 🔄 Matryoshka multi-resolution search
 - 🔄 RAPTOR hierarchical indexing
 
@@ -479,7 +570,7 @@ python backend/scripts/backfill_chunk_embeddings.py
 
 **Questions or Issues?**
 - Check this documentation index first
-- Review the [Session Summary](guides/SESSION_SUMMARY.md) for recent changes
+- Review the [Features Guide](FEATURES.md) for recent changes
 - Check troubleshooting section above
 - Open an issue on GitHub with logs and reproduction steps
 
@@ -498,6 +589,6 @@ python backend/scripts/backfill_chunk_embeddings.py
 
 ---
 
-**Last Updated:** January 23, 2026
-**Documentation Version:** 1.2 (Phase 65.2)
+**Last Updated:** January 26, 2026
+**Documentation Version:** 1.5 (Phase 96)
 **System Version:** 0.1.0

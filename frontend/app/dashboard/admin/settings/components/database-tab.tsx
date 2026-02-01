@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Card,
   CardContent,
@@ -199,14 +200,18 @@ export function DatabaseTab({
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Index Type</label>
-              <select
-                className="w-full h-10 px-3 rounded-md border bg-background"
+              <Select
                 value={localSettings["database.index_type"] as string || "hnsw"}
-                onChange={(e) => handleSettingChange("database.index_type", e.target.value)}
+                onValueChange={(value) => handleSettingChange("database.index_type", value)}
               >
-                <option value="hnsw">HNSW</option>
-                <option value="ivfflat">IVFFlat</option>
-              </select>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="hnsw">HNSW</SelectItem>
+                  <SelectItem value="ivfflat">IVFFlat</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div className="space-y-2">
@@ -390,11 +395,9 @@ export function DatabaseTab({
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Database Type</label>
-                    <select
-                      className="w-full h-10 px-3 rounded-md border bg-background"
+                    <Select
                       value={newConnection.db_type}
-                      onChange={(e) => {
-                        const type = e.target.value;
+                      onValueChange={(type) => {
                         const config = getDbTypeConfig(type);
                         setNewConnection({
                           ...newConnection,
@@ -404,13 +407,18 @@ export function DatabaseTab({
                         });
                       }}
                     >
-                      {connectionTypesData?.database_types &&
-                        Object.entries(connectionTypesData.database_types).map(([key, config]: [string, AnyData]) => (
-                          <option key={key} value={key}>
-                            {config.name}
-                          </option>
-                        ))}
-                    </select>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {connectionTypesData?.database_types &&
+                          Object.entries(connectionTypesData.database_types).map(([key, config]: [string, AnyData]) => (
+                            <SelectItem key={key} value={key}>
+                              {(config as AnyData).name}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
                 {newConnection.db_type !== "sqlite" && (
@@ -466,15 +474,19 @@ export function DatabaseTab({
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Vector Store</label>
-                    <select
-                      className="w-full h-10 px-3 rounded-md border bg-background"
+                    <Select
                       value={newConnection.vector_store}
-                      onChange={(e) => setNewConnection({ ...newConnection, vector_store: e.target.value })}
+                      onValueChange={(value) => setNewConnection({ ...newConnection, vector_store: value })}
                     >
-                      <option value="auto">Auto-detect</option>
-                      <option value="pgvector">pgvector</option>
-                      <option value="chromadb">ChromaDB</option>
-                    </select>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">Auto-detect</SelectItem>
+                        <SelectItem value="pgvector">pgvector</SelectItem>
+                        <SelectItem value="chromadb">ChromaDB</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
                 <div className="flex gap-2">

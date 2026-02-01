@@ -23,8 +23,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.session import get_session
-from backend.api.routes.admin import get_current_admin_user
+from backend.db.database import get_async_session as get_session
+from backend.api.routes.auth import require_role
 from backend.db.models import DSPyTrainingExample, DSPyOptimizationJob
 
 logger = structlog.get_logger(__name__)
@@ -89,7 +89,7 @@ class JobResponse(BaseModel):
 async def trigger_optimization(
     request: OptimizeRequest,
     db: AsyncSession = Depends(get_session),
-    _admin=Depends(get_current_admin_user),
+    _admin = Depends(require_role(["admin"])),
 ):
     """
     Trigger DSPy prompt optimization for a signature.
@@ -181,7 +181,7 @@ async def trigger_optimization(
 async def get_job_status(
     job_id: str,
     db: AsyncSession = Depends(get_session),
-    _admin=Depends(get_current_admin_user),
+    _admin = Depends(require_role(["admin"])),
 ):
     """Get status of a DSPy optimization job."""
     result = await db.execute(
@@ -214,7 +214,7 @@ async def list_jobs(
     signature: Optional[str] = None,
     limit: int = 20,
     db: AsyncSession = Depends(get_session),
-    _admin=Depends(get_current_admin_user),
+    _admin=Depends(require_role(["admin"])),
 ):
     """List DSPy optimization jobs."""
     query = select(DSPyOptimizationJob).order_by(
@@ -253,7 +253,7 @@ async def list_examples(
     active_only: bool = True,
     limit: int = 50,
     db: AsyncSession = Depends(get_session),
-    _admin=Depends(get_current_admin_user),
+    _admin=Depends(require_role(["admin"])),
 ):
     """List training examples."""
     query = select(DSPyTrainingExample).order_by(
@@ -289,7 +289,7 @@ async def list_examples(
 async def add_example(
     request: AddExampleRequest,
     db: AsyncSession = Depends(get_session),
-    _admin=Depends(get_current_admin_user),
+    _admin=Depends(require_role(["admin"])),
 ):
     """Add a manual training example."""
     example = DSPyTrainingExample(
@@ -321,7 +321,7 @@ async def add_example(
 async def delete_example(
     example_id: str,
     db: AsyncSession = Depends(get_session),
-    _admin=Depends(get_current_admin_user),
+    _admin=Depends(require_role(["admin"])),
 ):
     """Delete (deactivate) a training example."""
     result = await db.execute(
@@ -343,7 +343,7 @@ async def delete_example(
 async def get_example_counts(
     signature: Optional[str] = None,
     db: AsyncSession = Depends(get_session),
-    _admin=Depends(get_current_admin_user),
+    _admin=Depends(require_role(["admin"])),
 ):
     """Get training example counts by source."""
     try:
@@ -367,7 +367,7 @@ async def deploy_optimization(
     job_id: str,
     agent_id: str,
     db: AsyncSession = Depends(get_session),
-    _admin=Depends(get_current_admin_user),
+    _admin=Depends(require_role(["admin"])),
 ):
     """
     Deploy a completed optimization result.

@@ -67,6 +67,7 @@ except ImportError:
 
 from backend.api.middleware.request_id import RequestIDMiddleware
 from backend.api.errors import register_exception_handlers as register_app_exception_handlers
+from backend.utils.async_helpers import create_safe_task
 
 # Configure structured logging
 structlog.configure(
@@ -89,6 +90,55 @@ structlog.configure(
 )
 
 logger = structlog.get_logger(__name__)
+
+
+async def _periodic_memory_cleanup():
+    """
+    Periodic memory cleanup task.
+
+    Runs every 10 minutes to:
+    - Trigger garbage collection
+    - Clear GPU cache if available
+    - Unload idle ML models
+
+    Inspired by OpenClaw's memory management patterns.
+    """
+    import asyncio
+    import gc
+
+    cleanup_interval = 600  # 10 minutes
+
+    while True:
+        await asyncio.sleep(cleanup_interval)
+        try:
+            # Trigger garbage collection
+            gc.collect()
+
+            # Clear GPU cache if available
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    # MPS doesn't have explicit cache clearing
+                    pass
+            except ImportError:
+                pass
+
+            # Get memory usage for logging
+            try:
+                import psutil
+                process = psutil.Process()
+                memory_mb = process.memory_info().rss / 1024 / 1024
+                logger.info(
+                    "Periodic memory cleanup completed",
+                    memory_mb=round(memory_mb, 1),
+                )
+            except ImportError:
+                logger.info("Periodic memory cleanup completed")
+
+        except Exception as e:
+            logger.error("Memory cleanup failed", error=str(e))
 
 
 @asynccontextmanager
@@ -150,14 +200,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception as reset_error:
             logger.warning("Failed to reset stuck upload jobs", error=str(reset_error))
 
-        # Initialize Ray connection for parallel document processing
+        # Process any queued uploads in background
         try:
-            from backend.ray_workers.config import init_ray
-            ray_initialized = init_ray(cleanup_stale=True, init_timeout=30.0)
+            from backend.api.routes.upload import process_queued_uploads_startup, start_periodic_queue_processor
+            create_safe_task(
+                process_queued_uploads_startup(),
+                name="startup_queued_uploads",
+                on_error=lambda e: logger.error("Queued uploads processing failed", error=str(e))
+            )
+            logger.info("Started background processing of queued uploads")
+
+            # Start periodic processor to continuously check for new queued uploads
+            create_safe_task(
+                start_periodic_queue_processor(interval_seconds=30),
+                name="periodic_queue_processor",
+                on_error=lambda e: logger.error("Periodic queue processor failed", error=str(e))
+            )
+            logger.info("Started periodic queue processor (checks every 30s)")
+        except Exception as queue_error:
+            logger.warning("Failed to start queued uploads processing", error=str(queue_error))
+
+        # Initialize Ray connection for parallel document processing
+        # Uses settings from Admin UI (processing.ray_enabled, processing.ray_address, etc.)
+        try:
+            from backend.ray_workers.config import init_ray_async
+            ray_initialized = await init_ray_async(cleanup_stale=True, init_timeout=30.0)
             if ray_initialized:
                 logger.info("Ray cluster connected")
             else:
-                logger.warning("Ray initialization failed, falling back to local processing")
+                logger.info("Ray disabled or initialization failed, using local processing")
         except Exception as ray_error:
             logger.warning("Ray initialization failed, falling back to local processing", error=str(ray_error))
 
@@ -165,6 +236,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # from backend.services.cache import init_cache
         # await init_cache()
         logger.info("Redis cache initialized")
+
+        # Auto-start Celery worker if enabled in settings
+        try:
+            from backend.services.celery_manager import start_celery_worker_auto
+            celery_started = await start_celery_worker_auto()
+            if celery_started:
+                logger.info("Celery worker auto-started (controlled by settings)")
+            else:
+                logger.info("Celery worker not started (disabled in settings or Redis unavailable)")
+        except Exception as celery_error:
+            logger.warning("Celery auto-start failed, using sync processing", error=str(celery_error))
 
         # Initialize LangChain + LiteLLM
         # from backend.services.llm import init_llm
@@ -223,6 +305,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception as ocr_error:
             logger.warning("OCR model auto-download failed, models will be downloaded on first use", error=str(ocr_error))
 
+        # Start periodic memory cleanup task (inspired by OpenClaw patterns)
+        import asyncio
+        memory_cleanup_task = create_safe_task(
+            _periodic_memory_cleanup(),
+            name="memory_cleanup",
+            on_error=lambda e: logger.error("Memory cleanup task failed", error=str(e))
+        )
+        logger.info("Started periodic memory cleanup task")
+
         logger.info("AIDocumentIndexer API started successfully")
 
     except Exception as e:
@@ -230,6 +321,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise
 
     yield
+
+    # Cancel memory cleanup task
+    try:
+        memory_cleanup_task.cancel()
+        try:
+            await memory_cleanup_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Memory cleanup task cancelled")
+    except Exception as cleanup_error:
+        logger.warning("Failed to cancel memory cleanup task", error=str(cleanup_error))
+
+    # Stop periodic queue processor
+    try:
+        from backend.api.routes.upload import stop_periodic_queue_processor
+        stop_periodic_queue_processor()
+        logger.info("Periodic queue processor stopped")
+    except Exception as queue_error:
+        logger.warning("Failed to stop periodic queue processor", error=str(queue_error))
 
     # Shutdown tasks
     logger.info("Shutting down AIDocumentIndexer API...")
@@ -246,6 +356,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Close database connections
         # from backend.db.database import close_db
         # await close_db()
+
+        # Stop Celery worker if we started it
+        try:
+            from backend.services.celery_manager import stop_celery_worker_auto
+            await stop_celery_worker_auto()
+            logger.info("Celery worker stopped")
+        except Exception as celery_error:
+            logger.warning("Celery shutdown failed", error=str(celery_error))
 
         # Disconnect from Ray with timeout
         try:
@@ -291,8 +409,11 @@ def create_app() -> FastAPI:
     # Add Request ID middleware (must be first to ensure all requests get an ID)
     app.add_middleware(RequestIDMiddleware)
 
-    # Configure CORS
-    cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+    # Configure CORS - allow both localhost and 127.0.0.1
+    cors_origins = os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000"
+    ).split(",")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -395,6 +516,23 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.experiments import router as experiments_router
     from backend.api.routes.diagnostics import router as diagnostics_router
     from backend.api.routes.dspy_optimization import router as dspy_router
+    from backend.api.routes.smart_router import router as smart_router_router
+    from backend.api.routes.embedding_defense import router as embedding_defense_router
+    from backend.api.routes.matryoshka import router as matryoshka_router
+    from backend.api.routes.speculative_rag import router as speculative_rag_router
+    from backend.api.routes.otel_tracing import router as otel_tracing_router
+    from backend.api.routes.skills import router as skills_router
+    from backend.api.routes.moodboard import router as moodboard_router
+    from backend.api.routes.research import router as research_router
+    from backend.api.routes.reports import router as reports_router
+    from backend.api.routes.parallel_query import router as parallel_query_router
+    from backend.api.routes.tools import router as tools_router
+    from backend.api.routes.mcp import router as mcp_router
+    from backend.api.routes.ensemble import router as ensemble_router
+    from backend.api.routes.knowledge_analytics import router as knowledge_analytics_router
+    from backend.api.routes.query_analysis import router as query_analysis_router
+    from backend.api.routes.intelligence import router as intelligence_router
+    from backend.api.routes.tool_streaming import router as tool_streaming_router
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
@@ -436,6 +574,22 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(experiments_router, prefix="/api/v1", tags=["Experiments & Feedback"])
     app.include_router(diagnostics_router, prefix="/api/v1", tags=["Diagnostics & Monitoring"])
     app.include_router(dspy_router, prefix="/api/v1", tags=["DSPy Optimization"])
+    app.include_router(smart_router_router, prefix="/api/v1", tags=["Smart Model Router"])
+    app.include_router(embedding_defense_router, prefix="/api/v1", tags=["Embedding Defense"])
+    app.include_router(matryoshka_router, prefix="/api/v1", tags=["Matryoshka Retrieval"])
+    app.include_router(speculative_rag_router, prefix="/api/v1", tags=["Speculative RAG"])
+    app.include_router(otel_tracing_router, prefix="/api/v1", tags=["OpenTelemetry Tracing"])
+    app.include_router(skills_router, prefix="/api/v1/skills", tags=["Skills Marketplace"])
+    app.include_router(moodboard_router, prefix="/api/v1/moodboard", tags=["Mood Board"])
+    app.include_router(research_router, prefix="/api/v1/research", tags=["Deep Research"])
+    app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports (Sparkpages)"])
+    app.include_router(parallel_query_router, prefix="/api/v1/parallel", tags=["Parallel Knowledge"])
+    app.include_router(tools_router, prefix="/api/v1/tools", tags=["Tool Augmentation"])
+    app.include_router(mcp_router, prefix="/api/v1/mcp", tags=["MCP Server"])
+    app.include_router(ensemble_router, prefix="/api/v1/ensemble", tags=["Ensemble Voting"])
+    app.include_router(knowledge_analytics_router, prefix="/api/v1/analytics", tags=["Knowledge Analytics"])
+    app.include_router(intelligence_router, prefix="/api/v1", tags=["Intelligence Enhancement"])
+    app.include_router(tool_streaming_router, prefix="/api/v1", tags=["Tool Streaming"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

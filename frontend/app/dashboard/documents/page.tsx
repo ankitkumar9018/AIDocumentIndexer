@@ -51,6 +51,8 @@ import {
   PanelLeft,
   FolderTree as FolderTreeIcon,
   GripVertical,
+  Database,
+  AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -82,10 +84,13 @@ import {
   useLLMProviders,
   useLLMOperations,
   useSetLLMOperationConfig,
+  useVisionStatus,
+  useReprocessDocument,
   Document,
   api,
 } from "@/lib/api";
-import { Wand2, Zap, Settings, Info, Bot, Tag, FolderInput } from "lucide-react";
+import { ReanalyzeImagesModal } from "@/components/documents/reanalyze-images-modal";
+import { Wand2, Zap, Settings, Info, Bot, Tag, FolderInput, ImageOff, Images } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -118,6 +123,10 @@ import {
 import { FolderTree } from "@/components/folder-tree";
 import { FolderSelector } from "@/components/folder-selector";
 import { SavedSearchesPanel, type SearchFilters } from "@/components/saved-searches-panel";
+import { SmartFolders, DocumentInsights } from "@/components/documents/smart-folders";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { UploadedDocumentPreview } from "@/components/preview/UploadedDocumentPreview";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 type ViewMode = "grid" | "list";
 
@@ -196,6 +205,7 @@ export default function DocumentsPage() {
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [recentlyViewed, setRecentlyViewed] = useState<string[]>([]);
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const [showImagesPending, setShowImagesPending] = useState(false);
 
   // Delete confirmation dialog
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -206,6 +216,14 @@ export default function DocumentsPage() {
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
   const [moveFolderId, setMoveFolderId] = useState<string | null>(null);
   const [isMoving, setIsMoving] = useState(false);
+
+  // Document preview panel
+  const [previewDocument, setPreviewDocument] = useState<any>(null);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+
+  // Image analysis modal
+  const [imageAnalysisDocument, setImageAnalysisDocument] = useState<any>(null);
+  const [isImageAnalysisOpen, setIsImageAnalysisOpen] = useState(false);
 
   // Drag and drop state
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
@@ -323,6 +341,7 @@ export default function DocumentsPage() {
 
   // Mutations
   const deleteDocument = useDeleteDocument();
+  const reprocessDocument = useReprocessDocument();
 
   // Use real documents from API (no mock fallback)
   const documents: Document[] = documentsData?.documents ?? [];
@@ -434,9 +453,15 @@ export default function DocumentsPage() {
       // Favorites filter
       const matchesFavorites = !showFavoritesOnly || favorites.has(doc.id);
 
-      return matchesSearch && matchesFileType && matchesSize && matchesDate && matchesFavorites;
+      // Images pending filter
+      const matchesImagesPending = !showImagesPending || (
+        (doc as any).images_extracted_count > 0 &&
+        (doc as any).image_analysis_status !== 'completed'
+      );
+
+      return matchesSearch && matchesFileType && matchesSize && matchesDate && matchesFavorites && matchesImagesPending;
     });
-  }, [documents, searchQuery, selectedFileType, selectedSizeFilter, selectedDateRange, showFavoritesOnly, favorites]);
+  }, [documents, searchQuery, selectedFileType, selectedSizeFilter, selectedDateRange, showFavoritesOnly, favorites, showImagesPending]);
 
   // Pagination calculations - use server-side total count
   const totalCount = documentsData?.total ?? 0;
@@ -546,6 +571,25 @@ export default function DocumentsPage() {
     }
   };
 
+  // Reprocess a document (re-run processing pipeline)
+  const handleReprocessDocument = async (docId: string, docName: string) => {
+    try {
+      toast.loading(`Reprocessing "${docName}"...`, { id: `reprocess-${docId}` });
+      await reprocessDocument.mutateAsync(docId);
+      toast.success("Document reprocessing started", {
+        id: `reprocess-${docId}`,
+        description: `"${docName}" is being reprocessed. This may take a moment.`,
+      });
+      refetch();
+    } catch (error) {
+      console.error("Reprocess failed:", error);
+      toast.error("Failed to reprocess document", {
+        id: `reprocess-${docId}`,
+        description: getErrorMessage(error, "An error occurred"),
+      });
+    }
+  };
+
   const handleDownloadDocument = async (docId: string, docName: string) => {
     try {
       await api.downloadDocument(docId, docName);
@@ -563,8 +607,37 @@ export default function DocumentsPage() {
   const handleViewDocument = (docId: string) => {
     // Track recently viewed
     addToRecentlyViewed(docId);
-    // Navigate to document detail view
+    // Open preview panel instead of navigating
+    const doc = filteredDocuments.find(d => d.id === docId);
+    if (doc) {
+      setPreviewDocument(doc);
+      setIsPreviewOpen(true);
+    }
+  };
+
+  const handleOpenFullView = (docId: string) => {
     window.location.href = `/dashboard/documents/${docId}`;
+  };
+
+  // Generate embeddings for a specific document
+  const handleGenerateEmbeddings = async (docId: string) => {
+    try {
+      toast.info("Starting embedding generation...");
+      const response = await api.post(`/embeddings/generate/${docId}`);
+      if (response.data.job_id) {
+        toast.success("Embedding generation started", {
+          description: "You can check the status in the embeddings dashboard.",
+        });
+        // Refresh documents after a delay to show updated status
+        setTimeout(() => {
+          refetch();
+        }, 3000);
+      }
+    } catch (error) {
+      toast.error("Failed to start embedding generation", {
+        description: getErrorMessage(error),
+      });
+    }
   };
 
   const [isAutoTagging, setIsAutoTagging] = useState(false);
@@ -918,6 +991,12 @@ export default function DocumentsPage() {
         </div>
       </div>
 
+      {/* AI-Powered Smart Folders Section */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <SmartFolders />
+        <DocumentInsights />
+      </div>
+
       {/* Main Content with Sidebar - wrapped in DndContext for drag-drop */}
       <DndContext
         sensors={sensors}
@@ -1058,6 +1137,21 @@ export default function DocumentsPage() {
                 Favorites {favorites.size > 0 && `(${favorites.size})`}
               </Button>
 
+              {/* Images Pending Toggle */}
+              <Button
+                variant={showImagesPending ? "default" : "outline"}
+                size="sm"
+                className="h-10"
+                onClick={() => {
+                  setShowImagesPending(!showImagesPending);
+                  setCurrentPage(1);
+                }}
+                aria-label="Show documents with pending image analysis"
+              >
+                <ImageOff className={`h-4 w-4 mr-1 ${showImagesPending ? "text-orange-300" : "text-orange-500"}`} />
+                Images Pending
+              </Button>
+
               {/* View Toggle */}
               <div className="flex rounded-lg border bg-muted p-1">
                 <Button
@@ -1122,7 +1216,7 @@ export default function DocumentsPage() {
                         <Star
                           className={`h-3 w-3 ${
                             favorites.has(doc.id)
-                              ? "fill-yellow-400 text-yellow-400"
+                              ? "fill-yellow-400 text-yellow-400 dark:fill-yellow-300 dark:text-yellow-300"
                               : "text-muted-foreground"
                           }`}
                         />
@@ -1136,64 +1230,69 @@ export default function DocumentsPage() {
         </Card>
       )}
 
-      {/* Bulk Actions */}
+      {/* Floating Batch Action Bar */}
       {selectedDocuments.size > 0 && (
-        <div className="flex items-center gap-4 p-3 rounded-lg bg-muted">
-          <span className="text-sm font-medium">
-            {selectedDocuments.size} selected
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleBulkAutoTag}
-            disabled={isAutoTagging}
-          >
-            <Sparkles className="h-4 w-4 mr-2" />
-            {isAutoTagging ? "Tagging..." : "Auto-tag"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleBulkEnhance}
-            disabled={isEnhancing}
-          >
-            <Wand2 className="h-4 w-4 mr-2" />
-            {isEnhancing ? "Enhancing..." : "Enhance for RAG"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setMoveDialogOpen(true)}
-            disabled={isMoving}
-          >
-            <FolderInput className="h-4 w-4 mr-2" />
-            {isMoving ? "Moving..." : "Move to Folder"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleDeleteSelected}
-            disabled={deleteDocument.isPending}
-          >
-            <Trash2 className="h-4 w-4 mr-2" />
-            Delete
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleBulkDownload}
-            disabled={isDownloading}
-          >
-            <Download className="h-4 w-4 mr-2" />
-            {isDownloading ? "Downloading..." : "Download"}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setSelectedDocuments(new Set())}
-          >
-            Clear
-          </Button>
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 animate-in slide-in-from-bottom-4 duration-300">
+          <div className="flex items-center gap-3 px-5 py-3 rounded-xl border bg-background/80 backdrop-blur-lg shadow-lg">
+            <span className="text-sm font-medium whitespace-nowrap">
+              {selectedDocuments.size} selected
+            </span>
+            <div className="w-px h-6 bg-border" />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleBulkAutoTag}
+              disabled={isAutoTagging}
+            >
+              <Sparkles className="h-4 w-4 mr-1.5" />
+              {isAutoTagging ? "Tagging..." : "Auto-tag"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleBulkEnhance}
+              disabled={isEnhancing}
+            >
+              <Wand2 className="h-4 w-4 mr-1.5" />
+              {isEnhancing ? "Enhancing..." : "Enhance"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setMoveDialogOpen(true)}
+              disabled={isMoving}
+            >
+              <FolderInput className="h-4 w-4 mr-1.5" />
+              {isMoving ? "Moving..." : "Move"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleBulkDownload}
+              disabled={isDownloading}
+            >
+              <Download className="h-4 w-4 mr-1.5" />
+              {isDownloading ? "Downloading..." : "Download"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-destructive hover:text-destructive"
+              onClick={handleDeleteSelected}
+              disabled={deleteDocument.isPending}
+            >
+              <Trash2 className="h-4 w-4 mr-1.5" />
+              Delete
+            </Button>
+            <div className="w-px h-6 bg-border" />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSelectedDocuments(new Set())}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       )}
 
@@ -1337,14 +1436,14 @@ export default function DocumentsPage() {
                             <div>
                               <div className="flex items-center gap-2">
                                 {favorites.has(doc.id) && (
-                                  <Star className="h-4 w-4 fill-yellow-400 text-yellow-400 shrink-0" />
+                                  <Star className="h-4 w-4 fill-yellow-400 text-yellow-400 dark:fill-yellow-300 dark:text-yellow-300 shrink-0" />
                                 )}
                                 <p className="font-medium">{doc.name}</p>
                                 {doc.is_enhanced && (
                                   <TooltipProvider>
                                     <Tooltip>
                                       <TooltipTrigger asChild>
-                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-green-50 text-green-700 border-green-200">
+                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-300 dark:border-green-800">
                                           <Zap className="h-2.5 w-2.5 mr-0.5" />
                                           Enhanced
                                         </Badge>
@@ -1371,10 +1470,84 @@ export default function DocumentsPage() {
                                     </Tooltip>
                                   </TooltipProvider>
                                 )}
+                                {/* Image Analysis Status Badge */}
+                                {(doc as any).images_extracted_count > 0 && (
+                                  <TooltipProvider>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Badge
+                                          variant="outline"
+                                          className={`text-[10px] px-1.5 py-0 h-4 cursor-pointer ${
+                                            (doc as any).image_analysis_status === 'completed'
+                                              ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-300 dark:border-blue-800'
+                                              : 'bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800'
+                                          }`}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setImageAnalysisDocument(doc);
+                                            setIsImageAnalysisOpen(true);
+                                          }}
+                                        >
+                                          <Images className="h-2.5 w-2.5 mr-0.5" />
+                                          {(doc as any).images_analyzed_count || 0}/{(doc as any).images_extracted_count}
+                                        </Badge>
+                                      </TooltipTrigger>
+                                      <TooltipContent side="right">
+                                        <p className="font-medium text-sm mb-1">Image Analysis</p>
+                                        <p className="text-xs text-muted-foreground">
+                                          {(doc as any).image_analysis_status === 'completed'
+                                            ? `${(doc as any).images_analyzed_count} images analyzed`
+                                            : `${(doc as any).images_extracted_count - ((doc as any).images_analyzed_count || 0)} images pending`}
+                                        </p>
+                                        <p className="text-[10px] text-muted-foreground mt-1">Click to analyze</p>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                )}
                               </div>
-                              <p className="text-xs text-muted-foreground">
-                                {doc.chunk_count} chunks
-                              </p>
+                              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                <span>{doc.chunk_count} chunks</span>
+                                {doc.chunk_count > 0 && (
+                                  <TooltipProvider>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span
+                                          className={`flex items-center gap-1 cursor-pointer ${
+                                            doc.has_all_embeddings
+                                              ? "text-green-600 dark:text-green-400"
+                                              : "text-amber-600 dark:text-amber-400"
+                                          }`}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (!doc.has_all_embeddings) {
+                                              handleGenerateEmbeddings(doc.id);
+                                            }
+                                          }}
+                                        >
+                                          {doc.has_all_embeddings ? (
+                                            <Database className="h-3 w-3" />
+                                          ) : (
+                                            <AlertCircle className="h-3 w-3" />
+                                          )}
+                                          {doc.embedding_coverage.toFixed(0)}%
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        <p className="font-medium">
+                                          {doc.has_all_embeddings
+                                            ? "All embeddings generated"
+                                            : `${doc.embedding_count}/${doc.chunk_count} chunks embedded`}
+                                        </p>
+                                        {!doc.has_all_embeddings && (
+                                          <p className="text-[10px] text-muted-foreground mt-1">
+                                            Click to generate missing embeddings
+                                          </p>
+                                        )}
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                )}
+                              </div>
                             </div>
                           </div>
                         </td>
@@ -1415,7 +1588,7 @@ export default function DocumentsPage() {
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
                               <DropdownMenuItem onClick={() => toggleFavorite(doc.id)}>
-                                <Star className={`h-4 w-4 mr-2 ${favorites.has(doc.id) ? "fill-yellow-400 text-yellow-400" : ""}`} />
+                                <Star className={`h-4 w-4 mr-2 ${favorites.has(doc.id) ? "fill-yellow-400 text-yellow-400 dark:fill-yellow-300 dark:text-yellow-300" : ""}`} />
                                 {favorites.has(doc.id) ? "Remove from Favorites" : "Add to Favorites"}
                               </DropdownMenuItem>
                               <DropdownMenuItem onClick={() => handleViewDocument(doc.id)}>
@@ -1436,6 +1609,32 @@ export default function DocumentsPage() {
                               <DropdownMenuItem onClick={() => handleOpenEditTags(doc)}>
                                 <Edit className="h-4 w-4 mr-2" />
                                 Edit Tags
+                              </DropdownMenuItem>
+                              {(doc as any).images_extracted_count > 0 && (
+                                <DropdownMenuItem
+                                  onClick={() => {
+                                    setImageAnalysisDocument(doc);
+                                    setIsImageAnalysisOpen(true);
+                                  }}
+                                >
+                                  <Images className="h-4 w-4 mr-2" />
+                                  Analyze Images
+                                </DropdownMenuItem>
+                              )}
+                              {!doc.has_all_embeddings && doc.chunk_count > 0 && (
+                                <DropdownMenuItem
+                                  onClick={() => handleGenerateEmbeddings(doc.id)}
+                                >
+                                  <Database className="h-4 w-4 mr-2" />
+                                  Generate Embeddings
+                                </DropdownMenuItem>
+                              )}
+                              <DropdownMenuItem
+                                onClick={() => handleReprocessDocument(doc.id, doc.name)}
+                                disabled={reprocessDocument.isPending}
+                              >
+                                <RefreshCw className={`h-4 w-4 mr-2 ${reprocessDocument.isPending ? "animate-spin" : ""}`} />
+                                Reprocess Document
                               </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
@@ -1487,7 +1686,7 @@ export default function DocumentsPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem onClick={(e) => { e.stopPropagation(); toggleFavorite(doc.id); }}>
-                          <Star className={`h-4 w-4 mr-2 ${favorites.has(doc.id) ? "fill-yellow-400 text-yellow-400" : ""}`} />
+                          <Star className={`h-4 w-4 mr-2 ${favorites.has(doc.id) ? "fill-yellow-400 text-yellow-400 dark:fill-yellow-300 dark:text-yellow-300" : ""}`} />
                           {favorites.has(doc.id) ? "Remove from Favorites" : "Add to Favorites"}
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleViewDocument(doc.id); }}>
@@ -1509,6 +1708,25 @@ export default function DocumentsPage() {
                           <Edit className="h-4 w-4 mr-2" />
                           Edit Tags
                         </DropdownMenuItem>
+                        {(doc as any).images_extracted_count > 0 && (
+                          <DropdownMenuItem
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setImageAnalysisDocument(doc);
+                              setIsImageAnalysisOpen(true);
+                            }}
+                          >
+                            <Images className="h-4 w-4 mr-2" />
+                            Analyze Images
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuItem
+                          onClick={(e) => { e.stopPropagation(); handleReprocessDocument(doc.id, doc.name); }}
+                          disabled={reprocessDocument.isPending}
+                        >
+                          <RefreshCw className={`h-4 w-4 mr-2 ${reprocessDocument.isPending ? "animate-spin" : ""}`} />
+                          Reprocess Document
+                        </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
                           className="text-destructive focus:text-destructive"
@@ -1527,7 +1745,7 @@ export default function DocumentsPage() {
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-green-50 text-green-700 border-green-200 shrink-0">
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-300 dark:border-green-800 shrink-0">
                                 <Zap className="h-2.5 w-2.5" />
                               </Badge>
                             </TooltipTrigger>
@@ -1538,6 +1756,34 @@ export default function DocumentsPage() {
                                   {doc.enhanced_metadata.summary_short}
                                 </p>
                               )}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
+                      {(doc as any).images_extracted_count > 0 && (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge
+                                variant="outline"
+                                className={`text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer ${
+                                  (doc as any).image_analysis_status === 'completed'
+                                    ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-300 dark:border-blue-800'
+                                    : 'bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800'
+                                }`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setImageAnalysisDocument(doc);
+                                  setIsImageAnalysisOpen(true);
+                                }}
+                              >
+                                <Images className="h-2.5 w-2.5" />
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                              <p className="text-xs">
+                                {(doc as any).images_analyzed_count || 0}/{(doc as any).images_extracted_count} images
+                              </p>
                             </TooltipContent>
                           </Tooltip>
                         </TooltipProvider>
@@ -1853,6 +2099,161 @@ export default function DocumentsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Document Preview Panel */}
+      <Sheet open={isPreviewOpen} onOpenChange={setIsPreviewOpen}>
+        <SheetContent side="right" className="w-[480px] sm:w-[540px] sm:max-w-[50vw] p-0">
+          {previewDocument && (
+            <div className="flex flex-col h-full">
+              <SheetHeader className="px-6 py-4 border-b">
+                <div className="flex items-center justify-between">
+                  <SheetTitle className="text-base truncate pr-4">
+                    {previewDocument.name || previewDocument.title}
+                  </SheetTitle>
+                </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleOpenFullView(previewDocument.id)}
+                  >
+                    <Eye className="h-3 w-3 mr-1" />
+                    Full View
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleDownloadDocument(previewDocument.id, previewDocument.name)}
+                  >
+                    <Download className="h-3 w-3 mr-1" />
+                    Download
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setEditingDocument(previewDocument);
+                      setEditingTags(previewDocument.tags || []);
+                      setEditTagsDialogOpen(true);
+                    }}
+                  >
+                    <Edit className="h-3 w-3 mr-1" />
+                    Tags
+                  </Button>
+                </div>
+              </SheetHeader>
+              <Tabs defaultValue="preview" className="flex-1 flex flex-col min-h-0">
+                <TabsList className="mx-6 mt-3 w-fit">
+                  <TabsTrigger value="preview">Preview</TabsTrigger>
+                  <TabsTrigger value="metadata">Metadata</TabsTrigger>
+                </TabsList>
+                <TabsContent value="preview" className="flex-1 min-h-0 px-6 py-3">
+                  <ScrollArea className="h-full">
+                    <UploadedDocumentPreview
+                      documentId={previewDocument.id}
+                      fileName={previewDocument.name || previewDocument.original_filename}
+                      fileType={previewDocument.file_type || previewDocument.name?.split('.').pop() || 'txt'}
+                      className="min-h-[300px]"
+                    />
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="metadata" className="flex-1 min-h-0 px-6 py-3">
+                  <ScrollArea className="h-full">
+                    <div className="space-y-4 text-sm">
+                      <div>
+                        <p className="font-medium text-muted-foreground">Filename</p>
+                        <p>{previewDocument.name}</p>
+                      </div>
+                      <div>
+                        <p className="font-medium text-muted-foreground">Type</p>
+                        <p>{previewDocument.file_type || 'Unknown'}</p>
+                      </div>
+                      {previewDocument.file_size && (
+                        <div>
+                          <p className="font-medium text-muted-foreground">Size</p>
+                          <p>{(previewDocument.file_size / 1024).toFixed(1)} KB</p>
+                        </div>
+                      )}
+                      {previewDocument.collection && (
+                        <div>
+                          <p className="font-medium text-muted-foreground">Collection</p>
+                          <p>{previewDocument.collection}</p>
+                        </div>
+                      )}
+                      {previewDocument.tags && previewDocument.tags.length > 0 && (
+                        <div>
+                          <p className="font-medium text-muted-foreground">Tags</p>
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {previewDocument.tags.map((tag: string) => (
+                              <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {previewDocument.created_at && (
+                        <div>
+                          <p className="font-medium text-muted-foreground">Created</p>
+                          <p>{new Date(previewDocument.created_at).toLocaleString()}</p>
+                        </div>
+                      )}
+                      {previewDocument.chunk_count !== undefined && (
+                        <div>
+                          <p className="font-medium text-muted-foreground">Chunks</p>
+                          <p>{previewDocument.chunk_count}</p>
+                        </div>
+                      )}
+                      {previewDocument.chunk_count > 0 && (
+                        <div>
+                          <p className="font-medium text-muted-foreground">Embedding Status</p>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`flex items-center gap-1 ${
+                                previewDocument.has_all_embeddings
+                                  ? "text-green-600 dark:text-green-400"
+                                  : "text-amber-600 dark:text-amber-400"
+                              }`}
+                            >
+                              {previewDocument.has_all_embeddings ? (
+                                <Database className="h-4 w-4" />
+                              ) : (
+                                <AlertCircle className="h-4 w-4" />
+                              )}
+                              {previewDocument.embedding_coverage?.toFixed(0) || 0}% ({previewDocument.embedding_count}/{previewDocument.chunk_count})
+                            </span>
+                            {!previewDocument.has_all_embeddings && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleGenerateEmbeddings(previewDocument.id)}
+                                className="h-6 text-xs"
+                              >
+                                Generate
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </ScrollArea>
+                </TabsContent>
+              </Tabs>
+            </div>
+          )}
+        </SheetContent>
+      </Sheet>
+
+      {/* Image Analysis Modal */}
+      {imageAnalysisDocument && (
+        <ReanalyzeImagesModal
+          open={isImageAnalysisOpen}
+          onOpenChange={setIsImageAnalysisOpen}
+          document={imageAnalysisDocument}
+          onSuccess={() => {
+            // Refresh the documents list
+            refetch();
+          }}
+        />
+      )}
     </div>
   );
 }

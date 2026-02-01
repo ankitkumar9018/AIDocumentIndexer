@@ -14,10 +14,13 @@ Features:
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
+from collections import defaultdict
+import threading
+import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, status
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, status, Request
 from fastapi.responses import StreamingResponse
 
 from backend.api.middleware.auth import AuthenticatedUser
@@ -45,6 +48,106 @@ from backend.services.prompt_optimization.prompt_version_manager import PromptVe
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+
+# =============================================================================
+# Rate Limiter for Published Agents
+# =============================================================================
+
+class EmbedRateLimiter:
+    """
+    In-memory rate limiter for embedded agent endpoints.
+
+    Tracks requests per client IP/embed_token combination and enforces
+    rate limits based on agent's publish_config.
+    """
+
+    def __init__(self, cleanup_interval: int = 300):
+        self._lock = threading.Lock()
+        # Key: (embed_token, client_ip) -> List of request timestamps
+        self._requests: Dict[tuple, List[float]] = defaultdict(list)
+        self._last_cleanup = time.time()
+        self._cleanup_interval = cleanup_interval
+
+    def _cleanup_old_entries(self):
+        """Remove entries older than 1 hour."""
+        now = time.time()
+        if now - self._last_cleanup < self._cleanup_interval:
+            return
+
+        with self._lock:
+            cutoff = now - 3600  # 1 hour
+            for key in list(self._requests.keys()):
+                self._requests[key] = [t for t in self._requests[key] if t > cutoff]
+                if not self._requests[key]:
+                    del self._requests[key]
+            self._last_cleanup = now
+
+    def is_rate_limited(
+        self,
+        embed_token: str,
+        client_ip: str,
+        requests_per_minute: int = 10,
+        requests_per_hour: int = 100,
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Check if a request should be rate limited.
+
+        Args:
+            embed_token: The agent's embed token
+            client_ip: Client's IP address
+            requests_per_minute: Max requests per minute (default: 10)
+            requests_per_hour: Max requests per hour (default: 100)
+
+        Returns:
+            Tuple of (is_limited, reason)
+        """
+        self._cleanup_old_entries()
+
+        now = time.time()
+        key = (embed_token, client_ip)
+
+        with self._lock:
+            timestamps = self._requests[key]
+
+            # Check per-minute limit
+            minute_ago = now - 60
+            recent_minute = [t for t in timestamps if t > minute_ago]
+            if len(recent_minute) >= requests_per_minute:
+                return True, f"Rate limit exceeded: {requests_per_minute} requests per minute"
+
+            # Check per-hour limit
+            hour_ago = now - 3600
+            recent_hour = [t for t in timestamps if t > hour_ago]
+            if len(recent_hour) >= requests_per_hour:
+                return True, f"Rate limit exceeded: {requests_per_hour} requests per hour"
+
+            # Record this request
+            self._requests[key].append(now)
+
+            # Keep only last hour of requests
+            self._requests[key] = [t for t in self._requests[key] if t > hour_ago]
+
+            return False, None
+
+
+# Global rate limiter instance
+_embed_rate_limiter = EmbedRateLimiter()
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract client IP from request, handling proxies."""
+    # Check for forwarded headers (behind proxy/load balancer)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip
+
+    # Direct connection
+    return request.client.host if request.client else "unknown"
 
 
 # =============================================================================
@@ -1907,6 +2010,7 @@ async def get_embed_config(
 async def embedded_chat(
     embed_token: str,
     request: EmbedChatRequest,
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1928,7 +2032,32 @@ async def embedded_chat(
     if not agent:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found or not published")
 
-    # TODO: Add rate limiting based on publish_config["rate_limit"]
+    # Apply rate limiting based on publish_config
+    publish_config = agent.publish_config or {}
+    rate_limit_config = publish_config.get("rate_limit", {})
+    requests_per_minute = rate_limit_config.get("requests_per_minute", 10)
+    requests_per_hour = rate_limit_config.get("requests_per_hour", 100)
+
+    client_ip = get_client_ip(http_request)
+    is_limited, reason = _embed_rate_limiter.is_rate_limited(
+        embed_token=embed_token,
+        client_ip=client_ip,
+        requests_per_minute=requests_per_minute,
+        requests_per_hour=requests_per_hour,
+    )
+
+    if is_limited:
+        logger.warning(
+            "Embedded chat rate limited",
+            embed_token=embed_token,
+            client_ip=client_ip,
+            reason=reason,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=reason,
+            headers={"Retry-After": "60"},
+        )
 
     try:
         from backend.services.llm import EnhancedLLMFactory

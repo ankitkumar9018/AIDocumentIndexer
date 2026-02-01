@@ -357,6 +357,38 @@ async def get_recent_metrics(
     }
 
 
+@router.get("/metrics/summary")
+async def get_metrics_summary(
+    period_hours: int = 24,
+) -> Dict[str, Any]:
+    """
+    Get summary metrics for evaluations (alias for /metrics/recent).
+
+    Returns average scores across all evaluations in the specified time window.
+    Frontend-friendly format.
+    """
+    metrics = _evaluation_tracker.get_recent_metrics(hours=period_hours)
+
+    if not metrics:
+        return {
+            "count": 0,
+            "avg_overall": 0.0,
+            "avg_faithfulness": 0.0,
+            "avg_relevance": 0.0,
+            "period_hours": period_hours,
+        }
+
+    return {
+        "count": metrics.get("count", 0),
+        "avg_overall": metrics.get("avg_overall", 0.0),
+        "avg_faithfulness": metrics.get("avg_faithfulness", 0.0),
+        "avg_relevance": metrics.get("avg_relevance", 0.0),
+        "avg_context_relevance": metrics.get("avg_context_relevance"),
+        "avg_answer_relevance": metrics.get("avg_answer_relevance"),
+        "period_hours": period_hours,
+    }
+
+
 @router.get("/metrics/trend", response_model=TrendResponse)
 async def get_metrics_trend(
     metric: str = "overall_score",

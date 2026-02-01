@@ -24,6 +24,14 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Card,
   CardContent,
@@ -322,12 +330,10 @@ export function ProvidersTab({
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Provider Type</label>
-                  <select
-                    className="w-full h-10 px-3 rounded-md border bg-background disabled:opacity-50"
+                  <Select
                     value={newProvider.provider_type}
                     disabled={!!editingProvider}
-                    onChange={(e) => {
-                      const type = e.target.value;
+                    onValueChange={(type) => {
                       const config = getProviderTypeConfig(type);
                       setNewProvider({
                         ...newProvider,
@@ -338,13 +344,18 @@ export function ProvidersTab({
                       });
                     }}
                   >
-                    {providerTypesData?.provider_types &&
-                      Object.entries(providerTypesData.provider_types).map(([key, config]) => (
-                        <option key={key} value={key}>
-                          {config.name}
-                        </option>
-                      ))}
-                  </select>
+                    <SelectTrigger disabled={!!editingProvider}>
+                      <SelectValue placeholder="Select provider..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {providerTypesData?.provider_types &&
+                        Object.entries(providerTypesData.provider_types).map(([key, config]) => (
+                          <SelectItem key={key} value={key}>
+                            {config.name}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
               {getProviderTypeConfig(newProvider.provider_type)?.fields.includes("api_key") && (
@@ -397,57 +408,62 @@ export function ProvidersTab({
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Chat Model</label>
-                  <select
-                    className="w-full h-10 px-3 rounded-md border bg-background"
+                  <Select
                     value={newProvider.default_chat_model}
-                    onChange={(e) => setNewProvider({ ...newProvider, default_chat_model: e.target.value })}
+                    onValueChange={(value) => setNewProvider({ ...newProvider, default_chat_model: value })}
                   >
-                    <option value="">Select model...</option>
-                    {newProvider.provider_type === "ollama" && ollamaModelsData?.chat_models ? (
-                      ollamaModelsData.chat_models.map((model) => (
-                        <option key={model.name} value={model.name}>
-                          {model.name} {model.parameter_size && `(${model.parameter_size})`}
-                        </option>
-                      ))
-                    ) : (
-                      getProviderTypeConfig(newProvider.provider_type)?.chat_models.map((model) => (
-                        <option key={model} value={model}>
-                          {model}
-                        </option>
-                      ))
-                    )}
-                  </select>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select model..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {newProvider.provider_type === "ollama" && ollamaModelsData?.chat_models ? (
+                        ollamaModelsData.chat_models.map((model) => (
+                          <SelectItem key={model.name} value={model.name}>
+                            {model.name} {model.parameter_size && `(${model.parameter_size})`}
+                          </SelectItem>
+                        ))
+                      ) : (
+                        getProviderTypeConfig(newProvider.provider_type)?.chat_models.map((model) => (
+                          <SelectItem key={model} value={model}>
+                            {model}
+                          </SelectItem>
+                        ))
+                      )}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Embedding Model</label>
-                  <select
-                    className="w-full h-10 px-3 rounded-md border bg-background"
+                  <Select
                     value={newProvider.default_embedding_model}
-                    onChange={(e) => setNewProvider({ ...newProvider, default_embedding_model: e.target.value })}
+                    onValueChange={(value) => setNewProvider({ ...newProvider, default_embedding_model: value })}
                   >
-                    <option value="">Select model...</option>
-                    {newProvider.provider_type === "ollama" && ollamaModelsData?.embedding_models ? (
-                      ollamaModelsData.embedding_models.map((model) => (
-                        <option key={model.name} value={model.name}>
-                          {model.name} {model.parameter_size && `(${model.parameter_size})`}
-                        </option>
-                      ))
-                    ) : (
-                      getProviderTypeConfig(newProvider.provider_type)?.embedding_models.map((model) => (
-                        <option key={model} value={model}>
-                          {model}
-                        </option>
-                      ))
-                    )}
-                  </select>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select model..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {newProvider.provider_type === "ollama" && ollamaModelsData?.embedding_models ? (
+                        ollamaModelsData.embedding_models.map((model) => (
+                          <SelectItem key={model.name} value={model.name}>
+                            {model.name} {model.parameter_size && `(${model.parameter_size})`}
+                          </SelectItem>
+                        ))
+                      ) : (
+                        getProviderTypeConfig(newProvider.provider_type)?.embedding_models.map((model) => (
+                          <SelectItem key={model} value={model}>
+                            {model}
+                          </SelectItem>
+                        ))
+                      )}
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
+                <Switch
                   id="is_default_provider"
                   checked={newProvider.is_default}
-                  onChange={(e) => setNewProvider({ ...newProvider, is_default: e.target.checked })}
+                  onCheckedChange={(checked) => setNewProvider({ ...newProvider, is_default: checked })}
                 />
                 <label htmlFor="is_default_provider" className="text-sm">
                   Set as default provider

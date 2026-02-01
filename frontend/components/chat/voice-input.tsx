@@ -84,10 +84,18 @@ export function VoiceInput({
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
+  // Track support status in state to avoid hydration mismatch
+  // Initialize to false - will be updated after mount on client
+  const [isSupported, setIsSupported] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingTranscriptRef = useRef<string>("");
+
+  // Check for speech recognition support after mount (avoids hydration mismatch)
+  useEffect(() => {
+    setIsSupported(isSpeechRecognitionSupported());
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -246,8 +254,10 @@ export function VoiceInput({
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  if (!isSpeechRecognitionSupported()) {
-    return null; // Don't show button if not supported
+  // Don't render until we've checked support (after hydration)
+  // This prevents hydration mismatch between server and client
+  if (!isSupported) {
+    return null;
   }
 
   return (

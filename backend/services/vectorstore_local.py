@@ -25,6 +25,13 @@ from sqlalchemy import select
 logger = structlog.get_logger(__name__)
 
 
+def _get_backend_root() -> Path:
+    """Get the backend directory (where backend code lives)."""
+    # This file is at backend/services/vectorstore_local.py
+    # So backend root is 2 levels up
+    return Path(__file__).resolve().parents[1]
+
+
 def fix_chromadb_pickle() -> bool:
     """
     Fix ChromaDB index_metadata.pickle corruption.
@@ -39,7 +46,9 @@ def fix_chromadb_pickle() -> bool:
     """
     from chromadb.segment.impl.vector.local_persistent_hnsw import PersistentData
 
-    chroma_dir = Path(os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma"))
+    # Resolve path relative to project root
+    default_dir = _get_backend_root() / "data" / "chroma"
+    chroma_dir = Path(os.getenv("CHROMA_PERSIST_DIRECTORY", str(default_dir)))
     if not chroma_dir.exists():
         return False
 
@@ -118,9 +127,14 @@ def fix_chromadb_pickle() -> bool:
 @dataclass
 class ChromaConfig:
     """Configuration for ChromaDB local vector store."""
-    persist_directory: str = "./data/chroma"
+    persist_directory: str = ""  # Will be set to project_root/data/chroma
     collection_name: str = "documents"
     distance_function: str = "cosine"  # cosine, l2, ip
+
+    def __post_init__(self):
+        # Resolve path relative to project root, not current working directory
+        if not self.persist_directory:
+            self.persist_directory = str(_get_backend_root() / "data" / "chroma")
 
 
 # =============================================================================
@@ -162,6 +176,13 @@ class ChromaVectorStore:
             "CHROMA_COLLECTION_NAME",
             self.chroma_config.collection_name
         )
+
+        # CRITICAL: Always resolve to absolute path to ensure consistency
+        # across different working directories (e.g., Celery workers may have different cwd)
+        persist_dir = os.path.abspath(persist_dir)
+
+        # Ensure the directory exists
+        os.makedirs(persist_dir, exist_ok=True)
 
         # Initialize ChromaDB client with persistence
         self._client = chromadb.PersistentClient(
@@ -232,7 +253,10 @@ class ChromaVectorStore:
             chunk_ids.append(chunk_id)
 
             ids.append(chunk_id)
-            embeddings.append(chunk_data.get("embedding", []))
+            # Get embedding and check if it has actual values (not just empty list)
+            embedding = chunk_data.get("embedding")
+            has_valid_embedding = bool(embedding and len(embedding) > 0)
+            embeddings.append(embedding if has_valid_embedding else [])
             documents.append(chunk_data["content"])
 
             # Store metadata for filtering (including multi-tenant and private doc info)
@@ -253,13 +277,15 @@ class ChromaVectorStore:
                 "is_private": is_private,
             })
 
-            # Prepare SQLite chunk record (without embedding - stored in ChromaDB)
+            # Prepare SQLite chunk record (use has_embedding flag for UI tracking)
+            # Don't store actual embedding in SQLite - only in ChromaDB (saves storage)
             chunk_record = ChunkModel(
                 id=uuid.UUID(chunk_id),
                 document_id=uuid.UUID(document_id),
                 access_tier_id=uuid.UUID(access_tier_id),
                 content=chunk_data["content"],
                 content_hash=chunk_data.get("content_hash", ""),
+                has_embedding=has_valid_embedding,  # Only True if embedding has actual values
                 chunk_index=chunk_data.get("chunk_index", i),
                 page_number=chunk_data.get("page_number"),
                 section_title=chunk_data.get("section_title"),
@@ -271,14 +297,43 @@ class ChromaVectorStore:
                 chunk_record.organization_id = uuid.UUID(organization_id)
             db_chunks.append(chunk_record)
 
+        # Check how many chunks have valid embeddings
+        valid_embedding_count = sum(1 for e in embeddings if e and len(e) > 0)
+        has_any_embeddings = valid_embedding_count > 0
+
+        # Log warning if no embeddings - documents won't be searchable!
+        if not has_any_embeddings:
+            logger.warning(
+                "NO EMBEDDINGS provided for chunks - document will NOT be searchable!",
+                document_id=document_id,
+                chunk_count=len(ids),
+            )
+
         # Add to ChromaDB
         if ids:
-            self._collection.add(
-                ids=ids,
-                embeddings=embeddings if any(embeddings) else None,
-                documents=documents,
-                metadatas=metadatas,
-            )
+            try:
+                self._collection.add(
+                    ids=ids,
+                    embeddings=embeddings if has_any_embeddings else None,
+                    documents=documents,
+                    metadatas=metadatas,
+                )
+                logger.info(
+                    "Successfully added chunks to ChromaDB collection",
+                    document_id=document_id,
+                    chunk_count=len(ids),
+                    with_embeddings=valid_embedding_count,
+                )
+            except Exception as e:
+                logger.error(
+                    "CRITICAL: Failed to add chunks to ChromaDB - document will NOT be searchable!",
+                    document_id=document_id,
+                    chunk_count=len(ids),
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
+                # Re-raise so callers know the operation failed
+                raise RuntimeError(f"ChromaDB add failed for document {document_id}: {e}") from e
 
         # Also store in SQLite database for chunk counting and metadata queries
         if db_chunks:
@@ -290,6 +345,7 @@ class ChromaVectorStore:
                     "Added chunks to SQLite database",
                     document_id=document_id,
                     chunk_count=len(db_chunks),
+                    with_embeddings=valid_embedding_count,
                 )
             except Exception as e:
                 logger.warning(
@@ -302,6 +358,7 @@ class ChromaVectorStore:
             "Added chunks to ChromaDB",
             document_id=document_id,
             chunk_count=len(chunk_ids),
+            with_embeddings=valid_embedding_count,
         )
 
         return chunk_ids
@@ -1288,6 +1345,7 @@ class ChromaVectorStore:
 # =============================================================================
 
 _chroma_store: Optional[ChromaVectorStore] = None
+_chroma_store_pid: Optional[int] = None  # Track process ID for fork safety
 
 
 def get_chroma_vector_store(
@@ -1297,6 +1355,9 @@ def get_chroma_vector_store(
     """
     Get or create ChromaDB vector store instance.
 
+    This function is fork-safe: if called from a forked process (e.g., Celery worker),
+    it will create a new ChromaDB client to avoid stale connections.
+
     Args:
         config: Optional general configuration
         chroma_config: Optional ChromaDB-specific configuration
@@ -1304,9 +1365,29 @@ def get_chroma_vector_store(
     Returns:
         ChromaVectorStore instance
     """
-    global _chroma_store
+    global _chroma_store, _chroma_store_pid
 
-    if _chroma_store is None or config is not None or chroma_config is not None:
+    current_pid = os.getpid()
+
+    # Reinitialize if:
+    # 1. No store exists
+    # 2. Process forked (Celery workers) - detected by PID change
+    # 3. New config provided (for testing)
+    needs_reinit = (
+        _chroma_store is None
+        or _chroma_store_pid != current_pid
+        or config is not None
+        or chroma_config is not None
+    )
+
+    if needs_reinit:
+        if _chroma_store_pid is not None and _chroma_store_pid != current_pid:
+            logger.info(
+                "Process fork detected, reinitializing ChromaDB client",
+                old_pid=_chroma_store_pid,
+                new_pid=current_pid,
+            )
         _chroma_store = ChromaVectorStore(config=config, chroma_config=chroma_config)
+        _chroma_store_pid = current_pid
 
     return _chroma_store

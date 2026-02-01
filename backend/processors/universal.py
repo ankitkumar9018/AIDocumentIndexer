@@ -700,7 +700,7 @@ class UniversalProcessor:
     # =========================================================================
 
     def _process_image(self, file_path: str, mode: str) -> ExtractedContent:
-        """Process image using OCR."""
+        """Process image using OCR and optional VLM captioning."""
         if mode == "basic":
             return ExtractedContent(
                 text="",
@@ -708,11 +708,48 @@ class UniversalProcessor:
                 page_count=1,
             )
 
+        # OCR the image for text extraction
         text = self._ocr_image(file_path)
+
+        # Also include the image for VLM captioning (like PDFs do)
+        extracted_images: List[ExtractedImage] = []
+        if self.enable_image_analysis:
+            try:
+                with open(file_path, "rb") as f:
+                    image_bytes = f.read()
+
+                # Determine extension from file path
+                import os
+                ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+                if ext == "jpeg":
+                    ext = "jpg"
+
+                if len(image_bytes) > 1000:  # Skip tiny images (< 1KB)
+                    extracted_images.append(ExtractedImage(
+                        page_number=1,
+                        image_index=0,
+                        image_bytes=image_bytes,
+                        extension=ext or "png",
+                        alt_text=None,
+                        source_type="standalone",
+                    ))
+                    logger.debug(
+                        "Image added for VLM captioning",
+                        file_path=file_path,
+                        size_kb=len(image_bytes) // 1024,
+                    )
+            except Exception as e:
+                logger.warning("Failed to read image for VLM", error=str(e))
 
         return ExtractedContent(
             text=text,
-            metadata={"file_type": "image", "file_path": file_path},
+            metadata={
+                "file_type": "image",
+                "file_path": file_path,
+                "ocr_text_length": len(text),
+                "images_extracted": len(extracted_images),
+            },
+            extracted_images=extracted_images,
             page_count=1,
         )
 
@@ -749,12 +786,25 @@ class UniversalProcessor:
 
         import os
         import time
-        provider = "paddleocr"
+
+        # Check settings for OCR provider (default to tesseract to avoid PaddleOCR memory issues)
+        ocr_provider = os.getenv("OCR_PROVIDER", "tesseract").lower()
+
         fallback_used = False
         start_time = time.time()
         success = True
         error_message = None
         text = ""
+        provider = ocr_provider
+
+        # If provider is tesseract, skip PaddleOCR entirely
+        if ocr_provider == "tesseract":
+            try:
+                text = self._ocr_tesseract(image_path)
+                return text
+            except Exception as e:
+                logger.error("Tesseract OCR failed", error=str(e))
+                return ""
 
         try:
             from paddleocr import PaddleOCR
@@ -796,7 +846,8 @@ class UniversalProcessor:
                     cache_dir=paddle_home,
                 )
 
-            result = self._ocr_engine.ocr(image_path, cls=True)
+            # Note: cls parameter removed - text orientation is configured via use_textline_orientation in init
+            result = self._ocr_engine.ocr(image_path)
 
             if result and result[0]:
                 text_lines = [line[1][0] for line in result[0]]

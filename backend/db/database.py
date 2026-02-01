@@ -52,19 +52,28 @@ class DatabaseConfig:
         if self.local_mode:
             # Force SQLite + local settings in local mode
             self.database_type = "sqlite"
-            default_db_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                "data",
-                "aidocindexer.db"
-            )
-            self.database_url = os.getenv(
-                "DATABASE_URL",
-                f"sqlite:///{default_db_path}"
-            )
+
+            # Get project root (backend/../..)
+            project_root = Path(__file__).parent.parent.parent
+
+            # Default SQLite path in backend/data/
+            default_db_path = project_root / "backend" / "data" / "aidocindexer.db"
+
+            raw_url = os.getenv("DATABASE_URL", f"sqlite:///{default_db_path}")
+
+            # Handle relative SQLite paths - resolve them from project root
+            if raw_url.startswith("sqlite:///") and not raw_url.startswith("sqlite:////"):
+                # Extract the relative path (remove sqlite:///)
+                rel_path = raw_url[10:]  # Remove "sqlite:///"
+                abs_path = (project_root / rel_path).resolve()
+                self.database_url = f"sqlite:///{abs_path}"
+            else:
+                self.database_url = raw_url
+
             # Ensure VECTOR_STORE_BACKEND is set for local mode
             if not os.getenv("VECTOR_STORE_BACKEND"):
                 os.environ["VECTOR_STORE_BACKEND"] = "chroma"
-            logger.info("Running in LOCAL_MODE - using SQLite + ChromaDB")
+            logger.info(f"Running in LOCAL_MODE - using SQLite at {self.database_url}")
         else:
             self.database_type = os.getenv("DATABASE_TYPE", "postgresql")
             self.database_url = os.getenv("DATABASE_URL", "")

@@ -447,3 +447,54 @@ Each agent can be configured with:
 - Agent health dashboard shows degraded agents
 - Optimization jobs highlight underperforming prompts
 - Cost dashboard tracks usage trends
+
+---
+
+## Phase 95 Enhancements
+
+### Agent Usage Insights (Phase 95O)
+
+Per-agent analytics are now available via the Agent Insights component:
+
+**Metrics Tracked:**
+| Metric | Description |
+|--------|-------------|
+| Total Queries | Number of requests handled by the agent |
+| Avg Response Time | Mean response latency across all requests |
+| Satisfaction Rate | Percentage of positive feedback (thumbs up) |
+| Active Users | Unique users who have interacted with the agent |
+
+**Time Period Filters:**
+- Last 7 days
+- Last 30 days
+- All time
+
+**Accessing Insights:**
+Navigate to **Dashboard > Agents > [Agent Name] > Insights** to view per-agent analytics.
+
+### Voice Agent References
+
+The audio system (Phase 76) integrates with agents for voice-based interactions:
+- **TTS Providers:** OpenAI TTS, ElevenLabs, Chatterbox, CosyVoice2, Fish Speech
+- **Audio Overviews:** Agents can generate podcast-style discussions from documents
+- **Streaming:** Real-time audio generation with 40ms time-to-first-audio (Cartesia)
+
+See [FEATURES.md](FEATURES.md#audio-overviews) for full audio documentation.
+
+### DSPy Prompt Optimization for Agents (Phase 93)
+
+Agent prompts can be automatically optimized using DSPy:
+
+1. **Training Data Collection:** Agent trajectories (input/output pairs) are collected automatically
+2. **Optimization:** Admin triggers DSPy optimization which compiles optimal prompts from examples
+3. **Deployment:** Compiled prompts are deployed to replace hand-written prompts
+4. **A/B Testing:** New prompts are tested against existing ones with traffic splitting
+
+**Admin Endpoints:**
+```
+POST /api/v1/dspy/optimize          # Start optimization job
+GET  /api/v1/dspy/jobs              # List optimization jobs
+POST /api/v1/dspy/jobs/{id}/deploy  # Deploy optimized prompts
+```
+
+See [API.md](API.md#dspy-prompt-optimization-endpoints-phase-93) for full endpoint documentation.

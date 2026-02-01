@@ -212,67 +212,188 @@ class MultimodalRAGService:
         """Check if vision model is available."""
         # Check for common vision model environment variables
         # Supports both free (Ollama, local) and paid (OpenAI, Anthropic) options
-        has_openai = bool(os.getenv("OPENAI_API_KEY"))
-        has_anthropic = bool(os.getenv("ANTHROPIC_API_KEY"))
-        has_ollama = bool(os.getenv("OLLAMA_BASE_URL") or os.getenv("USE_OLLAMA"))
+        # For API keys, check they're not placeholders
+
+        # Ollama (preferred - free local)
+        has_ollama = bool(
+            os.getenv("OLLAMA_BASE_URL")
+            or os.getenv("USE_OLLAMA")
+            or os.getenv("OLLAMA_ENABLED")
+        )
+        if has_ollama:
+            return True
+
+        # OpenAI - check for valid (non-placeholder) key
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        has_openai = bool(
+            openai_key
+            and not openai_key.startswith("sk-your-")
+            and openai_key != "disabled"
+            and len(openai_key) > 20
+        )
+
+        # Anthropic - check for valid (non-placeholder) key
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        has_anthropic = bool(
+            anthropic_key
+            and not anthropic_key.startswith("sk-ant-placeholder")
+            and anthropic_key != "disabled"
+            and len(anthropic_key) > 20
+        )
+
         has_local = bool(os.getenv("LOCAL_VISION_MODEL"))
-        return has_openai or has_anthropic or has_ollama or has_local
+
+        return has_openai or has_anthropic or has_local
 
     async def _get_vision_model(self):
         """
         Get or initialize vision model.
 
-        Supports multiple providers with fallback:
-        1. FREE: Ollama with LLaVA or similar vision model
-        2. FREE: Local vision model (if configured)
-        3. PAID: OpenAI GPT-4o
-        4. PAID: Anthropic Claude
+        Provider priority:
+        1. Database setting (rag.vision_provider) - if set to specific provider, use ONLY that
+        2. Environment variables for Ollama detection
+        3. Auto-detect based on available API keys (only valid, non-placeholder keys)
 
-        Configure via environment variables:
+        Configure via Admin Settings UI or environment variables:
+        - Admin Settings: Settings > OCR > Vision Language Model section
         - USE_OLLAMA=true + OLLAMA_BASE_URL for free local vision
         - OPENAI_API_KEY for paid OpenAI
         - ANTHROPIC_API_KEY for paid Anthropic
         """
-        if self.vision_model:
-            return self.vision_model
+        # FIRST: Always check database settings (no caching to ensure fresh settings)
+        db_provider = None
+        db_model = None
+        try:
+            from backend.services.settings import get_settings_service
+            settings_service = get_settings_service()
+            settings = await settings_service.get_settings_batch([
+                "rag.vision_provider",      # Correct key from database
+                "rag.vlm_provider",          # Legacy key fallback
+                "rag.ollama_vision_model",
+            ])
+            # Use correct database key with fallback to legacy key
+            db_provider = settings.get("rag.vision_provider") or settings.get("rag.vlm_provider", "auto")
+            db_model = settings.get("rag.ollama_vision_model")
+        except Exception as e:
+            logger.warning(f"Could not fetch VLM settings from database: {e}")
 
-        # Option 1: FREE - Ollama with vision model (e.g., LLaVA, Bakllava)
-        if os.getenv("USE_OLLAMA") or os.getenv("OLLAMA_BASE_URL"):
+        # Log the actual values for debugging
+        logger.info(
+            "Vision model selection",
+            db_provider=db_provider,
+            db_model=db_model,
+            cached_model=self.vision_model is not None,
+        )
+
+        # If database explicitly says "ollama", use Ollama with NO fallback
+        if db_provider == "ollama":
             try:
                 from langchain_ollama import ChatOllama
                 ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-                vision_model = os.getenv("OLLAMA_VISION_MODEL", "llava")
-                logger.info(f"Using FREE Ollama vision model: {vision_model}")
+                vision_model = db_model or os.getenv("OLLAMA_VISION_MODEL", "llava")
+                logger.info(f"Using Ollama vision model (from DB setting): {vision_model} at {ollama_base}")
                 return ChatOllama(
                     model=vision_model,
                     base_url=ollama_base,
                 )
             except ImportError:
-                logger.debug("langchain_ollama not installed")
+                logger.error("langchain_ollama not installed - cannot use Ollama for vision")
+                return None
             except Exception as e:
-                logger.warning(f"Ollama vision init failed: {e}")
+                logger.error(f"Ollama vision init failed: {e}")
+                return None
 
-        # Option 2: PAID - OpenAI (if configured)
-        if os.getenv("OPENAI_API_KEY"):
+        # If database explicitly says "openai", use OpenAI (but validate key)
+        if db_provider == "openai":
+            openai_key = os.getenv("OPENAI_API_KEY", "")
+            if not openai_key or openai_key.startswith("sk-your-") or openai_key == "disabled":
+                logger.error("OpenAI requested but API key is invalid/placeholder")
+                return None
             try:
                 from langchain_openai import ChatOpenAI
-                logger.info("Using PAID OpenAI GPT-4o vision model")
-                return ChatOpenAI(model="gpt-4o", max_tokens=1000)
+                model_name = db_model if db_model and "gpt" in db_model.lower() else "gpt-4o"
+                logger.info(f"Using OpenAI vision model (from DB setting): {model_name}")
+                return ChatOpenAI(model=model_name, max_tokens=1000)
             except ImportError:
-                pass
+                logger.error("langchain_openai not installed")
+                return None
 
-        # Option 3: PAID - Anthropic (if configured)
-        if os.getenv("ANTHROPIC_API_KEY"):
+        # If database explicitly says "anthropic", use Anthropic (but validate key)
+        if db_provider == "anthropic":
+            anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+            if not anthropic_key or anthropic_key.startswith("sk-ant-placeholder") or anthropic_key == "disabled":
+                logger.error("Anthropic requested but API key is invalid/placeholder")
+                return None
             try:
                 from langchain_anthropic import ChatAnthropic
-                logger.info("Using PAID Anthropic Claude vision model")
-                return ChatAnthropic(model="claude-3-5-sonnet-20241022", max_tokens=1000)
+                model_name = db_model if db_model and "claude" in db_model.lower() else "claude-3-5-sonnet-20241022"
+                logger.info(f"Using Anthropic vision model (from DB setting): {model_name}")
+                return ChatAnthropic(model=model_name, max_tokens=1000)
             except ImportError:
-                pass
+                logger.error("langchain_anthropic not installed")
+                return None
+
+        # AUTO mode: Return cached model if available
+        if self.vision_model:
+            return self.vision_model
+
+        # AUTO mode: Check environment variables for Ollama
+        if os.getenv("USE_OLLAMA") or os.getenv("OLLAMA_ENABLED") or os.getenv("OLLAMA_BASE_URL"):
+            try:
+                from langchain_ollama import ChatOllama
+                ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+                vision_model = db_model or os.getenv("OLLAMA_VISION_MODEL", "llava")
+                logger.info(f"Using Ollama vision model (from env): {vision_model} at {ollama_base}")
+                return ChatOllama(
+                    model=vision_model,
+                    base_url=ollama_base,
+                )
+            except ImportError:
+                logger.warning("langchain_ollama not installed, trying other providers")
+            except Exception as e:
+                logger.warning(f"Ollama vision init failed: {e}, trying other providers")
+
+        # AUTO mode: Try OpenAI with valid (non-placeholder) key
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        has_valid_openai_key = (
+            openai_key
+            and not openai_key.startswith("sk-your-")
+            and not openai_key.startswith("sk-placeholder")
+            and openai_key != "disabled"
+            and openai_key != ""
+            and len(openai_key) > 20
+        )
+        if has_valid_openai_key:
+            try:
+                from langchain_openai import ChatOpenAI
+                model_name = "gpt-4o"
+                logger.info(f"Using OpenAI vision model (auto-detected): {model_name}")
+                return ChatOpenAI(model=model_name, max_tokens=1000)
+            except ImportError:
+                logger.warning("langchain_openai not installed")
+
+        # AUTO mode: Try Anthropic with valid (non-placeholder) key
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        has_valid_anthropic_key = (
+            anthropic_key
+            and not anthropic_key.startswith("sk-ant-placeholder")
+            and anthropic_key != "disabled"
+            and anthropic_key != ""
+            and len(anthropic_key) > 20
+        )
+        if has_valid_anthropic_key:
+            try:
+                from langchain_anthropic import ChatAnthropic
+                model_name = "claude-3-5-sonnet-20241022"
+                logger.info(f"Using Anthropic vision model (auto-detected): {model_name}")
+                return ChatAnthropic(model=model_name, max_tokens=1000)
+            except ImportError:
+                logger.warning("langchain_anthropic not installed")
 
         logger.warning(
-            "No vision model available. Configure one of: "
-            "USE_OLLAMA=true (free), OPENAI_API_KEY (paid), or ANTHROPIC_API_KEY (paid)"
+            "No vision model available. Configure in Admin Settings > OCR > Vision Language Model, "
+            "or set environment variables: USE_OLLAMA=true or OLLAMA_ENABLED=true (free local), "
+            "OPENAI_API_KEY (paid), or ANTHROPIC_API_KEY (paid)"
         )
         return None
 

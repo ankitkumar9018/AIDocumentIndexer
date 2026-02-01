@@ -43,7 +43,10 @@ By participating in this project, you agree to maintain a respectful and inclusi
    cd backend
    python -m venv venv
    source venv/bin/activate
-   pip install -r requirements.txt
+   pip install -e ".[dev]"
+
+   # Alternative: Use UV for faster installs
+   # pip install uv && uv pip install -e ".[dev]"
 
    # Frontend
    cd ../frontend
@@ -95,7 +98,10 @@ docs(api): update authentication endpoint docs
 1. **Ensure tests pass:**
    ```bash
    # Backend
-   cd backend && pytest
+   cd backend && pytest tests/ -v
+
+   # Backend with coverage
+   cd backend && pytest tests/ --cov=services --cov=api -v
 
    # Frontend
    cd frontend && npm test

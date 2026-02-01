@@ -7,6 +7,7 @@ Handles starting, tracking, pausing, and cancelling extraction jobs.
 """
 
 import asyncio
+import os
 import uuid
 import time
 from datetime import datetime, timezone
@@ -831,8 +832,26 @@ class KGExtractionJobRunner:
                     for doc in batch
                 ]
 
-                # Wait for results
-                results = ray.get(futures)
+                # Wait for results with timeout
+                ray_timeout = float(os.getenv("RAY_TASK_TIMEOUT", "300"))
+                try:
+                    results = ray.get(futures, timeout=ray_timeout)
+                except ray.exceptions.GetTimeoutError:
+                    logger.warning(
+                        "Ray KG extraction timed out, cancelling tasks",
+                        timeout=ray_timeout,
+                        batch_size=len(futures),
+                    )
+                    for ref in futures:
+                        try:
+                            ray.cancel(ref, force=True)
+                        except Exception:
+                            pass
+                    # Mark batch as failed
+                    for doc in batch:
+                        doc.kg_extraction_status = "failed"
+                        failed_count += 1
+                    continue
 
                 # Process results
                 for doc, result in zip(batch, results):

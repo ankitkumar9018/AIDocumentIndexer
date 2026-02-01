@@ -3,8 +3,10 @@
 import { TabsContent } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmbeddingDashboard } from "@/components/embedding-dashboard";
-import { Sparkles, FileText, MessageSquare, Search, Zap, Cog, Activity, Workflow, Bot, RefreshCw, DollarSign, Shield, Layers, TreePine } from "lucide-react";
+import { Sparkles, FileText, MessageSquare, Search, Zap, Cog, Activity, Workflow, Bot, RefreshCw, DollarSign, Shield, Layers, TreePine, Brain, HardDrive, GitBranch } from "lucide-react";
 
 interface RagTabProps {
   localSettings: Record<string, unknown>;
@@ -16,6 +18,79 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
     <TabsContent value="rag" className="space-y-6">
       {/* Embedding System Status Dashboard */}
       <EmbeddingDashboard />
+
+      {/* Embedding Provider Settings */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <HardDrive className="h-5 w-5" />
+            Embedding Provider
+          </CardTitle>
+          <CardDescription>
+            Configure which provider and model to use for generating document embeddings
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Provider</label>
+              <Select
+                value={localSettings["embedding.provider"] as string ?? "ollama"}
+                onValueChange={(value) => handleSettingChange("embedding.provider", value)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select provider" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ollama">Ollama (Local)</SelectItem>
+                  <SelectItem value="openai">OpenAI</SelectItem>
+                  <SelectItem value="voyage">Voyage AI</SelectItem>
+                  <SelectItem value="cohere">Cohere</SelectItem>
+                  <SelectItem value="gemini">Google Gemini</SelectItem>
+                  <SelectItem value="auto">Auto-select</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Ollama is free and runs locally. Cloud providers require API keys configured in Providers tab.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Model</label>
+              <Input
+                value={localSettings["embedding.model"] as string ?? ""}
+                onChange={(e) => handleSettingChange("embedding.model", e.target.value)}
+                placeholder={
+                  (localSettings["embedding.provider"] as string) === "ollama"
+                    ? "nomic-embed-text"
+                    : "text-embedding-3-small"
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Leave empty to use provider default. For Ollama: nomic-embed-text (768D), mxbai-embed-large (1024D)
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Auto-select Model</p>
+              <p className="text-sm text-muted-foreground">
+                Automatically choose embedding model based on content type (code, multilingual, etc.)
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["embedding.auto_select_enabled"] as boolean ?? false}
+              onCheckedChange={(checked) => handleSettingChange("embedding.auto_select_enabled", checked)}
+            />
+          </div>
+
+          <div className="p-3 bg-blue-50 dark:bg-blue-950/30 rounded-lg text-sm text-muted-foreground">
+            Changes take effect for new document uploads. Existing documents retain their original embeddings.
+            Use the &quot;Reprocess&quot; option on individual documents to regenerate embeddings with new settings.
+          </div>
+        </CardContent>
+      </Card>
 
       {/* AI Optimization Settings */}
       <Card>
@@ -46,11 +121,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                     Clean text before embedding
                   </p>
                 </div>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["ai.enable_preprocessing"] as boolean ?? true}
-                  onChange={(e) => handleSettingChange("ai.enable_preprocessing", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("ai.enable_preprocessing", checked)}
                 />
               </div>
               <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -60,11 +133,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                     Strip headers, footers, page numbers
                   </p>
                 </div>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["ai.remove_boilerplate"] as boolean ?? true}
-                  onChange={(e) => handleSettingChange("ai.remove_boilerplate", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("ai.remove_boilerplate", checked)}
                 />
               </div>
               <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -74,11 +145,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                     Collapse multiple spaces/newlines
                   </p>
                 </div>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["ai.normalize_whitespace"] as boolean ?? true}
-                  onChange={(e) => handleSettingChange("ai.normalize_whitespace", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("ai.normalize_whitespace", checked)}
                 />
               </div>
               <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -88,11 +157,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                     Remove near-duplicate chunks
                   </p>
                 </div>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["ai.deduplicate_content"] as boolean ?? false}
-                  onChange={(e) => handleSettingChange("ai.deduplicate_content", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("ai.deduplicate_content", checked)}
                 />
               </div>
             </div>
@@ -114,11 +181,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Summarize large docs before chunking
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["ai.enable_summarization"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("ai.enable_summarization", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("ai.enable_summarization", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -145,15 +210,19 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Summary Model</label>
-              <select
-                className="w-full h-10 px-3 rounded-md border bg-background"
+              <Select
                 value={localSettings["ai.summarization_model"] as string || "gpt-4o-mini"}
-                onChange={(e) => handleSettingChange("ai.summarization_model", e.target.value)}
+                onValueChange={(value) => handleSettingChange("ai.summarization_model", value)}
               >
-                <option value="gpt-4o-mini">GPT-4o Mini (Cost-effective)</option>
-                <option value="gpt-4o">GPT-4o (Higher quality)</option>
-                <option value="claude-3-haiku">Claude 3 Haiku (Fast)</option>
-              </select>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gpt-4o-mini">GPT-4o Mini (Cost-effective)</SelectItem>
+                  <SelectItem value="gpt-4o">GPT-4o (Higher quality)</SelectItem>
+                  <SelectItem value="claude-3-haiku">Claude 3 Haiku (Fast)</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
@@ -173,11 +242,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Match similar queries by embedding
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={localSettings["ai.enable_semantic_cache"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("ai.enable_semantic_cache", e.target.checked)}
+              <Switch
+                checked={localSettings["rag.semantic_cache_enabled"] as boolean ?? false}
+                onCheckedChange={(checked) => handleSettingChange("rag.semantic_cache_enabled", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -189,8 +256,8 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   min="0.8"
                   max="1.0"
                   placeholder="0.95"
-                  value={localSettings["ai.semantic_similarity_threshold"] as number ?? 0.95}
-                  onChange={(e) => handleSettingChange("ai.semantic_similarity_threshold", parseFloat(e.target.value))}
+                  value={localSettings["rag.semantic_similarity_threshold"] as number ?? 0.95}
+                  onChange={(e) => handleSettingChange("rag.semantic_similarity_threshold", parseFloat(e.target.value))}
                 />
                 <p className="text-xs text-muted-foreground">Higher = stricter matching (0.8-1.0)</p>
               </div>
@@ -199,8 +266,8 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                 <Input
                   type="number"
                   placeholder="10000"
-                  value={localSettings["ai.max_semantic_cache_entries"] as number ?? 10000}
-                  onChange={(e) => handleSettingChange("ai.max_semantic_cache_entries", parseInt(e.target.value) || 1000)}
+                  value={localSettings["rag.max_semantic_cache_entries"] as number ?? 10000}
+                  onChange={(e) => handleSettingChange("rag.max_semantic_cache_entries", parseInt(e.target.value) || 1000)}
                 />
                 <p className="text-xs text-muted-foreground">Limit semantic cache size</p>
               </div>
@@ -223,11 +290,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Generate paraphrased queries for better retrieval
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={localSettings["ai.enable_query_expansion"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("ai.enable_query_expansion", e.target.checked)}
+              <Switch
+                checked={localSettings["rag.query_expansion_enabled"] as boolean ?? false}
+                onCheckedChange={(checked) => handleSettingChange("rag.query_expansion_enabled", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -238,22 +303,26 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   min="1"
                   max="5"
                   placeholder="2"
-                  value={localSettings["ai.query_expansion_count"] as number ?? 2}
-                  onChange={(e) => handleSettingChange("ai.query_expansion_count", parseInt(e.target.value) || 2)}
+                  value={localSettings["rag.query_expansion_count"] as number ?? 2}
+                  onChange={(e) => handleSettingChange("rag.query_expansion_count", parseInt(e.target.value) || 2)}
                 />
                 <p className="text-xs text-muted-foreground">Number of variations to generate (1-5)</p>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Expansion Model</label>
-                <select
-                  className="w-full h-10 px-3 rounded-md border bg-background"
-                  value={localSettings["ai.query_expansion_model"] as string || "gpt-4o-mini"}
-                  onChange={(e) => handleSettingChange("ai.query_expansion_model", e.target.value)}
+                <Select
+                  value={localSettings["rag.query_expansion_model"] as string || "gpt-4o-mini"}
+                  onValueChange={(value) => handleSettingChange("rag.query_expansion_model", value)}
                 >
-                  <option value="gpt-4o-mini">GPT-4o Mini (Cost-effective)</option>
-                  <option value="gpt-4o">GPT-4o (Higher quality)</option>
-                  <option value="claude-3-haiku">Claude 3 Haiku (Fast)</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="gpt-4o-mini">GPT-4o Mini (Cost-effective)</SelectItem>
+                    <SelectItem value="gpt-4o">GPT-4o (Higher quality)</SelectItem>
+                    <SelectItem value="claude-3-haiku">Claude 3 Haiku (Fast)</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           </div>
@@ -274,11 +343,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Auto-detect document type and adjust chunk size
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["ai.enable_adaptive_chunking"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("ai.enable_adaptive_chunking", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("ai.enable_adaptive_chunking", checked)}
               />
             </div>
             <div className="bg-muted/30 rounded-lg p-3">
@@ -309,11 +376,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Create document/section/detail chunk levels
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["ai.enable_hierarchical_chunking"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("ai.enable_hierarchical_chunking", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("ai.enable_hierarchical_chunking", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -441,11 +506,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Use cross-encoder AI to reorder results by semantic relevance (recommended)
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.rerank_results"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.rerank_results", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.rerank_results", checked)}
               />
             </div>
           </div>
@@ -466,11 +529,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Extract entities and relationships for graph-based retrieval
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.graphrag_enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.graphrag_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.graphrag_enabled", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -505,11 +566,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Extract entities when processing documents
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.entity_extraction_enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.entity_extraction_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.entity_extraction_enabled", checked)}
               />
             </div>
           </div>
@@ -530,11 +589,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Decompose complex queries into sub-questions
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.agentic_enabled"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("rag.agentic_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.agentic_enabled", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -556,11 +613,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                     Trigger agentic mode automatically
                   </p>
                 </div>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["rag.auto_detect_complexity"] as boolean ?? true}
-                  onChange={(e) => handleSettingChange("rag.auto_detect_complexity", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("rag.auto_detect_complexity", checked)}
                 />
               </div>
             </div>
@@ -582,58 +637,125 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Caption images and extract tables during indexing
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.multimodal_enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.multimodal_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.multimodal_enabled", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Vision Provider</label>
-                <select
-                  className="w-full h-10 px-3 rounded-md border bg-background"
+                <Select
                   value={localSettings["rag.vision_provider"] as string || "auto"}
-                  onChange={(e) => handleSettingChange("rag.vision_provider", e.target.value)}
+                  onValueChange={(value) => handleSettingChange("rag.vision_provider", value)}
                 >
-                  <option value="auto">Auto (Free first)</option>
-                  <option value="ollama">Ollama (Free - Local)</option>
-                  <option value="openai">OpenAI (Paid)</option>
-                  <option value="anthropic">Anthropic (Paid)</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto (Free first)</SelectItem>
+                    <SelectItem value="ollama">Ollama (Free - Local)</SelectItem>
+                    <SelectItem value="openai">OpenAI (Paid)</SelectItem>
+                    <SelectItem value="anthropic">Anthropic (Paid)</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Ollama Vision Model</label>
-                <select
-                  className="w-full h-10 px-3 rounded-md border bg-background"
+                <Select
                   value={localSettings["rag.ollama_vision_model"] as string || "llava"}
-                  onChange={(e) => handleSettingChange("rag.ollama_vision_model", e.target.value)}
+                  onValueChange={(value) => handleSettingChange("rag.ollama_vision_model", value)}
                 >
-                  <option value="llava">LLaVA (Recommended)</option>
-                  <option value="bakllava">BakLLaVA</option>
-                  <option value="llava:13b">LLaVA 13B</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="llava">LLaVA (Recommended)</SelectItem>
+                    <SelectItem value="bakllava">BakLLaVA</SelectItem>
+                    <SelectItem value="llava:13b">LLaVA 13B</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["rag.caption_images"] as boolean ?? true}
-                  onChange={(e) => handleSettingChange("rag.caption_images", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("rag.caption_images", checked)}
                 />
                 <span className="text-sm">Caption Images</span>
               </div>
               <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["rag.extract_tables"] as boolean ?? true}
-                  onChange={(e) => handleSettingChange("rag.extract_tables", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("rag.extract_tables", checked)}
                 />
                 <span className="text-sm">Extract Tables</span>
+              </div>
+            </div>
+
+            {/* Image Analysis Settings */}
+            <div className="space-y-4 pt-3 mt-3 border-t border-dashed">
+              <h5 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Image Analysis Options
+              </h5>
+
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Enable Image Analysis</p>
+                  <p className="text-sm text-muted-foreground">
+                    Analyze images with AI during document processing
+                  </p>
+                </div>
+                <Switch
+                  checked={localSettings["rag.image_analysis_enabled"] as boolean ?? true}
+                  onCheckedChange={(checked) => handleSettingChange("rag.image_analysis_enabled", checked)}
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Skip Duplicate Images</p>
+                  <p className="text-sm text-muted-foreground">
+                    Reuse cached analysis for identical images (saves time and cost)
+                  </p>
+                </div>
+                <Switch
+                  checked={localSettings["rag.image_duplicate_detection"] as boolean ?? true}
+                  onCheckedChange={(checked) => handleSettingChange("rag.image_duplicate_detection", checked)}
+                />
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Max Images per Document</label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="200"
+                    value={localSettings["rag.max_images_per_document"] as number ?? 50}
+                    onChange={(e) => handleSettingChange("rag.max_images_per_document", parseInt(e.target.value) || 50)}
+                  />
+                  <p className="text-xs text-muted-foreground">Limit images to analyze (0 = unlimited)</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Min Image Size (KB)</label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={localSettings["rag.min_image_size_kb"] as number ?? 5}
+                    onChange={(e) => handleSettingChange("rag.min_image_size_kb", parseInt(e.target.value) || 5)}
+                  />
+                  <p className="text-xs text-muted-foreground">Skip tiny icons and decorations</p>
+                </div>
+              </div>
+
+              <div className="bg-amber-50 dark:bg-amber-950/30 rounded-lg p-3 text-xs">
+                <p className="font-medium text-amber-700 dark:text-amber-400">Free Vision with Ollama</p>
+                <p className="text-amber-600 dark:text-amber-500 mt-1">
+                  Run <code className="bg-amber-100 dark:bg-amber-900/50 px-1 rounded">ollama pull llava</code> for free local image analysis. No API costs!
+                </p>
               </div>
             </div>
           </div>
@@ -654,11 +776,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Only update changed chunks when reprocessing
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.incremental_indexing"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.incremental_indexing", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.incremental_indexing", checked)}
               />
             </div>
             <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -668,11 +788,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Flag stale content based on age
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.freshness_tracking"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.freshness_tracking", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.freshness_tracking", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -715,24 +833,26 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Remember facts and preferences across sessions
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["memory.enabled"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("memory.enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("memory.enabled", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Memory Provider</label>
-                <select
-                  className="w-full p-2 border rounded-md"
+                <Select
                   value={localSettings["memory.provider"] as string ?? "mem0"}
-                  onChange={(e) => handleSettingChange("memory.provider", e.target.value)}
+                  onValueChange={(value) => handleSettingChange("memory.provider", value)}
                 >
-                  <option value="mem0">Mem0 (Recommended)</option>
-                  <option value="amem">A-Mem (Agentic)</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="mem0">Mem0 (Recommended)</SelectItem>
+                    <SelectItem value="amem">A-Mem (Agentic)</SelectItem>
+                  </SelectContent>
+                </Select>
                 <p className="text-xs text-muted-foreground">Memory backend to use</p>
               </div>
               <div className="space-y-2">
@@ -754,11 +874,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Automatically deprioritize old memories
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["memory.decay_enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("memory.decay_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("memory.decay_enabled", checked)}
               />
             </div>
           </div>
@@ -779,11 +897,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Summarize older turns while keeping recent ones verbatim
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["compression.enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("compression.enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("compression.enabled", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -800,15 +916,19 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Compression Level</label>
-                <select
-                  className="w-full p-2 border rounded-md"
+                <Select
                   value={localSettings["compression.level"] as string ?? "moderate"}
-                  onChange={(e) => handleSettingChange("compression.level", e.target.value)}
+                  onValueChange={(value) => handleSettingChange("compression.level", value)}
                 >
-                  <option value="minimal">Minimal (Keep more context)</option>
-                  <option value="moderate">Moderate (Balanced)</option>
-                  <option value="aggressive">Aggressive (Max savings)</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="minimal">Minimal (Keep more context)</SelectItem>
+                    <SelectItem value="moderate">Moderate (Balanced)</SelectItem>
+                    <SelectItem value="aggressive">Aggressive (Max savings)</SelectItem>
+                  </SelectContent>
+                </Select>
                 <p className="text-xs text-muted-foreground">How aggressively to compress</p>
               </div>
             </div>
@@ -819,11 +939,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Never compress critical information (names, dates, etc.)
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["compression.enable_anchoring"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("compression.enable_anchoring", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("compression.enable_anchoring", checked)}
               />
             </div>
           </div>
@@ -844,11 +962,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Use 3-stage pipeline for 87% multi-hop accuracy
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rerank.tiered_enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rerank.tiered_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rerank.tiered_enabled", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
@@ -893,11 +1009,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Use LLM for final reranking (higher quality, more cost)
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rerank.use_llm_stage"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("rerank.use_llm_stage", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rerank.use_llm_stage", checked)}
               />
             </div>
           </div>
@@ -923,11 +1037,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Reduces hallucinations by 30% with self-verification and correction
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.self_rag_enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.self_rag_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.self_rag_enabled", checked)}
               />
             </div>
             {(localSettings["rag.self_rag_enabled"] as boolean ?? true) && (
@@ -971,11 +1083,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   10x token reduction with entity-based and relationship-aware retrieval
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.lightrag_enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.lightrag_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.lightrag_enabled", checked)}
               />
             </div>
             {(localSettings["rag.lightrag_enabled"] as boolean ?? true) && (
@@ -983,15 +1093,19 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <label className="text-sm font-medium">LightRAG Mode</label>
-                    <select
-                      className="w-full h-10 px-3 rounded-md border bg-background"
+                    <Select
                       value={localSettings["rag.lightrag_mode"] as string ?? "hybrid"}
-                      onChange={(e) => handleSettingChange("rag.lightrag_mode", e.target.value)}
+                      onValueChange={(value) => handleSettingChange("rag.lightrag_mode", value)}
                     >
-                      <option value="local">Local (Entity-focused)</option>
-                      <option value="global">Global (Relationship-focused)</option>
-                      <option value="hybrid">Hybrid (Both - Recommended)</option>
-                    </select>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="local">Local (Entity-focused)</SelectItem>
+                        <SelectItem value="global">Global (Relationship-focused)</SelectItem>
+                        <SelectItem value="hybrid">Hybrid (Both - Recommended)</SelectItem>
+                      </SelectContent>
+                    </Select>
                     <p className="text-xs text-muted-foreground">Retrieval strategy</p>
                   </div>
                   <div className="space-y-2">
@@ -1020,11 +1134,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   97% token reduction with hierarchical document tree for multi-level understanding
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.raptor_enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.raptor_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.raptor_enabled", checked)}
               />
             </div>
             {(localSettings["rag.raptor_enabled"] as boolean ?? true) && (
@@ -1060,11 +1172,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                       Generate summaries at each tree level
                     </p>
                   </div>
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4"
+                  <Switch
                     checked={localSettings["rag.raptor_use_summaries"] as boolean ?? true}
-                    onChange={(e) => handleSettingChange("rag.raptor_use_summaries", e.target.checked)}
+                    onCheckedChange={(checked) => handleSettingChange("rag.raptor_use_summaries", checked)}
                   />
                 </div>
               </div>
@@ -1100,11 +1210,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Suggest follow-up questions after answers
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.suggested_questions_enabled"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("rag.suggested_questions_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.suggested_questions_enabled", checked)}
               />
             </div>
             <div className="space-y-2">
@@ -1138,11 +1246,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Self-Refine/CRITIC for +20% answer quality (NeurIPS 2023)
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.answer_refiner_enabled"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("rag.answer_refiner_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.answer_refiner_enabled", checked)}
               />
             </div>
             {(localSettings["rag.answer_refiner_enabled"] as boolean) && (
@@ -1150,15 +1256,19 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Refinement Strategy</label>
-                    <select
-                      className="w-full h-10 px-3 rounded-md border bg-background"
+                    <Select
                       value={localSettings["rag.answer_refiner_strategy"] as string ?? "self_refine"}
-                      onChange={(e) => handleSettingChange("rag.answer_refiner_strategy", e.target.value)}
+                      onValueChange={(value) => handleSettingChange("rag.answer_refiner_strategy", value)}
                     >
-                      <option value="self_refine">Self-Refine (General quality)</option>
-                      <option value="critic">CRITIC (Tool-verified facts)</option>
-                      <option value="cove">CoVe (Hallucination reduction)</option>
-                    </select>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="self_refine">Self-Refine (General quality)</SelectItem>
+                        <SelectItem value="critic">CRITIC (Tool-verified facts)</SelectItem>
+                        <SelectItem value="cove">CoVe (Hallucination reduction)</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Max Iterations</label>
@@ -1183,11 +1293,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Test-Time Training for 35x faster inference on 2M+ context (NVIDIA)
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.ttt_compression_enabled"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("rag.ttt_compression_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.ttt_compression_enabled", checked)}
               />
             </div>
             {(localSettings["rag.ttt_compression_enabled"] as boolean) && (
@@ -1213,11 +1321,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   ICLR 2025 technique to skip unnecessary retrieval rounds
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={localSettings["rag.sufficiency_checker_enabled"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("rag.sufficiency_checker_enabled", e.target.checked)}
+              <Switch
+                checked={localSettings["rag.sufficiency_checker_enabled"] as boolean ?? true}
+                onCheckedChange={(checked) => handleSettingChange("rag.sufficiency_checker_enabled", checked)}
               />
             </div>
             {(localSettings["rag.sufficiency_checker_enabled"] as boolean) && (
@@ -1243,11 +1349,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Multi-path reasoning for complex analytical queries
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["rag.tree_of_thoughts_enabled"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("rag.tree_of_thoughts_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("rag.tree_of_thoughts_enabled", checked)}
               />
             </div>
             {(localSettings["rag.tree_of_thoughts_enabled"] as boolean) && (
@@ -1287,27 +1391,29 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Chonkie-based chunking (33x faster, 10-50x less memory)
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={localSettings["processing.fast_chunking_enabled"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("processing.fast_chunking_enabled", e.target.checked)}
+              <Switch
+                checked={localSettings["processing.fast_chunking_enabled"] as boolean ?? true}
+                onCheckedChange={(checked) => handleSettingChange("processing.fast_chunking_enabled", checked)}
               />
             </div>
             {(localSettings["processing.fast_chunking_enabled"] as boolean) && (
               <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
                 <label className="text-sm font-medium">Chunking Strategy</label>
-                <select
-                  className="w-full h-10 px-3 rounded-md border bg-background"
+                <Select
                   value={localSettings["processing.fast_chunking_strategy"] as string ?? "auto"}
-                  onChange={(e) => handleSettingChange("processing.fast_chunking_strategy", e.target.value)}
+                  onValueChange={(value) => handleSettingChange("processing.fast_chunking_strategy", value)}
                 >
-                  <option value="auto">Auto (Select based on doc size)</option>
-                  <option value="token">Token (Fastest)</option>
-                  <option value="sentence">Sentence (Fast)</option>
-                  <option value="semantic">Semantic (Balanced)</option>
-                  <option value="sdpm">SDPM (Best quality)</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto (Select based on doc size)</SelectItem>
+                    <SelectItem value="token">Token (Fastest)</SelectItem>
+                    <SelectItem value="sentence">Sentence (Fast)</SelectItem>
+                    <SelectItem value="semantic">Semantic (Balanced)</SelectItem>
+                    <SelectItem value="sdpm">SDPM (Best quality)</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             )}
 
@@ -1319,11 +1425,9 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Enterprise document parsing with 97.9% table accuracy
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["processing.docling_parser_enabled"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("processing.docling_parser_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("processing.docling_parser_enabled", checked)}
               />
             </div>
 
@@ -1335,12 +1439,553 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
                   Pass^k metrics, hallucination detection, progress tracking
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["agent.evaluation_enabled"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("agent.evaluation_enabled", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("agent.evaluation_enabled", checked)}
               />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Query Intelligence */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Brain className="h-5 w-5" />
+            Query Intelligence
+          </CardTitle>
+          <CardDescription>
+            Smart query processing — routing, decomposition, fusion, and expansion techniques
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Adaptive Query Routing */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium flex items-center gap-2">
+                <GitBranch className="h-4 w-4 text-indigo-500" />
+                Adaptive Query Routing
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Automatically routes queries to optimal strategy (DIRECT, HYBRID, TWO_STAGE, AGENTIC, GRAPH)
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.adaptive_routing_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("rag.adaptive_routing_enabled", checked)}
+            />
+          </div>
+
+          {/* Query Decomposition */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Query Decomposition</p>
+              <p className="text-sm text-muted-foreground">
+                Break complex queries into sub-queries for better accuracy on comparison/aggregation questions
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.query_decomposition_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("rag.query_decomposition_enabled", checked)}
+            />
+          </div>
+          {(localSettings["rag.query_decomposition_enabled"] as boolean ?? true) && (
+            <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
+              <label className="text-sm font-medium">Min Query Words</label>
+              <Input
+                type="number"
+                min="5"
+                max="20"
+                value={localSettings["rag.decomposition_min_words"] as number ?? 10}
+                onChange={(e) => handleSettingChange("rag.decomposition_min_words", parseInt(e.target.value) || 10)}
+              />
+              <p className="text-xs text-muted-foreground">Only decompose queries longer than this (5-20 words)</p>
+            </div>
+          )}
+
+          {/* RAG-Fusion */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">RAG-Fusion</p>
+              <p className="text-sm text-muted-foreground">
+                Generate multiple query variations and fuse results with Reciprocal Rank Fusion
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.rag_fusion_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("rag.rag_fusion_enabled", checked)}
+            />
+          </div>
+          {(localSettings["rag.rag_fusion_enabled"] as boolean ?? true) && (
+            <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
+              <label className="text-sm font-medium">Query Variations</label>
+              <Input
+                type="number"
+                min="2"
+                max="8"
+                value={localSettings["rag.rag_fusion_variations"] as number ?? 4}
+                onChange={(e) => handleSettingChange("rag.rag_fusion_variations", parseInt(e.target.value) || 4)}
+              />
+              <p className="text-xs text-muted-foreground">Number of query variations to generate (2-8)</p>
+            </div>
+          )}
+
+          {/* Step-Back Prompting */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Step-Back Prompting</p>
+              <p className="text-sm text-muted-foreground">
+                Abstract reasoning for complex analytical queries — retrieves background context first
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.stepback_prompting_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("rag.stepback_prompting_enabled", checked)}
+            />
+          </div>
+          {(localSettings["rag.stepback_prompting_enabled"] as boolean ?? true) && (
+            <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
+              <label className="text-sm font-medium">Max Background Chunks</label>
+              <Input
+                type="number"
+                min="1"
+                max="5"
+                value={localSettings["rag.stepback_max_background"] as number ?? 3}
+                onChange={(e) => handleSettingChange("rag.stepback_max_background", parseInt(e.target.value) || 3)}
+              />
+              <p className="text-xs text-muted-foreground">Background chunks for step-back context (1-5)</p>
+            </div>
+          )}
+
+          {/* HyDE */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">HyDE (Hypothetical Document Embeddings)</p>
+              <p className="text-sm text-muted-foreground">
+                Generate hypothetical documents for short/abstract queries to improve recall
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.hyde_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("rag.hyde_enabled", checked)}
+            />
+          </div>
+          {(localSettings["rag.hyde_enabled"] as boolean ?? true) && (
+            <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
+              <label className="text-sm font-medium">Min Query Words</label>
+              <Input
+                type="number"
+                min="2"
+                max="10"
+                value={localSettings["rag.hyde_min_query_words"] as number ?? 5}
+                onChange={(e) => handleSettingChange("rag.hyde_min_query_words", parseInt(e.target.value) || 5)}
+              />
+              <p className="text-xs text-muted-foreground">Use HyDE only for queries shorter than this (2-10)</p>
+            </div>
+          )}
+
+          {/* Learning to Rank */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Learning to Rank</p>
+              <p className="text-sm text-muted-foreground">
+                ML-based reranking trained on click logs and user feedback
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["search.ltr_enabled"] as boolean ?? false}
+              onCheckedChange={(checked) => handleSettingChange("search.ltr_enabled", checked)}
+            />
+          </div>
+
+          {/* Info Box */}
+          <div className="bg-indigo-50 dark:bg-indigo-950/30 rounded-lg p-4 mt-2">
+            <div className="flex items-start gap-3">
+              <GitBranch className="h-5 w-5 text-indigo-500 mt-0.5" />
+              <div>
+                <p className="font-medium text-sm">How These Work Together</p>
+                <p className="text-sm text-muted-foreground mt-1">
+                  When Adaptive Routing is enabled, it automatically selects the optimal combination of these features per query. Simple queries skip expensive steps, while complex multi-hop queries use decomposition + fusion + step-back together.
+                </p>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Advanced Compression & Retrieval */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Layers className="h-5 w-5" />
+            Advanced Compression & Retrieval
+          </CardTitle>
+          <CardDescription>
+            Context compression and retrieval optimization techniques
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* AttentionRAG */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium flex items-center gap-2">
+                <Zap className="h-4 w-4 text-amber-500" />
+                AttentionRAG Compression
+              </p>
+              <p className="text-sm text-muted-foreground">
+                6.3x better compression than LLMLingua — uses attention scores for intelligent context pruning
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.attention_rag_enabled"] as boolean ?? false}
+              onCheckedChange={(checked) => handleSettingChange("rag.attention_rag_enabled", checked)}
+            />
+          </div>
+          {(localSettings["rag.attention_rag_enabled"] as boolean) && (
+            <div className="ml-6 space-y-3 p-3 bg-muted/30 rounded-lg">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Compression Mode</label>
+                  <Select
+                    value={localSettings["rag.attention_rag_mode"] as string ?? "moderate"}
+                    onValueChange={(value) => handleSettingChange("rag.attention_rag_mode", value)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="light">Light (1.25x)</SelectItem>
+                      <SelectItem value="moderate">Moderate (2x)</SelectItem>
+                      <SelectItem value="aggressive">Aggressive (4x)</SelectItem>
+                      <SelectItem value="extreme">Extreme (6.6x)</SelectItem>
+                      <SelectItem value="adaptive">Adaptive (auto)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">Higher = more compression, less context</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Compression Unit</label>
+                  <Select
+                    value={localSettings["rag.attention_rag_unit"] as string ?? "sentence"}
+                    onValueChange={(value) => handleSettingChange("rag.attention_rag_unit", value)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="token">Token (Fine-grained)</SelectItem>
+                      <SelectItem value="sentence">Sentence (Balanced)</SelectItem>
+                      <SelectItem value="paragraph">Paragraph (Coarse)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">Granularity of compression</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* CRAG */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium flex items-center gap-2">
+                <RefreshCw className="h-4 w-4 text-orange-500" />
+                CRAG (Corrective RAG)
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Auto-corrects low-confidence results — rewrites query and re-retrieves when needed
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.crag_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("rag.crag_enabled", checked)}
+            />
+          </div>
+          {(localSettings["rag.crag_enabled"] as boolean ?? true) && (
+            <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
+              <label className="text-sm font-medium">Confidence Threshold</label>
+              <Input
+                type="number"
+                step="0.1"
+                min="0.1"
+                max="0.9"
+                value={localSettings["rag.crag_confidence_threshold"] as number ?? 0.5}
+                onChange={(e) => handleSettingChange("rag.crag_confidence_threshold", parseFloat(e.target.value))}
+              />
+              <p className="text-xs text-muted-foreground">Trigger CRAG when confidence is below this (0.1-0.9)</p>
+            </div>
+          )}
+
+          {/* Graph-O1 */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium flex items-center gap-2">
+                <Workflow className="h-4 w-4 text-cyan-500" />
+                Graph-O1 Reasoning
+              </p>
+              <p className="text-sm text-muted-foreground">
+                3-5x faster GraphRAG with beam search — explores multiple reasoning paths efficiently
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.graph_o1_enabled"] as boolean ?? false}
+              onCheckedChange={(checked) => handleSettingChange("rag.graph_o1_enabled", checked)}
+            />
+          </div>
+          {(localSettings["rag.graph_o1_enabled"] as boolean) && (
+            <div className="ml-6 space-y-3 p-3 bg-muted/30 rounded-lg">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Beam Width</label>
+                  <Input
+                    type="number"
+                    min="3"
+                    max="10"
+                    value={localSettings["rag.graph_o1_beam_width"] as number ?? 5}
+                    onChange={(e) => handleSettingChange("rag.graph_o1_beam_width", parseInt(e.target.value) || 5)}
+                  />
+                  <p className="text-xs text-muted-foreground">Parallel reasoning paths (3-10)</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Confidence Threshold</label>
+                  <Input
+                    type="number"
+                    step="0.1"
+                    min="0.5"
+                    max="0.9"
+                    value={localSettings["rag.graph_o1_confidence_threshold"] as number ?? 0.7}
+                    onChange={(e) => handleSettingChange("rag.graph_o1_confidence_threshold", parseFloat(e.target.value))}
+                  />
+                  <p className="text-xs text-muted-foreground">Path pruning threshold (0.5-0.9)</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* LazyGraphRAG */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium flex items-center gap-2">
+                <DollarSign className="h-4 w-4 text-green-500" />
+                LazyGraphRAG
+              </p>
+              <p className="text-sm text-muted-foreground">
+                99% cost reduction vs standard GraphRAG — builds graph lazily at query time
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.lazy_graphrag_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("rag.lazy_graphrag_enabled", checked)}
+            />
+          </div>
+          {(localSettings["rag.lazy_graphrag_enabled"] as boolean ?? true) && (
+            <div className="ml-6 space-y-2 p-3 bg-muted/30 rounded-lg">
+              <label className="text-sm font-medium">Max Communities</label>
+              <Input
+                type="number"
+                min="1"
+                max="10"
+                value={localSettings["rag.lazy_graphrag_max_communities"] as number ?? 5}
+                onChange={(e) => handleSettingChange("rag.lazy_graphrag_max_communities", parseInt(e.target.value) || 5)}
+              />
+              <p className="text-xs text-muted-foreground">Communities to summarize per query (1-10)</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Storage & Indexing Optimization */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <HardDrive className="h-5 w-5" />
+            Storage & Indexing Optimization
+          </CardTitle>
+          <CardDescription>
+            Vectorstore optimization and prompt tuning
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Binary Quantization */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Binary Quantization Pre-filter</p>
+              <p className="text-sm text-muted-foreground">
+                10-100x faster initial search on 1M+ vectors — uses 1-bit representations for candidate selection
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["vectorstore.binary_quantization_enabled"] as boolean ?? false}
+              onCheckedChange={(checked) => handleSettingChange("vectorstore.binary_quantization_enabled", checked)}
+            />
+          </div>
+
+          {/* Late Chunking */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Late Chunking</p>
+              <p className="text-sm text-muted-foreground">
+                Embed full document first, then chunk — preserves cross-chunk context (+15% recall)
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["vectorstore.late_chunking_enabled"] as boolean ?? false}
+              onCheckedChange={(checked) => handleSettingChange("vectorstore.late_chunking_enabled", checked)}
+            />
+          </div>
+
+          {/* DSPy Prompt Optimization */}
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-violet-500" />
+                DSPy Prompt Optimization
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Automated prompt tuning via DSPy compilation — discovers optimal instructions from user feedback
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["rag.dspy_optimization_enabled"] as boolean ?? false}
+              onCheckedChange={(checked) => handleSettingChange("rag.dspy_optimization_enabled", checked)}
+            />
+          </div>
+          {(localSettings["rag.dspy_optimization_enabled"] as boolean) && (
+            <div className="ml-6 space-y-3 p-3 bg-muted/30 rounded-lg">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Default Optimizer</label>
+                  <Select
+                    value={localSettings["rag.dspy_default_optimizer"] as string ?? "bootstrap_few_shot"}
+                    onValueChange={(value) => handleSettingChange("rag.dspy_default_optimizer", value)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="bootstrap_few_shot">BootstrapFewShot (20+ examples)</SelectItem>
+                      <SelectItem value="miprov2">MIPROv2 (100+ examples)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">Optimization algorithm</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Min Training Examples</label>
+                  <Input
+                    type="number"
+                    min="5"
+                    max="500"
+                    value={localSettings["rag.dspy_min_examples"] as number ?? 20}
+                    onChange={(e) => handleSettingChange("rag.dspy_min_examples", parseInt(e.target.value) || 20)}
+                  />
+                  <p className="text-xs text-muted-foreground">Required before optimization can run (5-500)</p>
+                </div>
+              </div>
+              <div className="flex items-center justify-between p-3 rounded-lg border bg-background">
+                <div>
+                  <p className="font-medium text-sm">DSPy Inference Mode</p>
+                  <p className="text-xs text-muted-foreground">
+                    Use DSPy modules at inference time (default: compilation-only, exported as text prompts)
+                  </p>
+                </div>
+                <Switch
+                  checked={localSettings["rag.dspy_inference_enabled"] as boolean ?? false}
+                  onCheckedChange={(checked) => handleSettingChange("rag.dspy_inference_enabled", checked)}
+                />
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Query Pipeline Visualization */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Workflow className="h-5 w-5" />
+            Query Pipeline Visualization
+          </CardTitle>
+          <CardDescription>
+            See how your query flows through the 38-step RAG pipeline. Green = enabled, gray = disabled, blue = always-on.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-1">
+            {[
+              { step: 1, name: "Spell Correction", desc: "Fix typos before search", key: "search.spell_correction_enabled" },
+              { step: 2, name: "Semantic Cache Check", desc: "Return cached answer if similar query found", key: "rag.semantic_cache_enabled" },
+              { step: 3, name: "Query Classification", desc: "Determine query type and complexity", key: null },
+              { step: 4, name: "Adaptive Routing", desc: "Route to optimal retrieval strategy", key: "rag.adaptive_routing_enabled" },
+              { step: 5, name: "Tree of Thoughts", desc: "Multi-path reasoning for complex queries", key: "rag.tree_of_thoughts_enabled" },
+              { step: 6, name: "Aggregation Detection", desc: "Detect comparison/aggregation patterns", key: null },
+              { step: 7, name: "Query Decomposition", desc: "Break into sub-queries if complex", key: "rag.query_decomposition_enabled" },
+              { step: 8, name: "Model Selection", desc: "Choose optimal LLM for this query", key: null },
+              { step: 9, name: "Dynamic Chunk Capping", desc: "Adapt context window to query needs", key: null },
+              { step: 10, name: "Folder Scoping", desc: "Filter to relevant document folders", key: null },
+              { step: 11, name: "RAG-Fusion", desc: "Multi-query with Reciprocal Rank Fusion", key: "rag.rag_fusion_enabled" },
+              { step: 12, name: "Step-Back Prompting", desc: "Abstract reasoning for analytical queries", key: "rag.stepback_prompting_enabled" },
+              { step: 13, name: "HyDE Expansion", desc: "Generate hypothetical documents", key: "rag.hyde_enabled" },
+              { step: 14, name: "Query Expansion", desc: "Expand with synonyms and related terms", key: "rag.query_expansion_enabled" },
+              { step: 15, name: "KG Query Expansion", desc: "Expand via knowledge graph entities", key: "rag.knowledge_graph_enabled" },
+              { step: 16, name: "Binary Quantization Pre-filter", desc: "Fast 1-bit candidate selection", key: "vectorstore.binary_quantization_enabled" },
+              { step: 17, name: "Hybrid/Multi-Source Retrieval", desc: "Retrieve from vector + keyword + graph", key: null },
+              { step: 18, name: "Tiered Reranking", desc: "ColBERT → Cross-Encoder → LLM pipeline", key: "rerank.tiered_enabled" },
+              { step: 19, name: "KG Augmentation", desc: "Enrich results with knowledge graph context", key: "rag.knowledge_graph_enabled" },
+              { step: 20, name: "LazyGraphRAG", desc: "Cost-efficient graph-based retrieval", key: "rag.lazy_graphrag_enabled" },
+              { step: 21, name: "MMR Diversity", desc: "Maximize Marginal Relevance for diverse results", key: null },
+              { step: 22, name: "Result Verification", desc: "Verify retrieved document relevance", key: "rag.verification_enabled" },
+              { step: 23, name: "Context Formatting", desc: "Format chunks with metadata for LLM", key: null },
+              { step: 24, name: "Graph-O1 Reasoning", desc: "Beam search over knowledge graph", key: "rag.graph_o1_enabled" },
+              { step: 25, name: "Sufficiency Check", desc: "Skip extra retrieval if context sufficient", key: "rag.sufficiency_checker_enabled" },
+              { step: 26, name: "Context Compression", desc: "Compress context to reduce tokens", key: "rag.context_compression_enabled" },
+              { step: 27, name: "AttentionRAG", desc: "Attention-based context pruning", key: "rag.attention_rag_enabled" },
+              { step: 28, name: "Prompt Construction", desc: "Build final prompt with system + context", key: null },
+              { step: 29, name: "Generative Cache Check", desc: "Check for cached LLM response", key: "rag.semantic_cache_enabled" },
+              { step: 30, name: "LLM Invocation", desc: "Generate answer via language model", key: null },
+              { step: 31, name: "Answer Refinement", desc: "Self-Refine/CRITIC quality improvement", key: "rag.answer_refiner_enabled" },
+              { step: 32, name: "Suggested Questions", desc: "Generate follow-up question suggestions", key: "rag.suggested_questions_enabled" },
+              { step: 33, name: "Usage Tracking", desc: "Log token usage and costs", key: null },
+              { step: 34, name: "Memory Update", desc: "Store conversation in agent memory", key: "memory.enabled" },
+              { step: 35, name: "CRAG Recovery", desc: "Corrective re-retrieval if low confidence", key: "rag.crag_enabled" },
+              { step: 36, name: "Self-RAG Verification", desc: "Self-reflective answer validation", key: "rag.self_rag_enabled" },
+              { step: 37, name: "Semantic Cache Store", desc: "Cache answer for future similar queries", key: "rag.semantic_cache_enabled" },
+              { step: 38, name: "Response Return", desc: "Stream or return final response", key: null },
+            ].map((item) => {
+              const isAlwaysOn = item.key === null;
+              const isEnabled = isAlwaysOn || (localSettings[item.key!] as boolean ?? false);
+              const dotColor = isAlwaysOn
+                ? "bg-blue-500"
+                : isEnabled
+                  ? "bg-green-500"
+                  : "bg-gray-300 dark:bg-gray-600";
+
+              return (
+                <div
+                  key={item.step}
+                  className="flex items-center gap-3 py-1.5 px-2 rounded hover:bg-muted/50 transition-colors"
+                >
+                  <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${dotColor}`} />
+                  <span className="text-xs font-mono text-muted-foreground w-6 flex-shrink-0">
+                    {String(item.step).padStart(2, "0")}
+                  </span>
+                  <span className="text-sm font-medium flex-shrink-0">{item.name}</span>
+                  <span className="text-xs text-muted-foreground truncate">{item.desc}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-6 mt-4 pt-3 border-t text-xs text-muted-foreground">
+            <div className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-green-500" />
+              <span>Enabled</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-gray-300 dark:bg-gray-600" />
+              <span>Disabled</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+              <span>Always Active</span>
             </div>
           </div>
         </CardContent>

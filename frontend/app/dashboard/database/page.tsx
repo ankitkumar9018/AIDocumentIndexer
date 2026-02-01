@@ -59,6 +59,9 @@ import {
 import { toast } from "sonner";
 import { api } from "@/lib/api/client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useSession } from "next-auth/react";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { databaseConnectionSchema, databaseQuerySchema, type DatabaseConnectionInput, type DatabaseQueryInput } from "@/lib/validations";
@@ -121,6 +124,8 @@ const databaseIcons: Record<string, string> = {
 };
 
 export default function DatabasePage() {
+  const { data: session } = useSession();
+  const accessToken = (session as any)?.accessToken as string | undefined;
   const queryClient = useQueryClient();
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [selectedConnection, setSelectedConnection] = useState<DatabaseConnection | null>(null);
@@ -176,36 +181,40 @@ export default function DatabasePage() {
   const { data: connections = [], isLoading, refetch } = useQuery({
     queryKey: ["database-connections"],
     queryFn: async () => {
-      const response = await fetch("/api/v1/database/connections", {
-        credentials: "include",
+      if (!accessToken) return [];
+      const response = await fetch(`${API_BASE}/database/connections`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!response.ok) throw new Error("Failed to fetch connections");
       return response.json();
     },
+    enabled: !!accessToken,
   });
 
   // Fetch query history for selected connection
   const { data: queryHistory = [] } = useQuery({
     queryKey: ["database-history", selectedConnection?.id],
     queryFn: async () => {
-      if (!selectedConnection) return [];
+      if (!selectedConnection || !accessToken) return [];
       const response = await fetch(
-        `/api/v1/database/connections/${selectedConnection.id}/history`,
-        { credentials: "include" }
+        `${API_BASE}/database/connections/${selectedConnection.id}/history`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
       );
       if (!response.ok) throw new Error("Failed to fetch history");
       return response.json();
     },
-    enabled: !!selectedConnection,
+    enabled: !!selectedConnection && !!accessToken,
   });
 
   // Create connection mutation
   const createMutation = useMutation({
     mutationFn: async (data: typeof newConnection) => {
-      const response = await fetch("/api/v1/database/connections", {
+      const response = await fetch(`${API_BASE}/database/connections`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
         body: JSON.stringify(data),
       });
       if (!response.ok) {
@@ -228,9 +237,9 @@ export default function DatabasePage() {
   // Test connection mutation
   const testMutation = useMutation({
     mutationFn: async (id: string) => {
-      const response = await fetch(`/api/v1/database/connections/${id}/test`, {
+      const response = await fetch(`${API_BASE}/database/connections/${id}/test`, {
         method: "POST",
-        credentials: "include",
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!response.ok) throw new Error("Test failed");
       return response.json();
@@ -251,9 +260,9 @@ export default function DatabasePage() {
   // Delete connection mutation
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
-      const response = await fetch(`/api/v1/database/connections/${id}`, {
+      const response = await fetch(`${API_BASE}/database/connections/${id}`, {
         method: "DELETE",
-        credentials: "include",
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!response.ok) throw new Error("Delete failed");
       return response.json();
@@ -279,10 +288,12 @@ export default function DatabasePage() {
       rating: number;
       isCorrect: boolean;
     }) => {
-      const response = await fetch(`/api/v1/database/history/${queryId}/feedback`, {
+      const response = await fetch(`${API_BASE}/database/history/${queryId}/feedback`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
         body: JSON.stringify({ rating, is_correct: isCorrect }),
       });
       if (!response.ok) throw new Error("Feedback failed");
@@ -329,18 +340,20 @@ export default function DatabasePage() {
   });
 
   const handleQuery = async () => {
-    if (!selectedConnection || !query.trim()) return;
+    if (!selectedConnection || !query.trim() || !accessToken) return;
 
     setIsQuerying(true);
     setQueryResult(null);
 
     try {
       const response = await fetch(
-        `/api/v1/database/connections/${selectedConnection.id}/query`,
+        `${API_BASE}/database/connections/${selectedConnection.id}/query`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
           body: JSON.stringify({
             question: query,
             execute: true,

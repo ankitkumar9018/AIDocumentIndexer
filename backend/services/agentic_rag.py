@@ -865,7 +865,16 @@ Respond with ONLY a JSON object:
                     observation = action_input
 
                 else:
-                    observation = f"Action {action.value} not implemented."
+                    logger.warning(
+                        "Unknown agent action requested",
+                        action=action.value if hasattr(action, 'value') else str(action),
+                        available_actions=[a.value for a in AgentAction],
+                    )
+                    observation = (
+                        f"Action '{action.value if hasattr(action, 'value') else action}' is not recognized. "
+                        f"Available actions: {', '.join(a.value for a in AgentAction)}. "
+                        "Please use one of the available actions."
+                    )
 
             # Execute with timeout
             await asyncio.wait_for(

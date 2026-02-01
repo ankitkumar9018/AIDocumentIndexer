@@ -8,6 +8,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
 import { TabsContent } from "@/components/ui/tabs";
 
 interface NotificationsTabProps {
@@ -35,11 +36,9 @@ export function NotificationsTab({ localSettings, handleSettingChange }: Notific
                 Notify when document processing finishes
               </p>
             </div>
-            <input
-              type="checkbox"
-              className="h-4 w-4"
+            <Switch
               checked={localSettings["notifications.processing_completed"] as boolean ?? true}
-              onChange={(e) => handleSettingChange("notifications.processing_completed", e.target.checked)}
+              onCheckedChange={(checked) => handleSettingChange("notifications.processing_completed", checked)}
             />
           </div>
           <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -49,11 +48,9 @@ export function NotificationsTab({ localSettings, handleSettingChange }: Notific
                 Notify when document processing fails
               </p>
             </div>
-            <input
-              type="checkbox"
-              className="h-4 w-4"
+            <Switch
               checked={localSettings["notifications.processing_failed"] as boolean ?? true}
-              onChange={(e) => handleSettingChange("notifications.processing_failed", e.target.checked)}
+              onCheckedChange={(checked) => handleSettingChange("notifications.processing_failed", checked)}
             />
           </div>
           <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -63,11 +60,9 @@ export function NotificationsTab({ localSettings, handleSettingChange }: Notific
                 Notify when API costs exceed threshold
               </p>
             </div>
-            <input
-              type="checkbox"
-              className="h-4 w-4"
+            <Switch
               checked={localSettings["notifications.cost_alerts"] as boolean ?? true}
-              onChange={(e) => handleSettingChange("notifications.cost_alerts", e.target.checked)}
+              onCheckedChange={(checked) => handleSettingChange("notifications.cost_alerts", checked)}
             />
           </div>
         </CardContent>

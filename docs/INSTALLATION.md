@@ -220,10 +220,15 @@ python3.11 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r backend/requirements.txt
+pip install -e ".[dev]"
 
 # Install PaddleOCR (may require additional setup)
 pip install paddlepaddle paddleocr
+```
+
+```bash
+# Optional: Install DSPy for prompt optimization (Phase 93)
+pip install dspy-ai
 ```
 
 ### Step 3.5: Initialize the Database
@@ -542,8 +547,7 @@ git clone https://github.com/yourusername/AIDocumentIndexer.git
 cd AIDocumentIndexer
 
 # Install development dependencies
-pip install -r backend/requirements.txt
-pip install -r backend/requirements-dev.txt  # If available
+pip install -e ".[dev]"
 
 # Install pre-commit hooks
 pip install pre-commit

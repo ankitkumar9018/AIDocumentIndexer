@@ -32,6 +32,12 @@ import {
   Lock,
   Download,
   Database,
+  BookOpen,
+  FileSpreadsheet,
+  Zap,
+  Microscope,
+  Eye,
+  UserCog,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -41,6 +47,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { KeyboardShortcutsDialog } from "@/components/keyboard-shortcuts-dialog";
 import { CommandPalette } from "@/components/command-palette";
 import { OrganizationSwitcher } from "@/components/organization-switcher";
+import { NotificationCenter } from "@/components/notifications";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -51,6 +58,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useUser, logout } from "@/lib/auth";
 import { ErrorBoundary } from "@/components/ui/error-recovery";
+import { reportError } from "@/lib/errors";
 
 const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
@@ -58,13 +66,18 @@ const navigation = [
   { name: "Upload", href: "/dashboard/upload", icon: Upload },
   { name: "Documents", href: "/dashboard/documents", icon: FolderOpen },
   { name: "Create", href: "/dashboard/create", icon: PenTool },
+  { name: "Reports", href: "/dashboard/reports", icon: FileSpreadsheet },
+  { name: "Research", href: "/dashboard/research", icon: Microscope },
+  { name: "Skills", href: "/dashboard/skills", icon: Zap },
   { name: "Workflows", href: "/dashboard/workflows", icon: GitBranch },
   { name: "Audio", href: "/dashboard/audio", icon: Headphones },
   { name: "Connectors", href: "/dashboard/connectors", icon: Link2 },
   { name: "Database Query", href: "/dashboard/database", icon: Database },
+  { name: "Prompts", href: "/dashboard/prompts", icon: BookOpen },
   { name: "Collaboration", href: "/dashboard/collaboration", icon: Sparkles },
   { name: "Knowledge Graph", href: "/dashboard/knowledge-graph", icon: Network },
   { name: "Web Scraper", href: "/dashboard/scraper", icon: Globe },
+  { name: "File Watcher", href: "/dashboard/watcher", icon: Eye },
   { name: "Costs", href: "/dashboard/costs", icon: DollarSign },
   { name: "LLM Gateway", href: "/dashboard/gateway", icon: Key },
   { name: "Privacy", href: "/dashboard/privacy", icon: Lock },
@@ -85,6 +98,9 @@ const pageTitles: Record<string, string> = {
   "/dashboard/upload": "Upload",
   "/dashboard/documents": "Documents",
   "/dashboard/create": "Create",
+  "/dashboard/reports": "Sparkpages",
+  "/dashboard/research": "Deep Research",
+  "/dashboard/skills": "Skills Marketplace",
   "/dashboard/workflows": "Workflows",
   "/dashboard/audio": "Audio Overviews",
   "/dashboard/connectors": "Connectors",
@@ -92,6 +108,7 @@ const pageTitles: Record<string, string> = {
   "/dashboard/collaboration": "Collaboration",
   "/dashboard/knowledge-graph": "Knowledge Graph",
   "/dashboard/scraper": "Web Scraper",
+  "/dashboard/watcher": "File Watcher",
   "/dashboard/costs": "Costs",
   "/dashboard/gateway": "LLM Gateway",
   "/dashboard/privacy": "Privacy & Data",
@@ -292,6 +309,7 @@ export default function DashboardLayout({
           </div>
 
           <div className="flex items-center gap-2">
+            <NotificationCenter />
             <ThemeToggle />
             <Button variant="ghost" size="icon" onClick={() => logout()}>
               <LogOut className="h-5 w-5" />
@@ -303,8 +321,9 @@ export default function DashboardLayout({
         <main className="flex-1 p-4 lg:p-6 overflow-x-hidden">
           <ErrorBoundary
             onError={(error, errorInfo) => {
-              console.error("Dashboard Error:", error, errorInfo);
-              // TODO: Send to Sentry when configured
+              reportError(error, "Dashboard", {
+                componentStack: errorInfo?.componentStack,
+              });
             }}
           >
             {children}

@@ -181,25 +181,54 @@ def mask_string(s: str, visible_chars: int = 4) -> str:
     return s[:visible_chars] + "*" * (len(s) - visible_chars)
 
 
+def _get_fernet_key() -> bytes:
+    """
+    Derive a Fernet key from the application SECRET_KEY.
+    Uses PBKDF2 to derive a 32-byte key suitable for Fernet.
+    """
+    import hashlib
+    import base64
+    from backend.core.config import settings
+
+    # Use SECRET_KEY as the basis for encryption
+    secret = settings.SECRET_KEY.encode() if settings.SECRET_KEY else b"default-dev-key-change-in-prod"
+
+    # Derive a 32-byte key using SHA256 (Fernet requires exactly 32 bytes)
+    derived_key = hashlib.sha256(secret).digest()
+
+    # Fernet requires base64-encoded 32-byte key
+    return base64.urlsafe_b64encode(derived_key)
+
+
 def encrypt_credential(value: str) -> str:
     """
-    Encrypt a credential value.
+    Encrypt a credential value using Fernet symmetric encryption.
 
-    In production, this should use proper encryption (e.g., Fernet).
-    For now, using base64 as a placeholder.
+    Uses the application SECRET_KEY to derive the encryption key.
+    Fernet guarantees that data encrypted cannot be read or tampered with.
     """
-    import base64
-    return base64.b64encode(value.encode()).decode()
+    from cryptography.fernet import Fernet
+
+    fernet = Fernet(_get_fernet_key())
+    encrypted = fernet.encrypt(value.encode())
+    return encrypted.decode()
 
 
 def decrypt_credential(value: str) -> str:
     """
-    Decrypt a credential value.
+    Decrypt a credential value using Fernet symmetric encryption.
 
-    In production, this should use proper decryption.
+    Raises InvalidToken if the data is corrupted or the key is wrong.
     """
-    import base64
-    return base64.b64decode(value.encode()).decode()
+    from cryptography.fernet import Fernet, InvalidToken
+
+    fernet = Fernet(_get_fernet_key())
+    try:
+        decrypted = fernet.decrypt(value.encode())
+        return decrypted.decode()
+    except InvalidToken:
+        logger.error("Failed to decrypt credential - invalid token or key mismatch")
+        raise ValueError("Failed to decrypt credential. The encryption key may have changed.")
 
 
 async def get_connector(connection: ExternalDatabaseConnection):
@@ -561,6 +590,7 @@ async def test_connection(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
 
         start_time = time.time()
+        connector = None
 
         try:
             connector = await get_connector(connection)
@@ -574,7 +604,6 @@ async def test_connection(
             await db.commit()
 
             if success:
-                await connector.disconnect()
                 return TestConnectionResponse(
                     success=True,
                     message="Connection successful",
@@ -599,6 +628,12 @@ async def test_connection(
                 message=str(e),
                 latency_ms=latency,
             )
+        finally:
+            if connector:
+                try:
+                    await connector.disconnect()
+                except Exception:
+                    logger.warning("Failed to disconnect connector during test", exc_info=True)
 
 
 @router.get("/connections/{connection_id}/schema", response_model=DatabaseSchemaResponse)
@@ -632,10 +667,10 @@ async def get_database_schema(
                 last_updated=connection.schema_cached_at,
             )
 
+        connector = None
         try:
             connector = await get_connector(connection)
             schema = await connector.get_schema(refresh=True)
-            await connector.disconnect()
 
             # Cache the schema
             connection.schema_cache = {
@@ -656,6 +691,12 @@ async def get_database_schema(
         except Exception as e:
             logger.error("Failed to get schema", error=str(e))
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get schema: {e}")
+        finally:
+            if connector:
+                try:
+                    await connector.disconnect()
+                except Exception:
+                    logger.warning("Failed to disconnect connector during schema fetch", exc_info=True)
 
 
 # =============================================================================
@@ -684,6 +725,7 @@ async def query_database(
         if not connection:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
 
+        connector = None
         try:
             connector = await get_connector(connection)
             service = TextToSQLService(connector)
@@ -705,8 +747,6 @@ async def query_database(
                 execute=request.execute,
                 explain=request.explain,
             )
-
-            await connector.disconnect()
 
             # Save query history
             history = DatabaseQueryHistory(
@@ -749,6 +789,12 @@ async def query_database(
         except Exception as e:
             logger.error("Query failed", error=str(e), question=request.question)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Query failed: {e}")
+        finally:
+            if connector:
+                try:
+                    await connector.disconnect()
+                except Exception:
+                    logger.warning("Failed to disconnect connector during query", exc_info=True)
 
 
 @router.get("/connections/{connection_id}/history", response_model=List[QueryHistoryResponse])

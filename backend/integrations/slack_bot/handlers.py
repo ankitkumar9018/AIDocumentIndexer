@@ -192,13 +192,82 @@ class SlackEventHandler:
                 channel=channel,
             )
 
-            # TODO: Download and process the file
-            # This would integrate with the document upload service
+            # Download and process the file
+            try:
+                import aiohttp
+                import tempfile
+                import os
 
-            await say(
-                text=f"File '{filename}' has been processed and added to your documents. You can now ask questions about it!",
-                channel=channel,
-            )
+                # Download file using Slack's private URL with auth token
+                headers = {"Authorization": f"Bearer {client.token}"}
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url_private, headers=headers) as response:
+                        if response.status != 200:
+                            raise Exception(f"Failed to download: HTTP {response.status}")
+
+                        file_content = await response.read()
+
+                # Save to temp file
+                temp_dir = tempfile.mkdtemp()
+                temp_path = os.path.join(temp_dir, filename)
+
+                with open(temp_path, "wb") as f:
+                    f.write(file_content)
+
+                # Process through document upload service
+                from backend.services.document_processor import get_document_processor
+
+                processor = get_document_processor()
+
+                # Create a unique collection for Slack uploads if user context available
+                collection_name = f"slack_uploads_{user}" if user else "slack_uploads"
+
+                # Process the document
+                async with async_session_context() as db:
+                    result = await processor.process_file(
+                        file_path=temp_path,
+                        filename=filename,
+                        collection_name=collection_name,
+                        db=db,
+                        metadata={
+                            "source": "slack",
+                            "channel_id": channel,
+                            "user_id": user,
+                            "file_id": file_id,
+                        },
+                    )
+
+                # Cleanup temp file
+                try:
+                    os.remove(temp_path)
+                    os.rmdir(temp_dir)
+                except Exception:
+                    pass
+
+                chunks_count = result.get("chunks_created", 0)
+                await say(
+                    text=f"✅ File '{filename}' has been processed and added to your documents!\n"
+                         f"• Created {chunks_count} searchable chunks\n"
+                         f"You can now ask questions about it.",
+                    channel=channel,
+                )
+
+            except ImportError:
+                # Document processor not available
+                logger.warning("Document processor not available for Slack file upload")
+                await say(
+                    text=f"File '{filename}' received but document processing is not configured. "
+                         f"Please contact your administrator.",
+                    channel=channel,
+                )
+
+            except Exception as download_error:
+                logger.error("Failed to download/process file", error=str(download_error))
+                await say(
+                    text=f"I had trouble processing '{filename}'. Error: {str(download_error)[:100]}",
+                    channel=channel,
+                )
 
         except Exception as e:
             logger.error("Failed to process file", error=str(e), file_id=file_id)

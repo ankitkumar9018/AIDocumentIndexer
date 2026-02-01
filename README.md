@@ -41,7 +41,7 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 | **Real-Time Indexing** | Incremental updates with content freshness tracking |
 | **File Watcher** | Automatically index new files from monitored directories |
 | **Advanced OCR Management** | PaddleOCR, EasyOCR, Tesseract with performance metrics & batch downloads |
-| **Tabbed Admin Settings** | Organized settings UI with 8 tabs for easy configuration |
+| **Tabbed Admin Settings** | Organized settings UI with 19 tabs for comprehensive configuration |
 | **Folder Management** | Hierarchical folders with permissions, folder-scoped searches |
 | **Saved Searches** | Save complex search queries with filters for quick access |
 | **Search Operators** | AND, OR, NOT, phrase matching, and grouping support |
@@ -68,6 +68,20 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 | **WARP Engine** | 3x faster multi-vector retrieval |
 | **Ultra-Fast TTS** | <55ms latency with Murf Falcon, Cartesia Sonic |
 | **A-Mem Agentic** | 90% token reduction with intelligent memory operations |
+| **Late Chunking** | 33x faster semantic chunking with Chonkie |
+| **Binary Quantization** | 32x memory reduction for vector search |
+| **DSPy Prompt Optimization** | Automated prompt compilation for RAG |
+| **Cross-Section RAG** | Unified KG + Web Crawler + Text-to-SQL retrieval |
+| **Inline Source Citations** | Numbered [1][2][3] citations with hover popover |
+| **Thinking Transparency** | Collapsible RAG pipeline visualization |
+| **Canvas/Artifacts** | Side panel for code viewing and editing |
+| **Prompt Library** | Template management with variables and categories |
+| **Custom Instructions** | Org-wide system prompts and language preferences |
+| **BYOK** | Bring Your Own Key for 6 LLM providers |
+| **Content Freshness** | Time-decay scoring for document relevance |
+| **Hallucination Scoring** | Multi-signal confidence and hallucination detection |
+| **Adaptive RAG Router** | Query-complexity-based strategy selection |
+| **LazyGraphRAG** | 99% cost reduction for knowledge graph retrieval |
 
 ---
 
@@ -82,8 +96,8 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 ### One-Command Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/AIDocumentIndexer.git
+# Clone the repository (replace with your fork URL)
+git clone <your-repository-url>
 cd AIDocumentIndexer
 
 # Copy environment template
@@ -161,8 +175,8 @@ Password: changeme123
 ### Option 1: Docker Compose (Recommended)
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/yourusername/AIDocumentIndexer.git
+# 1. Clone repository (replace with your fork URL)
+git clone <your-repository-url>
 cd AIDocumentIndexer
 
 # 2. Configure environment
@@ -182,8 +196,8 @@ docker-compose logs -f
 ### Option 2: Local Development (with UV)
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/yourusername/AIDocumentIndexer.git
+# 1. Clone repository (replace with your fork URL)
+git clone <your-repository-url>
 cd AIDocumentIndexer
 
 # 2. Backend setup (requires uv: curl -LsSf https://astral.sh/uv/install.sh | sh)
@@ -445,8 +459,6 @@ AIDocumentIndexer/
 └── tests/              # Test suites
 ```
 
-See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed development guide.
-
 **New developers**: Start with [DEVELOPER_ONBOARDING.md](docs/DEVELOPER_ONBOARDING.md) for a comprehensive guide to the codebase architecture, key classes, and project flow.
 
 ---
@@ -545,8 +557,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Support
 
 - **Documentation**: [docs/](docs/)
-- **Issues**: [GitHub Issues](https://github.com/yourusername/AIDocumentIndexer/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/AIDocumentIndexer/discussions)
+- **Issues**: Open an issue in the repository
+- **Discussions**: Use the repository's Discussions tab
 
 ---
 

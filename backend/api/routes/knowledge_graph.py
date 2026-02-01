@@ -19,12 +19,64 @@ from sqlalchemy.orm import selectinload
 from backend.db.database import get_async_session
 from backend.db.models import (
     Entity, EntityMention, EntityRelation,
-    EntityType, RelationType, Document,
+    EntityType, RelationType, Document, AccessTier,
 )
 from backend.api.middleware.auth import get_org_filter, AuthenticatedUser
 from backend.services.knowledge_graph import get_knowledge_graph_service
 
 logger = structlog.get_logger(__name__)
+
+
+# =============================================================================
+# Access Tier Filtering Helper
+# =============================================================================
+
+async def get_accessible_entity_ids(
+    db: AsyncSession,
+    user: AuthenticatedUser,
+    org_id: Optional[uuid.UUID],
+) -> set:
+    """
+    Get entity IDs accessible to user based on document access tiers.
+
+    The knowledge graph extracts entities from ALL documents.
+    This function filters which entities a specific user can see
+    based on their access tier and private document permissions.
+
+    An entity is accessible if it has at least one mention in a
+    document the user can access.
+    """
+    query = (
+        select(EntityMention.entity_id)
+        .distinct()
+        .join(Document, EntityMention.document_id == Document.id)
+        .join(AccessTier, Document.access_tier_id == AccessTier.id)
+        .where(AccessTier.level <= user.access_tier_level)
+    )
+
+    # Filter private documents - only owner or superadmin can access
+    if not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.is_private == False,
+                and_(
+                    Document.is_private == True,
+                    Document.uploaded_by_id == uuid.UUID(user.user_id),
+                ),
+            )
+        )
+
+    # Apply organization filtering
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),
+            )
+        )
+
+    result = await db.execute(query)
+    return {row[0] for row in result.fetchall()}
 
 router = APIRouter()
 
@@ -118,77 +170,77 @@ async def get_graph_stats(
 
     Returns summary statistics about the knowledge graph including
     entity counts, relationship counts, and distributions.
+
+    Note: Results are filtered based on user's access tier level.
+    Users only see stats for entities from documents they can access.
     """
     try:
         # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
         org_id = get_org_filter(user)
 
-        # Build base queries with org filtering
-        entity_base = select(func.count(Entity.id))
-        relation_base = select(func.count(EntityRelation.id))
-        mention_base = select(func.count(EntityMention.id))
+        # SECURITY FIX: Get entities accessible based on document access tiers
+        # Users only see entities from documents at or below their tier level
+        accessible_entity_ids = await get_accessible_entity_ids(db, user, org_id)
 
-        if org_id and not user.is_superadmin:
-            entity_base = entity_base.where(
-                or_(
-                    Entity.organization_id == org_id,
-                    Entity.organization_id.is_(None),
-                )
+        # If user has no accessible entities, return empty stats
+        if not accessible_entity_ids:
+            return GraphStatsResponse(
+                total_entities=0,
+                total_relations=0,
+                total_mentions=0,
+                entity_type_distribution={},
+                relation_type_distribution={},
+                top_entities=[],
+                documents_with_entities=0,
             )
-            relation_base = relation_base.where(
-                or_(
-                    EntityRelation.organization_id == org_id,
-                    EntityRelation.organization_id.is_(None),
-                )
+
+        # Build base queries filtered by accessible entities
+        entity_base = select(func.count(Entity.id)).where(Entity.id.in_(accessible_entity_ids))
+        relation_base = select(func.count(EntityRelation.id)).where(
+            and_(
+                EntityRelation.source_entity_id.in_(accessible_entity_ids),
+                EntityRelation.target_entity_id.in_(accessible_entity_ids),
             )
-            # EntityMention doesn't have org_id, filter via Document join
-            mention_base = mention_base.select_from(
-                EntityMention.__table__.join(
-                    Document.__table__,
-                    EntityMention.document_id == Document.id
-                )
-            ).where(
-                or_(
-                    Document.organization_id == org_id,
-                    Document.organization_id.is_(None),
-                )
-            )
+        )
+        mention_base = select(func.count(EntityMention.id)).where(
+            EntityMention.entity_id.in_(accessible_entity_ids)
+        )
 
         # Get basic counts
         entity_count = await db.scalar(entity_base) or 0
         relation_count = await db.scalar(relation_base) or 0
         mention_count = await db.scalar(mention_base) or 0
 
-        # Entity type distribution with org filtering
-        entity_type_query = select(Entity.entity_type, func.count(Entity.id)).group_by(Entity.entity_type)
-        if org_id and not user.is_superadmin:
-            entity_type_query = entity_type_query.where(
-                or_(
-                    Entity.organization_id == org_id,
-                    Entity.organization_id.is_(None),
-                )
-            )
+        # Entity type distribution - filtered by accessible entities
+        entity_type_query = (
+            select(Entity.entity_type, func.count(Entity.id))
+            .where(Entity.id.in_(accessible_entity_ids))
+            .group_by(Entity.entity_type)
+        )
         result = await db.execute(entity_type_query)
         entity_type_dist = {str(row[0].value): row[1] for row in result.all()}
 
-        # Relation type distribution with org filtering
-        relation_type_query = select(EntityRelation.relation_type, func.count(EntityRelation.id)).group_by(EntityRelation.relation_type)
-        if org_id and not user.is_superadmin:
-            relation_type_query = relation_type_query.where(
-                or_(
-                    EntityRelation.organization_id == org_id,
-                    EntityRelation.organization_id.is_(None),
+        # Relation type distribution - only relations between accessible entities
+        relation_type_query = (
+            select(EntityRelation.relation_type, func.count(EntityRelation.id))
+            .where(
+                and_(
+                    EntityRelation.source_entity_id.in_(accessible_entity_ids),
+                    EntityRelation.target_entity_id.in_(accessible_entity_ids),
                 )
             )
+            .group_by(EntityRelation.relation_type)
+        )
         result = await db.execute(relation_type_query)
         relation_type_dist = {str(row[0].value): row[1] for row in result.all()}
 
-        # Top entities by mention count (subquery approach) with org filtering
+        # Top entities by mention count - filtered by accessible entities
         mention_counts = (
             select(
                 EntityMention.entity_id,
                 func.count(EntityMention.id).label("mention_count")
             )
+            .where(EntityMention.entity_id.in_(accessible_entity_ids))
             .group_by(EntityMention.entity_id)
             .subquery()
         )
@@ -196,15 +248,10 @@ async def get_graph_stats(
         top_entities_query = (
             select(Entity, mention_counts.c.mention_count)
             .outerjoin(mention_counts, Entity.id == mention_counts.c.entity_id)
+            .where(Entity.id.in_(accessible_entity_ids))
+            .order_by(desc(mention_counts.c.mention_count))
+            .limit(10)
         )
-        if org_id and not user.is_superadmin:
-            top_entities_query = top_entities_query.where(
-                or_(
-                    Entity.organization_id == org_id,
-                    Entity.organization_id.is_(None),
-                )
-            )
-        top_entities_query = top_entities_query.order_by(desc(mention_counts.c.mention_count)).limit(10)
 
         result = await db.execute(top_entities_query)
 
@@ -222,15 +269,25 @@ async def get_graph_stats(
                 created_at=entity.created_at.isoformat() if entity.created_at else "",
             ))
 
-        # Documents with entities (filtered by org)
-        docs_with_entities_query = select(func.count(func.distinct(EntityMention.document_id)))
-        if org_id and not user.is_superadmin:
-            docs_with_entities_query = docs_with_entities_query.select_from(
-                EntityMention.__table__.join(
-                    Document.__table__,
-                    EntityMention.document_id == Document.id
+        # Documents with entities - count only accessible documents
+        docs_with_entities_query = (
+            select(func.count(func.distinct(EntityMention.document_id)))
+            .join(Document, EntityMention.document_id == Document.id)
+            .join(AccessTier, Document.access_tier_id == AccessTier.id)
+            .where(AccessTier.level <= user.access_tier_level)
+        )
+        if not user.is_superadmin:
+            docs_with_entities_query = docs_with_entities_query.where(
+                or_(
+                    Document.is_private == False,
+                    and_(
+                        Document.is_private == True,
+                        Document.uploaded_by_id == uuid.UUID(user.user_id),
+                    ),
                 )
-            ).where(
+            )
+        if org_id and not user.is_superadmin:
+            docs_with_entities_query = docs_with_entities_query.where(
                 or_(
                     Document.organization_id == org_id,
                     Document.organization_id.is_(None),
@@ -268,13 +325,27 @@ async def get_graph_data(
 
     Returns nodes (entities) and edges (relationships) formatted
     for use with visualization libraries like vis.js or d3.js.
+
+    Note: Results are filtered based on user's access tier level.
+    Users only see entities from documents they can access.
     """
     try:
-        # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+        # Get organization and accessible entities based on access tier
         org_id = get_org_filter(user)
 
-        # Build entity query with org filtering
-        entity_query = select(Entity)
+        # SECURITY FIX: Get entities accessible based on document access tiers
+        accessible_entity_ids = await get_accessible_entity_ids(db, user, org_id)
+
+        # If user has no accessible entities, return empty graph
+        if not accessible_entity_ids:
+            return GraphDataResponse(
+                nodes=[],
+                edges=[],
+                stats=GraphStatsResponse(),
+            )
+
+        # Build entity query filtered by accessible entities
+        entity_query = select(Entity).where(Entity.id.in_(accessible_entity_ids))
         if entity_type:
             try:
                 et = EntityType(entity_type)
@@ -282,24 +353,18 @@ async def get_graph_data(
             except ValueError:
                 pass
 
-        # Apply organization filter
-        if org_id and not user.is_superadmin:
-            entity_query = entity_query.where(
-                or_(
-                    Entity.organization_id == org_id,
-                    Entity.organization_id.is_(None),
-                )
-            )
-
         entity_query = entity_query.limit(limit)
 
         result = await db.execute(entity_query)
         entities = list(result.scalars().all())
         entity_ids = [e.id for e in entities]
 
-        # Get relations between these entities (with org filtering)
+        # Get relations where BOTH source and target are accessible (security)
+        # but at least one end is in the displayed entity_ids
         relations = []
         if entity_ids:
+            # Find relations where at least one end is in displayed entities
+            # AND both ends are in the accessible set (security filter)
             relations_query = (
                 select(EntityRelation)
                 .options(
@@ -308,20 +373,32 @@ async def get_graph_data(
                 )
                 .where(
                     and_(
-                        EntityRelation.source_entity_id.in_(entity_ids),
-                        EntityRelation.target_entity_id.in_(entity_ids),
+                        # Security: both ends must be accessible
+                        EntityRelation.source_entity_id.in_(accessible_entity_ids),
+                        EntityRelation.target_entity_id.in_(accessible_entity_ids),
+                        # At least one end is in the displayed set
+                        or_(
+                            EntityRelation.source_entity_id.in_(entity_ids),
+                            EntityRelation.target_entity_id.in_(entity_ids),
+                        ),
                     )
                 )
             )
-            if org_id and not user.is_superadmin:
-                relations_query = relations_query.where(
-                    or_(
-                        EntityRelation.organization_id == org_id,
-                        EntityRelation.organization_id.is_(None),
-                    )
-                )
             result = await db.execute(relations_query)
             relations = list(result.scalars().all())
+
+            # Add missing connected entities to the node list
+            connected_entity_ids = set()
+            for rel in relations:
+                connected_entity_ids.add(rel.source_entity_id)
+                connected_entity_ids.add(rel.target_entity_id)
+
+            # Fetch any connected entities not already in our list
+            missing_ids = connected_entity_ids - set(entity_ids)
+            if missing_ids:
+                missing_query = select(Entity).where(Entity.id.in_(missing_ids))
+                missing_result = await db.execute(missing_query)
+                entities.extend(missing_result.scalars().all())
 
         # Format nodes for visualization
         nodes = []
@@ -399,25 +476,32 @@ async def search_entities(
     Search entities in the knowledge graph.
 
     Supports filtering by name/alias search and entity type.
+
+    Note: Results are filtered based on user's access tier level.
+    Users only see entities from documents they can access.
     """
     try:
-        # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+        # Get organization and accessible entities based on access tier
         org_id = get_org_filter(user)
 
-        # Build base query
-        base_query = select(Entity)
-        count_query = select(func.count(Entity.id))
+        # SECURITY FIX: Get entities accessible based on document access tiers
+        accessible_entity_ids = await get_accessible_entity_ids(db, user, org_id)
+
+        # If user has no accessible entities, return empty results
+        if not accessible_entity_ids:
+            return EntitySearchResponse(
+                entities=[],
+                total=0,
+                page=page,
+                page_size=page_size,
+                has_more=False,
+            )
+
+        # Build base query filtered by accessible entities
+        base_query = select(Entity).where(Entity.id.in_(accessible_entity_ids))
+        count_query = select(func.count(Entity.id)).where(Entity.id.in_(accessible_entity_ids))
 
         conditions = []
-
-        # Organization filter
-        if org_id and not user.is_superadmin:
-            conditions.append(
-                or_(
-                    Entity.organization_id == org_id,
-                    Entity.organization_id.is_(None),
-                )
-            )
 
         # Name search
         if query:
@@ -501,7 +585,11 @@ async def get_entity(
     user: AuthenticatedUser,
     db: AsyncSession = Depends(get_async_session),
 ):
-    """Get a specific entity by ID."""
+    """
+    Get a specific entity by ID.
+
+    Note: User must have access to at least one document mentioning this entity.
+    """
     try:
         entity_uuid = uuid.UUID(entity_id)
     except ValueError:
@@ -510,17 +598,18 @@ async def get_entity(
             detail="Invalid entity ID format"
         )
 
-    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    # Get organization and accessible entities based on access tier
     org_id = get_org_filter(user)
-    entity_query = select(Entity).where(Entity.id == entity_uuid)
-    if org_id and not user.is_superadmin:
-        entity_query = entity_query.where(
-            or_(
-                Entity.organization_id == org_id,
-                Entity.organization_id.is_(None),
-            )
+
+    # SECURITY FIX: Check if user can access this entity
+    accessible_entity_ids = await get_accessible_entity_ids(db, user, org_id)
+    if entity_uuid not in accessible_entity_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Entity not found"
         )
 
+    entity_query = select(Entity).where(Entity.id == entity_uuid)
     result = await db.execute(entity_query)
     entity = result.scalar_one_or_none()
 
@@ -753,6 +842,9 @@ async def get_entity_neighborhood(
 
     Returns the entity and all entities connected to it within
     the specified number of hops.
+
+    Note: Results are filtered based on user's access tier level.
+    Neighbors are limited to entities the user can access.
     """
     try:
         entity_uuid = uuid.UUID(entity_id)
@@ -762,19 +854,19 @@ async def get_entity_neighborhood(
             detail="Invalid entity ID format"
         )
 
-    # PHASE 12 FIX: Apply organization filtering for multi-tenant isolation
+    # Get organization and accessible entities based on access tier
     org_id = get_org_filter(user)
 
-    # Get the entity with org filtering
-    entity_query = select(Entity).where(Entity.id == entity_uuid)
-    if org_id and not user.is_superadmin:
-        entity_query = entity_query.where(
-            or_(
-                Entity.organization_id == org_id,
-                Entity.organization_id.is_(None),
-            )
+    # SECURITY FIX: Get accessible entities and verify requested entity is accessible
+    accessible_entity_ids = await get_accessible_entity_ids(db, user, org_id)
+    if entity_uuid not in accessible_entity_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Entity not found"
         )
 
+    # Get the entity
+    entity_query = select(Entity).where(Entity.id == entity_uuid)
     result = await db.execute(entity_query)
     entity = result.scalar_one_or_none()
 
@@ -792,8 +884,18 @@ async def get_entity_neighborhood(
         max_neighbors=max_neighbors,
     )
 
-    # Get mention counts
-    entity_ids = [n.id for n in neighbors]
+    # SECURITY FIX: Filter neighbors to only include accessible entities
+    accessible_neighbors = [n for n in neighbors if n.id in accessible_entity_ids]
+
+    # SECURITY FIX: Filter relations to only include those between accessible entities
+    accessible_relations = [
+        r for r in relations
+        if r.source_entity_id in accessible_entity_ids
+        and r.target_entity_id in accessible_entity_ids
+    ]
+
+    # Get mention counts for accessible entities
+    entity_ids = [n.id for n in accessible_neighbors]
     mention_counts = {}
 
     if entity_ids:
@@ -828,7 +930,7 @@ async def get_entity_neighborhood(
             mention_count=mention_counts.get(n.id, 0),
             created_at=n.created_at.isoformat() if n.created_at else "",
         )
-        for n in neighbors if n.id != entity_uuid
+        for n in accessible_neighbors if n.id != entity_uuid
     ]
 
     relation_responses = [
@@ -842,7 +944,7 @@ async def get_entity_neighborhood(
             relation_label=r.relation_label,
             weight=r.weight,
         )
-        for r in relations
+        for r in accessible_relations
     ]
 
     return EntityNeighborhoodResponse(

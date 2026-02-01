@@ -12,7 +12,10 @@ import ipaddress
 import socket
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl, field_validator
+import json as json_module
+import asyncio as asyncio_module
 import structlog
 
 from backend.api.middleware.auth import AuthenticatedUser
@@ -25,6 +28,7 @@ from backend.services.scraper import (
     StorageMode,
     get_scraper_service,
 )
+from backend.services.crawl_scheduler import get_scheduler_service
 
 logger = structlog.get_logger(__name__)
 
@@ -902,3 +906,591 @@ async def get_job_documents(
         "documents": documents,
         "total": len(documents),
     }
+
+
+# =============================================================================
+# Sitemap Crawling
+# =============================================================================
+
+class SitemapCrawlRequest(BaseModel):
+    """Request to crawl a site via its sitemap."""
+    url: str = Field(..., description="Base URL of the site (e.g., https://example.com)")
+    max_pages: int = Field(default=50, ge=1, le=500, description="Maximum pages to crawl from sitemap")
+    storage_mode: str = Field(default="permanent", description="immediate or permanent")
+    access_tier: int = Field(default=1, ge=1, le=100, description="Access tier for stored content")
+
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        return validate_url_for_ssrf(v)
+
+
+@router.post("/sitemap-crawl")
+async def sitemap_crawl(
+    request: SitemapCrawlRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Crawl a website using its sitemap.xml for URL discovery.
+
+    Fetches the site's sitemap.xml, extracts URLs, and crawls them.
+    URLs are prioritized by lastmod date (newest first).
+    Results can be stored permanently in the RAG knowledge base.
+    """
+    from backend.services.web_crawler import get_web_crawler
+
+    logger.info(
+        "Sitemap crawl requested",
+        url=request.url,
+        max_pages=request.max_pages,
+        user_id=user.user_id,
+    )
+
+    try:
+        crawler = get_web_crawler()
+        results = await crawler.crawl_sitemap(
+            url=request.url,
+            max_pages=request.max_pages,
+        )
+
+        # If permanent storage requested, index the content
+        if request.storage_mode == "permanent" and results:
+            service = get_scraper_service()
+            from backend.services.scraper import ScrapedPage, ScrapeConfig, StorageMode, ScrapeJob, ScrapeStatus
+            from uuid import uuid4
+
+            pages = []
+            for r in results:
+                if r.success:
+                    pages.append(ScrapedPage(
+                        url=r.url,
+                        title=r.title,
+                        content=r.markdown or r.content,
+                        word_count=r.word_count,
+                    ))
+
+            if pages:
+                result = await service.index_pages_content(
+                    pages=pages,
+                    source_id=f"sitemap_{urlparse(request.url).netloc}",
+                )
+
+        return {
+            "url": request.url,
+            "pages_found": len(results),
+            "pages_successful": sum(1 for r in results if r.success),
+            "total_words": sum(r.word_count for r in results if r.success),
+            "storage_mode": request.storage_mode,
+            "pages": [
+                {
+                    "url": r.url,
+                    "title": r.title,
+                    "success": r.success,
+                    "word_count": r.word_count,
+                    "error": r.error,
+                }
+                for r in results
+            ],
+        }
+    except Exception as e:
+        logger.error("Sitemap crawl failed", url=request.url, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Sitemap crawl failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# SSE Progress Streaming
+# =============================================================================
+
+@router.get("/jobs/{job_id}/stream")
+async def stream_job_progress(
+    job_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Stream real-time progress of a scrape job via Server-Sent Events (SSE).
+
+    Events include: status updates, page completions, errors, and final summary.
+    Connect using EventSource in the browser.
+    """
+    service = get_scraper_service()
+    job = service.get_job(job_id)
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job not found: {job_id}",
+        )
+
+    if job.user_id != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this job",
+        )
+
+    async def event_generator():
+        """Generate SSE events for job progress."""
+        last_pages_scraped = 0
+        last_status = None
+
+        while True:
+            current_job = service.get_job(job_id)
+            if not current_job:
+                yield f"data: {json_module.dumps({'type': 'error', 'message': 'Job not found'})}\n\n"
+                break
+
+            # Send status update if changed
+            if current_job.status != last_status:
+                last_status = current_job.status
+                yield f"data: {json_module.dumps({'type': 'status', 'status': current_job.status.value, 'job_id': job_id})}\n\n"
+
+            # Send page progress if new pages scraped
+            if current_job.pages_scraped > last_pages_scraped:
+                for page in current_job.pages[last_pages_scraped:]:
+                    yield f"data: {json_module.dumps({'type': 'page_complete', 'url': page.url, 'title': page.title, 'word_count': page.word_count, 'pages_scraped': current_job.pages_scraped, 'total_pages': current_job.total_pages})}\n\n"
+                last_pages_scraped = current_job.pages_scraped
+
+            # Check if job is done
+            if current_job.status in [ScrapeStatus.COMPLETED, ScrapeStatus.FAILED]:
+                summary = {
+                    'type': 'complete',
+                    'status': current_job.status.value,
+                    'pages_scraped': current_job.pages_scraped,
+                    'pages_failed': current_job.pages_failed,
+                    'total_words': sum(p.word_count for p in current_job.pages),
+                }
+                yield f"data: {json_module.dumps(summary)}\n\n"
+                break
+
+            await asyncio_module.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# =============================================================================
+# Search-based Crawling
+# =============================================================================
+
+class SearchCrawlRequest(BaseModel):
+    """Request to search for and crawl pages."""
+    query: str = Field(..., min_length=3, description="Search query for finding relevant pages")
+    max_results: int = Field(default=5, ge=1, le=20, description="Maximum search results to crawl")
+    storage_mode: str = Field(default="immediate", description="immediate or permanent")
+    access_tier: int = Field(default=1, ge=1, le=100, description="Access tier for stored content")
+
+
+@router.post("/search-crawl")
+async def search_and_crawl(
+    request: SearchCrawlRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Search the web for relevant pages and crawl them.
+
+    Uses DuckDuckGo to find pages matching the query, then crawls
+    each result to extract content. Optionally stores results in
+    the RAG knowledge base for future queries.
+    """
+    from backend.services.web_crawler import get_web_crawler
+
+    logger.info(
+        "Search and crawl requested",
+        query=request.query,
+        max_results=request.max_results,
+        user_id=user.user_id,
+    )
+
+    try:
+        crawler = get_web_crawler()
+        results = await crawler.search_and_crawl(
+            query=request.query,
+            max_results=request.max_results,
+        )
+
+        # If permanent storage requested, index the content
+        if request.storage_mode == "permanent" and results:
+            service = get_scraper_service()
+            from backend.services.scraper import ScrapedPage
+
+            pages = []
+            for r in results:
+                if r.success:
+                    pages.append(ScrapedPage(
+                        url=r.url,
+                        title=r.title,
+                        content=r.markdown or r.content,
+                        word_count=r.word_count,
+                    ))
+
+            if pages:
+                await service.index_pages_content(
+                    pages=pages,
+                    source_id=f"search_{request.query[:50].replace(' ', '_')}",
+                )
+
+        return {
+            "query": request.query,
+            "results_found": len(results),
+            "results_successful": sum(1 for r in results if r.success),
+            "total_words": sum(r.word_count for r in results if r.success),
+            "storage_mode": request.storage_mode,
+            "results": [
+                {
+                    "url": r.url,
+                    "title": r.title,
+                    "success": r.success,
+                    "word_count": r.word_count,
+                    "error": r.error,
+                    "snippet": (r.markdown or "")[:200] if r.success else None,
+                }
+                for r in results
+            ],
+        }
+    except Exception as e:
+        logger.error("Search and crawl failed", query=request.query, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Search and crawl failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# Robots.txt Checking
+# =============================================================================
+
+@router.get("/robots-txt")
+async def check_robots_txt(
+    user: AuthenticatedUser,
+    url: str = Query(..., description="URL to check robots.txt for"),
+):
+    """
+    Parse and return robots.txt rules for a domain.
+
+    Returns allowed/disallowed paths, crawl delay, and sitemap URLs.
+    """
+    from backend.services.web_crawler import get_web_crawler
+
+    try:
+        crawler = get_web_crawler()
+        rules = await crawler.parse_robots_txt(url)
+        return rules
+    except Exception as e:
+        logger.error("robots.txt check failed", url=url, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse robots.txt: {str(e)}",
+        )
+
+
+# =============================================================================
+# Scheduled Crawl Pydantic Models
+# =============================================================================
+
+class ScheduledCrawlCreate(BaseModel):
+    """Request to create a scheduled crawl."""
+    url: str = Field(..., description="URL to crawl on schedule")
+    schedule: str = Field(
+        ...,
+        description="Cron expression (e.g. '0 */6 * * *' for every 6 hours)",
+    )
+    crawl_config: dict = Field(
+        default_factory=lambda: {"max_pages": 50, "max_depth": 3, "storage_mode": "permanent"},
+        description="Crawl configuration (max_pages, max_depth, storage_mode, etc.)",
+    )
+    enabled: bool = Field(default=True, description="Whether the schedule is active")
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        """Validate URL for SSRF protection."""
+        return validate_url_for_ssrf(v)
+
+
+class ScheduledCrawlUpdate(BaseModel):
+    """Request to update a scheduled crawl (partial update)."""
+    url: Optional[str] = Field(None, description="Updated URL")
+    schedule: Optional[str] = Field(None, description="Updated cron expression")
+    crawl_config: Optional[dict] = Field(None, description="Updated crawl configuration")
+    enabled: Optional[bool] = Field(None, description="Enable or disable the schedule")
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: Optional[str]) -> Optional[str]:
+        """Validate URL for SSRF protection."""
+        if v is not None:
+            return validate_url_for_ssrf(v)
+        return v
+
+
+class ScheduledCrawlResponse(BaseModel):
+    """Response model for a scheduled crawl."""
+    id: str
+    url: str
+    schedule: str
+    crawl_config: dict
+    enabled: bool
+    last_run: Optional[datetime] = None
+    next_run: Optional[datetime] = None
+    last_content_hash: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    created_by: Optional[str] = None
+
+
+class ScheduledCrawlListResponse(BaseModel):
+    """Response model for listing scheduled crawls."""
+    schedules: List[ScheduledCrawlResponse]
+    total: int
+
+
+# =============================================================================
+# Scheduled Crawl API Endpoints
+# =============================================================================
+
+@router.post("/scheduled", response_model=ScheduledCrawlResponse, status_code=status.HTTP_201_CREATED)
+async def create_scheduled_crawl(
+    request: ScheduledCrawlCreate,
+    user: AuthenticatedUser,
+):
+    """
+    Create a new scheduled/recurring crawl.
+
+    Registers a periodic crawl task that runs on the specified cron schedule.
+    Uses Celery Beat for dispatch. Content is hashed between runs to detect
+    changes and avoid redundant re-indexing.
+    """
+    logger.info(
+        "Creating scheduled crawl",
+        url=request.url,
+        schedule=request.schedule,
+        user_id=user.user_id,
+    )
+
+    scheduler = get_scheduler_service()
+
+    try:
+        scheduled_crawl = scheduler.create_schedule(
+            url=request.url,
+            schedule=request.schedule,
+            config=request.crawl_config,
+            user_id=user.user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    return ScheduledCrawlResponse(**scheduled_crawl.to_dict())
+
+
+@router.get("/scheduled", response_model=ScheduledCrawlListResponse)
+async def list_scheduled_crawls(
+    user: AuthenticatedUser,
+):
+    """
+    List all scheduled crawls.
+
+    Returns all scheduled crawl configurations for the current user.
+    Admins see all schedules.
+    """
+    scheduler = get_scheduler_service()
+
+    if user.is_admin():
+        schedules = scheduler.list_schedules()
+    else:
+        schedules = scheduler.list_schedules(user_id=user.user_id)
+
+    return ScheduledCrawlListResponse(
+        schedules=[ScheduledCrawlResponse(**s.to_dict()) for s in schedules],
+        total=len(schedules),
+    )
+
+
+@router.get("/scheduled/{schedule_id}", response_model=ScheduledCrawlResponse)
+async def get_scheduled_crawl(
+    schedule_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Get a specific scheduled crawl by ID.
+    """
+    scheduler = get_scheduler_service()
+
+    scheduled_crawl = scheduler.get_schedule(schedule_id)
+    if not scheduled_crawl:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scheduled crawl not found: {schedule_id}",
+        )
+
+    # Verify ownership (admins can access any schedule)
+    if scheduled_crawl.created_by != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this scheduled crawl",
+        )
+
+    return ScheduledCrawlResponse(**scheduled_crawl.to_dict())
+
+
+@router.put("/scheduled/{schedule_id}", response_model=ScheduledCrawlResponse)
+async def update_scheduled_crawl(
+    schedule_id: str,
+    request: ScheduledCrawlUpdate,
+    user: AuthenticatedUser,
+):
+    """
+    Update an existing scheduled crawl.
+
+    Supports partial updates. If the cron schedule or enabled state changes,
+    the Celery Beat registration is updated accordingly.
+    """
+    scheduler = get_scheduler_service()
+
+    # Check existence and ownership
+    existing = scheduler.get_schedule(schedule_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scheduled crawl not found: {schedule_id}",
+        )
+
+    if existing.created_by != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this scheduled crawl",
+        )
+
+    # Build updates dict from non-None fields
+    updates = {k: v for k, v in request.model_dump().items() if v is not None}
+
+    if not updates:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No fields to update",
+        )
+
+    try:
+        updated_crawl = scheduler.update_schedule(schedule_id, updates)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    logger.info(
+        "Updated scheduled crawl",
+        schedule_id=schedule_id,
+        updates=list(updates.keys()),
+        user_id=user.user_id,
+    )
+
+    return ScheduledCrawlResponse(**updated_crawl.to_dict())
+
+
+@router.delete("/scheduled/{schedule_id}")
+async def delete_scheduled_crawl(
+    schedule_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Delete a scheduled crawl.
+
+    Removes the schedule and unregisters the corresponding Celery Beat task.
+    """
+    scheduler = get_scheduler_service()
+
+    # Check existence and ownership
+    existing = scheduler.get_schedule(schedule_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scheduled crawl not found: {schedule_id}",
+        )
+
+    if existing.created_by != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this scheduled crawl",
+        )
+
+    deleted = scheduler.delete_schedule(schedule_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete scheduled crawl",
+        )
+
+    logger.info(
+        "Deleted scheduled crawl",
+        schedule_id=schedule_id,
+        user_id=user.user_id,
+    )
+
+    return {"message": f"Scheduled crawl {schedule_id} deleted successfully"}
+
+
+@router.post("/scheduled/{schedule_id}/run")
+async def run_scheduled_crawl(
+    schedule_id: str,
+    user: AuthenticatedUser,
+):
+    """
+    Manually trigger a scheduled crawl execution.
+
+    Runs the crawl immediately regardless of the cron schedule. Computes
+    a content hash and re-indexes only if content has changed since the
+    last execution.
+    """
+    scheduler = get_scheduler_service()
+
+    # Check existence and ownership
+    existing = scheduler.get_schedule(schedule_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scheduled crawl not found: {schedule_id}",
+        )
+
+    if existing.created_by != user.user_id and not user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this scheduled crawl",
+        )
+
+    logger.info(
+        "Manually triggering scheduled crawl",
+        schedule_id=schedule_id,
+        user_id=user.user_id,
+    )
+
+    try:
+        result = await scheduler.execute_scheduled_crawl(schedule_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            "Scheduled crawl execution failed",
+            schedule_id=schedule_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Scheduled crawl execution failed: {str(e)}",
+        )
+
+    return result

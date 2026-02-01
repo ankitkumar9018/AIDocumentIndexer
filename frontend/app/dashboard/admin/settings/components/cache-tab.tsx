@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useSession } from "next-auth/react";
 import {
   Card,
   CardContent,
@@ -35,7 +36,7 @@ import {
   Activity,
 } from "lucide-react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
 interface CacheTierStats {
   hits: number;
@@ -55,18 +56,34 @@ interface CacheStats {
 }
 
 export function CacheTab() {
+  const { data: session } = useSession();
   const [stats, setStats] = useState<CacheStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [clearing, setClearing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const fetchStats = async () => {
+  const accessToken = (session as any)?.accessToken as string | undefined;
+
+  const fetchStats = useCallback(async () => {
+    if (!accessToken) {
+      // Use placeholder stats if not authenticated
+      setStats({
+        redis_connected: false,
+        semantic_cache: { hits: 0, misses: 0, hit_rate: 0, size: 0 },
+        generative_cache: { hits: 0, misses: 0, hit_rate: 0, size: 0 },
+        embedding_cache: { hits: 0, misses: 0, hit_rate: 0, size: 0 },
+      });
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
       setError(null);
       const response = await fetch(`${API_BASE}/cache/stats`, {
-        credentials: "include",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
       });
       if (response.ok) {
         const data = await response.json();
@@ -90,15 +107,16 @@ export function CacheTab() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [accessToken]);
 
   useEffect(() => {
     fetchStats();
     const interval = setInterval(fetchStats, 30000); // Auto-refresh every 30s
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchStats]);
 
   const clearCache = async (cacheType?: string) => {
+    if (!accessToken) return;
     const target = cacheType || "all";
     setClearing(target);
     setError(null);
@@ -109,8 +127,10 @@ export function CacheTab() {
         : `${API_BASE}/cache/clear`;
       const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
         body: JSON.stringify({ cache_type: cacheType || "all" }),
       });
       if (response.ok) {

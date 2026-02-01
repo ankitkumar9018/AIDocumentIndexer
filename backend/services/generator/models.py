@@ -26,6 +26,7 @@ class OutputFormat(str, Enum):
     MARKDOWN = "markdown"
     HTML = "html"
     TXT = "txt"
+    MINDMAP = "mindmap"  # Interactive mind map (HTML/SVG)
 
 
 class GenerationStatus(str, Enum):

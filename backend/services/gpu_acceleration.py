@@ -481,7 +481,12 @@ class GPUVectorSearch:
             Total index size
         """
         if self._backend == "cuvs":
-            raise NotImplementedError("cuVS doesn't support incremental adds. Rebuild index.")
+            raise NotImplementedError(
+                "cuVS backend does not support incremental index updates. "
+                "Options: 1) Use 'faiss_gpu' backend for incremental updates, "
+                "2) Rebuild the entire index with build_index(), "
+                "3) Use batch indexing instead of incremental adds."
+            )
 
         embeddings = np.array(embeddings, dtype=np.float32)
         if self.config.use_precomputed:
@@ -495,7 +500,12 @@ class GPUVectorSearch:
     def save_index(self, path: str) -> None:
         """Save index to disk."""
         if self._backend == "cuvs":
-            raise NotImplementedError("cuVS index serialization not yet supported")
+            raise NotImplementedError(
+                "cuVS backend does not support index serialization. "
+                "Options: 1) Use 'faiss_gpu' backend for index persistence, "
+                "2) Rebuild the index on startup using build_index(), "
+                "3) Store embeddings in database and rebuild on demand."
+            )
 
         if self._backend == "faiss_gpu":
             # Transfer to CPU first

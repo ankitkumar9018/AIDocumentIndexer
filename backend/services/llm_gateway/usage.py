@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import structlog
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.base import BaseService
@@ -234,7 +234,7 @@ class UsageTracker(BaseService):
             func.sum(LLMUsageLog.total_tokens).label("total_tokens"),
             func.sum(LLMUsageLog.cost_usd).label("total_cost"),
             func.avg(LLMUsageLog.latency_ms).label("avg_latency_ms"),
-            func.sum(func.cast(LLMUsageLog.success, type_=None)).label("successful_requests"),
+            func.sum(func.cast(LLMUsageLog.success, Integer)).label("successful_requests"),
         ).where(
             LLMUsageLog.organization_id == self._organization_id,
             LLMUsageLog.created_at >= start_date,

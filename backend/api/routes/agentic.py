@@ -13,9 +13,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.api.middleware.auth import get_current_user
+from backend.api.middleware.auth import AuthenticatedUser
 from backend.db.database import get_async_session
-from backend.db.models import User
 
 router = APIRouter(tags=["Agentic RAG"])
 
@@ -79,7 +78,7 @@ async def get_agentic_service(db: AsyncSession = Depends(get_async_session)):
     from backend.services.rag import RAGService
     from backend.services.agentic_rag import get_agentic_rag_service
 
-    rag_service = RAGService(db)
+    rag_service = RAGService()
     return get_agentic_rag_service(rag_service)
 
 
@@ -95,7 +94,7 @@ async def get_agentic_service(db: AsyncSession = Depends(get_async_session)):
 )
 async def process_agentic_query(
     request: AgenticQueryRequest,
-    user: User = Depends(get_current_user),
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_async_session),
 ):
     """
@@ -111,15 +110,15 @@ async def process_agentic_query(
     from backend.services.agentic_rag import get_agentic_rag_service
 
     # Create services
-    rag_service = RAGService(db)
+    rag_service = RAGService()
     agentic_service = get_agentic_rag_service(rag_service)
 
     # Process query
     result = await agentic_service.process_query(
         query=request.query,
         collection_filter=request.collection_filter,
-        access_tier=user.access_tier if hasattr(user, 'access_tier') else 100,
-        user_id=str(user.id),
+        access_tier=user.access_tier_level,
+        user_id=user.user_id,
         use_multi_agent=request.use_multi_agent,
     )
 
@@ -159,7 +158,7 @@ async def process_agentic_query(
 )
 async def stream_agentic_query(
     request: AgenticQueryRequest,
-    user: User = Depends(get_current_user),
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_async_session),
 ):
     """
@@ -172,14 +171,14 @@ async def stream_agentic_query(
     from backend.services.agentic_rag import get_agentic_rag_service
 
     async def generate():
-        rag_service = RAGService(db)
+        rag_service = RAGService()
         agentic_service = get_agentic_rag_service(rag_service)
 
         async for update in agentic_service.process_query_stream(
             query=request.query,
             collection_filter=request.collection_filter,
-            access_tier=user.access_tier if hasattr(user, 'access_tier') else 100,
-            user_id=str(user.id),
+            access_tier=user.access_tier_level,
+            user_id=user.user_id,
         ):
             yield f"data: {json.dumps(update)}\n\n"
 
@@ -197,7 +196,7 @@ async def stream_agentic_query(
 )
 async def analyze_query_complexity(
     request: AgenticQueryRequest,
-    user: User = Depends(get_current_user),
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_async_session),
 ):
     """
@@ -211,7 +210,7 @@ async def analyze_query_complexity(
     from backend.services.rag import RAGService
     from backend.services.agentic_rag import get_agentic_rag_service
 
-    rag_service = RAGService(db)
+    rag_service = RAGService()
     agentic_service = get_agentic_rag_service(rag_service)
 
     is_complex, sub_queries, synthesis = await agentic_service.decompose_query(

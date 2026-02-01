@@ -20,7 +20,7 @@ source venv/bin/activate
 pip install --upgrade pip
 
 # Install with no cache
-pip install --no-cache-dir -r requirements.txt
+pip install --no-cache-dir -e ".[dev]"
 ```
 
 ### Node.js/npm Errors
@@ -821,6 +821,126 @@ ollama serve
 # Or configure a cloud provider in Settings → LLM Providers
 # Add OpenAI or Anthropic as fallback
 ```
+
+---
+
+## DSPy Optimization Issues
+
+### DSPy Optimization Job Fails
+
+**Problem:** DSPy optimization job fails or hangs.
+
+**Causes & Solutions:**
+
+1. **Insufficient training examples:**
+   ```bash
+   # Check example count — minimum 10 required
+   curl -H "Authorization: Bearer $TOKEN" \
+     http://localhost:8000/api/v1/dspy/training-data/stats
+   ```
+
+2. **LLM provider unavailable:**
+   - DSPy optimization requires an active LLM provider
+   - Check provider health in admin settings
+
+3. **Timeout exceeded:**
+   - Default timeout is configurable via `rag.dspy_optimization_timeout`
+   - Long-running jobs may need longer timeouts for large datasets
+
+### DSPy Inference Not Working
+
+**Problem:** Compiled DSPy prompts not being used in RAG responses.
+
+**Solution:**
+```bash
+# Verify DSPy inference is enabled
+# Admin Settings → Intelligence → DSPy Inference Enabled = true
+# Or check via API:
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/settings/rag.dspy_inference_enabled
+```
+
+Ensure at least one optimization job has `deployed` status.
+
+---
+
+## Binary Quantization Issues
+
+### Memory Not Reduced After Enabling
+
+**Problem:** Binary quantization is enabled but memory usage hasn't decreased.
+
+**Solution:**
+- Binary quantization only applies to new embeddings — existing vectors must be re-indexed
+- Re-process documents to generate binary-quantized embeddings
+- Check `rag.binary_quantization_enabled` is `true` in admin settings
+
+### Search Quality Degraded
+
+**Problem:** Search results are less relevant after enabling binary quantization.
+
+**Solution:**
+- Binary quantization trades some precision for 32x memory savings
+- Use binary quantization as a first-pass filter with re-ranking enabled
+- If quality is unacceptable, disable binary quantization and use full-precision vectors
+
+---
+
+## BYOK (Bring Your Own Key) Issues
+
+### BYOK Key Not Working
+
+**Problem:** Provider returns authentication error when using BYOK key.
+
+**Causes & Solutions:**
+
+1. **Invalid API key:**
+   - Use the "Test Key" button in BYOK settings to validate
+   - Ensure the key has not been revoked by the provider
+
+2. **Key not saved correctly:**
+   - BYOK keys are stored in browser localStorage
+   - Clear localStorage and re-enter the key
+   - Check that the master BYOK toggle is enabled
+
+3. **Provider mismatch:**
+   - Ensure the key matches the selected provider
+   - OpenAI keys start with `sk-`, Anthropic keys start with `sk-ant-`
+
+### BYOK Mode Not Activating
+
+**Problem:** Requests still use server-side keys despite BYOK being enabled.
+
+**Solution:**
+```javascript
+// Check browser localStorage
+localStorage.getItem('byok-enabled')  // should be "true"
+localStorage.getItem('byok-keys')     // should contain provider keys
+```
+
+Ensure the master BYOK toggle is ON in the BYOK settings panel.
+
+---
+
+## Content Freshness Issues
+
+### Old Documents Getting Low Scores
+
+**Problem:** Older documents are being penalized too aggressively.
+
+**Solution:**
+- Adjust `rag.freshness_decay_days` (default: 180) to a longer period
+- Reduce `rag.freshness_penalty_factor` (default: 0.95) closer to 1.0
+- Disable content freshness entirely via `rag.content_freshness_enabled = false`
+
+### Recent Documents Not Boosted
+
+**Problem:** Recently updated documents don't appear higher in results.
+
+**Solution:**
+- Verify `rag.content_freshness_enabled` is `true`
+- Check that document `updated_at` timestamps are being set correctly
+- Increase `rag.freshness_boost_factor` (default: 1.05) for stronger boosting
 
 ---
 

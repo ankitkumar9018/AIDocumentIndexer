@@ -7,8 +7,12 @@ import {
   Eye,
   Sparkles,
   BarChart3,
+  Zap,
+  Brain,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Card,
   CardContent,
@@ -76,11 +80,9 @@ export function GenerationTab({
                     Add source citations to documents
                   </p>
                 </div>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["generation.include_sources"] as boolean ?? true}
-                  onChange={(e) => handleSettingChange("generation.include_sources", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("generation.include_sources", checked)}
                 />
               </div>
               <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -90,29 +92,31 @@ export function GenerationTab({
                     Auto-generate relevant images
                   </p>
                 </div>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["generation.include_images"] as boolean ?? true}
-                  onChange={(e) => handleSettingChange("generation.include_images", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("generation.include_images", checked)}
                 />
               </div>
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Image Backend</label>
-              <select
-                className="w-full h-10 px-3 rounded-md border bg-background"
+              <Select
                 value={localSettings["generation.image_backend"] as string || "picsum"}
-                onChange={(e) => handleSettingChange("generation.image_backend", e.target.value)}
+                onValueChange={(value) => handleSettingChange("generation.image_backend", value)}
               >
-                <option value="picsum">Picsum (Free - No API Key)</option>
-                <option value="unsplash">Unsplash (Requires API Key)</option>
-                <option value="pexels">Pexels (Requires API Key)</option>
-                <option value="openai">OpenAI DALL-E (Requires API Key)</option>
-                <option value="stability">Stability AI (Requires API Key)</option>
-                <option value="automatic1111">Automatic1111 (Local SD)</option>
-                <option value="disabled">Disabled</option>
-              </select>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="picsum">Picsum (Free - No API Key)</SelectItem>
+                  <SelectItem value="unsplash">Unsplash (Requires API Key)</SelectItem>
+                  <SelectItem value="pexels">Pexels (Requires API Key)</SelectItem>
+                  <SelectItem value="openai">OpenAI DALL-E (Requires API Key)</SelectItem>
+                  <SelectItem value="stability">Stability AI (Requires API Key)</SelectItem>
+                  <SelectItem value="automatic1111">Automatic1111 (Local SD)</SelectItem>
+                  <SelectItem value="disabled">Disabled</SelectItem>
+                </SelectContent>
+              </Select>
               <p className="text-xs text-muted-foreground">Source for auto-generated images</p>
             </div>
           </div>
@@ -133,11 +137,9 @@ export function GenerationTab({
                   Use LLM to review generated content quality
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["generation.enable_quality_review"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("generation.enable_quality_review", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("generation.enable_quality_review", checked)}
               />
             </div>
             <div className="space-y-2">
@@ -174,65 +176,70 @@ export function GenerationTab({
                     Analyze template slides to learn visual styling and layout
                   </p>
                 </div>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["generation.enable_template_vision_analysis"] as boolean ?? false}
-                  onChange={(e) => handleSettingChange("generation.enable_template_vision_analysis", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("generation.enable_template_vision_analysis", checked)}
                 />
               </div>
               <div className="space-y-2 pt-2">
                 <label className="text-sm font-medium">Template Vision Model</label>
-                <select
-                  className="w-full h-10 px-3 rounded-md border bg-background"
+                <Select
                   value={localSettings["generation.template_vision_model"] as string || "auto"}
-                  onChange={(e) => handleSettingChange("generation.template_vision_model", e.target.value)}
+                  onValueChange={(value) => handleSettingChange("generation.template_vision_model", value)}
                 >
-                  <option value="auto">Auto (Use default vision model)</option>
-                  <optgroup label="OpenAI (Vision-capable)">
-                    {providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
-                      <>
-                        <option value="gpt-4o">GPT-4o</option>
-                        <option value="gpt-4o-mini">GPT-4o Mini</option>
-                        <option value="gpt-4-vision-preview">GPT-4 Vision</option>
-                      </>
-                    )}
-                    {!providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
-                      <option disabled>No OpenAI provider configured</option>
-                    )}
-                  </optgroup>
-                  <optgroup label="Anthropic (Vision-capable)">
-                    {providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
-                      <>
-                        <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                        <option value="claude-3-opus-20240229">Claude 3 Opus</option>
-                        <option value="claude-3-sonnet-20240229">Claude 3 Sonnet</option>
-                        <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
-                      </>
-                    )}
-                    {!providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
-                      <option disabled>No Anthropic provider configured</option>
-                    )}
-                  </optgroup>
-                  <optgroup label="Ollama (Local - Downloaded)">
-                    {ollamaLocalModels?.chat_models?.filter(m =>
-                      m.name.includes("llava") || m.name.includes("bakllava") ||
-                      m.name.includes("vision") || m.name.includes("qwen2.5vl") ||
-                      m.name.includes("minicpm-v")
-                    ).map(model => (
-                      <option key={model.name} value={model.name}>
-                        {model.name} {model.parameter_size && `(${model.parameter_size})`}
-                      </option>
-                    ))}
-                    {(!ollamaLocalModels?.chat_models || ollamaLocalModels.chat_models.filter(m =>
-                      m.name.includes("llava") || m.name.includes("bakllava") ||
-                      m.name.includes("vision") || m.name.includes("qwen2.5vl") ||
-                      m.name.includes("minicpm-v")
-                    ).length === 0) && (
-                      <option disabled>No vision models downloaded (try: ollama pull llava)</option>
-                    )}
-                  </optgroup>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto (Use default vision model)</SelectItem>
+                    <SelectGroup>
+                      <SelectLabel>OpenAI (Vision-capable)</SelectLabel>
+                      {providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
+                        <>
+                          <SelectItem value="gpt-4o">GPT-4o</SelectItem>
+                          <SelectItem value="gpt-4o-mini">GPT-4o Mini</SelectItem>
+                          <SelectItem value="gpt-4-vision-preview">GPT-4 Vision</SelectItem>
+                        </>
+                      )}
+                      {!providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
+                        <SelectItem value="_no_openai" disabled>No OpenAI provider configured</SelectItem>
+                      )}
+                    </SelectGroup>
+                    <SelectGroup>
+                      <SelectLabel>Anthropic (Vision-capable)</SelectLabel>
+                      {providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
+                        <>
+                          <SelectItem value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</SelectItem>
+                          <SelectItem value="claude-3-opus-20240229">Claude 3 Opus</SelectItem>
+                          <SelectItem value="claude-3-sonnet-20240229">Claude 3 Sonnet</SelectItem>
+                          <SelectItem value="claude-3-haiku-20240307">Claude 3 Haiku</SelectItem>
+                        </>
+                      )}
+                      {!providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
+                        <SelectItem value="_no_anthropic" disabled>No Anthropic provider configured</SelectItem>
+                      )}
+                    </SelectGroup>
+                    <SelectGroup>
+                      <SelectLabel>Ollama (Local - Downloaded)</SelectLabel>
+                      {ollamaLocalModels?.chat_models?.filter(m =>
+                        m.name.includes("llava") || m.name.includes("bakllava") ||
+                        m.name.includes("vision") || m.name.includes("qwen2.5vl") ||
+                        m.name.includes("minicpm-v")
+                      ).map(model => (
+                        <SelectItem key={model.name} value={model.name}>
+                          {model.name} {model.parameter_size && `(${model.parameter_size})`}
+                        </SelectItem>
+                      ))}
+                      {(!ollamaLocalModels?.chat_models || ollamaLocalModels.chat_models.filter(m =>
+                        m.name.includes("llava") || m.name.includes("bakllava") ||
+                        m.name.includes("vision") || m.name.includes("qwen2.5vl") ||
+                        m.name.includes("minicpm-v")
+                      ).length === 0) && (
+                        <SelectItem value="_no_ollama_vision" disabled>No vision models downloaded (try: ollama pull llava)</SelectItem>
+                      )}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
                 <p className="text-xs text-muted-foreground">Vision model for analyzing template styling</p>
               </div>
             </div>
@@ -246,66 +253,71 @@ export function GenerationTab({
                     Review generated slides for visual issues (overlaps, truncation)
                   </p>
                 </div>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
+                <Switch
                   checked={localSettings["generation.enable_vision_review"] as boolean ?? false}
-                  onChange={(e) => handleSettingChange("generation.enable_vision_review", e.target.checked)}
+                  onCheckedChange={(checked) => handleSettingChange("generation.enable_vision_review", checked)}
                 />
               </div>
               <div className="space-y-3 pt-2">
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Vision Review Model</label>
-                  <select
-                    className="w-full h-10 px-3 rounded-md border bg-background"
+                  <Select
                     value={localSettings["generation.vision_review_model"] as string || "auto"}
-                    onChange={(e) => handleSettingChange("generation.vision_review_model", e.target.value)}
+                    onValueChange={(value) => handleSettingChange("generation.vision_review_model", value)}
                   >
-                    <option value="auto">Auto (Use default vision model)</option>
-                    <optgroup label="OpenAI (Vision-capable)">
-                      {providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
-                        <>
-                          <option value="gpt-4o">GPT-4o</option>
-                          <option value="gpt-4o-mini">GPT-4o Mini</option>
-                          <option value="gpt-4-vision-preview">GPT-4 Vision</option>
-                        </>
-                      )}
-                      {!providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
-                        <option disabled>No OpenAI provider configured</option>
-                      )}
-                    </optgroup>
-                    <optgroup label="Anthropic (Vision-capable)">
-                      {providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
-                        <>
-                          <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                          <option value="claude-3-opus-20240229">Claude 3 Opus</option>
-                          <option value="claude-3-sonnet-20240229">Claude 3 Sonnet</option>
-                          <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
-                        </>
-                      )}
-                      {!providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
-                        <option disabled>No Anthropic provider configured</option>
-                      )}
-                    </optgroup>
-                    <optgroup label="Ollama (Local - Downloaded)">
-                      {ollamaLocalModels?.chat_models?.filter(m =>
-                        m.name.includes("llava") || m.name.includes("bakllava") ||
-                        m.name.includes("vision") || m.name.includes("qwen2.5vl") ||
-                        m.name.includes("minicpm-v")
-                      ).map(model => (
-                        <option key={model.name} value={model.name}>
-                          {model.name} {model.parameter_size && `(${model.parameter_size})`}
-                        </option>
-                      ))}
-                      {(!ollamaLocalModels?.chat_models || ollamaLocalModels.chat_models.filter(m =>
-                        m.name.includes("llava") || m.name.includes("bakllava") ||
-                        m.name.includes("vision") || m.name.includes("qwen2.5vl") ||
-                        m.name.includes("minicpm-v")
-                      ).length === 0) && (
-                        <option disabled>No vision models downloaded (try: ollama pull llava)</option>
-                      )}
-                    </optgroup>
-                  </select>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Auto (Use default vision model)</SelectItem>
+                      <SelectGroup>
+                        <SelectLabel>OpenAI (Vision-capable)</SelectLabel>
+                        {providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
+                          <>
+                            <SelectItem value="gpt-4o">GPT-4o</SelectItem>
+                            <SelectItem value="gpt-4o-mini">GPT-4o Mini</SelectItem>
+                            <SelectItem value="gpt-4-vision-preview">GPT-4 Vision</SelectItem>
+                          </>
+                        )}
+                        {!providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
+                          <SelectItem value="_no_openai_review" disabled>No OpenAI provider configured</SelectItem>
+                        )}
+                      </SelectGroup>
+                      <SelectGroup>
+                        <SelectLabel>Anthropic (Vision-capable)</SelectLabel>
+                        {providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
+                          <>
+                            <SelectItem value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</SelectItem>
+                            <SelectItem value="claude-3-opus-20240229">Claude 3 Opus</SelectItem>
+                            <SelectItem value="claude-3-sonnet-20240229">Claude 3 Sonnet</SelectItem>
+                            <SelectItem value="claude-3-haiku-20240307">Claude 3 Haiku</SelectItem>
+                          </>
+                        )}
+                        {!providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
+                          <SelectItem value="_no_anthropic_review" disabled>No Anthropic provider configured</SelectItem>
+                        )}
+                      </SelectGroup>
+                      <SelectGroup>
+                        <SelectLabel>Ollama (Local - Downloaded)</SelectLabel>
+                        {ollamaLocalModels?.chat_models?.filter(m =>
+                          m.name.includes("llava") || m.name.includes("bakllava") ||
+                          m.name.includes("vision") || m.name.includes("qwen2.5vl") ||
+                          m.name.includes("minicpm-v")
+                        ).map(model => (
+                          <SelectItem key={model.name} value={model.name}>
+                            {model.name} {model.parameter_size && `(${model.parameter_size})`}
+                          </SelectItem>
+                        ))}
+                        {(!ollamaLocalModels?.chat_models || ollamaLocalModels.chat_models.filter(m =>
+                          m.name.includes("llava") || m.name.includes("bakllava") ||
+                          m.name.includes("vision") || m.name.includes("qwen2.5vl") ||
+                          m.name.includes("minicpm-v")
+                        ).length === 0) && (
+                          <SelectItem value="_no_ollama_vision_review" disabled>No vision models downloaded (try: ollama pull llava)</SelectItem>
+                        )}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="flex items-center justify-between">
                   <div>
@@ -314,11 +326,9 @@ export function GenerationTab({
                       If off, only reviews slides at risk of issues
                     </p>
                   </div>
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4"
+                  <Switch
                     checked={localSettings["generation.vision_review_all_slides"] as boolean ?? false}
-                    onChange={(e) => handleSettingChange("generation.vision_review_all_slides", e.target.checked)}
+                    onCheckedChange={(checked) => handleSettingChange("generation.vision_review_all_slides", checked)}
                   />
                 </div>
               </div>
@@ -338,11 +348,9 @@ export function GenerationTab({
                   Learn layout constraints from template for each slide type
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["generation.enable_per_slide_constraints"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("generation.enable_per_slide_constraints", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("generation.enable_per_slide_constraints", checked)}
               />
             </div>
             <div className="flex items-center justify-between p-3 rounded-lg border">
@@ -352,11 +360,9 @@ export function GenerationTab({
                   Use LLM to condense overflowing content intelligently
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["generation.enable_llm_rewrite"] as boolean ?? true}
-                onChange={(e) => handleSettingChange("generation.enable_llm_rewrite", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("generation.enable_llm_rewrite", checked)}
               />
             </div>
           </div>
@@ -374,26 +380,28 @@ export function GenerationTab({
                   Automatically create charts from data in content
                 </p>
               </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4"
+              <Switch
                 checked={localSettings["generation.auto_charts"] as boolean ?? false}
-                onChange={(e) => handleSettingChange("generation.auto_charts", e.target.checked)}
+                onCheckedChange={(checked) => handleSettingChange("generation.auto_charts", checked)}
               />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Chart Style</label>
-                <select
-                  className="w-full h-10 px-3 rounded-md border bg-background"
+                <Select
                   value={localSettings["generation.chart_style"] as string || "business"}
-                  onChange={(e) => handleSettingChange("generation.chart_style", e.target.value)}
+                  onValueChange={(value) => handleSettingChange("generation.chart_style", value)}
                 >
-                  <option value="business">Business (Professional)</option>
-                  <option value="modern">Modern (Clean lines)</option>
-                  <option value="minimal">Minimal (Simple)</option>
-                  <option value="colorful">Colorful (Vibrant)</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="business">Business (Professional)</SelectItem>
+                    <SelectItem value="modern">Modern (Clean lines)</SelectItem>
+                    <SelectItem value="minimal">Minimal (Simple)</SelectItem>
+                    <SelectItem value="colorful">Colorful (Vibrant)</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Chart DPI</label>
@@ -410,6 +418,153 @@ export function GenerationTab({
             </div>
           </div>
 
+          {/* Feature LLM Defaults */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Zap className="h-4 w-4" />
+              Feature LLM Defaults
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Configure default LLMs for Skills and Deep Research features
+            </p>
+
+            {/* Skills Default LLM */}
+            <div className="space-y-3 p-3 rounded-lg border bg-muted/30">
+              <div className="flex items-center gap-2">
+                <Zap className="h-4 w-4 text-primary" />
+                <p className="font-medium">Skills Default Model</p>
+              </div>
+              <div className="space-y-2">
+                <Select
+                  value={localSettings["features.skills_default_model"] as string || "gpt-4o"}
+                  onValueChange={(value) => handleSettingChange("features.skills_default_model", value)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectLabel>OpenAI</SelectLabel>
+                      {providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
+                        <>
+                          <SelectItem value="gpt-4o">GPT-4o</SelectItem>
+                          <SelectItem value="gpt-4o-mini">GPT-4o Mini</SelectItem>
+                          <SelectItem value="gpt-4-turbo">GPT-4 Turbo</SelectItem>
+                        </>
+                      )}
+                      {!providersData?.providers?.some(p => p.provider_type === "openai" && p.is_active) && (
+                        <SelectItem value="_no_openai_skills" disabled>No OpenAI provider configured</SelectItem>
+                      )}
+                    </SelectGroup>
+                    <SelectGroup>
+                      <SelectLabel>Anthropic</SelectLabel>
+                      {providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
+                        <>
+                          <SelectItem value="claude-3-5-sonnet">Claude 3.5 Sonnet</SelectItem>
+                          <SelectItem value="claude-3-opus">Claude 3 Opus</SelectItem>
+                          <SelectItem value="claude-3-haiku">Claude 3 Haiku</SelectItem>
+                        </>
+                      )}
+                      {!providersData?.providers?.some(p => p.provider_type === "anthropic" && p.is_active) && (
+                        <SelectItem value="_no_anthropic_skills" disabled>No Anthropic provider configured</SelectItem>
+                      )}
+                    </SelectGroup>
+                    <SelectGroup>
+                      <SelectLabel>Google</SelectLabel>
+                      {providersData?.providers?.some(p => p.provider_type === "google" && p.is_active) && (
+                        <>
+                          <SelectItem value="gemini-pro">Gemini Pro</SelectItem>
+                          <SelectItem value="gemini-1.5-pro">Gemini 1.5 Pro</SelectItem>
+                        </>
+                      )}
+                      {!providersData?.providers?.some(p => p.provider_type === "google" && p.is_active) && (
+                        <SelectItem value="_no_google_skills" disabled>No Google provider configured</SelectItem>
+                      )}
+                    </SelectGroup>
+                    <SelectGroup>
+                      <SelectLabel>Ollama (Local)</SelectLabel>
+                      {ollamaLocalModels?.chat_models?.slice(0, 10).map(model => (
+                        <SelectItem key={model.name} value={model.name}>
+                          {model.name} {model.parameter_size && `(${model.parameter_size})`}
+                        </SelectItem>
+                      ))}
+                      {(!ollamaLocalModels?.chat_models || ollamaLocalModels.chat_models.length === 0) && (
+                        <SelectItem value="_no_ollama_skills" disabled>No Ollama models downloaded</SelectItem>
+                      )}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">Default model used when running Skills</p>
+              </div>
+            </div>
+
+            {/* Research Default LLMs */}
+            <div className="space-y-3 p-3 rounded-lg border bg-muted/30">
+              <div className="flex items-center gap-2">
+                <Brain className="h-4 w-4 text-primary" />
+                <p className="font-medium">Deep Research Default Models</p>
+              </div>
+              <p className="text-xs text-muted-foreground mb-2">
+                Select which models are enabled by default for multi-LLM verification
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div className="flex items-center justify-between p-2 rounded border">
+                  <span className="text-sm">GPT-4o</span>
+                  <Switch
+                    checked={localSettings["features.research_enable_gpt4o"] as boolean ?? true}
+                    onCheckedChange={(checked) => handleSettingChange("features.research_enable_gpt4o", checked)}
+                  />
+                </div>
+                <div className="flex items-center justify-between p-2 rounded border">
+                  <span className="text-sm">GPT-4o Mini</span>
+                  <Switch
+                    checked={localSettings["features.research_enable_gpt4o_mini"] as boolean ?? false}
+                    onCheckedChange={(checked) => handleSettingChange("features.research_enable_gpt4o_mini", checked)}
+                  />
+                </div>
+                <div className="flex items-center justify-between p-2 rounded border">
+                  <span className="text-sm">Claude 3.5 Sonnet</span>
+                  <Switch
+                    checked={localSettings["features.research_enable_claude_sonnet"] as boolean ?? true}
+                    onCheckedChange={(checked) => handleSettingChange("features.research_enable_claude_sonnet", checked)}
+                  />
+                </div>
+                <div className="flex items-center justify-between p-2 rounded border">
+                  <span className="text-sm">Claude 3 Haiku</span>
+                  <Switch
+                    checked={localSettings["features.research_enable_claude_haiku"] as boolean ?? false}
+                    onCheckedChange={(checked) => handleSettingChange("features.research_enable_claude_haiku", checked)}
+                  />
+                </div>
+                <div className="flex items-center justify-between p-2 rounded border">
+                  <span className="text-sm">Gemini Pro</span>
+                  <Switch
+                    checked={localSettings["features.research_enable_gemini"] as boolean ?? true}
+                    onCheckedChange={(checked) => handleSettingChange("features.research_enable_gemini", checked)}
+                  />
+                </div>
+                <div className="flex items-center justify-between p-2 rounded border">
+                  <span className="text-sm">Llama 3.1 70B</span>
+                  <Switch
+                    checked={localSettings["features.research_enable_llama"] as boolean ?? false}
+                    onCheckedChange={(checked) => handleSettingChange("features.research_enable_llama", checked)}
+                  />
+                </div>
+              </div>
+              <div className="space-y-2 pt-2">
+                <label className="text-sm font-medium">Default Verification Rounds</label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="5"
+                  value={localSettings["features.research_default_rounds"] as number ?? 3}
+                  onChange={(e) => handleSettingChange("features.research_default_rounds", parseInt(e.target.value) || 3)}
+                />
+                <p className="text-xs text-muted-foreground">Number of verification rounds for Deep Research</p>
+              </div>
+            </div>
+          </div>
+
           {/* Style Defaults */}
           <div className="space-y-4 pt-4 border-t">
             <h4 className="text-sm font-medium flex items-center gap-2">
@@ -419,30 +574,38 @@ export function GenerationTab({
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Default Tone</label>
-                <select
-                  className="w-full h-10 px-3 rounded-md border bg-background"
+                <Select
                   value={localSettings["generation.default_tone"] as string || "professional"}
-                  onChange={(e) => handleSettingChange("generation.default_tone", e.target.value)}
+                  onValueChange={(value) => handleSettingChange("generation.default_tone", value)}
                 >
-                  <option value="professional">Professional</option>
-                  <option value="casual">Casual</option>
-                  <option value="technical">Technical</option>
-                  <option value="friendly">Friendly</option>
-                  <option value="academic">Academic</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="professional">Professional</SelectItem>
+                    <SelectItem value="casual">Casual</SelectItem>
+                    <SelectItem value="technical">Technical</SelectItem>
+                    <SelectItem value="friendly">Friendly</SelectItem>
+                    <SelectItem value="academic">Academic</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Default Style</label>
-                <select
-                  className="w-full h-10 px-3 rounded-md border bg-background"
+                <Select
                   value={localSettings["generation.default_style"] as string || "business"}
-                  onChange={(e) => handleSettingChange("generation.default_style", e.target.value)}
+                  onValueChange={(value) => handleSettingChange("generation.default_style", value)}
                 >
-                  <option value="business">Business</option>
-                  <option value="creative">Creative</option>
-                  <option value="minimal">Minimal</option>
-                  <option value="bold">Bold</option>
-                </select>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="business">Business</SelectItem>
+                    <SelectItem value="creative">Creative</SelectItem>
+                    <SelectItem value="minimal">Minimal</SelectItem>
+                    <SelectItem value="bold">Bold</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           </div>

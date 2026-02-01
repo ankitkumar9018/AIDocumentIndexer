@@ -119,7 +119,7 @@
       "process_name": "celery",
       "required": false,
       "description": "Async document processing (requires Redis)",
-      "start_command": "uv run celery -A backend.services.task_queue worker --loglevel=info"
+      "start_command": "uv run --project backend python -m celery -A backend.services.task_queue worker --loglevel=info --pool=threads --concurrency=4"
     }
   },
   "environment": {

@@ -172,6 +172,26 @@ def _register_builtin_connectors():
     except ImportError as e:
         logger.debug(f"YouTube connector not available: {e}")
 
+    try:
+        from backend.services.connectors.slack_data import SlackDataConnector
+    except ImportError as e:
+        logger.debug(f"Slack data connector not available: {e}")
+
+    try:
+        from backend.services.connectors.github import GitHubConnector
+    except ImportError as e:
+        logger.debug(f"GitHub connector not available: {e}")
+
+    try:
+        from backend.services.connectors.dropbox import DropboxConnector
+    except ImportError as e:
+        logger.debug(f"Dropbox connector not available: {e}")
+
+    try:
+        from backend.services.connectors.box import BoxConnector
+    except ImportError as e:
+        logger.debug(f"Box connector not available: {e}")
+
 
 # Register connectors on module load
 _register_builtin_connectors()

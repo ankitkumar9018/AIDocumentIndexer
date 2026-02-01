@@ -575,6 +575,20 @@ class Document(Base, UUIDMixin, TimestampMixin):
     # Private documents are deleted when the owner user is deleted.
     is_private: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
+    # Image analysis tracking
+    # Tracks the status and results of AI-powered image analysis
+    image_analysis_status: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        default="pending",
+        index=True,
+    )  # pending, processing, completed, failed, skipped, not_applicable
+    image_analysis_completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+    )
+    images_extracted_count: Mapped[int] = mapped_column(Integer, default=0)
+    images_analyzed_count: Mapped[int] = mapped_column(Integer, default=0)
+    image_analysis_error: Mapped[Optional[str]] = mapped_column(Text)
+
     # Foreign keys
     access_tier_id: Mapped[uuid.UUID] = mapped_column(
         GUID(),
@@ -679,6 +693,15 @@ class Chunk(Base, UUIDMixin):
         Integer,
         nullable=True,
         comment="Dimension of primary embedding: 384, 768, 1536, 3072, etc."
+    )
+
+    # Track if embedding is stored in vector database (ChromaDB/pgvector)
+    # This allows UI progress tracking without storing the actual vector twice
+    has_embedding: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        index=True,
+        comment="True if embedding is stored in vector database"
     )
 
     # Position info
@@ -1681,6 +1704,338 @@ class PromptTemplate(Base, UUIDMixin, TimestampMixin):
 
 
 # =============================================================================
+# Skills Marketplace Models
+# =============================================================================
+
+class SkillCategory(str, PyEnum):
+    """Skill category classification."""
+    ANALYSIS = "analysis"
+    GENERATION = "generation"
+    EXTRACTION = "extraction"
+    TRANSFORMATION = "transformation"
+    VALIDATION = "validation"
+    INTEGRATION = "integration"
+    CUSTOM = "custom"
+
+
+class Skill(Base, UUIDMixin, TimestampMixin):
+    """
+    AI Skill definition for the Skills Marketplace.
+
+    Skills are reusable AI-powered functions that can be executed
+    with custom inputs. Users can create custom skills or use built-in ones.
+    """
+    __tablename__ = "skills"
+
+    # Ownership
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+    )  # NULL = system/built-in skill
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+    )
+
+    # Skill identity
+    skill_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)  # e.g., "summarizer", "my-custom-skill"
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(50), default="custom", index=True)
+    icon: Mapped[str] = mapped_column(String(50), default="zap")
+    tags: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+
+    # Skill configuration
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    inputs: Mapped[Optional[list]] = mapped_column(JSONType())  # Input schema [{name, type, description, required}]
+    outputs: Mapped[Optional[list]] = mapped_column(JSONType())  # Output schema [{name, type, description}]
+    config: Mapped[Optional[dict]] = mapped_column(JSONType())  # Additional config (model, temperature, etc.)
+
+    # Visibility & access
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Versioning
+    version: Mapped[str] = mapped_column(String(20), default="1.0.0")
+
+    # Usage statistics
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_execution_time_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Relationships
+    user: Mapped[Optional["User"]] = relationship("User")
+    organization: Mapped[Optional["Organization"]] = relationship("Organization")
+    executions: Mapped[List["SkillExecution"]] = relationship(
+        "SkillExecution", back_populates="skill", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("idx_skills_user", "user_id"),
+        Index("idx_skills_org", "organization_id"),
+        Index("idx_skills_key", "skill_key"),
+        Index("idx_skills_category", "category"),
+        Index("idx_skills_public", "is_public"),
+        Index("idx_skills_builtin", "is_builtin"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Skill(key='{self.skill_key}', name='{self.name}', category='{self.category}')>"
+
+
+class SkillExecutionStatus(str, PyEnum):
+    """Skill execution status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class SkillExecution(Base, UUIDMixin, TimestampMixin):
+    """
+    Skill execution history and audit log.
+
+    Records each execution of a skill for analytics and debugging.
+    """
+    __tablename__ = "skill_executions"
+
+    # References
+    skill_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("skills.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Execution details
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default=SkillExecutionStatus.PENDING.value,
+    )
+    inputs: Mapped[Optional[dict]] = mapped_column(JSONType())  # Input values used
+    output: Mapped[Optional[dict]] = mapped_column(JSONType())  # Result of execution
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Performance metrics
+    execution_time_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    tokens_used: Mapped[Optional[int]] = mapped_column(Integer)
+    model_used: Mapped[Optional[str]] = mapped_column(String(100))
+    provider_used: Mapped[Optional[str]] = mapped_column(String(50))
+
+    # Relationships
+    skill: Mapped["Skill"] = relationship("Skill", back_populates="executions")
+    user: Mapped["User"] = relationship("User")
+
+    __table_args__ = (
+        Index("idx_skill_executions_skill", "skill_id"),
+        Index("idx_skill_executions_user", "user_id"),
+        Index("idx_skill_executions_status", "status"),
+        Index("idx_skill_executions_created", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SkillExecution(skill_id={self.skill_id}, status='{self.status}')>"
+
+
+# =============================================================================
+# Reports (Sparkpages) Models
+# =============================================================================
+
+class ReportStatus(str, PyEnum):
+    """Report status."""
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    ARCHIVED = "archived"
+
+
+class Report(Base, UUIDMixin, TimestampMixin):
+    """
+    AI-generated report (Sparkpage).
+
+    Reports are structured documents with sections, citations,
+    and rich content generated from document queries.
+    """
+    __tablename__ = "reports"
+
+    # Ownership
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+    )
+
+    # Report info
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default=ReportStatus.DRAFT.value)
+
+    # Content
+    sections: Mapped[Optional[list]] = mapped_column(JSONType())  # Array of section objects
+    citations: Mapped[Optional[list]] = mapped_column(JSONType())  # Array of citation objects
+    extra_data: Mapped[Optional[dict]] = mapped_column(JSONType())  # Additional report data
+
+    # Display
+    thumbnail_url: Mapped[Optional[str]] = mapped_column(String(500))
+    is_starred: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Stats
+    section_count: Mapped[int] = mapped_column(Integer, default=0)
+    citation_count: Mapped[int] = mapped_column(Integer, default=0)
+    view_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User")
+    organization: Mapped[Optional["Organization"]] = relationship("Organization")
+
+    __table_args__ = (
+        Index("idx_reports_user", "user_id"),
+        Index("idx_reports_org", "organization_id"),
+        Index("idx_reports_status", "status"),
+        Index("idx_reports_starred", "is_starred"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Report(title='{self.title}', status='{self.status}')>"
+
+
+# =============================================================================
+# Deep Research Models
+# =============================================================================
+
+class ResearchStatus(str, PyEnum):
+    """Research job status."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ResearchResult(Base, UUIDMixin, TimestampMixin):
+    """
+    Deep research result with multi-LLM verification.
+
+    Stores research queries, findings, and verification results.
+    """
+    __tablename__ = "research_results"
+
+    # Ownership
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+    )
+
+    # Query
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    context: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Status
+    status: Mapped[str] = mapped_column(String(20), default=ResearchStatus.PENDING.value)
+
+    # Results
+    findings: Mapped[Optional[list]] = mapped_column(JSONType())  # Array of finding objects
+    sources: Mapped[Optional[list]] = mapped_column(JSONType())  # Array of source objects
+    verification: Mapped[Optional[dict]] = mapped_column(JSONType())  # Verification results
+    summary: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Metrics
+    confidence_score: Mapped[Optional[float]] = mapped_column(Float)
+    models_used: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+    execution_time_ms: Mapped[Optional[int]] = mapped_column(Integer)
+
+    # Display
+    is_starred: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User")
+    organization: Mapped[Optional["Organization"]] = relationship("Organization")
+
+    __table_args__ = (
+        Index("idx_research_user", "user_id"),
+        Index("idx_research_org", "organization_id"),
+        Index("idx_research_status", "status"),
+        Index("idx_research_starred", "is_starred"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ResearchResult(query='{self.query[:50]}...', status='{self.status}')>"
+
+
+# =============================================================================
+# MoodBoard Models
+# =============================================================================
+
+class MoodBoardStatus(str, PyEnum):
+    """MoodBoard status."""
+    GENERATING = "generating"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class MoodBoard(Base, UUIDMixin, TimestampMixin):
+    """
+    AI-generated mood board with images and themes.
+    """
+    __tablename__ = "mood_boards"
+
+    # Ownership
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+    )
+
+    # Board info
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Status
+    status: Mapped[str] = mapped_column(String(20), default=MoodBoardStatus.GENERATING.value)
+
+    # Content
+    images: Mapped[Optional[list]] = mapped_column(JSONType())  # Array of image objects
+    themes: Mapped[Optional[list]] = mapped_column(JSONType())  # Extracted themes
+    color_palette: Mapped[Optional[list]] = mapped_column(JSONType())  # Color palette
+    style_tags: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+
+    # Display
+    thumbnail_url: Mapped[Optional[str]] = mapped_column(String(500))
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User")
+    organization: Mapped[Optional["Organization"]] = relationship("Organization")
+
+    __table_args__ = (
+        Index("idx_moodboards_user", "user_id"),
+        Index("idx_moodboards_org", "organization_id"),
+        Index("idx_moodboards_status", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MoodBoard(name='{self.name}', status='{self.status}')>"
+
+
+# =============================================================================
 # Agent System Models
 # =============================================================================
 
@@ -2337,6 +2692,12 @@ class Entity(Base, UUIDMixin):
     properties: Mapped[Optional[dict]] = mapped_column(JSONType())
     mention_count: Mapped[int] = mapped_column(Integer, default=1)
 
+    # Access tier tracking - minimum tier level from source documents
+    # Updated during entity extraction to reflect the lowest tier of any source doc
+    min_access_tier_level: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False, index=True
+    )
+
     # Confidence scoring (Phase 2 enhancement)
     confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     # Confidence score 0.0-1.0 based on extraction method and validation
@@ -2985,6 +3346,14 @@ class WorkflowNodeType(str, PyEnum):
     HUMAN_APPROVAL = "human_approval"
     START = "start"
     END = "end"
+    # Lobster-style advanced nodes
+    PARALLEL = "parallel"        # Fork: execute multiple branches in parallel
+    JOIN = "join"                # Wait for all parallel branches to complete
+    SUBWORKFLOW = "subworkflow"  # Execute another workflow as a step
+    TRANSFORM = "transform"      # Data transformation/mapping node
+    SWITCH = "switch"            # Multi-way branching (like switch/case)
+    RETRY = "retry"              # Retry a failed node with backoff
+    AGGREGATE = "aggregate"      # Aggregate results from parallel branches
 
 
 class Workflow(Base, UUIDMixin, TimestampMixin):
@@ -4332,6 +4701,55 @@ class TextToSQLExample(Base, UUIDMixin):
 
     def __repr__(self) -> str:
         return f"<TextToSQLExample(question='{self.question[:50]}...', verified={self.is_verified})>"
+
+
+# =============================================================================
+# Image Analysis Models
+# =============================================================================
+
+class AnalyzedImage(Base, UUIDMixin, TimestampMixin):
+    """
+    Cache analyzed images for deduplication across documents.
+
+    When the same image appears in multiple documents, the caption is
+    generated once and reused. This saves vision API costs and processing time.
+    """
+    __tablename__ = "analyzed_images"
+
+    # Image identification via SHA-256 hash
+    image_hash: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    # Analysis results
+    caption: Mapped[str] = mapped_column(Text, nullable=False)
+    element_type: Mapped[Optional[str]] = mapped_column(
+        String(50),
+    )  # image, chart, table, diagram, screenshot, logo, equation
+
+    # Provider info
+    analysis_provider: Mapped[Optional[str]] = mapped_column(
+        String(50),
+    )  # ollama, openai, anthropic
+    analysis_model: Mapped[Optional[str]] = mapped_column(
+        String(100),
+    )  # llava, gpt-4o, claude-3-5-sonnet, etc.
+
+    # Usage tracking
+    usage_count: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Source document (first document where this image was found)
+    first_document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyzedImage(hash={self.image_hash[:16]}..., type={self.element_type}, uses={self.usage_count})>"
 
 
 # =============================================================================

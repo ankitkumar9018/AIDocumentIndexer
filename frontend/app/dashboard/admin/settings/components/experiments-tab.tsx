@@ -95,9 +95,9 @@ const DEFAULT_EXPERIMENTS: Experiment[] = [
 ];
 
 const statusColors: Record<string, string> = {
-  stable: "bg-green-100 text-green-700 border-green-200",
-  beta: "bg-yellow-100 text-yellow-700 border-yellow-200",
-  experimental: "bg-purple-100 text-purple-700 border-purple-200",
+  stable: "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800",
+  beta: "bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300 border-yellow-200 dark:border-yellow-800",
+  experimental: "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800",
 };
 
 const categoryIcons: Record<string, React.ReactNode> = {
@@ -119,7 +119,7 @@ export function ExperimentsTab() {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(`${API_BASE}/experiments`, {
+      const response = await fetch(`${API_BASE}/experiments/`, {
         credentials: "include",
       });
       if (response.ok) {
@@ -196,7 +196,7 @@ export function ExperimentsTab() {
         <CardContent>
           <div className="flex gap-4">
             <div className="flex items-center gap-2">
-              <CheckCircle className="h-4 w-4 text-green-500" />
+              <CheckCircle className="h-4 w-4 text-green-500 dark:text-green-400" />
               <span className="text-sm">{enabledCount} enabled</span>
             </div>
             <div className="flex items-center gap-2">

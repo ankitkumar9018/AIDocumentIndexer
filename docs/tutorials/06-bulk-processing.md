@@ -247,6 +247,6 @@ ray start --head --num-cpus=8
 
 ## Next Steps
 
-- [Ray Scaling Tutorial](08-ray-scaling.md) - Advanced Ray configuration
+- [Ray Scaling Tutorial](10-ray-scaling.md) - Advanced Ray configuration
 - [Knowledge Graph Tutorial](05-knowledge-graph.md) - Explore extracted entities
-- [Advanced RAG Tutorial](09-advanced-rag.md) - Improve retrieval quality
+- [Advanced RAG Tutorial](11-advanced-rag.md) - Improve retrieval quality

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useSession } from "next-auth/react";
 import {
   Card,
   CardContent,
@@ -32,7 +33,7 @@ import {
   Activity,
 } from "lucide-react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
 interface EvalMetrics {
   count: number;
@@ -48,12 +49,13 @@ interface MetricTrend {
   metric: string;
   periods: number;
   period_hours: number;
-  trend: number[];
-  average: number;
-  direction: "improving" | "declining" | "stable";
+  values: (number | null)[];  // Backend returns 'values', not 'trend'
+  average?: number;
+  direction?: "improving" | "declining" | "stable";
 }
 
 export function EvaluationTab() {
+  const { data: session } = useSession();
   const [metrics, setMetrics] = useState<EvalMetrics | null>(null);
   const [trend, setTrend] = useState<MetricTrend | null>(null);
   const [loading, setLoading] = useState(true);
@@ -61,18 +63,24 @@ export function EvaluationTab() {
   const [trendMetric, setTrendMetric] = useState("overall_score");
   const [trendPeriod, setTrendPeriod] = useState("7");
 
-  const fetchMetrics = async () => {
+  const accessToken = (session as any)?.accessToken as string | undefined;
+
+  const fetchMetrics = useCallback(async () => {
+    if (!accessToken) {
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
       setError(null);
 
+      const headers = { Authorization: `Bearer ${accessToken}` };
+
       const [metricsRes, trendRes] = await Promise.allSettled([
-        fetch(`${API_BASE}/evaluation/metrics/summary?period_hours=24`, {
-          credentials: "include",
-        }),
+        fetch(`${API_BASE}/evaluation/metrics/summary?period_hours=24`, { headers }),
         fetch(
           `${API_BASE}/evaluation/metrics/trend?metric=${trendMetric}&periods=${trendPeriod}&period_hours=24`,
-          { credentials: "include" }
+          { headers }
         ),
       ]);
 
@@ -87,11 +95,11 @@ export function EvaluationTab() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [accessToken, trendMetric, trendPeriod]);
 
   useEffect(() => {
     fetchMetrics();
-  }, [trendMetric, trendPeriod]);
+  }, [fetchMetrics]);
 
   const scoreColor = (score: number) => {
     if (score >= 0.8) return "text-green-600";
@@ -238,29 +246,36 @@ export function EvaluationTab() {
               </div>
             </CardHeader>
             <CardContent>
-              {trend ? (
+              {trend && trend.values && trend.values.length > 0 ? (
                 <div className="space-y-4">
-                  <div className="flex items-center gap-3">
-                    {directionIcon(trend.direction)}
-                    <span className="text-sm capitalize">{trend.direction}</span>
-                    <span className="text-sm text-muted-foreground">
-                      Average: {(trend.average * 100).toFixed(1)}%
-                    </span>
-                  </div>
+                  {trend.direction && (
+                    <div className="flex items-center gap-3">
+                      {directionIcon(trend.direction)}
+                      <span className="text-sm capitalize">{trend.direction}</span>
+                      {trend.average !== undefined && (
+                        <span className="text-sm text-muted-foreground">
+                          Average: {(trend.average * 100).toFixed(1)}%
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {/* Simple bar chart visualization */}
                   <div className="flex items-end gap-1 h-32">
-                    {trend.trend.map((value, i) => (
-                      <div
-                        key={i}
-                        className="flex-1 rounded-t transition-all hover:opacity-80"
-                        style={{
-                          height: `${Math.max(value * 100, 5)}%`,
-                          backgroundColor:
-                            value >= 0.8 ? "#22c55e" : value >= 0.6 ? "#eab308" : "#ef4444",
-                        }}
-                        title={`Day ${i + 1}: ${(value * 100).toFixed(1)}%`}
-                      />
-                    ))}
+                    {trend.values.map((value, i) => {
+                      const v = value ?? 0;
+                      return (
+                        <div
+                          key={i}
+                          className="flex-1 rounded-t transition-all hover:opacity-80"
+                          style={{
+                            height: `${Math.max(v * 100, 5)}%`,
+                            backgroundColor:
+                              v >= 0.8 ? "#22c55e" : v >= 0.6 ? "#eab308" : "#ef4444",
+                          }}
+                          title={`Day ${i + 1}: ${(v * 100).toFixed(1)}%`}
+                        />
+                      );
+                    })}
                   </div>
                   <div className="flex justify-between text-xs text-muted-foreground">
                     <span>{trend.periods} days ago</span>

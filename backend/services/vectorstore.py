@@ -138,13 +138,24 @@ def parse_search_query(query: str) -> Tuple[str, bool]:
     return (result.strip(), True)
 
 
-# Cross-encoder reranking support
-try:
-    from sentence_transformers import CrossEncoder
-    HAS_CROSS_ENCODER = True
-except ImportError:
-    HAS_CROSS_ENCODER = False
-    CrossEncoder = None
+# Cross-encoder reranking support (lazy import to avoid blocking at startup)
+# The actual import happens when reranking is first used
+HAS_CROSS_ENCODER = None  # Will be set on first check
+_CrossEncoder = None  # Lazy-loaded CrossEncoder class
+
+
+def _get_cross_encoder():
+    """Lazily import and return CrossEncoder class to avoid blocking at startup."""
+    global HAS_CROSS_ENCODER, _CrossEncoder
+    if HAS_CROSS_ENCODER is None:
+        try:
+            from sentence_transformers import CrossEncoder
+            _CrossEncoder = CrossEncoder
+            HAS_CROSS_ENCODER = True
+        except ImportError:
+            HAS_CROSS_ENCODER = False
+            _CrossEncoder = None
+    return _CrossEncoder
 
 
 # =============================================================================
@@ -504,16 +515,9 @@ class VectorStore:
         if not self._has_pgvector:
             logger.warning("pgvector not available, vector search will be limited")
 
-        # Initialize reranker if enabled and available
-        if self.config.enable_reranking and HAS_CROSS_ENCODER:
-            try:
-                self._reranker = CrossEncoder(self.config.rerank_model)
-                logger.info("Initialized cross-encoder reranker", model=self.config.rerank_model)
-            except Exception as e:
-                logger.warning("Failed to initialize reranker, disabling", error=str(e))
-                self._reranker = None
-        elif self.config.enable_reranking:
-            logger.warning("Reranking enabled but sentence-transformers not installed")
+        # Reranker is now lazy-loaded on first use to avoid blocking startup
+        # See _ensure_reranker() method
+        self._reranker_initialized = False
 
         # ColBERT reranker (lazy-loaded when setting is enabled)
         self._colbert_reranker = None
@@ -538,6 +542,42 @@ class VectorStore:
                 k1=self.config.bm25_k1,
                 b=self.config.bm25_b,
             )
+
+    # =========================================================================
+    # Lazy Reranker Initialization
+    # =========================================================================
+
+    def _ensure_reranker(self) -> bool:
+        """
+        Lazily initialize the cross-encoder reranker.
+
+        This avoids blocking the server startup with model downloads and
+        connectivity checks. The reranker is only loaded when first needed.
+
+        Returns:
+            True if reranker is available, False otherwise.
+        """
+        if self._reranker_initialized:
+            return self._reranker is not None
+
+        self._reranker_initialized = True
+
+        if not self.config.enable_reranking:
+            return False
+
+        CrossEncoder = _get_cross_encoder()
+        if CrossEncoder is None:
+            logger.warning("Reranking enabled but sentence-transformers not installed")
+            return False
+
+        try:
+            self._reranker = CrossEncoder(self.config.rerank_model)
+            logger.info("Initialized cross-encoder reranker", model=self.config.rerank_model)
+            return True
+        except Exception as e:
+            logger.warning("Failed to initialize reranker, disabling", error=str(e))
+            self._reranker = None
+            return False
 
     # =========================================================================
     # Phase 92: Binary Quantization Pre-Filter
@@ -574,7 +614,7 @@ class VectorStore:
 
                 # Count embeddings to check minimum corpus size
                 count_result = await db.execute(
-                    select(func.count(Chunk.id)).where(Chunk.embedding.isnot(None))
+                    select(func.count(Chunk.id)).where(Chunk.has_embedding == True)
                 )
                 embedded_count = count_result.scalar() or 0
 
@@ -586,11 +626,16 @@ class VectorStore:
                     )
                     return False
 
-                # Load all embeddings in batches
+                # Load embeddings in batches, pre-allocating numpy array
+                # to avoid doubling memory (Python list + numpy copy).
                 batch_size = 10000
-                all_embeddings = []
                 all_chunk_ids = []
                 offset = 0
+
+                # Pre-allocate numpy array using known count and dimension
+                # We'll detect dimension from the first batch.
+                corpus = None
+                write_idx = 0
 
                 while True:
                     result = await db.execute(
@@ -604,21 +649,31 @@ class VectorStore:
                     if not rows:
                         break
 
+                    # Detect dimension and allocate on first batch
+                    if corpus is None:
+                        dim = len(rows[0][1]) if rows[0][1] else 1536
+                        corpus = np.empty((embedded_count, dim), dtype=np.float32)
+
                     for chunk_id, embedding in rows:
                         all_chunk_ids.append(str(chunk_id))
-                        all_embeddings.append(embedding)
+                        if write_idx < embedded_count:
+                            corpus[write_idx] = embedding
+                            write_idx += 1
 
                     offset += batch_size
 
-                if not all_embeddings:
+                if corpus is None or write_idx == 0:
                     return False
+
+                # Trim if fewer rows than expected (deleted between count and load)
+                if write_idx < embedded_count:
+                    corpus = corpus[:write_idx]
 
                 # Build binary index (store_full=False: pgvector handles reranking)
                 from backend.services.binary_quantization import (
                     BinaryQuantizer,
                     BinaryQuantizationConfig,
                 )
-                corpus = np.array(all_embeddings, dtype=np.float32)
 
                 config = BinaryQuantizationConfig(
                     rerank_factor=self.config.binary_rerank_factor,
@@ -680,6 +735,17 @@ class VectorStore:
             built = await self._build_binary_index()
             if not built:
                 return None
+
+        # Skip binary prefilter for small corpuses (overhead not worth it)
+        # Binary prefilter helps when corpus > 10k chunks
+        MIN_CORPUS_FOR_BINARY = int(os.getenv("BINARY_PREFILTER_MIN_CORPUS", "10000"))
+        if self._binary_corpus_size < MIN_CORPUS_FOR_BINARY:
+            logger.debug(
+                "Skipping binary prefilter for small corpus",
+                corpus_size=self._binary_corpus_size,
+                threshold=MIN_CORPUS_FOR_BINARY,
+            )
+            return None
 
         try:
             import numpy as np
@@ -985,9 +1051,9 @@ WITH (
                         "size_bytes": row[3],
                     })
 
-                # Get total vector count
+                # Get total vector count (use has_embedding flag for tracking)
                 result = await db.execute(
-                    text("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL")
+                    text("SELECT COUNT(*) FROM chunks WHERE has_embedding = 1")
                 )
                 row = result.fetchone()
                 if row:
@@ -1265,6 +1331,11 @@ WITH (
         document_id: str,
         access_tier_id: str,
         session: Optional[AsyncSession] = None,
+        document_filename: Optional[str] = None,
+        collection: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        uploaded_by_id: Optional[str] = None,
+        is_private: bool = False,
     ) -> List[str]:
         """
         Add chunks with embeddings to the vector store.
@@ -1385,6 +1456,7 @@ WITH (
 
             if chunk:
                 chunk.embedding = embedding
+                chunk.has_embedding = True  # Track in both modes for UI consistency
                 return True
             return False
 
@@ -1919,42 +1991,58 @@ WITH (
         # Get more results from each method for better fusion
         fetch_k = self.config.rerank_top_k if self.config.enable_reranking else top_k * 2
 
-        # Run searches in parallel conceptually (await each)
-        vector_results = await self.similarity_search(
-            query_embedding=query_embedding,
-            top_k=fetch_k,
-            access_tier_level=access_tier_level,
-            document_ids=document_ids,
-            session=session,
-            organization_id=organization_id,
-            user_id=user_id,
-            is_superadmin=is_superadmin,
-        )
-
-        keyword_results = await self.keyword_search(
-            query=query,
-            top_k=fetch_k,
-            access_tier_level=access_tier_level,
-            document_ids=document_ids,
-            session=session,
-            organization_id=organization_id,
-            user_id=user_id,
-            is_superadmin=is_superadmin,
-        )
-
-        # Optionally search enhanced metadata
-        enhanced_results = []
-        if use_enhanced:
-            enhanced_results = await self.enhanced_metadata_search(
-                query=query,
+        # Run searches in parallel using asyncio.gather for 2-3x speedup
+        search_tasks = [
+            self.similarity_search(
+                query_embedding=query_embedding,
                 top_k=fetch_k,
-                organization_id=organization_id,
                 access_tier_level=access_tier_level,
                 document_ids=document_ids,
                 session=session,
+                organization_id=organization_id,
                 user_id=user_id,
                 is_superadmin=is_superadmin,
+            ),
+            self.keyword_search(
+                query=query,
+                top_k=fetch_k,
+                access_tier_level=access_tier_level,
+                document_ids=document_ids,
+                session=session,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
+            ),
+        ]
+
+        # Optionally search enhanced metadata in parallel
+        if use_enhanced:
+            search_tasks.append(
+                self.enhanced_metadata_search(
+                    query=query,
+                    top_k=fetch_k,
+                    organization_id=organization_id,
+                    access_tier_level=access_tier_level,
+                    document_ids=document_ids,
+                    session=session,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
+                )
             )
+
+        # Execute all searches in parallel, handle exceptions gracefully
+        results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+        # Unpack results with exception handling
+        vector_results = results[0] if not isinstance(results[0], Exception) else []
+        keyword_results = results[1] if not isinstance(results[1], Exception) else []
+        enhanced_results = results[2] if len(results) > 2 and not isinstance(results[2], Exception) else []
+
+        # Log any search failures
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                search_names = ["similarity", "keyword", "enhanced"]
+                logger.warning(f"Hybrid search: {search_names[i]} search failed", error=str(r))
 
         # Reciprocal Rank Fusion
         # RRF(d) = Σ 1/(k + rank(d)) where k is a constant (typically 60)
@@ -2178,7 +2266,8 @@ WITH (
         Returns:
             Reranked list of SearchResult objects
         """
-        if not results or self._reranker is None:
+        # Lazy-load reranker on first use
+        if not results or not self._ensure_reranker():
             return results
 
         try:
@@ -2606,9 +2695,9 @@ WITH (
             # Total chunks
             chunk_count = await db.scalar(select(func.count(Chunk.id)))
 
-            # Chunks with embeddings
+            # Chunks with embeddings (use has_embedding flag for consistency)
             embedded_count = await db.scalar(
-                select(func.count(Chunk.id)).where(Chunk.embedding.isnot(None))
+                select(func.count(Chunk.id)).where(Chunk.has_embedding == True)
             )
 
             # Total documents

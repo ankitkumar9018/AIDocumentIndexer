@@ -268,11 +268,24 @@ async def _get_llm_circuit_breaker(provider: str) -> CircuitBreaker:
     """Get or create a circuit breaker for an LLM provider."""
     async with _llm_circuit_breaker_lock:
         if provider not in _llm_circuit_breakers:
+            # Read from settings service (database-persisted, admin-configurable)
+            # with env var fallback for startup/bootstrap scenarios
+            try:
+                from backend.services.settings import get_settings_service
+                settings_svc = get_settings_service()
+                failure_threshold = await settings_svc.get_setting("llm.circuit_breaker_threshold")
+                recovery_timeout = await settings_svc.get_setting("llm.circuit_breaker_recovery")
+                call_timeout = await settings_svc.get_setting("llm.call_timeout")
+            except Exception:
+                failure_threshold = None
+                recovery_timeout = None
+                call_timeout = None
+
             config = CircuitBreakerConfig(
-                failure_threshold=int(os.getenv("LLM_CIRCUIT_BREAKER_THRESHOLD", "5")),
-                recovery_timeout=float(os.getenv("LLM_CIRCUIT_BREAKER_RECOVERY", "60.0")),
+                failure_threshold=int(failure_threshold or os.getenv("LLM_CIRCUIT_BREAKER_THRESHOLD", "5")),
+                recovery_timeout=float(recovery_timeout or os.getenv("LLM_CIRCUIT_BREAKER_RECOVERY", "60.0")),
                 success_threshold=2,
-                timeout=float(os.getenv("LLM_CALL_TIMEOUT", "120.0")),
+                timeout=float(call_timeout or os.getenv("LLM_CALL_TIMEOUT", "120.0")),
             )
             _llm_circuit_breakers[provider] = CircuitBreaker(f"llm_{provider}", config)
         return _llm_circuit_breakers[provider]
@@ -312,8 +325,16 @@ async def resilient_llm_invoke(
         return await llm.ainvoke(messages, **kwargs)
 
     # Configure retry for transient failures
+    # Read max_retries from settings service with env var fallback
+    try:
+        from backend.services.settings import get_settings_service
+        settings_svc = get_settings_service()
+        max_retries_setting = await settings_svc.get_setting("llm.max_retries")
+    except Exception:
+        max_retries_setting = None
+
     retry_config = RetryConfig(
-        max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
+        max_retries=int(max_retries_setting or os.getenv("LLM_MAX_RETRIES", "3")),
         base_delay=float(os.getenv("LLM_RETRY_BASE_DELAY", "1.0")),
         max_delay=float(os.getenv("LLM_RETRY_MAX_DELAY", "30.0")),
         jitter=True,
@@ -382,7 +403,7 @@ async def resilient_llm_stream(
                     if first_chunk:
                         # First chunk received = success
                         await cb._record_success()
-                        first_chunk = True  # Only record once
+                        first_chunk = False  # Only record once
                     yield chunk
             except Exception as e:
                 # Stream failed mid-way
@@ -426,6 +447,13 @@ class SearchResultCache:
             ttl_seconds: Cache TTL in seconds (default: 5 minutes from env)
             max_size: Maximum number of cached entries
         """
+        # Read from settings service (synchronous default), with env var fallback
+        if ttl_seconds is None:
+            try:
+                from backend.services.settings import get_settings_service
+                ttl_seconds = get_settings_service().get_default_value("search.query_cache_ttl_seconds")
+            except Exception:
+                pass
         self._ttl_seconds = ttl_seconds or int(os.getenv("SEARCH_CACHE_TTL_SECONDS", "300"))
         self._max_size = max_size
         self._cache: Dict[str, Tuple[List[Any], datetime]] = {}
@@ -1058,6 +1086,19 @@ class RAGService:
         if top_k is None:
             top_k = runtime_settings.get("top_k", self.config.top_k)
 
+        # Batch-load all RAG settings in a single DB query to avoid 30+ individual lookups
+        from backend.services.settings import get_settings_service
+        settings_svc = get_settings_service()
+        try:
+            _all_settings = await settings_svc.get_all_settings()
+        except Exception:
+            _all_settings = {}
+
+        def _s(key: str, default=None):
+            """Read a setting from the preloaded batch (zero DB cost)."""
+            val = _all_settings.get(key)
+            return val if val is not None else default
+
         # PHASE 12: Enhanced debug logging for RAG search troubleshooting
         # Get vectorstore stats to help diagnose "no results" issues
         vectorstore_stats = None
@@ -1096,7 +1137,7 @@ class RAGService:
                     await self._phase65_pipeline.initialize()
 
                 # Get query embedding for semantic cache (reuse later for retrieval)
-                embedding_service = await self._get_embeddings()
+                embedding_service = self.embeddings
                 if embedding_service:
                     try:
                         query_embedding_for_cache = await embedding_service.embed_query(question)
@@ -1182,7 +1223,7 @@ class RAGService:
         if self._adaptive_router and self._enable_adaptive_routing:
             try:
                 # Get adaptive routing settings from database
-                adaptive_routing_enabled = await settings_svc.get_setting("rag.adaptive_routing_enabled")
+                adaptive_routing_enabled = _s("rag.adaptive_routing_enabled")
                 if adaptive_routing_enabled is None:
                     adaptive_routing_enabled = True  # Default enabled
 
@@ -1207,16 +1248,16 @@ class RAGService:
                         use_rag_fusion_for_query = (
                             routing_decision.use_rag_fusion and
                             self._enable_rag_fusion and
-                            await settings_svc.get_setting("rag.rag_fusion_enabled") != False
+                            _s("rag.rag_fusion_enabled") != False
                         )
                         use_stepback_for_query = (
                             routing_decision.use_step_back and
                             self._enable_stepback_prompting and
-                            await settings_svc.get_setting("rag.stepback_prompting_enabled") != False
+                            _s("rag.stepback_prompting_enabled") != False
                         )
                         use_context_compression = (
                             self._enable_context_compression and
-                            await settings_svc.get_setting("rag.context_compression_enabled") != False
+                            _s("rag.context_compression_enabled") != False
                         )
 
                         # Log routing decision
@@ -1237,11 +1278,34 @@ class RAGService:
                 logger.warning("Phase 66: Adaptive routing failed, using defaults", error=str(e), error_type=type(e).__name__)
                 routing_decision = None
 
+        # Fallback: when adaptive routing is off or unavailable, check individual feature settings
+        if routing_decision is None:
+            try:
+                use_rag_fusion_for_query = (
+                    self._enable_rag_fusion
+                    and _s("rag.rag_fusion_enabled") != False
+                )
+                use_stepback_for_query = (
+                    self._enable_stepback_prompting
+                    and _s("rag.stepback_prompting_enabled") != False
+                )
+                use_context_compression = (
+                    self._enable_context_compression
+                    and _s("rag.context_compression_enabled") != False
+                )
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, OSError) as e:
+                logger.debug(
+                    "Feature settings lookup failed, keeping defaults",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    operation="feature_settings_fallback",
+                    query=question[:100],
+                    user_id=user_id,
+                )
+
         # Phase 62: Tree of Thoughts for complex analytical queries
         # Use runtime settings for hot-reload (no server restart needed)
-        from backend.services.settings import get_settings_service
-        settings_svc = get_settings_service()
-        tot_enabled = await settings_svc.get_setting("rag.tree_of_thoughts_enabled") or False
+        tot_enabled = _s("rag.tree_of_thoughts_enabled", False)
         if (
             tot_enabled
             and query_classification
@@ -1249,8 +1313,8 @@ class RAGService:
         ):
             try:
                 from backend.services.tree_of_thoughts import TreeOfThoughts, ToTConfig
-                tot_max_depth = await settings_svc.get_setting("rag.tot_max_depth") or 3
-                tot_branching = await settings_svc.get_setting("rag.tot_branching_factor") or 3
+                tot_max_depth = _s("rag.tot_max_depth", 3)
+                tot_branching = _s("rag.tot_branching_factor", 3)
                 tot = TreeOfThoughts(ToTConfig(
                     max_depth=tot_max_depth,
                     branching_factor=tot_branching,
@@ -1366,7 +1430,7 @@ class RAGService:
 
                 # Initialize RAG-Fusion if needed
                 if self._rag_fusion is None:
-                    num_variations = await settings_svc.get_setting("rag.rag_fusion_variations") or 4
+                    num_variations = _s("rag.rag_fusion_variations", 4)
                     self._rag_fusion = RAGFusion(
                         num_variations=num_variations,
                         rrf_k=60,
@@ -1388,8 +1452,16 @@ class RAGService:
                     fused_results=len(rag_fusion_result.fused_results),
                 )
 
-            except Exception as e:
-                logger.warning("Phase 66: RAG-Fusion failed, falling back to standard retrieval", error=str(e))
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, TypeError, KeyError) as e:
+                logger.warning(
+                    "Phase 66: RAG-Fusion failed, falling back to standard retrieval",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    operation="rag_fusion",
+                    query=question[:100],
+                    user_id=user_id,
+                    session_id=session_id,
+                )
                 rag_fusion_result = None
 
         # =============================================================================
@@ -1403,7 +1475,7 @@ class RAGService:
 
                 # Initialize step-back prompter if needed
                 if self._stepback_prompter is None:
-                    max_background = await settings_svc.get_setting("rag.stepback_max_background") or 3
+                    max_background = _s("rag.stepback_max_background", 3)
                     self._stepback_prompter = StepBackPrompter(max_background_chunks=max_background)
 
                 stepback_result = await self._stepback_prompter.retrieve_with_stepback(
@@ -1423,9 +1495,42 @@ class RAGService:
                     background_length=len(stepback_result.background_context),
                 )
 
-            except Exception as e:
-                logger.warning("Phase 66: Step-Back prompting failed", error=str(e))
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, TypeError, KeyError) as e:
+                logger.warning(
+                    "Phase 66: Step-Back prompting failed",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    operation="stepback_prompting",
+                    query=question[:100],
+                    user_id=user_id,
+                    session_id=session_id,
+                )
                 stepback_result = None
+
+        # Phase 95L: Conversation-aware retrieval
+        # Enrich query with recent conversation context for better embeddings
+        enriched_question = question
+        if session_id:
+            try:
+                _conv_memory = self._get_memory(session_id)
+                _conv_history = _conv_memory.load_memory_variables({}).get("chat_history", [])
+                if _conv_history:
+                    # Use last 2-3 user messages for context
+                    recent_user_msgs = [
+                        msg.content for msg in _conv_history[-6:]  # Last 3 turns (user+assistant pairs)
+                        if hasattr(msg, 'content') and isinstance(msg, HumanMessage)
+                    ][-3:]  # Take last 3 user messages
+                    if recent_user_msgs:
+                        conversation_context = " ".join(recent_user_msgs[-3:])
+                        # Prepend a compact version of recent context
+                        enriched_question = f"Context: {conversation_context[:200]}. Question: {question}"
+                        logger.debug("Conversation-aware retrieval",
+                            original_query=question[:100],
+                            enriched_query_length=len(enriched_question),
+                            context_messages=len(recent_user_msgs))
+            except Exception as e:
+                logger.debug("Conversation-aware retrieval failed, using original query", error=str(e))
+                enriched_question = question
 
         # Retrieve relevant documents
         # Phase 66: If RAG-Fusion was used, convert its results to retrieved_docs format
@@ -1488,8 +1593,9 @@ class RAGService:
             )
         else:
             # PHASE 14: Pass query classification for adaptive retrieval (MMR, KG enhancement)
+            # Phase 95L: Use enriched_question for retrieval (conversation-aware), keep original question for LLM prompt
             retrieved_docs = await self._retrieve(
-                question,
+                enriched_question,
                 collection_filter=collection_filter,
                 access_tier=access_tier,
                 top_k=top_k,
@@ -1525,7 +1631,7 @@ class RAGService:
         # =============================================================================
         if use_context_reordering and retrieved_docs and len(retrieved_docs) > 2:
             try:
-                reorder_strategy = await settings_svc.get_setting("rag.context_reorder_strategy") or "sandwich"
+                reorder_strategy = _s("rag.context_reorder_strategy", "sandwich")
 
                 # Create wrapper objects with similarity_score for reordering
                 class ScoreWrapper:
@@ -1551,7 +1657,7 @@ class RAGService:
         if self._phase65_enabled and self._phase65_pipeline and retrieved_docs:
             try:
                 # Check if LTR is enabled via settings
-                ltr_enabled = await settings_svc.get_setting("rag.ltr_enabled") if settings_svc else False
+                ltr_enabled = _s("search.ltr_enabled", False)
                 if ltr_enabled is None:
                     ltr_enabled = True  # Default to enabled if setting not found
 
@@ -1622,15 +1728,29 @@ class RAGService:
                 logger.warning("Verification failed, continuing without filtering", error=str(e), error_type=type(e).__name__)
                 verification_result = None
 
+        # Phase 95K: Compute freshness config for _format_context (async settings lookup)
+        freshness_config = None
+        try:
+            freshness_enabled = _s("rag.content_freshness_enabled")
+            if freshness_enabled:
+                freshness_config = {
+                    "enabled": True,
+                    "decay_days": int(_s("rag.freshness_decay_days", 180)),
+                    "boost_factor": float(_s("rag.freshness_boost_factor", 1.05)),
+                    "penalty_factor": float(_s("rag.freshness_penalty_factor", 0.95)),
+                }
+        except Exception as e:
+            logger.debug("Freshness config lookup failed", error=str(e))
+
         # Format context from retrieved documents
-        context, sources = self._format_context(retrieved_docs, include_collection_context)
+        context, sources = self._format_context(retrieved_docs, include_collection_context, freshness_config=freshness_config)
         logger.debug("Formatted context", context_length=len(context), sources_count=len(sources))
 
         # Phase 79: Graph-O1 enhanced reasoning (beam search over knowledge graph)
         from backend.core.config import settings as _go1_settings
         if getattr(_go1_settings, 'KG_ENABLED', False):
             try:
-                graph_o1_enabled = await settings_svc.get_setting("rag.graph_o1_enabled") if settings_svc else False
+                graph_o1_enabled = _s("rag.graph_o1_enabled", False)
                 if graph_o1_enabled:
                     from backend.services.graph_o1 import reason_over_graph
                     go1_result = await reason_over_graph(
@@ -1679,8 +1799,16 @@ class RAGService:
                 confidence_level=context_sufficiency_result.confidence_level,
                 missing_aspects=context_sufficiency_result.missing_aspects[:3] if context_sufficiency_result.missing_aspects else [],
             )
-        except Exception as e:
-            logger.warning("Context sufficiency check failed, continuing without", error=str(e))
+        except (ValueError, RuntimeError, TimeoutError, ConnectionError, TypeError, AttributeError) as e:
+            logger.warning(
+                "Context sufficiency check failed, continuing without",
+                error=str(e),
+                error_type=type(e).__name__,
+                operation="context_sufficiency_check",
+                query=question[:100],
+                user_id=user_id,
+                sources_count=len(sources) if sources else 0,
+            )
 
         # Add additional context (e.g., from temporary documents)
         if additional_context:
@@ -1700,83 +1828,28 @@ class RAGService:
             )
 
         # =============================================================================
-        # Phase 66: Context Compression (Token-efficient context for LLM)
-        # Applied before TTT compression as an alternative/complementary approach
+        # Context Compression Pipeline (consolidates Phase 66, 79, 63)
         # =============================================================================
-        if use_context_compression and len(context) > 4000:  # Only compress if context is large
-            try:
-                context_compression_enabled = await settings_svc.get_setting("rag.context_compression_enabled")
-                if context_compression_enabled != False:  # Default enabled
-                    # Initialize compressor if needed
-                    if self._context_compressor is None:
-                        target_tokens = await settings_svc.get_setting("rag.context_compression_target_tokens") or 2000
-                        self._context_compressor = ContextCompressor(
-                            target_tokens=target_tokens,
-                            use_llm_compression=True,
-                        )
-
-                    # Compress context
-                    compressed = await self._context_compressor.compress(
-                        query=question,
-                        contexts=[context],
-                        llm=llm if await settings_svc.get_setting("rag.context_compression_use_llm") else None,
-                    )
-
-                    if compressed.compression_ratio < 0.9:  # Only use if significantly compressed
-                        logger.info(
-                            "Phase 66: Context compression applied",
-                            original_tokens=compressed.original_tokens,
-                            compressed_tokens=compressed.compressed_tokens,
-                            compression_ratio=compressed.compression_ratio,
-                            method=compressed.method,
-                        )
-                        context = compressed.compressed_context
-
-            except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
-                logger.warning("Phase 66: Context compression failed", error=str(e), error_type=type(e).__name__)
-
-        # =============================================================================
-        # Phase 79: AttentionRAG Compression (6.3x better than LLMLingua)
-        # Alternative/complementary to Phase 66 context compression
-        # =============================================================================
-        if len(context) > 4000:
-            try:
-                attention_rag_enabled = await settings_svc.get_setting("rag.attention_rag_enabled")
-                if attention_rag_enabled:
-                    from backend.services.attention_rag import compress_context_with_attention, AttentionCompressionMode
-                    mode_str = await settings_svc.get_setting("rag.attention_rag_mode") or "moderate"
-                    mode_map = {
-                        "light": AttentionCompressionMode.LIGHT,
-                        "moderate": AttentionCompressionMode.MODERATE,
-                        "aggressive": AttentionCompressionMode.AGGRESSIVE,
-                    }
-                    mode = mode_map.get(mode_str, AttentionCompressionMode.MODERATE)
-                    compressed_text = await compress_context_with_attention(
-                        query=question, context=context, mode=mode,
-                    )
-                    if compressed_text and len(compressed_text) < len(context) * 0.9:
-                        logger.info(
-                            "Phase 79: AttentionRAG compression applied",
-                            original_len=len(context),
-                            compressed_len=len(compressed_text),
-                            ratio=len(compressed_text) / len(context),
-                        )
-                        context = compressed_text
-            except (ValueError, RuntimeError, TimeoutError, ConnectionError, ImportError) as e:
-                logger.warning("Phase 79: AttentionRAG compression failed", error=str(e), error_type=type(e).__name__)
+        context = await self._compress_context(
+            context=context,
+            question=question,
+            use_context_compression=use_context_compression,
+            settings_getter=_s,
+            llm=llm,
+        )
 
         # =============================================================================
         # Phase 63: Advanced Sufficiency Checker (ICLR 2025)
-        # Use runtime settings for hot-reload (no server restart needed)
         # =============================================================================
-        from backend.services.settings import get_settings_service
-        settings_svc = get_settings_service()
-        sufficiency_enabled = await settings_svc.get_setting("rag.sufficiency_checker_enabled") or False
+        sufficiency_enabled = _s("rag.sufficiency_checker_enabled", False)
         if sufficiency_enabled:
             try:
                 from backend.services.sufficiency_checker import SufficiencyChecker, SufficiencyLevel
                 adv_checker = SufficiencyChecker()
-                sufficiency = await adv_checker.check(query=question, context=context)
+                sufficiency = await adv_checker.check_sufficiency(
+                    query=question, 
+                    retrieved_chunks=[{"content": context}] 
+)
                 if sufficiency.level == SufficiencyLevel.SUFFICIENT:
                     logger.info(
                         "Advanced sufficiency check: context is sufficient",
@@ -1790,29 +1863,6 @@ class RAGService:
                     )
             except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
                 logger.warning("Advanced sufficiency checker failed", error=str(e), error_type=type(e).__name__)
-
-        # =============================================================================
-        # Phase 63: TTT Context Compression for Long Contexts
-        # Use runtime settings for hot-reload (no server restart needed)
-        # =============================================================================
-        from backend.core.config import settings
-        max_context_len = getattr(settings, 'MAX_CONTEXT_LENGTH', 100000)
-        ttt_enabled = await settings_svc.get_setting("rag.ttt_compression_enabled") or False
-        if ttt_enabled and len(context) > max_context_len:
-            try:
-                from backend.services.ttt_compression import TTTCompressionService
-                compressor = TTTCompressionService()
-                original_len = len(context)
-                compressed = await compressor.compress(context, target_ratio=0.5)
-                context = compressed.compressed_text if hasattr(compressed, 'compressed_text') else str(compressed)
-                logger.info(
-                    "Context compressed via TTT",
-                    original_len=original_len,
-                    compressed_len=len(context),
-                    ratio=len(context) / original_len,
-                )
-            except Exception as e:
-                logger.warning("TTT compression failed, using original context", error=str(e))
 
         # =============================================================================
         # PHASE 51: RLM Integration for Large Context Queries
@@ -1860,14 +1910,21 @@ class RAGService:
                 if rlm_result.success:
                     processing_time_ms = rlm_result.execution_time_ms
 
+                    # Derive confidence from convergence speed and reasoning depth
+                    max_iters = rlm_config.max_iterations or 20
+                    convergence_ratio = 1.0 - (rlm_result.iterations / max_iters) if max_iters > 0 else 0.5
+                    has_reasoning = len(rlm_result.reasoning_steps) > 0
+                    rlm_confidence = min(0.95, 0.6 + (convergence_ratio * 0.3) + (0.05 if has_reasoning else 0.0))
+                    rlm_confidence_level = "high" if rlm_confidence >= 0.8 else ("medium" if rlm_confidence >= 0.6 else "low")
+
                     # Return RLM response
                     return RAGResponse(
                         content=rlm_result.answer,
                         sources=sources,
                         query=question,
                         model=f"RLM({rlm_config.root_model})",
-                        confidence_score=0.85,  # RLM provides high confidence for large contexts
-                        confidence_level="high",
+                        confidence_score=rlm_confidence,
+                        confidence_level=rlm_confidence_level,
                         processing_time_ms=processing_time_ms,
                         suggested_questions=[],
                         context_used=min(len(context), 2000),  # Preview only
@@ -1885,12 +1942,49 @@ class RAGService:
                     )
                     # Continue with standard RAG below
 
-            except Exception as e:
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, ImportError, MemoryError) as e:
                 logger.warning(
                     "RLM integration error, falling back to standard RAG",
                     error=str(e),
+                    error_type=type(e).__name__,
+                    operation="rlm_integration",
+                    query=question[:100],
+                    user_id=user_id,
+                    estimated_context_tokens=estimated_context_tokens,
                 )
                 # Continue with standard RAG below
+
+        # Smart Model Routing: swap to cheaper/premium model based on query complexity
+        try:
+            from backend.services.smart_model_router import route_query_to_model
+            _route = await route_query_to_model(
+                question=question,
+                query_classification=query_classification,
+                context_length=len(context),
+                num_documents=len(retrieved_docs) if retrieved_docs else 0,
+                current_provider=llm_config.provider_type if llm_config else None,
+                settings_getter=_s,
+            )
+            if _route.model and _route.provider:
+                from backend.services.llm import LLMFactory
+                routed_llm = LLMFactory.get_chat_model(
+                    provider=_route.provider,
+                    model=_route.model,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_response_tokens,
+                )
+                llm = routed_llm
+                if llm_config:
+                    llm_config.model = _route.model
+                    llm_config.provider_type = _route.provider
+                logger.info(
+                    "Smart routing: swapped model",
+                    tier=_route.tier.value,
+                    new_model=_route.model,
+                    reason=_route.reason,
+                )
+        except Exception as e:
+            logger.debug("Smart model routing skipped", error=str(e))
 
         # Build prompt with language instruction
         # Support "auto" mode: respond in the same language as the question
@@ -1987,6 +2081,37 @@ class RAGService:
         if language_instruction:
             system_prompt = f"{system_prompt}\n{language_instruction}"
 
+        # Phase 93: DSPy compiled prompt injection
+        # When DSPy inference is enabled, override system prompt with compiled instructions
+        # and inject few-shot demonstrations from the optimized module
+        dspy_demos_messages = []
+        dspy_inference_enabled = _s("rag.dspy_inference_enabled", False)
+        if dspy_inference_enabled:
+            try:
+                dspy_instructions, dspy_demos = await self._load_dspy_compiled_state("rag_answer")
+                if dspy_instructions:
+                    # Prepend compiled instructions to system prompt
+                    system_prompt = f"{dspy_instructions}\n\n{system_prompt}"
+                    logger.info("DSPy compiled instructions injected into system prompt")
+                if dspy_demos:
+                    # Build few-shot demo messages (max 4 to avoid token overflow)
+                    for demo in dspy_demos[:4]:
+                        demo_q = demo.get("question", demo.get("query", ""))
+                        demo_a = demo.get("answer", "")
+                        if demo_q and demo_a:
+                            demo_ctx = demo.get("context", "")
+                            if demo_ctx:
+                                dspy_demos_messages.append(
+                                    HumanMessage(content=f"Context: {demo_ctx[:500]}\nQuestion: {demo_q}")
+                                )
+                            else:
+                                dspy_demos_messages.append(HumanMessage(content=demo_q))
+                            dspy_demos_messages.append(AIMessage(content=demo_a))
+                    if dspy_demos_messages:
+                        logger.info("DSPy few-shot demos injected", num_demos=len(dspy_demos_messages) // 2)
+            except Exception as e:
+                logger.debug("DSPy inference injection skipped", error=str(e))
+
         from backend.core.config import settings as app_settings
 
         if session_id:
@@ -2024,19 +2149,30 @@ class RAGService:
                             compressed_tokens=compression_result.compressed_tokens,
                             compression_ratio=compression_result.compression_ratio,
                         )
-                except Exception as e:
-                    logger.warning("Context compression failed", error=str(e))
+                except (ValueError, RuntimeError, TimeoutError, ConnectionError, ImportError) as e:
+                    logger.warning(
+                        "Context compression failed",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        operation="context_compression",
+                        query=question[:100],
+                        user_id=user_id,
+                        session_id=session_id,
+                        history_length=len(chat_history),
+                    )
 
             # Build messages with optional compressed context
             # Phase 82: Use _make_system_message for Anthropic prompt caching
             if compressed_context:
                 messages = [
                     _make_system_message(f"{system_prompt}\n\nPrevious Conversation Summary:\n{compressed_context}", model_name),
+                    *dspy_demos_messages,  # Phase 93: DSPy few-shot demos
                     HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
                 ]
             else:
                 messages = [
                     _make_system_message(system_prompt, model_name),
+                    *dspy_demos_messages,  # Phase 93: DSPy few-shot demos
                     *chat_history,
                     HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
                 ]
@@ -2044,6 +2180,7 @@ class RAGService:
             # Single-turn query with adaptive template
             messages = [
                 _make_system_message(system_prompt, model_name),
+                *dspy_demos_messages,  # Phase 93: DSPy few-shot demos
                 HumanMessage(content=prompt_template.format(context=context, question=question)),
             ]
 
@@ -2116,6 +2253,58 @@ class RAGService:
                 cache_hit=True,
             )
 
+        # Speculative RAG: parallel draft generation (if enabled and enough documents)
+        speculative_enabled = _s("rag.speculative_rag_enabled", False)
+        if speculative_enabled and retrieved_docs and len(retrieved_docs) >= 4:
+            try:
+                from backend.services.speculative_rag import speculative_rag_generate
+                from backend.services.smart_model_router import DEFAULT_TIER_MODELS, QueryTier
+
+                # Use a cheaper model as drafter
+                drafter_provider = llm_config.provider_type if llm_config else "openai"
+                drafter_model_name = DEFAULT_TIER_MODELS.get(QueryTier.SIMPLE, {}).get(drafter_provider)
+                drafter_llm = llm  # Fallback: same model
+                if drafter_model_name:
+                    try:
+                        from backend.services.llm import LLMFactory
+                        drafter_llm = LLMFactory.get_chat_model(
+                            provider=drafter_provider,
+                            model=drafter_model_name,
+                            temperature=0.3,
+                            max_tokens=self.config.max_response_tokens,
+                        )
+                    except Exception:
+                        drafter_llm = llm
+
+                num_drafts = int(_s("rag.speculative_rag_num_drafts", 3))
+                spec_result = await speculative_rag_generate(
+                    query=question,
+                    documents=retrieved_docs,
+                    drafter_llm=drafter_llm,
+                    verifier_llm=llm,
+                    full_context=context,
+                    num_drafts=num_drafts,
+                )
+
+                if spec_result and spec_result.answer:
+                    raw_content = spec_result.answer
+                    logger.info(
+                        "Speculative RAG produced answer",
+                        drafts=spec_result.total_drafts,
+                        selected=spec_result.selected_draft,
+                    )
+                    # Skip standard LLM invocation below
+                    # Jump to post-processing (answer refinement, caching, etc.)
+                    # We set a flag so the standard generation block is skipped
+                    _speculative_answer = True
+                else:
+                    _speculative_answer = False
+            except Exception as e:
+                logger.debug("Speculative RAG failed, falling back to standard", error=str(e))
+                _speculative_answer = False
+        else:
+            _speculative_answer = False
+
         # PHASE 15 OPTIONAL ENHANCEMENTS: Advanced optimizations
         from backend.services.rag_module.advanced_optimizations import (
             should_use_json_mode,
@@ -2125,86 +2314,90 @@ class RAGService:
         )
         from backend.services.rag_module.prompts import is_tiny_model
 
-        # Determine which advanced optimizations to apply
-        use_json_mode = should_use_json_mode(model_name, question)
-        use_multi_sampling = is_tiny_model(model_name) and not use_json_mode  # Don't combine both
+        if _speculative_answer:
+            # Speculative RAG already produced raw_content above; skip standard LLM call
+            use_json_mode = False
+            use_multi_sampling = False
+        else:
+            # Determine which advanced optimizations to apply
+            use_json_mode = should_use_json_mode(model_name, question)
+            use_multi_sampling = is_tiny_model(model_name) and not use_json_mode  # Don't combine both
 
-        try:
-            # Try to apply sampling config if LLM supports it (most modern LLMs do)
-            invoke_kwargs = {
-                "temperature": sampling_config["temperature"],
-            }
-            if sampling_config.get("top_p") is not None:
-                invoke_kwargs["top_p"] = sampling_config["top_p"]
-            if sampling_config.get("top_k") is not None:
-                invoke_kwargs["top_k"] = sampling_config["top_k"]
-            if sampling_config.get("repeat_penalty") is not None and sampling_config["repeat_penalty"] != 1.0:
-                invoke_kwargs["repeat_penalty"] = sampling_config["repeat_penalty"]
+        if not _speculative_answer:
+            try:
+                # Try to apply sampling config if LLM supports it (most modern LLMs do)
+                invoke_kwargs = {
+                    "temperature": sampling_config["temperature"],
+                }
+                if sampling_config.get("top_p") is not None:
+                    invoke_kwargs["top_p"] = sampling_config["top_p"]
+                if sampling_config.get("top_k") is not None:
+                    invoke_kwargs["top_k"] = sampling_config["top_k"]
+                if sampling_config.get("repeat_penalty") is not None and sampling_config["repeat_penalty"] != 1.0:
+                    invoke_kwargs["repeat_penalty"] = sampling_config["repeat_penalty"]
 
-            # Apply advanced optimizations if appropriate
-            if use_json_mode:
-                # Qwen model with structured query - use JSON mode
-                logger.info(
-                    "Using JSON mode for structured output",
+                # Apply advanced optimizations if appropriate
+                if use_json_mode:
+                    # Qwen model with structured query - use JSON mode
+                    logger.info(
+                        "Using JSON mode for structured output",
+                        model=model_name,
+                        query_preview=question[:50]
+                    )
+                    raw_content = await invoke_with_json_mode(
+                        llm, messages, model_name, **invoke_kwargs
+                    )
+                elif use_multi_sampling:
+                    # Tiny model - use multi-sampling for quality
+                    logger.info(
+                        "Using multi-sampling for tiny model",
+                        model=model_name,
+                        num_samples=3
+                    )
+                    raw_content = await invoke_with_multi_sampling(
+                        llm, messages, model_name, num_samples=3, **invoke_kwargs
+                    )
+                else:
+                    # Standard invocation with Phase 70 resilience patterns
+                    provider_name = llm_config.provider_type if llm_config else "default"
+                    try:
+                        response = await resilient_llm_invoke(
+                            llm, messages, provider=provider_name, **invoke_kwargs
+                        )
+                        raw_content = response.content if hasattr(response, 'content') else str(response)
+                    except CircuitBreakerOpen as e:
+                        logger.error("LLM circuit breaker open", provider=provider_name, error=str(e))
+                        raise
+                    except (ValueError, RuntimeError, TimeoutError, ConnectionError, asyncio.TimeoutError) as e:
+                        logger.warning("Resilient LLM invoke failed, using direct call", error=str(e), error_type=type(e).__name__)
+                        response = await llm.ainvoke(messages, **invoke_kwargs)
+                        raw_content = response.content if hasattr(response, 'content') else str(response)
+
+            except TypeError:
+                # Fallback if LLM doesn't support these parameters
+                logger.warning(
+                    "LLM does not support sampling parameters, using defaults",
                     model=model_name,
-                    query_preview=question[:50]
                 )
-                raw_content = await invoke_with_json_mode(
-                    llm, messages, model_name, **invoke_kwargs
-                )
-            elif use_multi_sampling:
-                # Tiny model - use multi-sampling for quality
-                logger.info(
-                    "Using multi-sampling for tiny model",
-                    model=model_name,
-                    num_samples=3
-                )
-                raw_content = await invoke_with_multi_sampling(
-                    llm, messages, model_name, num_samples=3, **invoke_kwargs
-                )
-            else:
-                # Standard invocation with Phase 70 resilience patterns
+                # Phase 70: Use resilient invocation even for fallback
                 provider_name = llm_config.provider_type if llm_config else "default"
                 try:
-                    response = await resilient_llm_invoke(
-                        llm, messages, provider=provider_name, **invoke_kwargs
-                    )
+                    response = await resilient_llm_invoke(llm, messages, provider=provider_name)
                     raw_content = response.content if hasattr(response, 'content') else str(response)
-                except CircuitBreakerOpen as e:
-                    logger.error("LLM circuit breaker open", provider=provider_name, error=str(e))
+                except CircuitBreakerOpen:
                     raise
-                except (ValueError, RuntimeError, TimeoutError, ConnectionError, asyncio.TimeoutError) as e:
-                    logger.warning("Resilient LLM invoke failed, using direct call", error=str(e), error_type=type(e).__name__)
-                    response = await llm.ainvoke(messages, **invoke_kwargs)
+                except (ValueError, RuntimeError, TimeoutError, ConnectionError, asyncio.TimeoutError):
+                    response = await llm.ainvoke(messages)
                     raw_content = response.content if hasattr(response, 'content') else str(response)
-
-        except TypeError:
-            # Fallback if LLM doesn't support these parameters
-            logger.warning(
-                "LLM does not support sampling parameters, using defaults",
-                model=model_name,
-            )
-            # Phase 70: Use resilient invocation even for fallback
-            provider_name = llm_config.provider_type if llm_config else "default"
-            try:
-                response = await resilient_llm_invoke(llm, messages, provider=provider_name)
-                raw_content = response.content if hasattr(response, 'content') else str(response)
-            except CircuitBreakerOpen:
-                raise
-            except (ValueError, RuntimeError, TimeoutError, ConnectionError, asyncio.TimeoutError):
-                response = await llm.ainvoke(messages)
-                raw_content = response.content if hasattr(response, 'content') else str(response)
 
         # Phase 62: Answer Refinement
         # Use runtime settings for hot-reload (no server restart needed)
-        from backend.services.settings import get_settings_service
-        settings_svc = get_settings_service()
-        refiner_enabled = await settings_svc.get_setting("rag.answer_refiner_enabled") or False
+        refiner_enabled = _s("rag.answer_refiner_enabled", False)
         if refiner_enabled and raw_content:
             try:
                 from backend.services.answer_refiner import AnswerRefiner, RefinerConfig
-                refiner_strategy = await settings_svc.get_setting("rag.answer_refiner_strategy") or "self_refine"
-                refiner_max_iter = await settings_svc.get_setting("rag.answer_refiner_max_iterations") or 2
+                refiner_strategy = _s("rag.answer_refiner_strategy", "self_refine")
+                refiner_max_iter = _s("rag.answer_refiner_max_iterations", 2)
                 refiner = AnswerRefiner(RefinerConfig(
                     strategy=refiner_strategy,
                     max_iterations=refiner_max_iter,
@@ -2402,8 +2595,16 @@ class RAGService:
                         confidence_level = "medium"
                         confidence_warning = ""
 
-            except Exception as e:
-                logger.warning("CRAG processing failed", error=str(e))
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, TypeError, KeyError) as e:
+                logger.warning(
+                    "CRAG processing failed",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    operation="corrective_rag",
+                    query=question[:100],
+                    user_id=user_id,
+                    confidence_score=confidence_score,
+                )
 
         # Self-RAG: Verify response against sources to detect hallucinations
         self_rag_result: Optional[SelfRAGResult] = None
@@ -2452,8 +2653,17 @@ class RAGService:
                         if self_rag_result.hallucination_count > 0:
                             confidence_warning = f"Some claims could not be fully verified against sources."
 
-            except Exception as e:
-                logger.warning("Self-RAG verification failed", error=str(e))
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, TypeError, KeyError) as e:
+                logger.warning(
+                    "Self-RAG verification failed",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    operation="self_rag_verification",
+                    query=question[:100],
+                    user_id=user_id,
+                    sources_count=len(sources),
+                    response_length=len(content) if content else 0,
+                )
 
         # PHASE 15 OPTIONAL ENHANCEMENTS: Record telemetry
         telemetry = get_telemetry()
@@ -2498,7 +2708,15 @@ class RAGService:
             except Exception as e:
                 logger.debug("Phase 65: Failed to cache result", error=str(e))
 
-        return RAGResponse(
+        # Phase 95J: Compute hallucination and confidence scores
+        hallucination_score = await self._compute_hallucination_score(content, context)
+        confidence_score_computed = await self._compute_confidence_score(
+            sources,
+            [s.similarity_score for s in sources],
+            len(retrieved_docs)
+        )
+
+        response = RAGResponse(
             content=content,
             sources=sources if self.config.include_sources else [],
             query=question,
@@ -2518,6 +2736,9 @@ class RAGService:
             crag_result=crag_result,
             context_sufficiency=context_sufficiency_result,
         )
+        response.metadata["hallucination_score"] = hallucination_score
+        response.metadata["confidence_score_raw"] = confidence_score_computed
+        return response
 
     async def query_stream(
         self,
@@ -2849,7 +3070,18 @@ class RAGService:
             yield StreamChunk(type="done", data=None)
 
         except Exception as e:
-            logger.error("Streaming error", error=str(e))
+            # Outermost catch-all for streaming: log full structured context
+            logger.error(
+                "Streaming error",
+                error=str(e),
+                error_type=type(e).__name__,
+                operation="query_stream",
+                query=question[:100],
+                user_id=user_id,
+                session_id=session_id,
+                collection_filter=collection_filter,
+                exc_info=True,
+            )
             # Track failed usage
             if self.track_usage and llm_config:
                 processing_time_ms = (time.time() - start_time) * 1000
@@ -3073,6 +3305,99 @@ class RAGService:
                 include_subfolders=include_subfolders,
                 language=language,
             )
+
+    async def _compress_context(
+        self,
+        context: str,
+        question: str,
+        use_context_compression: bool,
+        settings_getter,
+        llm=None,
+    ) -> str:
+        """
+        Unified context compression pipeline.
+
+        Applies compression methods in priority order (only one will fire):
+        1. Phase 66 ContextCompressor (LLM-based, for >4K context)
+        2. Phase 79 AttentionRAG (attention-scoring, for >4K context)
+        3. Phase 63 TTT Compression (for ultra-long >100K context)
+
+        Returns the (possibly compressed) context string.
+        """
+        _s = settings_getter
+
+        # Phase 66: LLM-based context compression
+        if use_context_compression and len(context) > 4000:
+            try:
+                if _s("rag.context_compression_enabled") != False:
+                    if self._context_compressor is None:
+                        target_tokens = _s("rag.context_compression_target_tokens", 2000)
+                        self._context_compressor = ContextCompressor(
+                            target_tokens=target_tokens,
+                            use_llm_compression=True,
+                        )
+                    compressed = await self._context_compressor.compress(
+                        query=question,
+                        contexts=[context],
+                        llm=llm if _s("rag.context_compression_use_llm") else None,
+                    )
+                    if compressed.compression_ratio < 0.9:
+                        logger.info(
+                            "Context compression applied (Phase 66)",
+                            original_tokens=compressed.original_tokens,
+                            compressed_tokens=compressed.compressed_tokens,
+                            ratio=compressed.compression_ratio,
+                        )
+                        context = compressed.compressed_context
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
+                logger.warning("Context compression failed (Phase 66)", error=str(e), error_type=type(e).__name__)
+
+        # Phase 79: AttentionRAG compression (only if still large)
+        if len(context) > 4000:
+            try:
+                if _s("rag.attention_rag_enabled"):
+                    from backend.services.attention_rag import compress_context_with_attention, AttentionCompressionMode
+                    mode_str = _s("rag.attention_rag_mode", "moderate")
+                    mode_map = {
+                        "light": AttentionCompressionMode.LIGHT,
+                        "moderate": AttentionCompressionMode.MODERATE,
+                        "aggressive": AttentionCompressionMode.AGGRESSIVE,
+                    }
+                    mode = mode_map.get(mode_str, AttentionCompressionMode.MODERATE)
+                    compressed_text = await compress_context_with_attention(
+                        query=question, context=context, mode=mode,
+                    )
+                    if compressed_text and len(compressed_text) < len(context) * 0.9:
+                        logger.info(
+                            "AttentionRAG compression applied (Phase 79)",
+                            original_len=len(context),
+                            compressed_len=len(compressed_text),
+                            ratio=len(compressed_text) / len(context),
+                        )
+                        context = compressed_text
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, ImportError) as e:
+                logger.warning("AttentionRAG compression failed (Phase 79)", error=str(e), error_type=type(e).__name__)
+
+        # Phase 63: TTT compression for ultra-long contexts
+        from backend.core.config import settings as app_settings
+        max_context_len = getattr(app_settings, 'MAX_CONTEXT_LENGTH', 100000)
+        if _s("rag.ttt_compression_enabled", False) and len(context) > max_context_len:
+            try:
+                from backend.services.ttt_compression import TTTCompressionService
+                compressor = TTTCompressionService()
+                original_len = len(context)
+                compressed = await compressor.compress(context, target_ratio=0.5)
+                context = compressed.compressed_text if hasattr(compressed, 'compressed_text') else str(compressed)
+                logger.info(
+                    "TTT compression applied (Phase 63)",
+                    original_len=original_len,
+                    compressed_len=len(context),
+                    ratio=len(context) / original_len,
+                )
+            except (ValueError, RuntimeError, TimeoutError, ConnectionError, MemoryError, ImportError) as e:
+                logger.warning("TTT compression failed (Phase 63)", error=str(e), error_type=type(e).__name__)
+
+        return context
 
     async def _retrieve(
         self,
@@ -3408,7 +3733,7 @@ class RAGService:
                 reranker = await get_tiered_reranker()
                 rerank_result = await reranker.rerank(
                     query=query,
-                    documents=all_results,
+                    candidates=all_results,
                     top_k=top_k,
                 )
 
@@ -4580,10 +4905,62 @@ class RAGService:
 
         return deduped
 
+    # -------------------------------------------------------------------------
+    # Phase 95J: Hallucination + Confidence Scoring
+    # -------------------------------------------------------------------------
+
+    async def _compute_hallucination_score(self, answer: str, context: str) -> float:
+        """
+        Score 0.0 (fully grounded) to 1.0 (hallucinated) using reranker similarity.
+        Compares the answer text against the source context.
+        """
+        try:
+            if not answer or not context:
+                return 0.5
+            # Use reranker to check how well the answer aligns with context
+            if hasattr(self, '_reranker') and self._reranker:
+                score = await self._rerank_single(answer, context)
+                return round(1.0 - score, 3)
+            # Fallback: simple word overlap check
+            answer_words = set(answer.lower().split())
+            context_words = set(context.lower().split())
+            if not answer_words:
+                return 0.5
+            overlap = len(answer_words & context_words) / len(answer_words)
+            return round(1.0 - min(overlap, 1.0), 3)
+        except Exception as e:
+            logger.warning("Hallucination scoring failed", error=str(e))
+            return 0.5
+
+    async def _compute_confidence_score(self, sources: list, rerank_scores: list, retrieval_count: int) -> float:
+        """
+        Multi-signal confidence from retrieval quality.
+        Returns 0.0-1.0 score.
+        """
+        try:
+            signals = []
+            # Signal 1: source count (5+ sources = max confidence)
+            if sources:
+                signals.append(min(len(sources) / 5.0, 1.0))
+            # Signal 2: average reranker score
+            if rerank_scores:
+                avg_rerank = sum(rerank_scores) / len(rerank_scores)
+                signals.append(min(avg_rerank, 1.0))
+            # Signal 3: retrieval density
+            if retrieval_count > 0:
+                signals.append(min(retrieval_count / 10.0, 1.0))
+            if not signals:
+                return 0.5
+            return round(sum(signals) / len(signals), 3)
+        except Exception as e:
+            logger.warning("Confidence scoring failed", error=str(e))
+            return 0.5
+
     def _format_context(
         self,
         retrieved_docs: List[Tuple[Document, float]],
         include_collection_context: bool = True,
+        freshness_config: Optional[dict] = None,
     ) -> Tuple[str, List[Source]]:
         """
         Format retrieved documents into context string and sources list.
@@ -4591,12 +4968,40 @@ class RAGService:
         Args:
             retrieved_docs: List of (document, score) tuples
             include_collection_context: Whether to include collection tags in LLM context
+            freshness_config: Optional dict with freshness scoring settings
+                (keys: enabled, decay_days, boost_factor, penalty_factor)
 
         Returns:
             Tuple of (context_string, sources_list)
         """
         if not retrieved_docs:
             return "No relevant documents found.", []
+
+        # Phase 95K: Content freshness scoring
+        if freshness_config and freshness_config.get("enabled"):
+            try:
+                decay_days = int(freshness_config.get("decay_days", 180))
+                boost = float(freshness_config.get("boost_factor", 1.05))
+                penalty = float(freshness_config.get("penalty_factor", 0.95))
+                now = datetime.now()
+                adjusted_docs = []
+                for doc, score in retrieved_docs:
+                    updated = doc.metadata.get("updated_at") or doc.metadata.get("created_at")
+                    if updated:
+                        try:
+                            if isinstance(updated, str):
+                                updated = datetime.fromisoformat(updated.replace("Z", "+00:00")).replace(tzinfo=None)
+                            age_days = (now - updated).days
+                            if age_days <= 30:
+                                score *= boost
+                            elif age_days > decay_days:
+                                score *= penalty
+                        except (ValueError, TypeError):
+                            pass
+                    adjusted_docs.append((doc, score))
+                retrieved_docs = sorted(adjusted_docs, key=lambda x: x[1], reverse=True)
+            except Exception as e:
+                logger.debug("Freshness scoring skipped", error=str(e))
 
         context_parts = []
         sources = []
@@ -4680,6 +5085,54 @@ class RAGService:
     def set_vector_store(self, vector_store: Any):
         """Set vector store for retrieval."""
         self._vector_store = vector_store
+
+    # -------------------------------------------------------------------------
+    # Phase 93: DSPy Compiled Prompt Loading
+    # -------------------------------------------------------------------------
+
+    async def _load_dspy_compiled_state(
+        self, signature_name: str = "rag_answer"
+    ) -> tuple:
+        """
+        Load the latest deployed DSPy compiled state from the database.
+
+        Returns:
+            Tuple of (compiled_instructions: str | None, compiled_demos: list | None)
+        """
+        try:
+            from backend.db.models import DSPyOptimizationJob
+            from sqlalchemy import select
+
+            async with async_session_context() as db:
+                result = await db.execute(
+                    select(DSPyOptimizationJob)
+                    .where(
+                        DSPyOptimizationJob.signature_name == signature_name,
+                        DSPyOptimizationJob.status.in_(["deployed", "completed"]),
+                        DSPyOptimizationJob.compiled_state.isnot(None),
+                    )
+                    .order_by(DSPyOptimizationJob.created_at.desc())
+                    .limit(1)
+                )
+                job = result.scalar_one_or_none()
+
+                if job and job.compiled_state:
+                    instructions = job.compiled_state.get("instructions", "")
+                    demos = job.compiled_state.get("demos", [])
+                    if instructions or demos:
+                        logger.info(
+                            "Loaded DSPy compiled state",
+                            signature=signature_name,
+                            has_instructions=bool(instructions),
+                            num_demos=len(demos),
+                            job_id=str(job.id),
+                        )
+                        return instructions, demos
+
+        except Exception as e:
+            logger.debug("DSPy compiled state not available", error=str(e))
+
+        return None, None
 
     # -------------------------------------------------------------------------
     # Advanced RAG Methods (GraphRAG, Agentic RAG)
@@ -4846,6 +5299,11 @@ def get_rag_service(
             _default_rag_service = RAGService(config=config)
 
         return _default_rag_service
+
+
+def get_rag_service_dependency() -> RAGService:
+    """FastAPI dependency wrapper for RAG service (no parameters for DI compatibility)."""
+    return get_rag_service()
 
 
 async def simple_query(

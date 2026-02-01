@@ -9,6 +9,7 @@ This package provides generators for different output formats:
 - Markdown: Markdown text
 - HTML: HTML documents
 - TXT: Plain text
+- Mind Map: Interactive D3.js-based mind maps
 """
 
 from .base import BaseFormatGenerator
@@ -20,6 +21,7 @@ from .docx import DOCXGenerator
 from .pdf import PDFGenerator
 from .xlsx import XLSXGenerator
 from .simple import MarkdownGenerator, HTMLGenerator, TXTGenerator
+from .mindmap import MindMapGenerator
 
 __all__ = [
     # Base classes
@@ -34,4 +36,5 @@ __all__ = [
     "MarkdownGenerator",
     "HTMLGenerator",
     "TXTGenerator",
+    "MindMapGenerator",
 ]

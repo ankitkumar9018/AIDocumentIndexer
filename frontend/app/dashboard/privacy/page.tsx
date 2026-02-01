@@ -154,8 +154,8 @@ export default function PrivacyPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-blue-100">
-              <History className="h-5 w-5 text-blue-600" />
+            <div className="p-2 rounded-lg bg-blue-100 dark:bg-blue-900/30">
+              <History className="h-5 w-5 text-blue-600 dark:text-blue-400" />
             </div>
             <div>
               <CardTitle>Chat History</CardTitle>
@@ -235,8 +235,8 @@ export default function PrivacyPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-purple-100">
-              <Brain className="h-5 w-5 text-purple-600" />
+            <div className="p-2 rounded-lg bg-purple-100 dark:bg-purple-900/30">
+              <Brain className="h-5 w-5 text-purple-600 dark:text-purple-400" />
             </div>
             <div>
               <CardTitle>AI Memory</CardTitle>
@@ -297,7 +297,7 @@ export default function PrivacyPage() {
           {settings.ai_memory_enabled && (
             <div className="bg-muted/50 rounded-lg p-4">
               <div className="flex items-center gap-2 text-sm">
-                <CheckCircle2 className="h-4 w-4 text-green-500" />
+                <CheckCircle2 className="h-4 w-4 text-green-500 dark:text-green-400" />
                 <span>AI memory is active and learning from your conversations</span>
               </div>
             </div>
@@ -309,8 +309,8 @@ export default function PrivacyPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-gray-100">
-              <EyeOff className="h-5 w-5 text-gray-600" />
+            <div className="p-2 rounded-lg bg-gray-100 dark:bg-gray-800">
+              <EyeOff className="h-5 w-5 text-gray-600 dark:text-gray-400" />
             </div>
             <div>
               <CardTitle>Incognito Mode</CardTitle>
@@ -336,7 +336,7 @@ export default function PrivacyPage() {
             />
           </div>
           {settings.incognito_mode && (
-            <div className="mt-4 flex items-center gap-2 text-sm text-yellow-600 bg-yellow-50 rounded-lg p-3">
+            <div className="mt-4 flex items-center gap-2 text-sm text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-950/30 rounded-lg p-3">
               <Lock className="h-4 w-4" />
               Incognito mode is active. Your chats will not be saved.
             </div>
@@ -348,8 +348,8 @@ export default function PrivacyPage() {
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-green-100">
-              <Settings className="h-5 w-5 text-green-600" />
+            <div className="p-2 rounded-lg bg-green-100 dark:bg-green-900/30">
+              <Settings className="h-5 w-5 text-green-600 dark:text-green-400" />
             </div>
             <div>
               <CardTitle>Data Management</CardTitle>
@@ -371,7 +371,7 @@ export default function PrivacyPage() {
             </Button>
             <Button
               variant="outline"
-              className="flex-1 text-red-600 hover:text-red-700 hover:bg-red-50"
+              className="flex-1 text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/30"
               onClick={() => setDeleteDialogOpen(true)}
             >
               <Trash2 className="h-4 w-4 mr-2" />
@@ -394,25 +394,25 @@ export default function PrivacyPage() {
               <ul className="text-sm text-muted-foreground space-y-1">
                 <li className="flex items-center gap-2">
                   {settings.chat_history_enabled ? (
-                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                    <CheckCircle2 className="h-4 w-4 text-green-500 dark:text-green-400" />
                   ) : (
-                    <AlertTriangle className="h-4 w-4 text-yellow-500" />
+                    <AlertTriangle className="h-4 w-4 text-yellow-500 dark:text-yellow-400" />
                   )}
                   Chat history is {settings.chat_history_enabled ? "enabled" : "disabled"}
                 </li>
                 <li className="flex items-center gap-2">
                   {settings.ai_memory_enabled ? (
-                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                    <CheckCircle2 className="h-4 w-4 text-green-500 dark:text-green-400" />
                   ) : (
-                    <AlertTriangle className="h-4 w-4 text-yellow-500" />
+                    <AlertTriangle className="h-4 w-4 text-yellow-500 dark:text-yellow-400" />
                   )}
                   AI memory is {settings.ai_memory_enabled ? "enabled" : "disabled"}
                 </li>
                 <li className="flex items-center gap-2">
                   {!settings.chat_history_admin_visible ? (
-                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                    <CheckCircle2 className="h-4 w-4 text-green-500 dark:text-green-400" />
                   ) : (
-                    <Eye className="h-4 w-4 text-yellow-500" />
+                    <Eye className="h-4 w-4 text-yellow-500 dark:text-yellow-400" />
                   )}
                   Chats are {settings.chat_history_admin_visible ? "visible" : "hidden"} to admins
                 </li>
@@ -504,7 +504,7 @@ export default function PrivacyPage() {
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle className="text-red-600">Delete Data</DialogTitle>
+            <DialogTitle className="text-red-600 dark:text-red-400">Delete Data</DialogTitle>
             <DialogDescription>
               This action cannot be undone. Please choose what to delete.
             </DialogDescription>
@@ -533,10 +533,10 @@ export default function PrivacyPage() {
                   </div>
                 </Label>
               </div>
-              <div className="flex items-center space-x-3 rounded-lg border border-red-200 p-4 bg-red-50">
+              <div className="flex items-center space-x-3 rounded-lg border border-red-200 dark:border-red-800 p-4 bg-red-50 dark:bg-red-950/30">
                 <RadioGroupItem value="all" id="delete-all" />
                 <Label htmlFor="delete-all" className="flex-1 cursor-pointer">
-                  <div className="font-medium text-red-600">Delete Everything</div>
+                  <div className="font-medium text-red-600 dark:text-red-400">Delete Everything</div>
                   <div className="text-sm text-muted-foreground">
                     Delete all history, memory, and preferences
                   </div>

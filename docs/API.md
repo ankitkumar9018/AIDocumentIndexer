@@ -188,28 +188,37 @@ Reprocess a document.
 
 Automatically generate tags/collection for a document using AI analysis.
 
+The auto-tagger uses the configured LLM provider (defaults to Ollama with the `DEFAULT_CHAT_MODEL`) to analyze the document's content and generate relevant tags. It samples the first few chunks of the document to understand its content and context.
+
 **Request:**
 ```json
 {
-  "max_tags": 3
+  "max_tags": 5
 }
 ```
 
 **Request Parameters:**
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `max_tags` | int | 3 | Maximum number of tags to generate (1-10) |
+| `max_tags` | int | 5 | Maximum number of tags to generate (1-10) |
 
 **Response:**
 ```json
 {
   "document_id": "uuid",
-  "tags": ["German", "Language Learning", "Vocabulary"],
-  "collection": "German"
+  "tags": ["Project Management", "Software Development", "Guide", "Best Practices"],
+  "collection": "Project Management"
 }
 ```
 
-The first tag is automatically set as the document's collection. Tags are merged with any existing user-defined tags.
+**How it works:**
+1. Retrieves the first 3 chunks of the document for content analysis
+2. Sends the content sample to the LLM with a tagging prompt
+3. LLM generates relevant tags based on topic, industry, document type, and content
+4. The first tag is automatically set as the document's collection
+5. Tags are merged with any existing user-defined tags (existing tags preserved)
+
+**Note:** Auto-tagging can also be enabled during upload by setting `auto_generate_tags=true` in the upload request. When enabled, tags are automatically generated after document processing completes.
 
 ### GET /documents/collections/list
 
@@ -381,6 +390,15 @@ Or using a URL:
 }
 ```
 
+**Additional Response Fields (Phase 95):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `hallucination_score` | float (0-1) | Hallucination detection score. 0 = fully grounded, 1 = likely hallucinated. Added in Phase 95J. |
+| `confidence_score` | float (0-1) | Overall confidence in the response quality, combining source relevance and faithfulness. Added in Phase 95J. |
+| `freshness_scores` | array | Per-source freshness scores indicating how current each retrieved document is. Each entry contains `document_id`, `score` (0-1), and `last_updated`. Added in Phase 95K. |
+| `conversation_context_used` | boolean | Whether prior conversation context was used to augment the current query. Added in Phase 95L. |
+
 **Confidence Levels:**
 
 | Level | Score Range | Description |
@@ -434,14 +452,25 @@ Upload a single file.
 - `file`: File to upload
 - `collection` (optional): Collection name
 - `access_tier` (optional): Access tier level (1-100)
+- `is_private` (optional, default: false): Mark document as private (only visible to uploader and admins)
 - `enable_ocr` (optional, default: true): Enable OCR for scanned documents
 - `enable_image_analysis` (optional, default: true): Enable image analysis
 - `smart_image_handling` (optional, default: true): Optimize images for faster processing
 - `smart_chunking` (optional, default: true): Use semantic chunking
-- `detect_duplicates` (optional, default: true): Skip duplicate files
+- `detect_duplicates` (optional, default: true): Skip duplicate files based on content hash. Only flags as duplicate if the original document still exists in the system
+- `auto_generate_tags` (optional, default: false): Automatically generate tags using AI analysis after processing. Uses the configured LLM (e.g., Ollama) to analyze document content and generate up to 5 relevant tags. The first tag is also set as the document's collection
 - `processing_mode` (optional): "full" (default), "ocr", or "basic"
 - `chunking_strategy` (optional, default: "semantic"): "simple", "semantic", or "hierarchical"
 - `enable_contextual_headers` (optional, default: true): Prepend document context to each chunk
+
+**Example with Private Document:**
+```bash
+curl -X POST "http://localhost:8000/api/upload" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "file=@sensitive-report.pdf" \
+  -F "is_private=true" \
+  -F "collection=confidential"
+```
 
 ### POST /upload/batch
 
@@ -837,56 +866,542 @@ Get scraped content as RAG-ready chunked documents.
 }
 ```
 
----
+### POST /scraper/sitemap-crawl (Phase 96)
 
-## Cost Tracking Endpoints
-
-### GET /costs/usage
-
-Get cost usage for a period.
-
-**Query Parameters:**
-- `period` (string): day, week, month (default: month)
-
-### GET /costs/history
-
-Get cost history.
-
-### GET /costs/current
-
-Get current period cost.
-
-### GET /costs/dashboard
-
-Get cost dashboard data.
-
-### GET /costs/alerts
-
-List cost alerts.
-
-### POST /costs/alerts
-
-Create a cost alert.
+Crawl a website using its sitemap.xml for URL discovery. Fetches the site's sitemap.xml, extracts URLs, and crawls them. URLs are prioritized by lastmod date (newest first). Results can be stored permanently in the RAG knowledge base.
 
 **Request:**
 ```json
 {
-  "threshold": 50.00,
-  "period": "month"
+  "url": "https://example.com",
+  "max_pages": 50,
+  "storage_mode": "permanent",
+  "access_tier": 1
 }
 ```
 
-### DELETE /costs/alerts/{alert_id}
+**Request Parameters:**
 
-Delete a cost alert.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `url` | string | required | Base URL of the site (e.g., https://example.com) |
+| `max_pages` | int | 50 | Maximum pages to crawl from sitemap (1-500) |
+| `storage_mode` | string | "permanent" | `immediate` or `permanent` |
+| `access_tier` | int | 1 | Access tier for stored content (1-100) |
 
-### POST /costs/estimate
+**Response:**
+```json
+{
+  "url": "https://example.com",
+  "pages_found": 120,
+  "pages_successful": 48,
+  "total_words": 75000,
+  "storage_mode": "permanent",
+  "pages": [
+    {
+      "url": "https://example.com/page1",
+      "title": "Page Title",
+      "success": true,
+      "word_count": 1500,
+      "error": null
+    }
+  ]
+}
+```
 
-Estimate cost for a request.
+### GET /scraper/jobs/{job_id}/stream (Phase 96)
 
-### GET /costs/pricing
+Stream real-time progress of a scrape job via Server-Sent Events (SSE). Connect using `EventSource` in the browser.
 
-Get model pricing information.
+**Content-Type:** `text/event-stream`
+
+**Path Parameters:**
+- `job_id` (string): UUID of the scrape job
+
+**SSE Event Types:**
+
+| Event Type | Data Structure | Description |
+|------------|----------------|-------------|
+| `status` | `{ "type": "status", "status": "running", "job_id": "uuid" }` | Job status changed |
+| `page_complete` | `{ "type": "page_complete", "url": "...", "title": "...", "word_count": 1500, "pages_scraped": 5, "total_pages": 20 }` | A page finished scraping |
+| `complete` | `{ "type": "complete", "status": "completed", "pages_scraped": 20, "pages_failed": 2, "total_words": 35000 }` | Job finished (completed or failed) |
+| `error` | `{ "type": "error", "message": "Job not found" }` | Error occurred |
+
+**Example SSE Stream:**
+```
+data: {"type": "status", "status": "running", "job_id": "abc-123"}
+
+data: {"type": "page_complete", "url": "https://example.com/page1", "title": "Page 1", "word_count": 1500, "pages_scraped": 1, "total_pages": 10}
+
+data: {"type": "page_complete", "url": "https://example.com/page2", "title": "Page 2", "word_count": 800, "pages_scraped": 2, "total_pages": 10}
+
+data: {"type": "complete", "status": "completed", "pages_scraped": 10, "pages_failed": 0, "total_words": 12000}
+```
+
+### POST /scraper/search-crawl (Phase 96)
+
+Search the web for relevant pages and crawl them. Uses DuckDuckGo to find pages matching the query, then crawls each result to extract content. Optionally stores results in the RAG knowledge base.
+
+**Request:**
+```json
+{
+  "query": "machine learning tutorials",
+  "max_results": 5,
+  "storage_mode": "immediate",
+  "access_tier": 1
+}
+```
+
+**Request Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | string | required | Search query for finding relevant pages (min 3 characters) |
+| `max_results` | int | 5 | Maximum search results to crawl (1-20) |
+| `storage_mode` | string | "immediate" | `immediate` or `permanent` |
+| `access_tier` | int | 1 | Access tier for stored content (1-100) |
+
+**Response:**
+```json
+{
+  "query": "machine learning tutorials",
+  "results_found": 5,
+  "results_successful": 4,
+  "total_words": 12000,
+  "storage_mode": "immediate",
+  "results": [
+    {
+      "url": "https://example.com/ml-guide",
+      "title": "ML Guide",
+      "success": true,
+      "word_count": 3000,
+      "error": null,
+      "snippet": "An introduction to machine learning concepts..."
+    }
+  ]
+}
+```
+
+### GET /scraper/robots-txt (Phase 96)
+
+Parse and return robots.txt rules for a domain. Returns allowed/disallowed paths, crawl delay, and sitemap URLs.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `url` | string | required | URL to check robots.txt for |
+
+**Response:**
+```json
+{
+  "url": "https://example.com",
+  "allowed_paths": ["/", "/public/"],
+  "disallowed_paths": ["/admin/", "/private/", "/api/"],
+  "crawl_delay": 1,
+  "sitemaps": ["https://example.com/sitemap.xml"]
+}
+```
+
+### Scheduled Crawls (Phase 96)
+
+Endpoints for managing recurring/scheduled crawls. Scheduled crawls run on cron schedules via Celery Beat. Content is hashed between runs to detect changes and avoid redundant re-indexing.
+
+### POST /scraper/scheduled (Phase 96)
+
+Create a new scheduled/recurring crawl.
+
+**Request:**
+```json
+{
+  "url": "https://example.com/blog",
+  "schedule": "0 */6 * * *",
+  "crawl_config": {
+    "max_pages": 50,
+    "max_depth": 3,
+    "storage_mode": "permanent"
+  },
+  "enabled": true
+}
+```
+
+**Request Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `url` | string | required | URL to crawl on schedule |
+| `schedule` | string | required | Cron expression (e.g., `0 */6 * * *` for every 6 hours) |
+| `crawl_config` | object | `{"max_pages": 50, "max_depth": 3, "storage_mode": "permanent"}` | Crawl configuration |
+| `enabled` | boolean | true | Whether the schedule is active |
+
+**Response:** `201 Created`
+```json
+{
+  "id": "uuid",
+  "url": "https://example.com/blog",
+  "schedule": "0 */6 * * *",
+  "crawl_config": {
+    "max_pages": 50,
+    "max_depth": 3,
+    "storage_mode": "permanent"
+  },
+  "enabled": true,
+  "last_run": null,
+  "next_run": "2026-01-26T18:00:00Z",
+  "last_content_hash": null,
+  "created_at": "2026-01-26T12:00:00Z",
+  "updated_at": "2026-01-26T12:00:00Z",
+  "created_by": "user-uuid"
+}
+```
+
+### GET /scraper/scheduled (Phase 96)
+
+List all scheduled crawls. Returns schedules for the current user; admins see all schedules.
+
+**Response:**
+```json
+{
+  "schedules": [
+    {
+      "id": "uuid",
+      "url": "https://example.com/blog",
+      "schedule": "0 */6 * * *",
+      "crawl_config": {},
+      "enabled": true,
+      "last_run": "2026-01-26T06:00:00Z",
+      "next_run": "2026-01-26T12:00:00Z",
+      "last_content_hash": "abc123",
+      "created_at": "2026-01-20T10:00:00Z",
+      "updated_at": "2026-01-26T06:00:00Z",
+      "created_by": "user-uuid"
+    }
+  ],
+  "total": 1
+}
+```
+
+### GET /scraper/scheduled/{schedule_id} (Phase 96)
+
+Get a specific scheduled crawl by ID. Only accessible by the schedule owner or admins.
+
+**Path Parameters:**
+- `schedule_id` (string): UUID of the scheduled crawl
+
+**Response:** Same `ScheduledCrawlResponse` object as `POST /scraper/scheduled`.
+
+### PUT /scraper/scheduled/{schedule_id} (Phase 96)
+
+Update an existing scheduled crawl. Supports partial updates -- only provided fields are changed. If the cron schedule or enabled state changes, the Celery Beat registration is updated accordingly.
+
+**Path Parameters:**
+- `schedule_id` (string): UUID of the scheduled crawl
+
+**Request:**
+```json
+{
+  "schedule": "0 0 * * *",
+  "enabled": false
+}
+```
+
+**Request Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `url` | string | null | Updated URL |
+| `schedule` | string | null | Updated cron expression |
+| `crawl_config` | object | null | Updated crawl configuration |
+| `enabled` | boolean | null | Enable or disable the schedule |
+
+All fields are optional. At least one field must be provided.
+
+**Response:** Updated `ScheduledCrawlResponse` object.
+
+### DELETE /scraper/scheduled/{schedule_id} (Phase 96)
+
+Delete a scheduled crawl. Removes the schedule and unregisters the corresponding Celery Beat task.
+
+**Path Parameters:**
+- `schedule_id` (string): UUID of the scheduled crawl
+
+**Response:**
+```json
+{
+  "message": "Scheduled crawl {schedule_id} deleted successfully"
+}
+```
+
+### POST /scraper/scheduled/{schedule_id}/run (Phase 96)
+
+Manually trigger a scheduled crawl execution. Runs the crawl immediately regardless of the cron schedule. Computes a content hash and re-indexes only if content has changed since the last execution.
+
+**Path Parameters:**
+- `schedule_id` (string): UUID of the scheduled crawl
+
+**Response:**
+```json
+{
+  "status": "completed",
+  "pages_crawled": 25,
+  "content_changed": true,
+  "content_hash": "sha256-hash",
+  "indexed": true
+}
+```
+
+---
+
+## Cost Optimization Endpoints (Phase 68)
+
+Cost monitoring dashboard for tracking and reducing LLM costs by 30-50%. Provides cost-per-query tracking, token usage analytics, cache hit rate monitoring, model usage mix analysis, budget alerts, and GPU utilization metrics.
+
+**Authentication:** All cost optimization endpoints require a valid JWT token.
+
+### GET /costs/analysis
+
+Get comprehensive cost analysis with breakdown by category, model usage, cache performance, and daily cost trends.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `time_range` | string | "week" | Time range: `hour`, `day`, `week`, or `month` |
+
+**Response:**
+```json
+{
+  "time_range": "week",
+  "start_date": "2026-01-19T00:00:00Z",
+  "end_date": "2026-01-26T00:00:00Z",
+  "total_cost_usd": 12.5432,
+  "breakdown": [
+    {
+      "category": "llm_inference",
+      "total_cost_usd": 8.1234,
+      "percentage": 64.8,
+      "request_count": 450,
+      "avg_cost_per_request": 0.018052
+    }
+  ],
+  "model_usage": [
+    {
+      "model_id": "gpt-4o",
+      "provider": "openai",
+      "request_count": 200,
+      "total_tokens": 500000,
+      "input_tokens": 350000,
+      "output_tokens": 150000,
+      "total_cost_usd": 6.25,
+      "avg_latency_ms": 1250.5
+    }
+  ],
+  "cache_stats": [
+    {
+      "cache_type": "semantic",
+      "hit_count": 1234,
+      "miss_count": 567,
+      "hit_rate": 0.685,
+      "savings_usd": 1.234
+    }
+  ],
+  "daily_costs": [
+    { "date": "2026-01-20", "cost_usd": 1.8234 }
+  ]
+}
+```
+
+**Cost Categories:**
+
+| Category | Description |
+|----------|-------------|
+| `llm_inference` | LLM chat/completion costs |
+| `embedding` | Embedding generation costs |
+| `reranking` | Reranking model costs |
+| `ocr` | OCR processing costs |
+| `tts` | Text-to-speech costs |
+| `storage` | Vector/document storage costs |
+| `compute` | General compute costs |
+
+### GET /costs/recommendations
+
+Get cost optimization recommendations based on usage pattern analysis.
+
+**Response:**
+```json
+[
+  {
+    "id": "enable-semantic-cache",
+    "title": "Enable Semantic Caching",
+    "description": "Your cache hit rate is low. Enable semantic caching to match similar queries.",
+    "potential_savings_usd": 5.0,
+    "priority": "high",
+    "action": "Enable 'rag.semantic_cache_enabled' in settings",
+    "implemented": false
+  }
+]
+```
+
+**Priority Levels:** `high`, `medium`, `low`
+
+### GET /costs/budget-alerts
+
+List all configured budget alerts with current spend status.
+
+**Response:**
+```json
+[
+  {
+    "id": "uuid",
+    "name": "Monthly LLM Budget",
+    "threshold_usd": 100.0,
+    "period": "month",
+    "current_spend_usd": 45.23,
+    "triggered": false,
+    "triggered_at": null
+  }
+]
+```
+
+### POST /costs/budget-alerts
+
+Create a new budget alert.
+
+**Request:**
+```json
+{
+  "name": "Monthly LLM Budget",
+  "threshold_usd": 100.0,
+  "period": "month",
+  "notify_email": "admin@example.com",
+  "notify_slack": false
+}
+```
+
+**Request Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Alert name |
+| `threshold_usd` | float | Yes | Budget threshold in USD (must be > 0) |
+| `period` | string | No | Time period: `hour`, `day`, `week`, or `month` (default: month) |
+| `notify_email` | string | No | Email address for notifications |
+| `notify_slack` | boolean | No | Enable Slack notifications (default: false) |
+
+**Response:** `201 Created` with the created `BudgetAlert` object.
+
+### DELETE /costs/budget-alerts/{alert_id}
+
+Delete a budget alert.
+
+**Response:** `204 No Content`
+
+### GET /costs/tokens
+
+Get token usage breakdown with input vs output tokens, tokens per query, and cost per 1K tokens.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `time_range` | string | "day" | Time range: `hour`, `day`, `week`, or `month` |
+
+**Response:**
+```json
+{
+  "time_range": "day",
+  "start_date": "2026-01-25T00:00:00Z",
+  "end_date": "2026-01-26T00:00:00Z",
+  "total_tokens": 125000,
+  "input_tokens": 87500,
+  "output_tokens": 37500,
+  "total_cost_usd": 1.5432,
+  "query_count": 85,
+  "avg_tokens_per_query": 1470.6,
+  "cost_per_1k_tokens": 0.012346
+}
+```
+
+### GET /costs/gpu
+
+Get GPU utilization metrics including memory usage and inference statistics.
+
+**Response:**
+```json
+{
+  "available": true,
+  "device_count": 1,
+  "cuda_version": "12.1",
+  "devices": [
+    {
+      "id": 0,
+      "name": "NVIDIA RTX 4090",
+      "total_memory_gb": 24.0,
+      "allocated_memory_gb": 8.5,
+      "reserved_memory_gb": 10.0,
+      "utilization_percent": 35.4
+    }
+  ]
+}
+```
+
+If no GPU is available, returns `{ "available": false, "device_count": 0, "devices": [] }`.
+
+### POST /costs/record
+
+Record a cost event. Used internally by services to track costs.
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `category` | string | Yes | Cost category (see categories above) |
+| `cost_usd` | float | Yes | Cost in USD |
+| `tokens` | int | No | Token count (default: 0) |
+| `model_id` | string | No | Model identifier |
+| `latency_ms` | float | No | Request latency in milliseconds (default: 0) |
+
+**Response:**
+```json
+{ "status": "recorded" }
+```
+
+### POST /costs/cache-event
+
+Record a cache hit or miss event. Used internally by cache services.
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `cache_type` | string | Yes | Cache type identifier (e.g., "semantic", "embedding") |
+| `hit` | boolean | Yes | Whether this was a cache hit |
+
+**Response:**
+```json
+{ "status": "recorded" }
+```
+
+### GET /costs/summary
+
+Get a quick cost summary for dashboard display.
+
+**Response:**
+```json
+{
+  "today_cost_usd": 2.3456,
+  "month_cost_usd": 45.2345,
+  "total_queries_today": 85,
+  "total_queries_month": 2150,
+  "cache_hit_rate": 0.685,
+  "estimated_cache_savings_usd": 1.234,
+  "top_model": {
+    "model_id": "gpt-4o",
+    "cost_usd": 6.25
+  },
+  "active_alerts": 0
+}
+```
 
 ---
 
@@ -2041,6 +2556,209 @@ Process text using late chunking (context-preserving chunking with +15-25% accur
   "model": "jina-embeddings-v3"
 }
 ```
+
+---
+
+## DSPy Prompt Optimization Endpoints (Phase 93)
+
+Admin API for DSPy-based prompt optimization. Supports automated optimization of RAG prompts using BootstrapFewShot and MIPROv2 optimizers, training example management, and deployment of optimized prompts via A/B testing.
+
+**Authentication:** All DSPy endpoints require admin privileges (JWT token with admin role).
+
+**Base Path:** `/admin/dspy`
+
+### POST /admin/dspy/optimize
+
+Trigger DSPy prompt optimization for a specific signature. Creates and runs an optimization job that collects training examples, runs the selected optimizer, evaluates improvement, and optionally exports to the prompt version manager.
+
+**Request:**
+```json
+{
+  "signature": "rag_answer",
+  "optimizer": "bootstrap_few_shot",
+  "max_examples": 50,
+  "agent_id": "optional-agent-id"
+}
+```
+
+**Request Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `signature` | string | required | Signature to optimize (see valid values below) |
+| `optimizer` | string | "bootstrap_few_shot" | Optimizer type: `bootstrap_few_shot` or `miprov2` |
+| `max_examples` | int | 50 | Maximum training examples to use (5-1000) |
+| `agent_id` | string | null | Agent ID for prompt version export |
+
+**Valid Signatures:**
+- `rag_answer` -- Main RAG answer generation
+- `query_expansion` -- Query expansion for improved retrieval
+- `query_decomposition` -- Complex query decomposition into sub-queries
+- `react_reasoning` -- ReAct-style reasoning steps
+- `answer_synthesis` -- Final answer synthesis from multiple sources
+
+**Response:**
+```json
+{
+  "id": "uuid",
+  "signature_name": "rag_answer",
+  "optimizer_type": "bootstrap_few_shot",
+  "status": "completed",
+  "num_train_examples": 40,
+  "num_dev_examples": 10,
+  "baseline_score": 0.72,
+  "optimized_score": 0.85,
+  "improvement_pct": 18.1,
+  "error_message": null,
+  "prompt_version_id": "uuid-or-null",
+  "created_at": "2026-01-26T10:30:00Z"
+}
+```
+
+**Job Status Values:** `running`, `completed`, `failed`, `deployed`
+
+### GET /admin/dspy/status/{job_id}
+
+Get the status of a DSPy optimization job.
+
+**Path Parameters:**
+- `job_id` (string): UUID of the optimization job
+
+**Response:** Same `JobResponse` schema as `POST /admin/dspy/optimize`.
+
+**Error:** `404` if job not found.
+
+### GET /admin/dspy/jobs
+
+List DSPy optimization jobs with optional filtering.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `signature` | string | null | Filter by signature name |
+| `limit` | int | 20 | Maximum number of jobs to return |
+
+**Response:** Array of `JobResponse` objects, ordered by creation date (newest first).
+
+### GET /admin/dspy/examples
+
+List training examples used for optimization.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `signature` | string | null | Filter by signature name |
+| `source` | string | null | Filter by source (e.g., `manual`, `chat_feedback`, `trajectory`) |
+| `active_only` | boolean | true | Only return active examples |
+| `limit` | int | 50 | Maximum number of examples to return |
+
+**Response:**
+```json
+[
+  {
+    "id": "uuid",
+    "signature_name": "rag_answer",
+    "inputs": { "question": "What is AI?", "context": "..." },
+    "outputs": { "answer": "AI is..." },
+    "source": "chat_feedback",
+    "quality_score": 0.95,
+    "is_active": true,
+    "created_at": "2026-01-25T14:00:00Z"
+  }
+]
+```
+
+### POST /admin/dspy/examples
+
+Add a manual training example for optimization.
+
+**Request:**
+```json
+{
+  "signature_name": "rag_answer",
+  "inputs": { "question": "What is machine learning?", "context": "ML is a subset of AI..." },
+  "outputs": { "answer": "Machine learning is a branch of artificial intelligence..." },
+  "quality_score": 1.0
+}
+```
+
+**Request Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `signature_name` | string | required | Target signature name |
+| `inputs` | object | required | Input fields for the signature |
+| `outputs` | object | required | Expected output fields |
+| `quality_score` | float | 1.0 | Quality score (0.0-1.0) |
+
+**Response:** The created `ExampleResponse` object.
+
+### DELETE /admin/dspy/examples/{example_id}
+
+Deactivate a training example (soft delete).
+
+**Path Parameters:**
+- `example_id` (string): UUID of the example to deactivate
+
+**Response:**
+```json
+{
+  "status": "deactivated",
+  "id": "example-uuid"
+}
+```
+
+**Error:** `404` if example not found.
+
+### GET /admin/dspy/example-counts
+
+Get training example counts grouped by source.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `signature` | string | null | Filter by signature name |
+
+**Response:**
+```json
+{
+  "chat_feedback": 25,
+  "trajectory": 15,
+  "manual": 10,
+  "total": 50
+}
+```
+
+### POST /admin/dspy/deploy/{job_id}
+
+Deploy a completed optimization result by creating a new prompt version for A/B testing via the PromptVersionManager.
+
+**Path Parameters:**
+- `job_id` (string): UUID of the completed optimization job
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | Yes | Agent ID to deploy the optimized prompt to |
+
+**Response:**
+```json
+{
+  "status": "deployed",
+  "job_id": "uuid",
+  "prompt_version_id": "uuid",
+  "improvement_pct": 18.1
+}
+```
+
+**Errors:**
+- `404` -- Job not found
+- `400` -- Job status is not `completed` or no compiled state available
+- `500` -- Deployment failed
 
 ---
 

@@ -34,7 +34,13 @@ export function TextToSpeech({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  // Track mounted state to prevent hydration mismatch
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -167,7 +173,9 @@ export function TextToSpeech({
     }
   }, [isSpeaking, isPaused, speak, stop, togglePause]);
 
-  if (!isSpeechSynthesisSupported()) {
+  // Prevent hydration mismatch by not rendering until mounted
+  // (server returns false for isSpeechSynthesisSupported, client returns true)
+  if (!isMounted || !isSpeechSynthesisSupported()) {
     return null;
   }
 

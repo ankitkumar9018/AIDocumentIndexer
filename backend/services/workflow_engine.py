@@ -643,6 +643,14 @@ class NodeExecutor:
             WorkflowNodeType.VOICE_AGENT.value: self._execute_voice_agent,
             WorkflowNodeType.CHAT_AGENT.value: self._execute_chat_agent,
             WorkflowNodeType.HUMAN_APPROVAL.value: self._execute_human_approval,
+            # Lobster-style advanced nodes
+            WorkflowNodeType.PARALLEL.value: self._execute_parallel,
+            WorkflowNodeType.JOIN.value: self._execute_join,
+            WorkflowNodeType.SUBWORKFLOW.value: self._execute_subworkflow,
+            WorkflowNodeType.TRANSFORM.value: self._execute_transform,
+            WorkflowNodeType.SWITCH.value: self._execute_switch,
+            WorkflowNodeType.RETRY.value: self._execute_retry,
+            WorkflowNodeType.AGGREGATE.value: self._execute_aggregate,
         }
 
         executor = executor_map.get(node_type)
@@ -1428,6 +1436,21 @@ class NodeExecutor:
             def __getattr__(self, name):
                 raise AttributeError(f"Access to 're.{name}' is not allowed in sandbox")
 
+        class _SafeDatetime:
+            """Restricted datetime interface — no access to module internals."""
+            @staticmethod
+            def now(): return datetime.now()
+            @staticmethod
+            def utcnow(): return datetime.utcnow()
+            @staticmethod
+            def fromisoformat(s): return datetime.fromisoformat(s)
+            @staticmethod
+            def strptime(date_string, fmt): return datetime.strptime(date_string, fmt)
+            @staticmethod
+            def today(): return datetime.today()
+            def __getattr__(self, name):
+                raise AttributeError(f"Access to 'datetime.{name}' is not allowed in sandbox")
+
         restricted_globals = {
             "__builtins__": safe_builtins,
             "_getitem_": default_guarded_getitem,
@@ -1435,7 +1458,7 @@ class NodeExecutor:
             # Safe module wrappers (no __builtins__/__import__ access)
             "json": _SafeJson(),
             "math": _SafeMath(),
-            "datetime": datetime,
+            "datetime": _SafeDatetime(),
             "re": _SafeRegex(),
             # Add context
             "variables": context.get("variables", {}),
@@ -1938,10 +1961,124 @@ class NodeExecutor:
         return {"channel": "log", "message": message, "recipients": recipients, "sent": True}
 
     async def _notify_email(self, message: str, recipients: List, config: Dict, context: "ExecutionContext") -> Dict:
-        """Send email notification."""
+        """
+        Send email notification via SMTP.
+
+        Config options:
+            - subject: Email subject line
+            - html: If True, send as HTML email
+            - from_name: Sender display name
+            - reply_to: Reply-to address
+
+        SMTP settings from environment or database settings:
+            - SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM
+        """
+        import os
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
         subject = config.get("subject", "Workflow Notification")
-        self.logger.info("Email notification", to=recipients, subject=subject)
-        return {"channel": "email", "message": message, "recipients": recipients, "sent": True, "subject": subject}
+        is_html = config.get("html", False)
+
+        # Get SMTP settings
+        smtp_settings = await self._get_smtp_settings()
+        smtp_host = smtp_settings.get("host")
+        smtp_port = smtp_settings.get("port", 587)
+        smtp_user = smtp_settings.get("user")
+        smtp_pass = smtp_settings.get("password")
+        smtp_from = smtp_settings.get("from_email")
+        from_name = config.get("from_name", smtp_settings.get("from_name", "AIDocumentIndexer"))
+
+        if not smtp_host:
+            self.logger.warning("SMTP not configured, email notification skipped")
+            return {
+                "channel": "email",
+                "sent": False,
+                "error": "SMTP not configured. Set SMTP_HOST in environment or settings.",
+                "recipients": recipients,
+            }
+
+        try:
+            import aiosmtplib
+
+            # Build email message
+            msg = MIMEMultipart("alternative") if is_html else MIMEText(message, "plain")
+            msg["Subject"] = subject
+            msg["To"] = ", ".join(recipients)
+            msg["From"] = f"{from_name} <{smtp_from}>" if from_name else smtp_from
+
+            if config.get("reply_to"):
+                msg["Reply-To"] = config["reply_to"]
+
+            if is_html:
+                # Add both plain text and HTML versions
+                plain_part = MIMEText(message, "plain")
+                html_part = MIMEText(message, "html")
+                msg.attach(plain_part)
+                msg.attach(html_part)
+
+            # Send email
+            await aiosmtplib.send(
+                msg,
+                hostname=smtp_host,
+                port=smtp_port,
+                username=smtp_user,
+                password=smtp_pass,
+                use_tls=smtp_port == 465,
+                start_tls=smtp_port == 587,
+                timeout=30,
+            )
+
+            self.logger.info(
+                "Email notification sent",
+                to=recipients,
+                subject=subject,
+                smtp_host=smtp_host,
+            )
+            return {
+                "channel": "email",
+                "sent": True,
+                "message": message,
+                "recipients": recipients,
+                "subject": subject,
+            }
+
+        except ImportError:
+            self.logger.warning("aiosmtplib not installed, email skipped")
+            return {"channel": "email", "sent": False, "error": "aiosmtplib not installed"}
+        except Exception as e:
+            self.logger.error("Email send failed", error=str(e))
+            return {"channel": "email", "sent": False, "error": str(e), "recipients": recipients}
+
+    async def _get_smtp_settings(self) -> Dict:
+        """Get SMTP settings from environment or database."""
+        import os
+
+        # Try environment variables first
+        settings = {
+            "host": os.getenv("SMTP_HOST"),
+            "port": int(os.getenv("SMTP_PORT", "587")),
+            "user": os.getenv("SMTP_USER"),
+            "password": os.getenv("SMTP_PASS") or os.getenv("SMTP_PASSWORD"),
+            "from_email": os.getenv("SMTP_FROM") or os.getenv("SMTP_FROM_EMAIL"),
+            "from_name": os.getenv("SMTP_FROM_NAME", "AIDocumentIndexer"),
+        }
+
+        # If not in environment, try database settings
+        if not settings["host"]:
+            try:
+                from backend.services.settings import get_settings_service
+                svc = get_settings_service()
+                settings["host"] = await svc.get_setting("notifications.smtp_host")
+                settings["port"] = await svc.get_setting("notifications.smtp_port") or 587
+                settings["user"] = await svc.get_setting("notifications.smtp_user")
+                settings["password"] = await svc.get_setting("notifications.smtp_password")
+                settings["from_email"] = await svc.get_setting("notifications.smtp_from_email")
+                settings["from_name"] = await svc.get_setting("notifications.smtp_from_name")
+            except Exception:
+                pass
+
+        return settings
 
     async def _notify_slack(self, message: str, recipients: List, config: Dict, context: "ExecutionContext") -> Dict:
         """Send Slack notification."""
@@ -2687,13 +2824,264 @@ Please provide a comprehensive answer based on the context above."""
             return {"status": "error", "error": str(e)}
 
     async def _run_tool_agent(self, agent_def, agent_input: Dict, context: "ExecutionContext") -> Dict:
-        """Run a tool-using agent."""
-        # Placeholder for tool-using agent
-        return {
-            "status": "success",
-            "response": "Tool agent execution placeholder",
-            "agent_type": "tool",
+        """
+        Run a tool-using agent that can execute external tools.
+
+        Supported tool types:
+        - http: Make HTTP API calls (GET, POST, PUT, DELETE)
+        - command: Execute whitelisted shell commands
+        - python: Execute Python functions from allowed modules
+
+        Agent config (from agent_def.config):
+            - tools: List of tool definitions
+            - tool_timeout: Max execution time per tool (default 30s)
+            - allow_parallel: Execute independent tools in parallel
+
+        Tool definition format:
+            {
+                "name": "tool_name",
+                "type": "http|command|python",
+                "config": { ... tool-specific config ... }
+            }
+        """
+        import aiohttp
+        import asyncio
+        import shlex
+
+        tools = agent_def.config.get("tools", []) if agent_def.config else []
+        tool_timeout = agent_def.config.get("tool_timeout", 30) if agent_def.config else 30
+        results = []
+
+        # Allowed CLI commands (security whitelist)
+        ALLOWED_COMMANDS = {
+            "curl", "wget", "python", "python3", "node", "npx",
+            "jq", "grep", "awk", "sed", "cat", "head", "tail",
+            "ls", "find", "wc", "sort", "uniq", "date", "echo",
         }
+
+        for tool in tools:
+            tool_name = tool.get("name", "unnamed")
+            tool_type = tool.get("type", "http")
+            tool_config = tool.get("config", {})
+
+            try:
+                if tool_type == "http":
+                    result = await self._execute_http_tool(tool_config, tool_timeout, context)
+                elif tool_type == "command":
+                    result = await self._execute_command_tool(
+                        tool_config, tool_timeout, ALLOWED_COMMANDS
+                    )
+                elif tool_type == "python":
+                    result = await self._execute_python_tool(tool_config, tool_timeout)
+                else:
+                    result = {"status": "error", "error": f"Unknown tool type: {tool_type}"}
+
+                result["tool_name"] = tool_name
+                results.append(result)
+
+            except asyncio.TimeoutError:
+                results.append({
+                    "tool_name": tool_name,
+                    "status": "error",
+                    "error": f"Tool execution timed out after {tool_timeout}s",
+                })
+            except Exception as e:
+                results.append({
+                    "tool_name": tool_name,
+                    "status": "error",
+                    "error": str(e),
+                })
+
+        # Aggregate results
+        success_count = sum(1 for r in results if r.get("status") == "success")
+        return {
+            "status": "success" if success_count == len(results) else "partial",
+            "response": f"Executed {success_count}/{len(results)} tools successfully",
+            "agent_type": "tool",
+            "tool_results": results,
+        }
+
+    async def _execute_http_tool(
+        self, config: Dict, timeout: int, context: "ExecutionContext"
+    ) -> Dict:
+        """
+        Execute HTTP API tool.
+
+        Config:
+            - url: Target URL (required)
+            - method: HTTP method (default: GET)
+            - headers: Request headers
+            - body: Request body (for POST/PUT)
+            - auth_type: "bearer", "basic", or None
+            - auth_token: Token or "user:pass" for basic
+        """
+        import aiohttp
+
+        url = config.get("url")
+        if not url:
+            return {"status": "error", "error": "No URL specified"}
+
+        method = config.get("method", "GET").upper()
+        headers = config.get("headers", {})
+        body = config.get("body")
+
+        # Handle authentication
+        auth_type = config.get("auth_type")
+        auth_token = config.get("auth_token")
+        if auth_type == "bearer" and auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        elif auth_type == "basic" and auth_token:
+            import base64
+            encoded = base64.b64encode(auth_token.encode()).decode()
+            headers["Authorization"] = f"Basic {encoded}"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                kwargs = {
+                    "headers": headers,
+                    "timeout": aiohttp.ClientTimeout(total=timeout),
+                }
+                if body and method in ("POST", "PUT", "PATCH"):
+                    if isinstance(body, dict):
+                        kwargs["json"] = body
+                    else:
+                        kwargs["data"] = body
+
+                async with session.request(method, url, **kwargs) as response:
+                    try:
+                        response_data = await response.json()
+                    except Exception:
+                        response_data = await response.text()
+
+                    return {
+                        "status": "success" if response.status < 400 else "error",
+                        "http_status": response.status,
+                        "output": response_data,
+                    }
+
+        except aiohttp.ClientError as e:
+            return {"status": "error", "error": f"HTTP error: {str(e)}"}
+
+    async def _execute_command_tool(
+        self, config: Dict, timeout: int, allowed_commands: set
+    ) -> Dict:
+        """
+        Execute whitelisted shell command.
+
+        Config:
+            - command: Shell command to execute (required)
+            - working_dir: Working directory (optional)
+        """
+        import asyncio
+        import shlex
+
+        command = config.get("command")
+        if not command:
+            return {"status": "error", "error": "No command specified"}
+
+        # Security: Extract the base command and check whitelist
+        try:
+            parts = shlex.split(command)
+            base_cmd = parts[0].split("/")[-1]  # Handle full paths
+        except ValueError:
+            return {"status": "error", "error": "Invalid command syntax"}
+
+        if base_cmd not in allowed_commands:
+            return {
+                "status": "error",
+                "error": f"Command not allowed: {base_cmd}. Allowed: {', '.join(sorted(allowed_commands))}",
+            }
+
+        working_dir = config.get("working_dir")
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=working_dir,
+            )
+
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+
+            return {
+                "status": "success" if proc.returncode == 0 else "error",
+                "exit_code": proc.returncode,
+                "stdout": stdout.decode("utf-8", errors="replace"),
+                "stderr": stderr.decode("utf-8", errors="replace"),
+            }
+
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {"status": "error", "error": f"Command timed out after {timeout}s"}
+
+    async def _execute_python_tool(self, config: Dict, timeout: int) -> Dict:
+        """
+        Execute Python function from allowed modules.
+
+        Config:
+            - module: Module path (must be in allowed list)
+            - function: Function name to call
+            - args: Positional arguments (list)
+            - kwargs: Keyword arguments (dict)
+        """
+        import asyncio
+        import importlib
+
+        # Allowed modules (security whitelist)
+        ALLOWED_MODULES = {
+            "json", "datetime", "re", "math", "statistics",
+            "urllib.parse", "base64", "hashlib", "uuid",
+            # Add specific backend modules as needed
+            "backend.services.rag",
+            "backend.services.vectorstore",
+        }
+
+        module_path = config.get("module")
+        function_name = config.get("function")
+
+        if not module_path or not function_name:
+            return {"status": "error", "error": "Module and function are required"}
+
+        # Check module whitelist
+        if module_path not in ALLOWED_MODULES:
+            return {
+                "status": "error",
+                "error": f"Module not allowed: {module_path}",
+            }
+
+        try:
+            module = importlib.import_module(module_path)
+            func = getattr(module, function_name)
+
+            args = config.get("args", [])
+            kwargs = config.get("kwargs", {})
+
+            # Execute with timeout
+            if asyncio.iscoroutinefunction(func):
+                result = await asyncio.wait_for(
+                    func(*args, **kwargs), timeout=timeout
+                )
+            else:
+                loop = asyncio.get_event_loop()
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: func(*args, **kwargs)),
+                    timeout=timeout,
+                )
+
+            return {
+                "status": "success",
+                "output": result if isinstance(result, (dict, list, str, int, float, bool)) else str(result),
+            }
+
+        except ImportError as e:
+            return {"status": "error", "error": f"Import error: {str(e)}"}
+        except AttributeError as e:
+            return {"status": "error", "error": f"Function not found: {str(e)}"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
 
     async def _run_general_agent(self, agent_def, agent_input: Dict, context: "ExecutionContext") -> Dict:
         """Run a general-purpose agent."""
@@ -2994,6 +3382,444 @@ Approval ID: {approval_id}
             approval_id=approval_id,
             channel=notification_channel,
         )
+
+    # =========================================================================
+    # Lobster-Style Advanced Node Executors
+    # =========================================================================
+
+    async def _execute_parallel(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
+        """
+        Parallel node - fork execution into multiple parallel branches.
+
+        Config:
+            branches: List of branch configurations
+            wait_for_all: Whether to wait for all branches (default: True)
+            timeout_seconds: Timeout for parallel execution
+        """
+        config = node.config or {}
+        branches = config.get("branches", [])
+        wait_for_all = config.get("wait_for_all", True)
+        timeout = config.get("timeout_seconds", 300)
+
+        if not branches:
+            return {"status": "completed", "branches": [], "message": "No branches configured"}
+
+        # Create tasks for each branch
+        branch_results = {}
+        branch_tasks = []
+
+        for i, branch in enumerate(branches):
+            branch_id = branch.get("id", f"branch_{i}")
+            branch_tasks.append(
+                self._execute_branch(branch_id, branch, context.copy())
+            )
+
+        # Execute branches in parallel
+        try:
+            if wait_for_all:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*branch_tasks, return_exceptions=True),
+                    timeout=timeout
+                )
+                for i, result in enumerate(results):
+                    branch_id = branches[i].get("id", f"branch_{i}")
+                    if isinstance(result, Exception):
+                        branch_results[branch_id] = {"status": "error", "error": str(result)}
+                    else:
+                        branch_results[branch_id] = result
+            else:
+                # Return as soon as first branch completes
+                done, pending = await asyncio.wait(
+                    [asyncio.create_task(t) for t in branch_tasks],
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    result = task.result()
+                    branch_results["first_completed"] = result
+                    break
+                # Cancel pending
+                for task in pending:
+                    task.cancel()
+
+        except asyncio.TimeoutError:
+            return {
+                "status": "timeout",
+                "branches": branch_results,
+                "message": f"Parallel execution timed out after {timeout}s",
+            }
+
+        return {
+            "status": "completed",
+            "branches": branch_results,
+            "branch_count": len(branches),
+        }
+
+    async def _execute_branch(self, branch_id: str, branch_config: Dict, context: ExecutionContext) -> Dict:
+        """Execute a single branch in parallel execution."""
+        # Branch can have inline actions or reference nodes
+        action_type = branch_config.get("action_type", "noop")
+        params = branch_config.get("params", {})
+
+        # Simple inline action execution
+        result = await self._execute_inline_action(action_type, params, context)
+
+        return {
+            "branch_id": branch_id,
+            "status": "completed",
+            "result": result,
+        }
+
+    async def _execute_inline_action(self, action_type: str, params: Dict, context: ExecutionContext) -> Any:
+        """Execute an inline action within a branch."""
+        if action_type == "http":
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                method = params.get("method", "GET").upper()
+                url = context.resolve_template(params.get("url", ""))
+                headers = params.get("headers", {})
+                body = params.get("body")
+
+                async with session.request(method, url, headers=headers, json=body) as resp:
+                    return {"status_code": resp.status, "body": await resp.text()}
+
+        elif action_type == "delay":
+            delay = params.get("seconds", 1)
+            await asyncio.sleep(delay)
+            return {"delayed": delay}
+
+        return {"action": action_type, "params": params}
+
+    async def _execute_join(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
+        """
+        Join node - wait for all parallel branches to complete.
+
+        Config:
+            required_branches: List of branch IDs that must complete
+            merge_strategy: how to merge results (all, first, latest)
+        """
+        config = node.config or {}
+        required_branches = config.get("required_branches", [])
+        merge_strategy = config.get("merge_strategy", "all")
+
+        # Get results from parallel branches stored in context
+        parallel_results = context.variables.get("_parallel_results", {})
+
+        if required_branches:
+            # Check if all required branches completed
+            completed = all(b in parallel_results for b in required_branches)
+            if not completed:
+                return {
+                    "status": "waiting",
+                    "message": "Waiting for required branches",
+                    "required": required_branches,
+                    "completed": list(parallel_results.keys()),
+                }
+
+        # Merge results based on strategy
+        if merge_strategy == "all":
+            merged = parallel_results
+        elif merge_strategy == "first":
+            merged = next(iter(parallel_results.values()), {})
+        else:
+            merged = parallel_results
+
+        return {
+            "status": "completed",
+            "merged_results": merged,
+            "branch_count": len(parallel_results),
+        }
+
+    async def _execute_subworkflow(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
+        """
+        Subworkflow node - execute another workflow as a step.
+
+        Config:
+            workflow_id: ID of workflow to execute
+            input_mapping: Map current context to subworkflow input
+            output_mapping: Map subworkflow output to current context
+            wait_for_completion: Whether to wait for subworkflow
+        """
+        config = node.config or {}
+        subworkflow_id = config.get("workflow_id")
+        input_mapping = config.get("input_mapping", {})
+        output_mapping = config.get("output_mapping", {})
+        wait = config.get("wait_for_completion", True)
+
+        if not subworkflow_id:
+            return {"status": "error", "message": "No workflow_id configured"}
+
+        # Map inputs
+        subworkflow_input = {}
+        for target_key, source_expr in input_mapping.items():
+            subworkflow_input[target_key] = context.resolve_template(source_expr)
+
+        # Execute subworkflow
+        try:
+            # Import engine locally to avoid circular import
+            from backend.services.workflow_engine import WorkflowExecutionEngine
+
+            engine = WorkflowExecutionEngine(session=self.session)
+            execution = await engine.execute(
+                workflow_id=uuid.UUID(subworkflow_id),
+                trigger_type="subworkflow",
+                input_data=subworkflow_input,
+            )
+
+            if wait:
+                # Wait for completion and get results
+                final_status = execution.status
+                final_output = execution.output_data or {}
+
+                # Map outputs back
+                mapped_output = {}
+                for target_key, source_key in output_mapping.items():
+                    mapped_output[target_key] = final_output.get(source_key)
+
+                return {
+                    "status": "completed",
+                    "subworkflow_id": subworkflow_id,
+                    "execution_id": str(execution.id),
+                    "subworkflow_status": final_status,
+                    "output": mapped_output,
+                }
+            else:
+                return {
+                    "status": "started",
+                    "subworkflow_id": subworkflow_id,
+                    "execution_id": str(execution.id),
+                    "message": "Subworkflow started in background",
+                }
+
+        except Exception as e:
+            self.logger.error("Subworkflow execution failed", error=str(e))
+            return {"status": "error", "message": str(e)}
+
+    async def _execute_transform(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
+        """
+        Transform node - data transformation/mapping.
+
+        Config:
+            transform_type: jmespath, jsonata, python, template
+            expression: Transformation expression
+            input_path: Path to input data in context
+            output_variable: Variable name for output
+        """
+        config = node.config or {}
+        transform_type = config.get("transform_type", "template")
+        expression = config.get("expression", "")
+        input_path = config.get("input_path", "")
+        output_var = config.get("output_variable", "transformed")
+
+        # Get input data
+        if input_path:
+            input_data = context.get_variable(input_path)
+        else:
+            input_data = context.variables
+
+        result = None
+
+        try:
+            if transform_type == "template":
+                result = context.resolve_template(expression)
+
+            elif transform_type == "jmespath":
+                import jmespath
+                result = jmespath.search(expression, input_data)
+
+            elif transform_type == "python":
+                # Safe eval with limited scope
+                safe_globals = {
+                    "__builtins__": {},
+                    "len": len,
+                    "str": str,
+                    "int": int,
+                    "float": float,
+                    "list": list,
+                    "dict": dict,
+                    "sum": sum,
+                    "max": max,
+                    "min": min,
+                    "sorted": sorted,
+                    "json": json,
+                }
+                result = eval(expression, safe_globals, {"data": input_data, "ctx": context.variables})
+
+            elif transform_type == "map":
+                # Simple field mapping
+                mappings = config.get("mappings", {})
+                result = {}
+                for target, source in mappings.items():
+                    result[target] = context.resolve_template(source)
+
+            else:
+                result = input_data
+
+            # Store result
+            context.variables[output_var] = result
+
+            return {
+                "status": "completed",
+                "transform_type": transform_type,
+                "output_variable": output_var,
+                "result": result,
+            }
+
+        except Exception as e:
+            self.logger.error("Transform failed", error=str(e))
+            return {"status": "error", "message": str(e)}
+
+    async def _execute_switch(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
+        """
+        Switch node - multi-way conditional branching (like switch/case).
+
+        Config:
+            expression: Expression to evaluate
+            cases: List of {value: X, target_node_id: Y}
+            default_target: Default target if no case matches
+        """
+        config = node.config or {}
+        expression = config.get("expression", "")
+        cases = config.get("cases", [])
+        default_target = config.get("default_target")
+
+        # Evaluate expression
+        value = context.resolve_template(expression)
+
+        # Find matching case
+        matched_target = None
+        for case in cases:
+            case_value = case.get("value")
+            if str(value) == str(case_value):
+                matched_target = case.get("target_node_id")
+                break
+
+        if not matched_target:
+            matched_target = default_target
+
+        return {
+            "status": "completed",
+            "evaluated_value": value,
+            "matched_case": matched_target,
+            "next_node": matched_target,
+        }
+
+    async def _execute_retry(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
+        """
+        Retry node - retry a failed action with exponential backoff.
+
+        Config:
+            action_config: Configuration for action to retry
+            max_retries: Maximum retry attempts
+            initial_delay: Initial delay in seconds
+            backoff_multiplier: Multiplier for each retry
+            max_delay: Maximum delay between retries
+        """
+        config = node.config or {}
+        action_config = config.get("action_config", {})
+        max_retries = config.get("max_retries", 3)
+        initial_delay = config.get("initial_delay", 1)
+        backoff_multiplier = config.get("backoff_multiplier", 2)
+        max_delay = config.get("max_delay", 60)
+
+        delay = initial_delay
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                # Execute the action
+                action_type = action_config.get("action_type", "noop")
+                result = await self._execute_inline_action(action_type, action_config, context)
+
+                return {
+                    "status": "completed",
+                    "attempts": attempt + 1,
+                    "result": result,
+                }
+
+            except Exception as e:
+                last_error = str(e)
+                self.logger.warning(
+                    f"Retry attempt {attempt + 1} failed",
+                    error=last_error,
+                    next_delay=delay,
+                )
+
+                if attempt < max_retries:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * backoff_multiplier, max_delay)
+
+        return {
+            "status": "failed",
+            "attempts": max_retries + 1,
+            "last_error": last_error,
+        }
+
+    async def _execute_aggregate(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
+        """
+        Aggregate node - combine results from parallel branches.
+
+        Config:
+            source_variable: Variable containing array of results
+            aggregation_type: sum, count, avg, min, max, concat, merge
+            field_path: Path to field to aggregate (for objects)
+            output_variable: Variable to store result
+        """
+        config = node.config or {}
+        source_var = config.get("source_variable", "_parallel_results")
+        agg_type = config.get("aggregation_type", "merge")
+        field_path = config.get("field_path")
+        output_var = config.get("output_variable", "aggregated")
+
+        source_data = context.get_variable(source_var)
+        if not source_data:
+            return {"status": "error", "message": f"Source variable '{source_var}' not found"}
+
+        # Extract field if specified
+        if field_path and isinstance(source_data, dict):
+            values = [v.get(field_path) for v in source_data.values() if isinstance(v, dict)]
+        elif isinstance(source_data, dict):
+            values = list(source_data.values())
+        else:
+            values = list(source_data) if source_data else []
+
+        # Aggregate
+        result = None
+        try:
+            if agg_type == "sum":
+                result = sum(v for v in values if isinstance(v, (int, float)))
+            elif agg_type == "count":
+                result = len(values)
+            elif agg_type == "avg":
+                nums = [v for v in values if isinstance(v, (int, float))]
+                result = sum(nums) / len(nums) if nums else 0
+            elif agg_type == "min":
+                nums = [v for v in values if isinstance(v, (int, float))]
+                result = min(nums) if nums else None
+            elif agg_type == "max":
+                nums = [v for v in values if isinstance(v, (int, float))]
+                result = max(nums) if nums else None
+            elif agg_type == "concat":
+                result = [item for v in values for item in (v if isinstance(v, list) else [v])]
+            elif agg_type == "merge":
+                result = {}
+                for v in values:
+                    if isinstance(v, dict):
+                        result.update(v)
+            else:
+                result = values
+
+            context.variables[output_var] = result
+
+            return {
+                "status": "completed",
+                "aggregation_type": agg_type,
+                "output_variable": output_var,
+                "result": result,
+            }
+
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
 
 class WorkflowExecutionEngine(BaseService):

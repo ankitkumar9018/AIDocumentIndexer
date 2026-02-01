@@ -470,6 +470,8 @@ docker compose exec -T db psql -U postgres aidocindexer < backup.sql
 - [ ] Enable database encryption at rest
 - [ ] Configure CORS properly
 - [ ] Set secure HTTP headers
+- [ ] Configure DSPy optimization timeout for production workloads
+- [ ] Review BYOK key storage model (client-side localStorage)
 
 ---
 

@@ -88,36 +88,22 @@ def process_document_task(
                 state="PROGRESS",
                 meta={
                     "progress": 20,
-                    "message": "Reading file...",
-                    "filename": original_filename,
-                }
-            )
-
-            # Read file content
-            with open(file_path, "rb") as f:
-                file_content = f.read()
-
-            # Update progress
-            self.update_state(
-                state="PROGRESS",
-                meta={
-                    "progress": 30,
                     "message": "Processing document...",
                     "filename": original_filename,
                 }
             )
 
-            # Process the document
-            async with async_session_context() as session:
-                result = await pipeline.process_document(
-                    file_content=file_content,
-                    filename=original_filename,
-                    user_id=user_id,
-                    collection=collection,
-                    access_tier=access_tier,
-                    metadata=metadata,
-                    session=session,
-                )
+            # Process the document - pipeline expects file_path, not file_content
+            result = await pipeline.process_document(
+                file_path=file_path,
+                metadata={
+                    "original_filename": original_filename,
+                    **(metadata or {}),
+                },
+                collection=collection,
+                access_tier=access_tier,
+                uploaded_by_id=user_id,
+            )
 
             # Update progress
             self.update_state(
@@ -137,10 +123,71 @@ def process_document_task(
         if os.path.exists(file_path):
             os.remove(file_path)
 
+        # Auto-generate tags if enabled in metadata
+        document_id = str(result.document_id) if hasattr(result, "document_id") and result.document_id else None
+        if metadata and metadata.get("auto_generate_tags") and document_id:
+            logger.info(f"Auto-generating tags for document: {original_filename}")
+            try:
+                from backend.services.auto_tagger import AutoTaggerService
+
+                async def _auto_tag():
+                    from backend.db.database import async_session_context
+                    from backend.db.models import Document, Chunk
+                    from sqlalchemy import select
+                    from uuid import UUID as PyUUID
+
+                    doc_uuid = PyUUID(document_id)
+                    async with async_session_context() as session:
+                        # Get document
+                        doc_query = select(Document).where(Document.id == doc_uuid)
+                        doc_result = await session.execute(doc_query)
+                        document = doc_result.scalar_one_or_none()
+
+                        if not document:
+                            logger.warning(f"Document not found for auto-tagging: {document_id}")
+                            return
+
+                        # Get first few chunks for content sample
+                        chunks_query = (
+                            select(Chunk)
+                            .where(Chunk.document_id == doc_uuid)
+                            .order_by(Chunk.chunk_index)
+                            .limit(3)
+                        )
+                        chunks_result = await session.execute(chunks_query)
+                        chunks = chunks_result.scalars().all()
+
+                        if not chunks:
+                            logger.warning(f"No chunks found for auto-tagging: {document_id}")
+                            return
+
+                        content_sample = "\n".join([c.content for c in chunks if c.content])
+
+                        # Generate tags using LLM
+                        auto_tagger = AutoTaggerService()
+                        tags = await auto_tagger.generate_tags(
+                            document_name=original_filename,
+                            content_sample=content_sample,
+                            existing_collections=None,
+                            max_tags=5
+                        )
+
+                        if tags:
+                            existing_tags = document.tags or []
+                            merged_tags = list(dict.fromkeys(existing_tags + tags))
+                            document.tags = merged_tags
+                            await session.commit()
+                            logger.info(f"Auto-generated tags for {original_filename}: {tags}")
+
+                run_async(_auto_tag())
+            except Exception as e:
+                logger.error(f"Auto-tagging failed for {original_filename}: {str(e)}")
+                # Don't fail the task if auto-tagging fails
+
         logger.info(f"Document processed successfully: {original_filename}")
         return {
             "status": "success",
-            "document_id": str(result.document_id) if hasattr(result, "document_id") else None,
+            "document_id": document_id,
             "filename": original_filename,
             "chunks": result.chunk_count if hasattr(result, "chunk_count") else 0,
         }
@@ -546,10 +593,42 @@ def process_document_with_progress(
     Process a single document with progress tracking for bulk uploads.
 
     Updates the bulk progress tracker at each processing stage.
+    Also updates the UploadJob status in the database for single file uploads.
     """
-    logger.info(f"Processing document: {original_filename} (batch={batch_id})")
+    logger.info(f"Processing document: {original_filename} (batch={batch_id}, file_id={file_id})")
 
     file_id = file_id or original_filename
+
+    async def _update_upload_job(status_str: str, progress: int, step: str, error: str = None, chunk_count: int = None, document_id: str = None):
+        """Helper to update UploadJob status in database."""
+        if not file_id:
+            return
+        try:
+            from backend.api.routes.upload import update_upload_job_status
+            from backend.db.models import UploadStatus
+
+            # Map string to UploadStatus enum
+            status_map = {
+                "extracting": UploadStatus.EXTRACTING,
+                "chunking": UploadStatus.CHUNKING,
+                "embedding": UploadStatus.EMBEDDING,
+                "indexing": UploadStatus.INDEXING,
+                "completed": UploadStatus.COMPLETED,
+                "failed": UploadStatus.FAILED,
+            }
+            status = status_map.get(status_str, UploadStatus.EXTRACTING)
+
+            await update_upload_job_status(
+                file_id=file_id,
+                status=status,
+                progress=progress,
+                current_step=step,
+                error_message=error,
+                chunk_count=chunk_count,
+                document_id=document_id,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update upload job status: {e}")
 
     async def _update_progress(stage, error=None, document_id=None, chunk_count=0):
         """Helper to update progress tracker."""
@@ -585,40 +664,37 @@ def process_document_with_progress(
             pipeline = DocumentPipeline()
 
             # Stage: Extracting
-            run_async(_update_progress(ProcessingStage.EXTRACTING))
-
-            # Read file content
-            with open(file_path, "rb") as f:
-                file_content = f.read()
+            await _update_progress(ProcessingStage.EXTRACTING)
+            await _update_upload_job("extracting", 20, "Extracting text")
 
             # Stage: Chunking
-            run_async(_update_progress(ProcessingStage.CHUNKING))
+            await _update_progress(ProcessingStage.CHUNKING)
+            await _update_upload_job("chunking", 40, "Chunking document")
 
-            # Process the document
-            async with async_session_context() as session:
-                # Stage: Embedding (happens inside pipeline)
-                run_async(_update_progress(ProcessingStage.EMBEDDING))
+            # Stage: Embedding (happens inside pipeline)
+            await _update_progress(ProcessingStage.EMBEDDING)
+            await _update_upload_job("embedding", 60, "Generating embeddings")
 
-                result = await pipeline.process_document(
-                    file_content=file_content,
-                    filename=original_filename,
-                    user_id=user_id,
-                    collection=collection,
-                    access_tier=access_tier,
-                    metadata=metadata,
-                    session=session,
-                )
+            # Process the document - pipeline expects file_path, not file_content
+            result = await pipeline.process_document(
+                file_path=file_path,
+                document_id=file_id,
+                metadata={
+                    "original_filename": original_filename,
+                    **(metadata or {}),
+                },
+                collection=collection,
+                access_tier=access_tier,
+                uploaded_by_id=user_id,
+            )
 
             # Stage: Storing
-            run_async(_update_progress(ProcessingStage.STORING))
+            await _update_progress(ProcessingStage.STORING)
+            await _update_upload_job("indexing", 80, "Indexing document")
 
             return result
 
         result = run_async(_process())
-
-        # Clean up temp file
-        if os.path.exists(file_path):
-            os.remove(file_path)
 
         # Stage: Completed
         document_id = str(result.document_id) if hasattr(result, "document_id") else None
@@ -630,7 +706,72 @@ def process_document_with_progress(
             chunk_count=chunk_count,
         ))
 
-        logger.info(f"Document processed: {original_filename}")
+        # Update UploadJob as completed
+        run_async(_update_upload_job(
+            "completed", 100, "Completed",
+            chunk_count=chunk_count, document_id=document_id
+        ))
+
+        # Auto-generate tags if enabled in metadata
+        if metadata and metadata.get("auto_generate_tags") and document_id:
+            logger.info(f"Auto-generating tags for document: {original_filename}")
+            try:
+                async def _auto_tag():
+                    from backend.services.auto_tagger import AutoTaggerService
+                    from backend.db.database import async_session_context
+                    from backend.db.models import Document, Chunk
+                    from sqlalchemy import select
+                    from uuid import UUID as PyUUID
+
+                    doc_uuid = PyUUID(document_id)
+                    async with async_session_context() as session:
+                        # Get document
+                        doc_query = select(Document).where(Document.id == doc_uuid)
+                        doc_result = await session.execute(doc_query)
+                        document = doc_result.scalar_one_or_none()
+
+                        if not document:
+                            logger.warning(f"Document not found for auto-tagging: {document_id}")
+                            return
+
+                        # Get first few chunks for content sample
+                        chunks_query = (
+                            select(Chunk)
+                            .where(Chunk.document_id == doc_uuid)
+                            .order_by(Chunk.chunk_index)
+                            .limit(3)
+                        )
+                        chunks_result = await session.execute(chunks_query)
+                        chunks = chunks_result.scalars().all()
+
+                        if not chunks:
+                            logger.warning(f"No chunks found for auto-tagging: {document_id}")
+                            return
+
+                        content_sample = "\n".join([c.content for c in chunks if c.content])
+
+                        # Generate tags using LLM
+                        auto_tagger = AutoTaggerService()
+                        tags = await auto_tagger.generate_tags(
+                            document_name=original_filename,
+                            content_sample=content_sample,
+                            existing_collections=None,
+                            max_tags=5
+                        )
+
+                        if tags:
+                            existing_tags = document.tags or []
+                            merged_tags = list(dict.fromkeys(existing_tags + tags))
+                            document.tags = merged_tags
+                            await session.commit()
+                            logger.info(f"Auto-generated tags for {original_filename}: {tags}")
+
+                run_async(_auto_tag())
+            except Exception as e:
+                logger.error(f"Auto-tagging failed for {original_filename}: {str(e)}")
+                # Don't fail the task if auto-tagging fails
+
+        logger.info(f"Document processed: {original_filename}, chunks={chunk_count}")
         return {
             "status": "success",
             "document_id": document_id,
@@ -642,12 +783,11 @@ def process_document_with_progress(
         error_msg = str(e)
         logger.error(f"Document processing failed: {original_filename} - {error_msg}")
 
-        # Clean up temp file on error
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
         # Update progress with error
         run_async(_update_progress(ProcessingStage.FAILED, error=error_msg))
+
+        # Update UploadJob as failed
+        run_async(_update_upload_job("failed", 0, "Failed", error=error_msg))
 
         return {
             "status": "failed",

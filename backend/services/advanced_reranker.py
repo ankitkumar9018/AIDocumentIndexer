@@ -58,6 +58,7 @@ Reranker Models (2024-2026):
 """
 
 import asyncio
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -85,6 +86,7 @@ class RerankerModel(str, Enum):
     COHERE_V3_5 = "cohere-rerank-v3.5"          # API-based, 8K context
     COHERE_V3 = "cohere-rerank-v3"              # API-based (legacy)
     JINA_V2 = "jina-reranker-v2"                # Fast (278M)
+    JINA_V3 = "jina-reranker-v3"                # Listwise, 131K context, 0.6B, BEIR 61.94
     # Phase 67: mxbai-rerank-v2 - open-source, 100+ languages
     MXBAI_RERANK_V2 = "mxbai-rerank-v2"         # mixedbread.ai (278M, 100+ languages)
     MXBAI_RERANK_LARGE = "mxbai-rerank-large"   # mixedbread.ai large variant
@@ -108,6 +110,7 @@ class RerankerBackend(str, Enum):
     COHERE = "cohere"
     OPENAI = "openai"
     COLBERT = "colbert"
+    JINA = "jina"
 
 
 @dataclass
@@ -334,6 +337,7 @@ class CrossEncoderReranker(BaseReranker):
         RerankerModel.BGE_V2_M3: "BAAI/bge-reranker-v2-m3",
         RerankerModel.BGE_LARGE: "BAAI/bge-reranker-large",
         RerankerModel.JINA_V2: "jinaai/jina-reranker-v2-base-multilingual",
+        RerankerModel.JINA_V3: "jinaai/jina-reranker-v3",
         # Phase 67: mxbai-rerank-v2 from mixedbread.ai
         # 100+ languages, strong multilingual performance
         RerankerModel.MXBAI_RERANK_V2: "mixedbread-ai/mxbai-rerank-xsmall-v2",
@@ -724,6 +728,108 @@ class VoyageReranker(BaseReranker):
         except Exception as e:
             logger.error(f"Voyage reranking failed: {e}")
             return [0.5] * len(documents)
+
+
+# =============================================================================
+# Jina Reranker v3 (Listwise, 131K context, BEIR 61.94)
+# =============================================================================
+
+class JinaV3Reranker(BaseReranker):
+    """
+    Jina reranker v3 via Jina API.
+
+    Key features:
+    - Listwise reranking: scores all documents together in one pass
+    - Cross-document interaction during scoring (unlike pointwise rerankers)
+    - 131K token context window, up to 64 documents simultaneously
+    - 0.6B params, BEIR 61.94 nDCG@10 (highest among evaluated rerankers)
+    """
+
+    API_URL = "https://api.jina.ai/v1/rerank"
+
+    def __init__(
+        self,
+        model: RerankerModel = RerankerModel.JINA_V3,
+        api_key: Optional[str] = None,
+        max_documents: int = 64,
+    ):
+        super().__init__("jina-reranker-v3")
+        self._api_key = api_key or os.getenv("JINA_API_KEY", "")
+        self.max_documents = max_documents
+
+    async def initialize(self) -> None:
+        if self._initialized:
+            return
+        if not self._api_key:
+            raise ValueError("JINA_API_KEY is required for jina-reranker-v3")
+        self._initialized = True
+        logger.info("Jina reranker v3 initialized (listwise, 131K context)")
+
+    async def score(
+        self,
+        query: str,
+        documents: List[str],
+    ) -> List[float]:
+        """Score documents using Jina reranker v3 API (listwise)."""
+        if not self._initialized:
+            await self.initialize()
+
+        if not documents:
+            return []
+
+        try:
+            import httpx
+
+            # Jina v3 scores up to 64 docs at once (listwise)
+            docs_to_score = documents[: self.max_documents]
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    self.API_URL,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "jina-reranker-v3",
+                        "query": query,
+                        "documents": docs_to_score,
+                        "top_n": len(docs_to_score),
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+
+            # Build score array in original order
+            scores = [0.0] * len(documents)
+            for result in data.get("results", []):
+                idx = result.get("index", 0)
+                if idx < len(scores):
+                    scores[idx] = result.get("relevance_score", 0.0)
+
+            return scores
+
+        except ImportError:
+            logger.warning("httpx not installed, falling back to cross-encoder for Jina v3")
+            # Fallback: use local model via sentence-transformers
+            fallback = CrossEncoderReranker(model=RerankerModel.JINA_V3)
+            await fallback.initialize()
+            return await fallback.score(query, documents)
+        except Exception as e:
+            logger.error(f"Jina v3 reranking failed: {e}")
+            return [0.5] * len(documents)
+
+    async def rerank(
+        self,
+        query: str,
+        documents: List[str],
+        top_k: int = 10,
+    ) -> List[Tuple[int, float]]:
+        """Rerank using listwise scoring and return top-k."""
+        scores = await self.score(query, documents)
+        indexed = [(i, s) for i, s in enumerate(scores)]
+        indexed.sort(key=lambda x: x[1], reverse=True)
+        return indexed[:top_k]
 
 
 # =============================================================================

@@ -72,7 +72,7 @@ import { SectionFeedbackDialog } from "@/components/generation";
 import { QueryEnhancementToggle } from "@/components/chat/query-enhancement-toggle";
 
 type Step = "format" | "topic" | "outline" | "content" | "download";
-type OutputFormat = "docx" | "pptx" | "pdf" | "markdown" | "html" | "txt" | "xlsx";
+type OutputFormat = "docx" | "pptx" | "pdf" | "markdown" | "html" | "txt" | "xlsx" | "moodboard";
 
 const formatOptions: { id: OutputFormat; name: string; icon: React.ElementType; description: string }[] = [
   { id: "docx", name: "Word Document", icon: FileText, description: "Microsoft Word format (.docx)" },
@@ -82,6 +82,7 @@ const formatOptions: { id: OutputFormat; name: string; icon: React.ElementType; 
   { id: "markdown", name: "Markdown", icon: FileText, description: "Plain text with formatting (.md)" },
   { id: "html", name: "HTML", icon: FileText, description: "Web page format (.html)" },
   { id: "txt", name: "Plain Text", icon: FileText, description: "Simple text file (.txt)" },
+  { id: "moodboard", name: "Mood Board", icon: Palette, description: "AI-powered visual inspiration board" },
 ];
 
 // Language options for document generation
@@ -218,6 +219,15 @@ export default function CreatePage() {
   const [isCheckingSpelling, setIsCheckingSpelling] = useState(false);
   const spellCheckJob = useSpellCheckJob();
 
+  // Mood Board state
+  const [moodBoardColors, setMoodBoardColors] = useState<string[]>(["#6366f1", "#8b5cf6", "#ec4899"]);
+  const [moodBoardKeywords, setMoodBoardKeywords] = useState<string[]>([]);
+  const [moodBoardKeywordInput, setMoodBoardKeywordInput] = useState("");
+  const [moodBoardImages, setMoodBoardImages] = useState<Array<{ url: string; file?: File }>>([]);
+  const [moodBoardStyleNotes, setMoodBoardStyleNotes] = useState("");
+  const [generatedMoodBoard, setGeneratedMoodBoard] = useState<any>(null);
+  const [isGeneratingMoodBoard, setIsGeneratingMoodBoard] = useState(false);
+
   // Queries - only fetch when authenticated
   const { data: job, isLoading: jobLoading, isError: jobError, error: jobQueryError } = useGenerationJob(currentJobId || "");
   const { data: recentJobs } = useGenerationJobs();
@@ -283,6 +293,137 @@ export default function CreatePage() {
   const handleEnhanceQueryChange = (enabled: boolean) => {
     setEnhanceQuery(enabled);
     localStorage.setItem("create_enhance_query", JSON.stringify(enabled));
+  };
+
+  // Mood Board helper functions
+  const addMoodBoardColor = () => {
+    if (moodBoardColors.length < 8) {
+      const randomColor = `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`;
+      setMoodBoardColors([...moodBoardColors, randomColor]);
+    }
+  };
+
+  const removeMoodBoardColor = (index: number) => {
+    if (moodBoardColors.length > 1) {
+      setMoodBoardColors(moodBoardColors.filter((_, i) => i !== index));
+    }
+  };
+
+  const updateMoodBoardColor = (index: number, color: string) => {
+    const newColors = [...moodBoardColors];
+    newColors[index] = color;
+    setMoodBoardColors(newColors);
+  };
+
+  const addMoodBoardKeyword = () => {
+    const trimmed = moodBoardKeywordInput.trim();
+    if (trimmed && !moodBoardKeywords.includes(trimmed)) {
+      setMoodBoardKeywords([...moodBoardKeywords, trimmed]);
+      setMoodBoardKeywordInput("");
+    }
+  };
+
+  const removeMoodBoardKeyword = (keyword: string) => {
+    setMoodBoardKeywords(moodBoardKeywords.filter(k => k !== keyword));
+  };
+
+  const handleMoodBoardImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files) {
+      Array.from(files).forEach(file => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          setMoodBoardImages(prev => [...prev, {
+            url: event.target?.result as string,
+            file,
+          }]);
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+  };
+
+  const removeMoodBoardImage = (index: number) => {
+    setMoodBoardImages(moodBoardImages.filter((_, i) => i !== index));
+  };
+
+  const handleGenerateMoodBoard = async () => {
+    if (!topic.trim()) {
+      toast.error("Please provide a name for your mood board");
+      return;
+    }
+
+    setIsGeneratingMoodBoard(true);
+
+    try {
+      // Call the backend Mood Board API
+      const response = await api.post("/moodboard/generate", {
+        name: topic,
+        description: context || undefined,
+        colors: moodBoardColors,
+        keywords: moodBoardKeywords,
+        style_notes: moodBoardStyleNotes || undefined,
+      });
+
+      const data = response.data;
+
+      setGeneratedMoodBoard({
+        id: data.id,
+        name: data.name,
+        description: data.description,
+        colors: data.colors,
+        keywords: data.keywords,
+        styleNotes: data.style_notes,
+        generatedSuggestions: {
+          typography: data.generated_suggestions.typography,
+          additionalColors: data.generated_suggestions.additional_colors,
+          moodKeywords: data.generated_suggestions.mood_keywords,
+          inspirationNotes: data.generated_suggestions.inspiration_notes,
+          designDirection: data.generated_suggestions.design_direction,
+          colorPsychology: data.generated_suggestions.color_psychology,
+        },
+        createdAt: data.created_at,
+        modelUsed: data.model_used,
+      });
+
+      toast.success("Mood board generated!", {
+        description: "AI suggestions have been added to your board.",
+      });
+    } catch (err: any) {
+      // Fallback to local simulation if API fails
+      if (err.response?.status === 404 || err.message?.includes("Network")) {
+        setGeneratedMoodBoard({
+          name: topic,
+          description: context,
+          colors: moodBoardColors,
+          keywords: moodBoardKeywords,
+          styleNotes: moodBoardStyleNotes,
+          generatedSuggestions: {
+            typography: ["Inter", "Playfair Display", "Space Grotesk"],
+            additionalColors: ["#f97316", "#22c55e", "#0ea5e9"],
+            moodKeywords: ["modern", "elegant", "bold"],
+            inspirationNotes: "Based on the colors and keywords provided, this mood board suggests a contemporary, sophisticated aesthetic with vibrant accent colors.",
+          },
+          createdAt: new Date().toISOString(),
+        });
+        toast.success("Mood board generated!", {
+          description: "AI suggestions have been added (offline mode).",
+        });
+      } else {
+        toast.error(err.response?.data?.detail || err.message || "Failed to generate mood board");
+      }
+    } finally {
+      setIsGeneratingMoodBoard(false);
+    }
+  };
+
+  const resetMoodBoard = () => {
+    setMoodBoardColors(["#6366f1", "#8b5cf6", "#ec4899"]);
+    setMoodBoardKeywords([]);
+    setMoodBoardKeywordInput("");
+    setMoodBoardImages([]);
+    setMoodBoardStyleNotes("");
+    setGeneratedMoodBoard(null);
   };
 
   // Load PPTX templates when PPTX format is selected
@@ -416,6 +557,13 @@ export default function CreatePage() {
         if (selectedFormat) setCurrentStep("topic");
         break;
       case "topic":
+        // Mood board has its own generation flow - skip job creation
+        if (selectedFormat === "moodboard") {
+          if (generatedMoodBoard) {
+            setCurrentStep("download");
+          }
+          return;
+        }
         if (topic) {
           try {
             const newJob = await createJob.mutateAsync({
@@ -842,7 +990,264 @@ export default function CreatePage() {
           )}
 
           {/* Step 2: Topic Input */}
-          {currentStep === "topic" && (
+          {currentStep === "topic" && selectedFormat === "moodboard" && (
+            <div className="space-y-6 max-w-3xl">
+              <div>
+                <h2 className="text-xl font-semibold flex items-center gap-2">
+                  <Palette className="h-5 w-5" />
+                  Create Mood Board
+                </h2>
+                <p className="text-muted-foreground">
+                  Generate an AI-powered visual inspiration board for your design projects
+                </p>
+              </div>
+
+              <div className="space-y-6">
+                {/* Basic Info */}
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">Board Name *</Label>
+                    <Input
+                      placeholder="e.g., Tech Startup Brand Identity, Wedding Theme, Product Launch"
+                      value={topic}
+                      onChange={(e) => setTopic(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">Description / Concept</Label>
+                    <textarea
+                      placeholder="Describe the mood, feeling, or concept you're going for..."
+                      value={context}
+                      onChange={(e) => setContext(e.target.value)}
+                      className="w-full min-h-[80px] p-3 rounded-md border bg-background resize-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Color Palette */}
+                <div className="space-y-3 p-4 rounded-lg border bg-muted/30">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm font-medium">Color Palette</Label>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={addMoodBoardColor}
+                      disabled={moodBoardColors.length >= 8}
+                    >
+                      <Plus className="h-3 w-3 mr-1" />
+                      Add Color
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    {moodBoardColors.map((color, index) => (
+                      <div key={index} className="flex items-center gap-2 p-2 rounded-lg border bg-background">
+                        <input
+                          type="color"
+                          value={color}
+                          onChange={(e) => updateMoodBoardColor(index, e.target.value)}
+                          className="w-10 h-10 rounded border cursor-pointer"
+                        />
+                        <span className="text-xs font-mono text-muted-foreground w-16">{color}</span>
+                        {moodBoardColors.length > 1 && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6"
+                            onClick={() => removeMoodBoardColor(index)}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Select 1-8 colors that define your aesthetic. Click on a color to change it.
+                  </p>
+                </div>
+
+                {/* Keywords / Tags */}
+                <div className="space-y-3 p-4 rounded-lg border bg-muted/30">
+                  <Label className="text-sm font-medium">Keywords / Style Tags</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="Add a keyword..."
+                      value={moodBoardKeywordInput}
+                      onChange={(e) => setMoodBoardKeywordInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addMoodBoardKeyword();
+                        }
+                      }}
+                    />
+                    <Button variant="outline" onClick={addMoodBoardKeyword}>
+                      Add
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap gap-2 min-h-[32px]">
+                    {moodBoardKeywords.map((keyword) => (
+                      <span
+                        key={keyword}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-primary/10 text-primary text-sm"
+                      >
+                        {keyword}
+                        <button
+                          onClick={() => removeMoodBoardKeyword(keyword)}
+                          className="ml-1 hover:text-destructive"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                    {moodBoardKeywords.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Add keywords like: minimalist, bold, playful, corporate, vintage, etc.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Reference Images */}
+                <div className="space-y-3 p-4 rounded-lg border bg-muted/30">
+                  <Label className="text-sm font-medium">Reference Images (Optional)</Label>
+                  <div className="grid grid-cols-4 gap-3">
+                    {moodBoardImages.map((img, index) => (
+                      <div key={index} className="relative group">
+                        <img
+                          src={img.url}
+                          alt={`Reference ${index + 1}`}
+                          className="w-full h-24 object-cover rounded-lg border"
+                        />
+                        <Button
+                          variant="destructive"
+                          size="icon"
+                          className="absolute top-1 right-1 h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                          onClick={() => removeMoodBoardImage(index)}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    ))}
+                    <label className="border-2 border-dashed rounded-lg h-24 flex flex-col items-center justify-center cursor-pointer hover:bg-muted/50 transition-colors">
+                      <input
+                        type="file"
+                        className="hidden"
+                        accept="image/*"
+                        multiple
+                        onChange={handleMoodBoardImageUpload}
+                      />
+                      <Image className="h-6 w-6 text-muted-foreground" />
+                      <span className="text-xs text-muted-foreground mt-1">Add Image</span>
+                    </label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Upload images that inspire your mood board's direction
+                  </p>
+                </div>
+
+                {/* Style Notes */}
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">Additional Style Notes</Label>
+                  <textarea
+                    placeholder="Any specific requirements, brand guidelines, or preferences..."
+                    value={moodBoardStyleNotes}
+                    onChange={(e) => setMoodBoardStyleNotes(e.target.value)}
+                    className="w-full min-h-[80px] p-3 rounded-md border bg-background resize-none"
+                  />
+                </div>
+
+                {/* Generated Mood Board Result */}
+                {generatedMoodBoard && (
+                  <div className="space-y-4 p-4 rounded-lg border bg-gradient-to-br from-primary/5 to-primary/10">
+                    <h4 className="font-medium flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-primary" />
+                      AI-Generated Suggestions
+                    </h4>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium">Suggested Typography</p>
+                        <div className="flex flex-wrap gap-2">
+                          {generatedMoodBoard.generatedSuggestions.typography.map((font: string) => (
+                            <span key={font} className="px-2 py-1 rounded bg-background border text-sm">{font}</span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium">Complementary Colors</p>
+                        <div className="flex gap-2">
+                          {generatedMoodBoard.generatedSuggestions.additionalColors.map((color: string) => (
+                            <div key={color} className="flex items-center gap-1">
+                              <div
+                                className="w-6 h-6 rounded border"
+                                style={{ backgroundColor: color }}
+                              />
+                              <span className="text-xs font-mono text-muted-foreground">{color}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium">Mood Keywords</p>
+                        <div className="flex flex-wrap gap-2">
+                          {generatedMoodBoard.generatedSuggestions.moodKeywords.map((keyword: string) => (
+                            <span key={keyword} className="px-2 py-1 rounded bg-primary/10 text-primary text-sm">{keyword}</span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 sm:col-span-2">
+                        <p className="text-sm font-medium">Inspiration Notes</p>
+                        <p className="text-sm text-muted-foreground bg-background p-3 rounded border">
+                          {generatedMoodBoard.generatedSuggestions.inspirationNotes}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2 pt-2">
+                      <Button variant="outline" size="sm" onClick={resetMoodBoard}>
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        Start Over
+                      </Button>
+                      <Button size="sm">
+                        <Download className="h-4 w-4 mr-2" />
+                        Export Mood Board
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Generate Button */}
+                {!generatedMoodBoard && (
+                  <Button
+                    onClick={handleGenerateMoodBoard}
+                    disabled={isGeneratingMoodBoard || !topic.trim()}
+                    className="w-full"
+                    size="lg"
+                  >
+                    {isGeneratingMoodBoard ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Generating Mood Board...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="h-4 w-4 mr-2" />
+                        Generate AI Mood Board
+                      </>
+                    )}
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Topic Input (for non-moodboard formats) */}
+          {currentStep === "topic" && selectedFormat !== "moodboard" && (
             <div className="space-y-6 max-w-2xl">
               <h2 className="text-xl font-semibold">Describe Your Document</h2>
               <p className="text-muted-foreground">
@@ -2493,30 +2898,33 @@ export default function CreatePage() {
               </Button>
             )}
           </div>
-          <Button
-            onClick={handleNext}
-            disabled={
-              (currentStep === "format" && !selectedFormat) ||
-              (currentStep === "topic" && !topic) ||
-              (currentStep === "outline" && (outline.filter(s => s.approved).length === 0 || isGenerating)) ||
-              (currentStep === "content" && isGenerating) ||
-              isLoading
-            }
-          >
-            {isLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin mr-2" />
-            ) : currentStep === "content" && job?.status === "completed" ? (
-              <>
-                Continue
-                <ChevronRight className="h-4 w-4 ml-2" />
-              </>
-            ) : (
-              <>
-                {currentStep === "topic" ? "Generate Outline" : currentStep === "outline" ? "Generate Content" : "Next"}
-                <ChevronRight className="h-4 w-4 ml-2" />
-              </>
-            )}
-          </Button>
+          {/* Hide Next button for mood board at topic step - it has its own generate button */}
+          {!(currentStep === "topic" && selectedFormat === "moodboard") && (
+            <Button
+              onClick={handleNext}
+              disabled={
+                (currentStep === "format" && !selectedFormat) ||
+                (currentStep === "topic" && !topic) ||
+                (currentStep === "outline" && (outline.filter(s => s.approved).length === 0 || isGenerating)) ||
+                (currentStep === "content" && isGenerating) ||
+                isLoading
+              }
+            >
+              {isLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+              ) : currentStep === "content" && job?.status === "completed" ? (
+                <>
+                  Continue
+                  <ChevronRight className="h-4 w-4 ml-2" />
+                </>
+              ) : (
+                <>
+                  {currentStep === "topic" ? "Generate Outline" : currentStep === "outline" ? "Generate Content" : "Next"}
+                  <ChevronRight className="h-4 w-4 ml-2" />
+                </>
+              )}
+            </Button>
+          )}
         </div>
       )}
 

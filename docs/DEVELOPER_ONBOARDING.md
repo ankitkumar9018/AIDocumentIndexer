@@ -42,14 +42,24 @@ AIDocumentIndexer is an intelligent document archive system with RAG (Retrieval-
 | Frontend | Next.js 15 + React 19 + TypeScript |
 | Database | PostgreSQL with pgvector |
 | Vector Store | pgvector (PostgreSQL extension) |
-| LLM Integration | LangChain + LiteLLM |
-| Task Queue | Ray (distributed computing) |
+| LLM Integration | LangChain + LiteLLM + DSPy |
+| Task Queue | Celery + Redis + Ray (distributed computing) |
 | Auth | JWT tokens + NextAuth.js |
+| Prompt Optimization | DSPy (automated prompt compilation) |
+| Monitoring | Sentry + Prometheus (error tracking and metrics collection) |
 | Styling | Tailwind CSS + shadcn/ui |
 
 ---
 
 ## Architecture Overview
+
+**Current Scale (as of Phase 95):**
+
+- **145+ backend service files** across services, processors, agents, and utilities
+- **50 route files** handling API endpoints
+- **60+ database models** (SQLAlchemy ORM with Alembic migrations)
+- **19 admin settings tabs** in the frontend settings panel
+- **27 frontend routes** across dashboard, admin, and public pages
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -331,6 +341,10 @@ class RAGService:
 | 3-Level Retriever | `retrieval_strategies.py` | Hierarchical retrieval |
 | Knowledge Graph | `knowledge_graph.py` | Entity-aware retrieval |
 | CRAG | `corrective_rag.py` | Query refinement on low confidence |
+| DSPy Optimization | `dspy_optimization.py` | DSPy automated prompt compilation and optimization (Phase 93) |
+| Cross-Section RAG | `cross_section_rag.py` | Cross-section RAG integration (Phase 94) |
+| Hallucination Scorer | `hallucination_scorer.py` | Hallucination detection and scoring (Phase 95J) |
+| Content Freshness | `content_freshness.py` | Content freshness scoring and staleness detection (Phase 95K) |
 
 **Key Data Classes:**
 
@@ -1337,7 +1351,7 @@ logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
    cd backend
    python -m venv .venv
    source .venv/bin/activate
-   pip install -r requirements.txt
+   pip install -e ".[dev]"
    ```
 3. **Install frontend dependencies**:
    ```bash

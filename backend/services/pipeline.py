@@ -22,6 +22,7 @@ import hashlib
 import asyncio
 import uuid
 import os
+import time
 import structlog
 
 import ray
@@ -51,6 +52,11 @@ from backend.services.summarizer import DocumentSummarizer, SummarizationConfig,
 from backend.services.contextual_chunking import contextualize_chunks
 
 logger = structlog.get_logger(__name__)
+
+# Access tier cache to avoid repeated DB lookups
+# Maps level -> (tier_id, cached_at_timestamp)
+_access_tier_cache: Dict[int, Tuple[str, float]] = {}
+_ACCESS_TIER_CACHE_TTL = 300.0  # 5 minutes
 
 
 class ProcessingStatus(str, Enum):
@@ -303,6 +309,21 @@ class DocumentPipeline:
             multimodal_enabled=self.config.enable_multimodal,
         )
 
+    def _safe_uuid(self, value: Optional[str]) -> Optional[uuid.UUID]:
+        """
+        Safely convert a string to UUID.
+
+        Returns None if value is None, empty, or not a valid UUID.
+        This handles cases like "anonymous" user_id that shouldn't be converted to UUID.
+        """
+        if not value:
+            return None
+        try:
+            return uuid.UUID(value)
+        except (ValueError, TypeError):
+            # Not a valid UUID (e.g., "anonymous")
+            return None
+
     def _update_status(self, doc_id: str, status: ProcessingStatus):
         """Update processing status via callback (sync or async)."""
         if self.config.on_status_change:
@@ -330,12 +351,20 @@ class DocumentPipeline:
                     asyncio.run(result)
 
     def compute_file_hash(self, file_path: str) -> str:
-        """Compute SHA-256 hash of file for deduplication."""
+        """Compute SHA-256 hash of file for deduplication (sync version)."""
         sha256_hash = hashlib.sha256()
         with open(file_path, "rb") as f:
             for byte_block in iter(lambda: f.read(4096), b""):
                 sha256_hash.update(byte_block)
         return sha256_hash.hexdigest()
+
+    async def compute_file_hash_async(self, file_path: str) -> str:
+        """Compute SHA-256 hash of file for deduplication (async version).
+
+        Runs file I/O in a thread pool to avoid blocking the event loop.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.compute_file_hash, file_path)
 
     def is_duplicate(self, file_hash: str) -> Optional[str]:
         """
@@ -404,7 +433,7 @@ class DocumentPipeline:
             if not path.exists():
                 raise FileNotFoundError(f"File not found: {file_path}")
 
-            result.file_hash = self.compute_file_hash(file_path)
+            result.file_hash = await self.compute_file_hash_async(file_path)
 
             # Check if document with this hash already exists (for re-uploads)
             # Use existing document_id to keep chunks linked correctly
@@ -444,12 +473,43 @@ class DocumentPipeline:
                 processing_mode=self.config.processing_mode.value,
             )
 
+            # OCR auto-routing: if extraction yielded empty/minimal text on a
+            # PDF and we weren't already using OCR, retry with OCR mode.
+            file_suffix = Path(file_path).suffix.lower()
+            _min_ocr_chars = 50  # threshold for "essentially empty"
+            if (
+                file_suffix == ".pdf"
+                and self.config.processing_mode == ProcessingMode.BASIC
+                and len((extracted.text or "").strip()) < _min_ocr_chars
+            ):
+                logger.info(
+                    "Text extraction yielded near-empty result, retrying with OCR",
+                    document_id=document_id,
+                    chars_extracted=len((extracted.text or "").strip()),
+                )
+                try:
+                    extracted = self._processor.process(
+                        file_path,
+                        processing_mode=ProcessingMode.OCR_ENABLED.value,
+                    )
+                    result.metadata["ocr_auto_routed"] = True
+                    logger.info(
+                        "OCR auto-routing succeeded",
+                        document_id=document_id,
+                        chars_after_ocr=len((extracted.text or "").strip()),
+                    )
+                except Exception as ocr_err:
+                    logger.warning(
+                        "OCR auto-routing failed, continuing with original extraction",
+                        document_id=document_id,
+                        error=str(ocr_err),
+                    )
+
             # Phase 63: Enhanced document parsing with Docling (97.9% table accuracy)
             # Use runtime settings for hot-reload (no server restart needed)
             from backend.services.settings import get_settings_service
             settings_svc = get_settings_service()
             docling_enabled = await settings_svc.get_setting("processing.docling_parser_enabled") or False
-            file_suffix = Path(file_path).suffix.lower()
 
             if docling_enabled and file_suffix in ['.pdf', '.docx', '.doc']:
                 try:
@@ -457,18 +517,30 @@ class DocumentPipeline:
                     docling_parser = DocumentParser()
                     docling_result = await docling_parser.parse(file_path)
 
-                    # Enhance extracted content with Docling's superior table extraction
+                    # Enhance extracted content with Docling's superior table extraction.
+                    # Only append tables whose content isn't already in the extracted text
+                    # to avoid duplication (standard extraction may have captured them too).
                     if docling_result.tables:
-                        table_markdown = "\n\n".join(
-                            t.to_markdown() if hasattr(t, 'to_markdown') else str(t)
-                            for t in docling_result.tables
-                        )
-                        extracted.text = extracted.text + "\n\n--- Extracted Tables ---\n" + table_markdown
+                        existing_text_lower = (extracted.text or "").lower()
+                        new_tables = []
+                        for t in docling_result.tables:
+                            table_str = t.to_markdown() if hasattr(t, 'to_markdown') else str(t)
+                            # Check if the first data row is already in the text
+                            first_line = table_str.strip().split("\n")[0] if table_str.strip() else ""
+                            if first_line and first_line.lower() not in existing_text_lower:
+                                new_tables.append(table_str)
+
+                        if new_tables:
+                            table_markdown = "\n\n".join(new_tables)
+                            extracted.text = extracted.text + "\n\n--- Extracted Tables ---\n" + table_markdown
+
                         result.metadata["docling_tables_extracted"] = len(docling_result.tables)
+                        result.metadata["docling_tables_appended"] = len(new_tables)
                         logger.info(
                             "Enhanced with Docling table extraction",
                             document_id=document_id,
                             tables_found=len(docling_result.tables),
+                            tables_appended=len(new_tables),
                         )
                 except ImportError:
                     logger.warning("Docling not available, using standard extraction")
@@ -485,6 +557,44 @@ class DocumentPipeline:
                 "folder_id": folder_id,
                 "language": extracted.language,
             }
+
+            # Step 2.25: Document quality assessment
+            # Detect garbled encoding, extremely low information density, or corruption
+            # before spending resources on chunking/embedding.
+            _quality_text = extracted.text or ""
+            if _quality_text:
+                _ascii_ratio = sum(1 for c in _quality_text if c.isascii()) / max(len(_quality_text), 1)
+                _alpha_ratio = sum(1 for c in _quality_text if c.isalpha()) / max(len(_quality_text), 1)
+                _avg_word_len = (
+                    sum(len(w) for w in _quality_text.split()) / max(len(_quality_text.split()), 1)
+                )
+                quality_score = "good"
+                quality_warnings = []
+                # Garbled encoding: very few alphabetic characters
+                if _alpha_ratio < 0.3 and len(_quality_text) > 100:
+                    quality_warnings.append("low_alpha_ratio")
+                    quality_score = "poor"
+                # Abnormal word length (may indicate binary/corrupted content)
+                if _avg_word_len > 20 and len(_quality_text) > 100:
+                    quality_warnings.append("abnormal_word_length")
+                    quality_score = "poor"
+                # High control character density
+                _control_ratio = sum(1 for c in _quality_text if ord(c) < 32 and c not in '\n\r\t') / max(len(_quality_text), 1)
+                if _control_ratio > 0.1:
+                    quality_warnings.append("high_control_chars")
+                    quality_score = "poor"
+
+                result.metadata["document_quality"] = quality_score
+                if quality_warnings:
+                    result.metadata["quality_warnings"] = quality_warnings
+                    logger.warning(
+                        "Document quality issues detected",
+                        document_id=document_id,
+                        quality=quality_score,
+                        warnings=quality_warnings,
+                        alpha_ratio=round(_alpha_ratio, 3),
+                        avg_word_len=round(_avg_word_len, 1),
+                    )
 
             # Step 2.5: Preprocess text (optional, reduces token costs)
             preprocessing_stats = {}
@@ -570,8 +680,9 @@ class DocumentPipeline:
                             reduction_percent=round(summary_result.reduction_percent, 2),
                         )
 
-            # Step 2.8: Process images for multimodal understanding
+            # Step 2.8: Process images for multimodal understanding with deduplication
             image_chunks = []
+            image_stats = {}
             if self._multimodal and extracted.extracted_images:
                 logger.info(
                     "Processing images for multimodal understanding",
@@ -579,14 +690,21 @@ class DocumentPipeline:
                     image_count=len(extracted.extracted_images),
                 )
 
-                image_captions = await self._process_document_images(
+                image_captions, image_stats = await self._process_document_images(
                     document_id=document_id,
                     images=extracted.extracted_images,
+                    skip_duplicates=True,
                 )
 
                 if image_captions:
                     # Create chunks for image descriptions
-                    for i, (img, caption) in enumerate(zip(extracted.extracted_images, image_captions)):
+                    # Limit to processed images count
+                    from backend.services.settings import get_settings_service
+                    settings_svc = get_settings_service()
+                    max_images = await settings_svc.get_setting("rag.max_images_per_document") or 50
+                    images_to_chunk = extracted.extracted_images[:max_images] if max_images > 0 else extracted.extracted_images
+
+                    for i, (img, caption) in enumerate(zip(images_to_chunk, image_captions)):
                         if caption and caption.strip():
                             page_info = f" on page {img.page_number}" if img.page_number else ""
                             image_content = f"[IMAGE{page_info}]: {caption}"
@@ -607,19 +725,66 @@ class DocumentPipeline:
                             image_chunks.append(image_chunk)
 
                     result.metadata["multimodal"] = {
-                        "images_processed": len(extracted.extracted_images),
-                        "captions_generated": len(image_captions),
+                        "images_found": image_stats.get("images_found", len(extracted.extracted_images)),
+                        "images_analyzed": image_stats.get("images_analyzed", 0),
+                        "images_cached": image_stats.get("cached_used", 0),
+                        "images_skipped_small": image_stats.get("images_skipped_small", 0),
+                        "images_skipped_duplicate": image_stats.get("images_skipped_duplicate", 0),
+                        "images_failed": image_stats.get("images_failed", 0),
+                        "captions_generated": len([c for c in image_captions if c]),
                     }
 
                     logger.info(
-                        "Image processing complete",
+                        "Image processing complete with deduplication",
                         document_id=document_id,
-                        captions_generated=len(image_captions),
+                        **image_stats,
+                    )
+
+                # Update document with image tracking fields
+                try:
+                    async with async_session_context() as db:
+                        doc_result = await db.execute(
+                            select(DocumentModel).where(DocumentModel.id == uuid.UUID(document_id))
+                        )
+                        doc = doc_result.scalar_one_or_none()
+                        if doc:
+                            doc.images_extracted_count = len(extracted.extracted_images)
+                            doc.images_analyzed_count = image_stats.get("images_analyzed", 0) + image_stats.get("cached_used", 0)
+                            doc.image_analysis_status = "completed"
+                            doc.image_analysis_completed_at = datetime.utcnow()
+                            await db.commit()
+                except Exception as e:
+                    logger.warning(
+                        "Failed to update document image tracking",
+                        document_id=document_id,
+                        error=str(e),
+                    )
+            else:
+                # No images in document - mark as not applicable
+                try:
+                    async with async_session_context() as db:
+                        doc_result = await db.execute(
+                            select(DocumentModel).where(DocumentModel.id == uuid.UUID(document_id))
+                        )
+                        doc = doc_result.scalar_one_or_none()
+                        if doc:
+                            doc.images_extracted_count = 0
+                            doc.images_analyzed_count = 0
+                            doc.image_analysis_status = "not_applicable"
+                            await db.commit()
+                except Exception as e:
+                    logger.debug(
+                        "Failed to update document image status",
+                        document_id=document_id,
+                        error=str(e),
                     )
 
             # Step 3: Chunk content
             self._update_status(document_id, ProcessingStatus.CHUNKING)
             self._update_progress(document_id, 2, 5)
+
+            # Initialize chunks list (will be populated by one of the chunking methods)
+            chunks: List[Chunk] = []
 
             # Phase 63: Fast chunking with Chonkie (33x faster than LangChain)
             # Use runtime settings for hot-reload (no server restart needed)
@@ -651,7 +816,6 @@ class DocumentPipeline:
                     fast_chunks = await fast_chunker.chunk(
                         text=text_to_chunk,
                         strategy=strategy,
-                        chunk_size=self.config.chunk_size,
                     )
                     # Convert to standard Chunk format
                     chunks = [
@@ -669,10 +833,11 @@ class DocumentPipeline:
                     )
                 except Exception as e:
                     logger.warning("Fast chunking failed, falling back to standard", error=str(e))
-                    fast_chunking_enabled = False  # Fall through to standard chunking
+                    chunks = []  # Reset to trigger fallback
 
             # Phase 59: Use semantic chunker with contextual headers if available
-            elif self._semantic_chunker is not None:
+            # Also used as fallback when fast chunking fails (chunks is empty)
+            if not chunks and self._semantic_chunker is not None:
                 # Use semantic chunker with section detection
                 text_to_chunk = "\n\n".join([
                     p.get("text", "") for p in extracted.pages
@@ -726,6 +891,12 @@ class DocumentPipeline:
             # Step 3.5: Apply contextual chunking (if enabled in settings)
             # This adds contextual information to each chunk for better retrieval
             # See: Anthropic's contextual retrieval approach (49-67% reduction in failed retrievals)
+            # Ensure chunks is defined (defensive check for edge cases)
+            try:
+                _ = chunks
+            except (NameError, UnboundLocalError):
+                logger.warning("chunks not defined, initializing empty list", document_id=document_id)
+                chunks = []
             try:
                 full_text = extracted.text
                 if not full_text and extracted.pages:
@@ -796,23 +967,56 @@ class DocumentPipeline:
                 )
                 return result
 
-            # Step 4: Generate embeddings
+            # Step 4: Generate embeddings (with retry for transient failures)
             self._update_status(document_id, ProcessingStatus.EMBEDDING)
             self._update_progress(document_id, 3, 5)
 
             if chunks:
-                if isinstance(self._embeddings, RayEmbeddingService):
-                    embeddings = self._embeddings.embed_chunks_parallel(chunks)
-                else:
-                    embeddings = self._embeddings.embed_chunks(
-                        chunks,
-                        batch_size=self.config.embedding_batch_size,
-                    )
-                result.embeddings = embeddings
+                _embed_max_retries = 3
+                for _attempt in range(1, _embed_max_retries + 1):
+                    try:
+                        if isinstance(self._embeddings, RayEmbeddingService):
+                            embeddings = self._embeddings.embed_chunks_parallel(chunks)
+                        else:
+                            embeddings = self._embeddings.embed_chunks(
+                                chunks,
+                                batch_size=self.config.embedding_batch_size,
+                            )
+                        result.embeddings = embeddings
+                        break
+                    except Exception as embed_err:
+                        if _attempt < _embed_max_retries:
+                            _backoff = 2 ** (_attempt - 1)  # 1s, 2s
+                            logger.warning(
+                                "Embedding generation failed, retrying",
+                                document_id=document_id,
+                                attempt=_attempt,
+                                max_retries=_embed_max_retries,
+                                backoff_seconds=_backoff,
+                                error=str(embed_err),
+                            )
+                            await asyncio.sleep(_backoff)
+                        else:
+                            logger.error(
+                                "Embedding generation failed after all retries",
+                                document_id=document_id,
+                                attempts=_embed_max_retries,
+                                error=str(embed_err),
+                            )
+                            raise
 
             # Step 5: Index in vector store (if available)
             self._update_status(document_id, ProcessingStatus.INDEXING)
             self._update_progress(document_id, 4, 5)
+
+            # Warn if embeddings are missing (will affect searchability)
+            if chunks and not result.embeddings:
+                logger.warning(
+                    "Document processed but NO EMBEDDINGS generated - will not be searchable!",
+                    document_id=document_id,
+                    chunk_count=len(chunks),
+                    file_path=file_path,
+                )
 
             # Index using custom vector store
             if self._custom_vectorstore and chunks and result.embeddings:
@@ -893,35 +1097,114 @@ class DocumentPipeline:
         self,
         document_id: str,
         images: List[ExtractedImage],
-    ) -> List[str]:
+        skip_duplicates: bool = True,
+    ) -> Tuple[List[str], Dict[str, int]]:
         """
-        Process extracted images to generate captions/descriptions.
+        Process extracted images to generate captions/descriptions with deduplication.
 
         Phase 71: Parallel processing with semaphore for 50-100x speedup on image-heavy docs.
+        Phase 95: Image deduplication - skip identical images using hash-based cache.
 
         Args:
             document_id: Document ID for logging
             images: List of extracted images
+            skip_duplicates: If True, use cached captions for identical images
 
         Returns:
-            List of caption strings (same order as input images)
+            Tuple of (captions list, stats dict)
         """
+        stats = {
+            "images_found": len(images),
+            "images_analyzed": 0,
+            "images_skipped_small": 0,
+            "images_skipped_duplicate": 0,
+            "images_failed": 0,
+            "cached_used": 0,
+            "newly_analyzed": 0,
+        }
+
         if not self._multimodal or not images:
-            return []
+            return [], stats
+
+        # Get settings for image analysis
+        from backend.services.settings import get_settings_service
+        from backend.services.image_analysis import get_image_analysis_service
+
+        settings = get_settings_service()
+        image_service = get_image_analysis_service()
+
+        # Load settings (with defaults)
+        max_images = await settings.get_setting("rag.max_images_per_document") or 50
+        min_size_kb = await settings.get_setting("rag.min_image_size_kb") or 5
+        enable_dedup = await settings.get_setting("rag.image_duplicate_detection")
+        if enable_dedup is None:
+            enable_dedup = True
+
+        # Limit images to process
+        images_to_process = images[:max_images] if max_images > 0 else images
 
         # Phase 71: Parallel image captioning (configurable concurrency)
-        max_concurrent = int(os.getenv("PIPELINE_MAX_CONCURRENT_CAPTIONS", "4"))
+        # Check settings service first, fall back to env var, default to 8 (was 4)
+        max_concurrent = await settings.get_setting("processing.max_concurrent_image_captions")
+        if max_concurrent is None:
+            max_concurrent = int(os.getenv("PIPELINE_MAX_CONCURRENT_CAPTIONS", "8"))
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def caption_with_limit(idx: int, img: ExtractedImage) -> Tuple[int, str]:
-            """Caption a single image with concurrency control."""
+        async def caption_with_limit(idx: int, img: ExtractedImage) -> Tuple[int, str, str]:
+            """Caption a single image with concurrency control and deduplication."""
             async with semaphore:
+                image_data = img.image_bytes
+                caption_source = "new"
+
+                # Skip small images
+                if len(image_data) < min_size_kb * 1024:
+                    return (idx, "", "skipped_small")
+
+                # Compute hash for deduplication
+                image_hash = image_service.compute_image_hash(image_data)
+
+                # Check cache if deduplication enabled
+                if skip_duplicates and enable_dedup:
+                    try:
+                        async with async_session_context() as db:
+                            cached = await image_service.find_cached_caption(db, image_hash)
+                            if cached:
+                                return (idx, cached, "cached")
+                    except Exception as e:
+                        logger.debug(
+                            "Cache lookup failed, will analyze",
+                            document_id=document_id,
+                            error=str(e),
+                        )
+
+                # Generate caption with vision model
                 try:
                     caption = await self._multimodal.caption_image(
-                        image_data=img.image_bytes,
+                        image_data=image_data,
                         image_format=img.extension,
                     )
-                    return (idx, caption)
+
+                    # Cache the result
+                    if caption and enable_dedup:
+                        try:
+                            async with async_session_context() as db:
+                                await image_service.cache_caption(
+                                    db=db,
+                                    image_hash=image_hash,
+                                    caption=caption,
+                                    element_type="image",
+                                    provider=None,  # Will be set by the service
+                                    model=None,
+                                    document_id=uuid.UUID(document_id) if document_id else None,
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                "Failed to cache caption",
+                                document_id=document_id,
+                                error=str(e),
+                            )
+
+                    return (idx, caption, "new")
                 except Exception as e:
                     logger.warning(
                         "Failed to caption image",
@@ -929,29 +1212,57 @@ class DocumentPipeline:
                         image_index=img.image_index,
                         error=str(e),
                     )
-                    return (idx, "")  # Empty caption for failed images
+                    return (idx, "", "failed")
 
-        if len(images) > 1:
+        if len(images_to_process) > 1:
             logger.info(
-                "Processing images in parallel",
+                "Processing images in parallel with deduplication",
                 document_id=document_id,
-                image_count=len(images),
+                image_count=len(images_to_process),
                 max_concurrent=max_concurrent,
+                skip_duplicates=skip_duplicates,
             )
             # Process all images in parallel
             results = await asyncio.gather(*[
                 caption_with_limit(i, img)
-                for i, img in enumerate(images)
+                for i, img in enumerate(images_to_process)
             ])
             # Sort by index to maintain order
             results.sort(key=lambda x: x[0])
-            return [caption for _, caption in results]
-        elif len(images) == 1:
+
+            # Collect stats and captions
+            captions = []
+            for idx, caption, source in results:
+                captions.append(caption)
+                if source == "cached":
+                    stats["cached_used"] += 1
+                    stats["images_skipped_duplicate"] += 1
+                elif source == "new":
+                    stats["newly_analyzed"] += 1
+                    stats["images_analyzed"] += 1
+                elif source == "skipped_small":
+                    stats["images_skipped_small"] += 1
+                elif source == "failed":
+                    stats["images_failed"] += 1
+
+            return captions, stats
+
+        elif len(images_to_process) == 1:
             # Single image - process directly
-            _, caption = await caption_with_limit(0, images[0])
-            return [caption]
+            idx, caption, source = await caption_with_limit(0, images_to_process[0])
+            if source == "cached":
+                stats["cached_used"] = 1
+                stats["images_skipped_duplicate"] = 1
+            elif source == "new":
+                stats["newly_analyzed"] = 1
+                stats["images_analyzed"] = 1
+            elif source == "skipped_small":
+                stats["images_skipped_small"] = 1
+            elif source == "failed":
+                stats["images_failed"] = 1
+            return [caption], stats
         else:
-            return []
+            return [], stats
 
     async def _get_existing_document_id(self, file_hash: str) -> Optional[str]:
         """
@@ -990,7 +1301,7 @@ class DocumentPipeline:
 
     async def _get_access_tier_id(self, access_tier_level: int) -> Optional[str]:
         """
-        Look up access tier UUID by level.
+        Look up access tier UUID by level with caching.
 
         Args:
             access_tier_level: Integer level of the access tier
@@ -998,14 +1309,24 @@ class DocumentPipeline:
         Returns:
             UUID string of the access tier, or None if not found
         """
+        # Check cache first
+        if access_tier_level in _access_tier_cache:
+            tier_id, cached_at = _access_tier_cache[access_tier_level]
+            if time.time() - cached_at < _ACCESS_TIER_CACHE_TTL:
+                logger.debug("Access tier cache hit", level=access_tier_level)
+                return tier_id
+
         try:
             async with async_session_context() as db:
-                tier_query = select(AccessTier).where(AccessTier.level == access_tier_level)
+                # Use .limit(1) to handle case where multiple tiers have same level
+                tier_query = select(AccessTier).where(AccessTier.level == access_tier_level).limit(1)
                 result = await db.execute(tier_query)
                 access_tier_obj = result.scalar_one_or_none()
 
                 if access_tier_obj:
-                    return str(access_tier_obj.id)
+                    tier_id = str(access_tier_obj.id)
+                    _access_tier_cache[access_tier_level] = (tier_id, time.time())
+                    return tier_id
 
                 # Try to find a suitable tier by closest level
                 all_tiers_query = select(AccessTier).order_by(AccessTier.level)
@@ -1016,21 +1337,25 @@ class DocumentPipeline:
                     # Find closest tier at or below requested level
                     for tier in reversed(all_tiers):
                         if tier.level <= access_tier_level:
+                            tier_id = str(tier.id)
+                            _access_tier_cache[access_tier_level] = (tier_id, time.time())
                             logger.info(
                                 "Using closest access tier",
                                 requested_level=access_tier_level,
                                 using_tier=tier.name,
                                 using_level=tier.level,
                             )
-                            return str(tier.id)
+                            return tier_id
 
                     # If all tiers are above requested level, use the lowest one
+                    tier_id = str(all_tiers[0].id)
+                    _access_tier_cache[access_tier_level] = (tier_id, time.time())
                     logger.info(
                         "Using lowest available access tier",
                         requested_level=access_tier_level,
                         using_tier=all_tiers[0].name,
                     )
-                    return str(all_tiers[0].id)
+                    return tier_id
 
                 return None
         except Exception as e:
@@ -1164,8 +1489,8 @@ class DocumentPipeline:
         with chunk indexing operations.
         """
         async def _create_record(db: AsyncSession) -> None:
-            # Find or create access tier by level
-            tier_query = select(AccessTier).where(AccessTier.level == access_tier)
+            # Find or create access tier by level (limit 1 in case of duplicate levels)
+            tier_query = select(AccessTier).where(AccessTier.level == access_tier).limit(1)
             result = await db.execute(tier_query)
             access_tier_obj = result.scalar_one_or_none()
 
@@ -1245,12 +1570,12 @@ class DocumentPipeline:
                     tags=[collection] if collection else [],  # Initialize with collection, auto-tag will merge more
                     access_tier_id=access_tier_obj.id,
                     processed_at=datetime.now(),
-                    # Multi-tenant fields
-                    organization_id=uuid.UUID(organization_id) if organization_id else None,
-                    uploaded_by_id=uuid.UUID(uploaded_by_id) if uploaded_by_id else None,
+                    # Multi-tenant fields - safely parse UUIDs (skip invalid values like "anonymous")
+                    organization_id=self._safe_uuid(organization_id),
+                    uploaded_by_id=self._safe_uuid(uploaded_by_id),
                     is_private=is_private,
                     # Folder assignment
-                    folder_id=uuid.UUID(folder_id) if folder_id else None,
+                    folder_id=self._safe_uuid(folder_id),
                 )
 
                 db.add(document)
@@ -1409,8 +1734,23 @@ class DocumentPipeline:
             for file_info in files
         ]
 
-        # Collect results
-        raw_results = ray.get(futures)
+        # Collect results with timeout
+        ray_timeout = float(os.getenv("RAY_TASK_TIMEOUT", "300"))
+        try:
+            raw_results = ray.get(futures, timeout=ray_timeout)
+        except ray.exceptions.GetTimeoutError:
+            logger.warning(
+                "Ray processing timed out, cancelling tasks and falling back",
+                timeout=ray_timeout,
+                task_count=len(futures),
+            )
+            for ref in futures:
+                try:
+                    ray.cancel(ref, force=True)
+                except Exception:
+                    pass
+            # Return empty results on timeout - caller should handle fallback
+            return []
 
         # Convert back to ProcessingResult objects
         results = []

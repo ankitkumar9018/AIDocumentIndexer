@@ -450,10 +450,70 @@ class DistributedProcessor:
         documents: List[Dict[str, Any]],
         batch_size: int,
     ) -> List[Dict[str, Any]]:
-        """Process VLM locally."""
-        # VLM processing would be implemented in Phase 44
-        logger.warning("VLM processing not yet implemented locally")
-        return [{"document_id": doc.get("id"), "status": "pending"} for doc in documents]
+        """
+        Process VLM (Visual Language Model) documents locally.
+
+        Note: Local VLM processing requires either:
+        1. Ray cluster for distributed processing (preferred)
+        2. Ollama with a vision model (llava, bakllava) installed locally
+
+        For visual document processing, use the multimodal_rag service directly
+        or configure a Ray cluster for distributed VLM processing.
+        """
+        # Check if we can use Ollama for local VLM processing
+        from backend.services.settings import get_settings_service
+
+        try:
+            settings_service = get_settings_service()
+            vision_provider = await settings_service.get_setting("rag.vision_provider")
+            ollama_model = await settings_service.get_setting("rag.ollama_vision_model")
+
+            if vision_provider == "ollama" and ollama_model:
+                # Use multimodal RAG service for local processing
+                from backend.services.multimodal_rag import get_multimodal_rag_service
+
+                multimodal_service = get_multimodal_rag_service()
+                results = []
+
+                for doc in documents:
+                    try:
+                        # Process document with vision model
+                        doc_result = await multimodal_service.process_document(
+                            document_id=doc.get("id"),
+                            content=doc.get("content", ""),
+                            images=doc.get("images", []),
+                        )
+                        results.append({
+                            "document_id": doc.get("id"),
+                            "status": "completed",
+                            "result": doc_result,
+                        })
+                    except Exception as e:
+                        logger.error(f"VLM processing failed for document {doc.get('id')}: {e}")
+                        results.append({
+                            "document_id": doc.get("id"),
+                            "status": "failed",
+                            "error": str(e),
+                        })
+
+                return results
+
+        except Exception as e:
+            logger.warning(f"Could not initialize local VLM processing: {e}")
+
+        # No local VLM available - return error status
+        logger.warning(
+            "Local VLM processing not available. Configure Ollama with a vision model "
+            "(e.g., 'ollama pull llava') or use Ray cluster for distributed VLM processing."
+        )
+        return [
+            {
+                "document_id": doc.get("id"),
+                "status": "skipped",
+                "error": "Local VLM processing not configured. Install Ollama with llava model or use Ray cluster.",
+            }
+            for doc in documents
+        ]
 
     # =========================================================================
     # Celery Task Submission
@@ -603,18 +663,311 @@ class KGExtractionWorker:
 
 
 class VLMWorker:
-    """Ray actor for VLM processing."""
+    """
+    Ray actor for Vision Language Model (VLM) processing.
 
-    def __init__(self):
-        self._processor = None
+    Supports multiple providers:
+    - Ollama (local, free): llava, bakllava, llava:13b
+    - OpenAI: gpt-4o, gpt-4-vision-preview
+    - Anthropic: claude-3-haiku, claude-3-sonnet
+
+    Cross-platform: Works on Mac (MPS), Linux (CUDA), Windows (CUDA/CPU).
+    """
+
+    def __init__(
+        self,
+        provider: str = "auto",
+        model: Optional[str] = None,
+    ):
+        """
+        Initialize VLM worker.
+
+        Args:
+            provider: "ollama", "openai", "anthropic", or "auto"
+            model: Model name (provider-specific), or None for default
+        """
+        self.provider = provider
+        self.model = model
+        self._client = None
+        self._initialized = False
+
+    def _initialize(self) -> bool:
+        """Lazy initialize the VLM client."""
+        if self._initialized:
+            return self._client is not None
+
+        self._initialized = True
+
+        # Auto-detect provider
+        if self.provider == "auto":
+            self.provider, self.model = self._detect_provider()
+            if self.provider is None:
+                logger.warning("No VLM provider available")
+                return False
+
+        try:
+            if self.provider == "ollama":
+                self._init_ollama()
+            elif self.provider == "openai":
+                self._init_openai()
+            elif self.provider == "anthropic":
+                self._init_anthropic()
+            else:
+                logger.error("Unknown VLM provider", provider=self.provider)
+                return False
+            return True
+        except Exception as e:
+            logger.error("Failed to initialize VLM", provider=self.provider, error=str(e))
+            return False
+
+    def _detect_provider(self) -> tuple:
+        """Auto-detect best available VLM provider."""
+        import os
+
+        # 1. Check Ollama (free, local)
+        try:
+            import ollama
+            models = ollama.list()
+            vision_models = [
+                m["name"] for m in models.get("models", [])
+                if any(v in m["name"].lower() for v in ["llava", "bakllava", "cogvlm"])
+            ]
+            if vision_models:
+                logger.info("Auto-detected Ollama VLM", models=vision_models)
+                return "ollama", vision_models[0]
+        except Exception:
+            pass
+
+        # 2. Check OpenAI (only if valid API key, not placeholder)
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        if (
+            openai_key
+            and not openai_key.startswith("sk-your-")
+            and openai_key != "disabled"
+            and len(openai_key) > 20
+        ):
+            return "openai", "gpt-4o"
+
+        # 3. Check Anthropic (only if valid API key, not placeholder)
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if (
+            anthropic_key
+            and not anthropic_key.startswith("sk-ant-placeholder")
+            and anthropic_key != "disabled"
+            and len(anthropic_key) > 20
+        ):
+            return "anthropic", "claude-3-haiku-20240307"
+
+        return None, None
+
+    def _init_ollama(self) -> None:
+        """Initialize Ollama client."""
+        import ollama
+        self._client = ollama.Client()
+        if not self.model:
+            self.model = "llava"
+        logger.info("Initialized Ollama VLM", model=self.model)
+
+    def _init_openai(self) -> None:
+        """Initialize OpenAI client."""
+        import os
+        from openai import OpenAI
+        self._client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        if not self.model:
+            self.model = "gpt-4o"
+        logger.info("Initialized OpenAI VLM", model=self.model)
+
+    def _init_anthropic(self) -> None:
+        """Initialize Anthropic client."""
+        import os
+        from anthropic import Anthropic
+        self._client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        if not self.model:
+            self.model = "claude-3-haiku-20240307"
+        logger.info("Initialized Anthropic VLM", model=self.model)
+
+    def analyze_image(
+        self,
+        image_data: bytes,
+        prompt: Optional[str] = None,
+        image_type: str = "image",
+    ) -> Dict[str, Any]:
+        """
+        Analyze a single image and return description.
+
+        Args:
+            image_data: Image bytes (PNG, JPEG, etc.)
+            prompt: Custom prompt, or None for default
+            image_type: "image", "chart", "diagram", "table"
+
+        Returns:
+            Dict with "caption", "element_type", "confidence", etc.
+        """
+        if not self._initialize():
+            return {"error": "VLM not available", "caption": ""}
+
+        import base64
+        b64_image = base64.b64encode(image_data).decode("utf-8")
+
+        # Build prompt based on image type
+        if prompt is None:
+            prompt = self._get_default_prompt(image_type)
+
+        try:
+            if self.provider == "ollama":
+                return self._analyze_ollama(b64_image, prompt, image_type)
+            elif self.provider == "openai":
+                return self._analyze_openai(b64_image, prompt, image_type)
+            elif self.provider == "anthropic":
+                return self._analyze_anthropic(b64_image, prompt, image_type)
+        except Exception as e:
+            logger.error("VLM analysis failed", error=str(e))
+            return {"error": str(e), "caption": ""}
+
+    def _get_default_prompt(self, image_type: str) -> str:
+        """Get default prompt based on image type."""
+        prompts = {
+            "image": "Describe this image in detail. Include key subjects, actions, colors, and any text visible.",
+            "chart": "Analyze this chart. Describe the type (bar, line, pie, etc.), the data being shown, trends, and key values.",
+            "diagram": "Explain this diagram step by step. Describe the components, connections, and the process or concept it illustrates.",
+            "table": "Extract the data from this table. List the headers and describe the key information in the rows.",
+            "screenshot": "Describe this screenshot. Identify the application, key UI elements, and any visible text or data.",
+        }
+        return prompts.get(image_type, prompts["image"])
+
+    def _analyze_ollama(self, b64_image: str, prompt: str, image_type: str) -> Dict[str, Any]:
+        """Analyze image using Ollama."""
+        response = self._client.chat(
+            model=self.model,
+            messages=[{
+                "role": "user",
+                "content": prompt,
+                "images": [b64_image],
+            }],
+        )
+        caption = response.get("message", {}).get("content", "")
+        return {
+            "caption": caption,
+            "element_type": image_type,
+            "provider": "ollama",
+            "model": self.model,
+        }
+
+    def _analyze_openai(self, b64_image: str, prompt: str, image_type: str) -> Dict[str, Any]:
+        """Analyze image using OpenAI."""
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{b64_image}"},
+                    },
+                ],
+            }],
+            max_tokens=500,
+        )
+        caption = response.choices[0].message.content if response.choices else ""
+        return {
+            "caption": caption,
+            "element_type": image_type,
+            "provider": "openai",
+            "model": self.model,
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+                "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            },
+        }
+
+    def _analyze_anthropic(self, b64_image: str, prompt: str, image_type: str) -> Dict[str, Any]:
+        """Analyze image using Anthropic Claude."""
+        response = self._client.messages.create(
+            model=self.model,
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": b64_image,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        caption = response.content[0].text if response.content else ""
+        return {
+            "caption": caption,
+            "element_type": image_type,
+            "provider": "anthropic",
+            "model": self.model,
+            "usage": {
+                "input_tokens": response.usage.input_tokens if response.usage else 0,
+                "output_tokens": response.usage.output_tokens if response.usage else 0,
+            },
+        }
 
     def process_batch(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process visual documents with VLM."""
-        # VLM implementation will be added in Phase 44
-        return [
-            {"document_id": doc.get("id"), "status": "processed"}
-            for doc in documents
-        ]
+        """
+        Process visual documents with VLM.
+
+        Args:
+            documents: List of dicts with:
+                - id: Document/image ID
+                - image_data: Image bytes
+                - image_type: "image", "chart", "diagram", "table"
+                - prompt: Optional custom prompt
+
+        Returns:
+            List of results with captions and metadata
+        """
+        if not self._initialize():
+            return [
+                {"document_id": doc.get("id"), "error": "VLM not available", "caption": ""}
+                for doc in documents
+            ]
+
+        results = []
+        for doc in documents:
+            try:
+                image_data = doc.get("image_data", b"")
+                image_type = doc.get("image_type", "image")
+                prompt = doc.get("prompt")
+
+                result = self.analyze_image(image_data, prompt, image_type)
+                result["document_id"] = doc.get("id")
+                result["status"] = "success" if result.get("caption") else "empty"
+                results.append(result)
+
+            except Exception as e:
+                results.append({
+                    "document_id": doc.get("id"),
+                    "status": "error",
+                    "error": str(e),
+                    "caption": "",
+                })
+
+        logger.info(
+            "VLM batch processed",
+            total=len(documents),
+            success=sum(1 for r in results if r.get("status") == "success"),
+        )
+        return results
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get VLM worker status."""
+        self._initialize()
+        return {
+            "available": self._client is not None,
+            "provider": self.provider,
+            "model": self.model,
+        }
 
 
 # =============================================================================

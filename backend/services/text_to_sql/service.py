@@ -134,6 +134,21 @@ class TextToSQLService:
         self._examples: List[TextToSQLExample] = []
         self._schema_cache: Optional[DatabaseSchema] = None
 
+        # Read settings from settings service (synchronous defaults for init)
+        try:
+            from backend.services.settings import get_settings_service
+            settings_svc = get_settings_service()
+            stored_timeout = settings_svc.get_default_value("database.query_timeout_seconds")
+            if stored_timeout is not None:
+                self.query_timeout = int(stored_timeout)
+            else:
+                self.query_timeout = 30
+            stored_retries = settings_svc.get_default_value("database.max_retries")
+            if stored_retries is not None:
+                self.max_retries = int(stored_retries)
+        except Exception:
+            self.query_timeout = 30
+
     def add_example(self, question: str, sql: str, explanation: str = None):
         """Add a few-shot example for prompting."""
         self._examples.append(TextToSQLExample(
@@ -163,6 +178,32 @@ class TextToSQLService:
             self._schema_cache = await self.connector.get_schema()
         return self._schema_cache.to_ddl_string(include_sample_values=True)
 
+    async def _get_entity_context(self, question: str) -> str:
+        """Get entity names from knowledge graph for better WHERE clause matching."""
+        try:
+            from backend.services.knowledge_graph import get_kg_service
+            from backend.services.settings import get_settings_service
+
+            settings_svc = get_settings_service()
+            kg_enabled = await settings_svc.get_setting("rag.knowledge_graph_enabled")
+            if not kg_enabled:
+                return ""
+
+            kg_service = await get_kg_service()
+            entities = await kg_service.find_entities_by_query(question, limit=10)
+            if not entities:
+                return ""
+
+            entity_lines = []
+            for e in entities[:8]:
+                entity_lines.append(f"- {e.name} ({e.entity_type.value})")
+                if e.aliases:
+                    entity_lines.append(f"  Aliases: {', '.join(e.aliases[:3])}")
+
+            return "\nKNOWN ENTITIES (use exact names for WHERE clauses):\n" + "\n".join(entity_lines) + "\n"
+        except Exception:
+            return ""
+
     async def generate_sql(self, question: str) -> Tuple[str, float]:
         """
         Generate SQL from natural language question.
@@ -176,9 +217,12 @@ class TextToSQLService:
         schema_ddl = await self._get_schema_ddl()
         examples = self._format_examples()
 
+        # Get entity context from knowledge graph for exact name matching
+        entity_context = await self._get_entity_context(question)
+
         prompt = SQL_GENERATION_PROMPT.format(
             schema=schema_ddl,
-            examples=examples,
+            examples=examples + entity_context,
             question=question,
         )
 
@@ -335,6 +379,17 @@ class TextToSQLService:
             success=False,
             natural_language_query=question,
         )
+
+        # Check if text-to-SQL is enabled via settings
+        try:
+            from backend.services.settings import get_settings_service
+            settings_svc = get_settings_service()
+            text_to_sql_enabled = await settings_svc.get_setting("database.text_to_sql_enabled")
+            if text_to_sql_enabled is False:
+                result.error = "Text-to-SQL is disabled in settings"
+                return result
+        except Exception:
+            pass  # Default to enabled
 
         try:
             # Generate SQL

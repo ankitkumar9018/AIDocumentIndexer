@@ -2,7 +2,8 @@
 AIDocumentIndexer - Experiments & Feedback API Routes
 =====================================================
 
-API endpoints for experiment tracking, feedback collection, and A/B testing.
+API endpoints for experiment tracking, feedback collection, A/B testing,
+and feature flag management.
 """
 
 from typing import Dict, Any, List, Optional
@@ -16,6 +17,155 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/experiments", tags=["experiments"])
+
+
+# =============================================================================
+# Feature Flag Management (synced with settings service)
+# =============================================================================
+
+# Maps experiment name → settings key
+EXPERIMENT_SETTINGS_MAP: Dict[str, str] = {
+    "attention_rag": "rag.attention_rag_enabled",
+    "graph_o1": "rag.graph_o1_enabled",
+    "tiered_reranking": "rerank.tiered_enabled",
+    "adaptive_routing": "rag.adaptive_routing_enabled",
+    "late_chunking": "vectorstore.late_chunking_enabled",
+    "tree_of_thoughts": "rag.tree_of_thoughts_enabled",
+    "generative_cache": "rag.semantic_cache_enabled",
+    "llmlingua_compression": "rag.llmlingua_compression_enabled",
+}
+
+# Static metadata for each experiment (description, category, stability)
+EXPERIMENT_METADATA: Dict[str, Dict[str, str]] = {
+    "attention_rag": {
+        "description": "6.3x context compression using attention scoring (AttentionRAG). Reduces context size while maintaining relevance.",
+        "category": "Compression",
+        "status": "beta",
+    },
+    "graph_o1": {
+        "description": "Beam search reasoning over the knowledge graph (Graph-O1). 3-5x faster graph reasoning with 95%+ accuracy.",
+        "category": "Retrieval",
+        "status": "experimental",
+    },
+    "tiered_reranking": {
+        "description": "4-stage reranking pipeline: BM25 \u2192 CrossEncoder \u2192 ColBERT \u2192 LLM. Doubles precision for complex queries.",
+        "category": "Retrieval",
+        "status": "stable",
+    },
+    "adaptive_routing": {
+        "description": "Query-dependent strategy routing (DIRECT/HYBRID/TWO_STAGE/AGENTIC/GRAPH). Selects optimal retrieval based on query complexity.",
+        "category": "Retrieval",
+        "status": "stable",
+    },
+    "late_chunking": {
+        "description": "Context-preserving chunking with +15-25% retrieval accuracy. Uses full document context for chunk embeddings.",
+        "category": "Processing",
+        "status": "beta",
+    },
+    "tree_of_thoughts": {
+        "description": "Multi-path reasoning with beam search exploration. Generates and evaluates multiple reasoning chains.",
+        "category": "Reasoning",
+        "status": "experimental",
+    },
+    "generative_cache": {
+        "description": "Semantic caching with 9x speedup over GPTCache. 68.8% cache hit rate for repeated queries.",
+        "category": "Performance",
+        "status": "stable",
+    },
+    "llmlingua_compression": {
+        "description": "LLMLingua-2 context compression (3-6x). Reduces token usage while preserving answer quality.",
+        "category": "Compression",
+        "status": "beta",
+    },
+}
+
+
+class ToggleExperimentRequest(BaseModel):
+    """Request to toggle an experiment feature flag."""
+    enabled: bool = Field(..., description="Whether to enable or disable the experiment")
+
+
+@router.get("/")
+async def get_feature_flags() -> Dict[str, Any]:
+    """
+    Get all experiment feature flags with their current states.
+
+    Reads enabled/disabled state from the settings service.
+    Returns metadata (description, category, status) alongside each flag.
+    """
+    experiments = []
+
+    try:
+        from backend.services.settings import get_settings_service
+        settings_svc = get_settings_service()
+
+        # Batch-load all experiment settings
+        settings_keys = list(EXPERIMENT_SETTINGS_MAP.values())
+        settings_values = await settings_svc.get_settings_batch(settings_keys)
+
+        for name, settings_key in EXPERIMENT_SETTINGS_MAP.items():
+            meta = EXPERIMENT_METADATA.get(name, {})
+            enabled = settings_values.get(settings_key)
+            # Fall back to settings default if not in DB
+            if enabled is None:
+                enabled = settings_svc.get_default_value(settings_key)
+            experiments.append({
+                "name": name,
+                "enabled": bool(enabled) if enabled is not None else False,
+                "description": meta.get("description", ""),
+                "category": meta.get("category", "General"),
+                "status": meta.get("status", "experimental"),
+            })
+
+    except Exception as e:
+        logger.warning("Failed to load experiment flags from settings, using defaults", error=str(e))
+        for name, meta in EXPERIMENT_METADATA.items():
+            experiments.append({
+                "name": name,
+                "enabled": False,
+                "description": meta.get("description", ""),
+                "category": meta.get("category", "General"),
+                "status": meta.get("status", "experimental"),
+            })
+
+    return {"experiments": experiments}
+
+
+@router.put("/{name}")
+async def toggle_feature_flag(name: str, request: ToggleExperimentRequest) -> Dict[str, Any]:
+    """
+    Toggle an experiment feature flag.
+
+    Maps the experiment name to a settings key and persists via the settings service.
+    """
+    if name not in EXPERIMENT_SETTINGS_MAP:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown experiment: {name}. Valid experiments: {', '.join(EXPERIMENT_SETTINGS_MAP.keys())}",
+        )
+
+    settings_key = EXPERIMENT_SETTINGS_MAP[name]
+
+    try:
+        from backend.services.settings import get_settings_service
+        settings_svc = get_settings_service()
+        await settings_svc.set_setting(settings_key, request.enabled)
+
+        logger.info("Toggled experiment", experiment=name, settings_key=settings_key, enabled=request.enabled)
+
+        return {
+            "name": name,
+            "enabled": request.enabled,
+            "settings_key": settings_key,
+            "status": "updated",
+        }
+
+    except Exception as e:
+        logger.error("Failed to toggle experiment", experiment=name, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to toggle experiment {name}: {str(e)}",
+        )
 
 
 # =============================================================================

@@ -417,6 +417,256 @@ async def get_distributed_processor_status(
         )
 
 
+# =============================================================================
+# Ray Cluster Control Endpoints
+# =============================================================================
+
+class RayControlResponse(BaseModel):
+    """Response for Ray control operations."""
+    success: bool
+    message: str
+    ray_connected: bool = False
+    cluster_info: Optional[Dict[str, Any]] = None
+
+
+@router.get("/ray/status")
+async def get_ray_status(_user: AdminUser) -> Dict[str, Any]:
+    """
+    Get detailed Ray cluster status.
+
+    Returns comprehensive information about the Ray cluster including:
+    - Connection status
+    - Cluster resources (CPUs, GPUs, memory)
+    - Node information
+    - Active workers
+    """
+    try:
+        import ray
+
+        ray_available = True
+        ray_connected = ray.is_initialized()
+
+        if not ray_connected:
+            return {
+                "status": "disconnected",
+                "ray_available": ray_available,
+                "ray_connected": False,
+                "message": "Ray is installed but not initialized",
+            }
+
+        # Get cluster resources
+        resources = ray.cluster_resources()
+        available = ray.available_resources()
+        nodes = ray.nodes()
+
+        # Count active nodes
+        active_nodes = sum(1 for n in nodes if n.get("Alive", False))
+
+        return {
+            "status": "connected",
+            "ray_available": ray_available,
+            "ray_connected": True,
+            "cluster_resources": {
+                "total_cpus": int(resources.get("CPU", 0)),
+                "available_cpus": int(available.get("CPU", 0)),
+                "total_gpus": int(resources.get("GPU", 0)),
+                "available_gpus": int(available.get("GPU", 0)),
+                "total_memory_gb": round(resources.get("memory", 0) / (1024 ** 3), 2),
+                "available_memory_gb": round(available.get("memory", 0) / (1024 ** 3), 2),
+                "object_store_memory_gb": round(resources.get("object_store_memory", 0) / (1024 ** 3), 2),
+            },
+            "nodes": {
+                "total": len(nodes),
+                "active": active_nodes,
+            },
+            "node_details": [
+                {
+                    "node_id": n.get("NodeID", "")[:8],
+                    "alive": n.get("Alive", False),
+                    "resources": n.get("Resources", {}),
+                }
+                for n in nodes
+            ],
+        }
+
+    except ImportError:
+        return {
+            "status": "unavailable",
+            "ray_available": False,
+            "ray_connected": False,
+            "message": "Ray is not installed",
+        }
+    except Exception as e:
+        logger.error("Failed to get Ray status", error=str(e))
+        return {
+            "status": "error",
+            "ray_available": True,
+            "ray_connected": False,
+            "message": str(e),
+        }
+
+
+@router.post("/ray/start", response_model=RayControlResponse)
+async def start_ray(_user: AdminUser) -> RayControlResponse:
+    """
+    Start Ray cluster.
+
+    Initializes Ray with settings from the Admin UI configuration.
+    If Ray is already running, returns success without reinitializing.
+    """
+    try:
+        import ray
+
+        if ray.is_initialized():
+            resources = ray.cluster_resources()
+            return RayControlResponse(
+                success=True,
+                message="Ray is already running",
+                ray_connected=True,
+                cluster_info={
+                    "cpus": int(resources.get("CPU", 0)),
+                    "gpus": int(resources.get("GPU", 0)),
+                    "memory_gb": round(resources.get("memory", 0) / (1024 ** 3), 2),
+                },
+            )
+
+        # Initialize Ray with settings
+        from backend.ray_workers.config import init_ray_async
+        success = await init_ray_async(cleanup_stale=True, init_timeout=30.0)
+
+        if success:
+            resources = ray.cluster_resources()
+            return RayControlResponse(
+                success=True,
+                message="Ray cluster started successfully",
+                ray_connected=True,
+                cluster_info={
+                    "cpus": int(resources.get("CPU", 0)),
+                    "gpus": int(resources.get("GPU", 0)),
+                    "memory_gb": round(resources.get("memory", 0) / (1024 ** 3), 2),
+                },
+            )
+        else:
+            return RayControlResponse(
+                success=False,
+                message="Failed to initialize Ray cluster",
+                ray_connected=False,
+            )
+
+    except ImportError:
+        return RayControlResponse(
+            success=False,
+            message="Ray is not installed",
+            ray_connected=False,
+        )
+    except Exception as e:
+        logger.error("Failed to start Ray", error=str(e))
+        return RayControlResponse(
+            success=False,
+            message=f"Error starting Ray: {str(e)}",
+            ray_connected=False,
+        )
+
+
+@router.post("/ray/stop", response_model=RayControlResponse)
+async def stop_ray(_user: AdminUser) -> RayControlResponse:
+    """
+    Stop Ray cluster.
+
+    Gracefully shuts down the Ray cluster connection.
+    Running tasks will be cancelled.
+    """
+    try:
+        import ray
+
+        if not ray.is_initialized():
+            return RayControlResponse(
+                success=True,
+                message="Ray is not running",
+                ray_connected=False,
+            )
+
+        from backend.ray_workers.config import shutdown_ray
+        shutdown_ray(timeout=10.0)
+
+        return RayControlResponse(
+            success=True,
+            message="Ray cluster stopped successfully",
+            ray_connected=False,
+        )
+
+    except ImportError:
+        return RayControlResponse(
+            success=False,
+            message="Ray is not installed",
+            ray_connected=False,
+        )
+    except Exception as e:
+        logger.error("Failed to stop Ray", error=str(e))
+        return RayControlResponse(
+            success=False,
+            message=f"Error stopping Ray: {str(e)}",
+            ray_connected=False,
+        )
+
+
+@router.post("/ray/restart", response_model=RayControlResponse)
+async def restart_ray(_user: AdminUser) -> RayControlResponse:
+    """
+    Restart Ray cluster.
+
+    Stops and then starts Ray with fresh configuration.
+    Useful after changing Ray settings.
+    """
+    try:
+        import ray
+
+        # Stop if running
+        if ray.is_initialized():
+            from backend.ray_workers.config import shutdown_ray
+            shutdown_ray(timeout=10.0)
+            # Wait a moment for cleanup
+            import asyncio
+            await asyncio.sleep(2)
+
+        # Start fresh
+        from backend.ray_workers.config import init_ray_async
+        success = await init_ray_async(cleanup_stale=True, init_timeout=30.0)
+
+        if success:
+            resources = ray.cluster_resources()
+            return RayControlResponse(
+                success=True,
+                message="Ray cluster restarted successfully",
+                ray_connected=True,
+                cluster_info={
+                    "cpus": int(resources.get("CPU", 0)),
+                    "gpus": int(resources.get("GPU", 0)),
+                    "memory_gb": round(resources.get("memory", 0) / (1024 ** 3), 2),
+                },
+            )
+        else:
+            return RayControlResponse(
+                success=False,
+                message="Failed to restart Ray cluster",
+                ray_connected=False,
+            )
+
+    except ImportError:
+        return RayControlResponse(
+            success=False,
+            message="Ray is not installed",
+            ray_connected=False,
+        )
+    except Exception as e:
+        logger.error("Failed to restart Ray", error=str(e))
+        return RayControlResponse(
+            success=False,
+            message=f"Error restarting Ray: {str(e)}",
+            ray_connected=False,
+        )
+
+
 @router.get("/analytics/usage", response_model=UsageAnalytics)
 async def get_usage_analytics(
     _user: AdminUser,

@@ -9,7 +9,10 @@ Endpoints for admin operations:
 - System configuration
 """
 
+import os
+import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 
@@ -20,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 import structlog
 
+from backend.core.config import settings
 from backend.db.database import get_async_session
 from backend.db.models import User, AccessTier, AuditLog, FolderPermission, Folder
 from backend.api.middleware.auth import (
@@ -5361,6 +5365,217 @@ async def get_celery_status(
         )
 
 
+# Global to track Celery worker process
+_celery_worker_process: Optional[subprocess.Popen] = None
+_celery_worker_pid: Optional[int] = None
+
+
+class CeleryStartResponse(BaseModel):
+    """Response model for Celery start."""
+    success: bool
+    message: str
+    pid: Optional[int] = None
+
+
+class CeleryStopResponse(BaseModel):
+    """Response model for Celery stop."""
+    success: bool
+    message: str
+
+
+@router.post("/celery/start", response_model=CeleryStartResponse)
+async def start_celery_worker(
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Start a Celery worker process.
+
+    Admin only endpoint. Spawns a Celery worker as a subprocess.
+    """
+    import subprocess
+    import sys
+    import os
+    global _celery_worker_process, _celery_worker_pid
+
+    # Check if worker already running
+    if _celery_worker_process is not None:
+        if _celery_worker_process.poll() is None:
+            return CeleryStartResponse(
+                success=False,
+                message=f"Celery worker already running (PID: {_celery_worker_pid})",
+                pid=_celery_worker_pid,
+            )
+        else:
+            # Process ended, clear refs
+            _celery_worker_process = None
+            _celery_worker_pid = None
+
+    # Check if Redis is enabled/reachable
+    from backend.services.redis_client import check_redis_connection
+    redis_status = await check_redis_connection()
+    if not redis_status.get("connected"):
+        return CeleryStartResponse(
+            success=False,
+            message=f"Cannot start Celery: Redis not available. {redis_status.get('reason', '')}",
+        )
+
+    # Get project root for working directory
+    project_root = Path(__file__).resolve().parents[3]
+    backend_dir = project_root / "backend"
+
+    # Build the celery command
+    # Use uv run if available, otherwise direct celery
+    celery_cmd = [
+        sys.executable, "-m", "celery",
+        "-A", "backend.services.task_queue:celery_app",
+        "worker",
+        "--loglevel=info",
+        "--concurrency=2",
+    ]
+
+    # Create logs directory
+    log_dir = project_root / "logs"
+    log_dir.mkdir(exist_ok=True)
+    celery_log = log_dir / "celery_worker.log"
+
+    try:
+        # Set environment for subprocess
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(project_root)
+
+        # Start Celery worker as subprocess
+        with open(celery_log, "a") as log_file:
+            _celery_worker_process = subprocess.Popen(
+                celery_cmd,
+                cwd=str(project_root),
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # Detach from parent
+            )
+        _celery_worker_pid = _celery_worker_process.pid
+
+        # Log the action
+        audit_service = get_audit_service()
+        await audit_service.log_admin_action(
+            action=AuditAction.SYSTEM_CONFIG_CHANGE,
+            admin_user_id=admin.user_id,
+            target_resource_type="celery_worker",
+            changes={"action": "start", "pid": _celery_worker_pid},
+            ip_address=get_client_ip(request),
+            session=db,
+        )
+
+        logger.info("Celery worker started", pid=_celery_worker_pid, admin_id=admin.user_id)
+
+        return CeleryStartResponse(
+            success=True,
+            message=f"Celery worker started successfully (PID: {_celery_worker_pid}). Logs at: logs/celery_worker.log",
+            pid=_celery_worker_pid,
+        )
+
+    except Exception as e:
+        logger.error("Failed to start Celery worker", error=str(e))
+        return CeleryStartResponse(
+            success=False,
+            message=f"Failed to start Celery worker: {str(e)}",
+        )
+
+
+@router.post("/celery/stop", response_model=CeleryStopResponse)
+async def stop_celery_worker(
+    admin: AdminUser,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Stop the Celery worker process.
+
+    Admin only endpoint. Gracefully terminates the worker.
+    """
+    import signal
+    import subprocess
+    global _celery_worker_process, _celery_worker_pid
+
+    stopped_pids = []
+
+    # Stop our tracked process if running
+    if _celery_worker_process is not None:
+        if _celery_worker_process.poll() is None:
+            try:
+                _celery_worker_process.terminate()
+                _celery_worker_process.wait(timeout=10)
+                stopped_pids.append(_celery_worker_pid)
+            except subprocess.TimeoutExpired:
+                _celery_worker_process.kill()
+                stopped_pids.append(_celery_worker_pid)
+            except Exception as e:
+                logger.warning("Error stopping tracked Celery process", error=str(e))
+
+        _celery_worker_process = None
+        _celery_worker_pid = None
+
+    # Also try to kill any celery workers by pattern (catches externally started workers)
+    try:
+        import platform
+        if platform.system() != "Windows":
+            # Kill celery workers by pattern
+            subprocess.run(["pkill", "-f", "celery.*worker"], check=False)
+    except Exception as e:
+        logger.debug("pkill not available", error=str(e))
+
+    # Log the action
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="celery_worker",
+        changes={"action": "stop", "pids": stopped_pids},
+        ip_address=get_client_ip(request),
+        session=db,
+    )
+
+    logger.info("Celery worker stopped", admin_id=admin.user_id)
+
+    return CeleryStopResponse(
+        success=True,
+        message="Celery worker stop signal sent. Workers will terminate gracefully.",
+    )
+
+
+@router.get("/celery/running")
+async def is_celery_worker_running(admin: AdminUser):
+    """
+    Check if a Celery worker is running (either tracked or external).
+
+    Admin only endpoint.
+    """
+    global _celery_worker_process, _celery_worker_pid
+
+    # Check our tracked process
+    tracked_running = False
+    if _celery_worker_process is not None:
+        if _celery_worker_process.poll() is None:
+            tracked_running = True
+        else:
+            _celery_worker_process = None
+            _celery_worker_pid = None
+
+    # Also check via Celery ping
+    from backend.services.task_queue import is_celery_available, get_worker_stats
+    celery_available = is_celery_available()
+    worker_stats = get_worker_stats()
+
+    return {
+        "running": tracked_running or celery_available,
+        "tracked_pid": _celery_worker_pid if tracked_running else None,
+        "worker_count": worker_stats.get("count", 0),
+        "workers": worker_stats.get("workers", []),
+    }
+
+
 @router.post("/redis/invalidate-cache")
 async def invalidate_redis_settings_cache(
     admin: AdminUser,
@@ -6215,21 +6430,69 @@ class VLMTestRequest(BaseModel):
 @router.get("/vlm/config", response_model=VLMConfigResponse)
 async def get_vlm_config(
     admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Get VLM configuration.
 
-    Superadmin only endpoint (Phase 54).
+    Reads from database settings (rag.vlm_*) with fallback to environment variables.
     """
+    from backend.services.settings import get_settings_service
+    settings_service = get_settings_service()
+
+    # Get settings from database
+    db_settings = await settings_service.get_settings_batch([
+        "rag.vlm_provider",
+        "rag.vlm_model",
+        "rag.ollama_vision_model",
+        "processing.max_image_captioning_concurrency",
+        "rag.extract_tables",
+        "rag.extract_charts",
+    ], session=db)
+
+    # Determine enabled state (env var or has provider configured)
+    enable_multimodal = os.getenv("ENABLE_MULTIMODAL", "false").lower() == "true"
+    enabled = settings.ENABLE_VLM or enable_multimodal or bool(db_settings.get("rag.vlm_provider"))
+
+    # Get provider (database > env > default)
+    provider = db_settings.get("rag.vlm_provider", "auto")
+    if provider == "auto":
+        # Auto-detect provider
+        if os.getenv("USE_OLLAMA") or os.getenv("OLLAMA_BASE_URL"):
+            provider = "ollama"
+        elif os.getenv("OPENAI_API_KEY"):
+            provider = "openai"
+        elif os.getenv("ANTHROPIC_API_KEY"):
+            provider = "anthropic"
+        else:
+            provider = "ollama"  # Default to ollama
+
+    # Get model (database > env > default based on provider)
+    model = db_settings.get("rag.vlm_model") or db_settings.get("rag.ollama_vision_model")
+    if not model:
+        if provider == "ollama":
+            model = os.getenv("OLLAMA_VISION_MODEL", "llava")
+        elif provider == "openai":
+            model = "gpt-4o"
+        elif provider == "anthropic":
+            model = "claude-3-5-sonnet-20241022"
+        else:
+            model = "llava"
+
+    # Get values with proper None handling
+    max_images = db_settings.get("processing.max_image_captioning_concurrency")
+    extract_tables = db_settings.get("rag.extract_tables")
+    extract_charts = db_settings.get("rag.extract_charts")
+
     return VLMConfigResponse(
-        enabled=settings.ENABLE_VLM,
-        provider=getattr(settings, "VLM_PROVIDER", "claude"),
-        model=getattr(settings, "VLM_MODEL", "claude-3-5-sonnet-20241022"),
-        max_images_per_request=getattr(settings, "VLM_MAX_IMAGES", 10),
-        auto_process_visual_docs=getattr(settings, "VLM_AUTO_PROCESS", True),
-        extract_tables=getattr(settings, "VLM_EXTRACT_TABLES", True),
-        extract_charts=getattr(settings, "VLM_EXTRACT_CHARTS", True),
-        ocr_fallback=getattr(settings, "VLM_OCR_FALLBACK", True),
+        enabled=enabled,
+        provider=provider,
+        model=model,
+        max_images_per_request=max_images if max_images is not None else 10,
+        auto_process_visual_docs=enabled,  # Same as enabled
+        extract_tables=extract_tables if extract_tables is not None else True,
+        extract_charts=extract_charts if extract_charts is not None else True,
+        ocr_fallback=True,  # Always enabled as fallback
     )
 
 
@@ -6242,31 +6505,32 @@ async def update_vlm_config(
     """
     Update VLM configuration.
 
-    Superadmin only endpoint (Phase 54).
+    Saves to database settings (rag.vlm_*) for use by multimodal processing.
     """
     logger.info("Updating VLM config", admin_id=admin.user_id)
 
+    # Map to database setting keys
     updates = {}
-    if config.enabled is not None:
-        updates["ENABLE_VLM"] = config.enabled
     if config.provider is not None:
-        updates["VLM_PROVIDER"] = config.provider
+        updates["rag.vlm_provider"] = config.provider
     if config.model is not None:
-        updates["VLM_MODEL"] = config.model
+        updates["rag.vlm_model"] = config.model
+        # Also update ollama-specific setting for backwards compatibility
+        if config.provider == "ollama" or not config.provider:
+            updates["rag.ollama_vision_model"] = config.model
     if config.max_images_per_request is not None:
-        updates["VLM_MAX_IMAGES"] = config.max_images_per_request
-    if config.auto_process_visual_docs is not None:
-        updates["VLM_AUTO_PROCESS"] = config.auto_process_visual_docs
+        updates["processing.max_image_captioning_concurrency"] = config.max_images_per_request
     if config.extract_tables is not None:
-        updates["VLM_EXTRACT_TABLES"] = config.extract_tables
+        updates["rag.extract_tables"] = config.extract_tables
     if config.extract_charts is not None:
-        updates["VLM_EXTRACT_CHARTS"] = config.extract_charts
-    if config.ocr_fallback is not None:
-        updates["VLM_OCR_FALLBACK"] = config.ocr_fallback
+        updates["rag.extract_charts"] = config.extract_charts
 
-    # Update settings in database
+    # Update settings in database using settings service
+    from backend.services.settings import get_settings_service
+    settings_service = get_settings_service()
+
     for key, value in updates.items():
-        await _update_setting(db, key, value, admin.user_id)
+        await settings_service.set_setting(key, value, session=db)
 
     await audit_service.log_admin_action(
         db=db,

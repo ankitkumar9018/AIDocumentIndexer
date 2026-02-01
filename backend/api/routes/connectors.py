@@ -170,7 +170,13 @@ async def create_connector(
 
     connector_class = ConnectorRegistry.get(connector_type)
     if not connector_class:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Connector type not implemented: {data.connector_type}")
+        # Get list of implemented connectors for helpful error message
+        implemented = [ct.value for ct in ConnectorType if ConnectorRegistry.get(ct)]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Connector '{data.connector_type}' is not yet implemented. "
+                   f"Available connectors: {', '.join(implemented)}"
+        )
 
     # Create instance
     connector = ConnectorInstance(

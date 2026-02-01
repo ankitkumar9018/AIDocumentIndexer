@@ -377,7 +377,7 @@ class LLMFactory:
             )
 
         elif provider == "ollama":
-            from langchain_community.chat_models import ChatOllama
+            from langchain_ollama import ChatOllama
             return ChatOllama(
                 model=model,
                 temperature=temperature,
@@ -460,7 +460,7 @@ class LLMFactory:
             )
 
         elif provider == "ollama":
-            from langchain_community.embeddings import OllamaEmbeddings
+            from langchain_ollama import OllamaEmbeddings
             return OllamaEmbeddings(
                 model=model,
                 base_url=llm_config.ollama_host,
@@ -1182,7 +1182,7 @@ class EnhancedLLMFactory:
                 **model_kwargs,
             )
         elif config.provider_type == "ollama":
-            from langchain_community.chat_models import ChatOllama
+            from langchain_ollama import ChatOllama
             return ChatOllama(
                 model=config.model,
                 temperature=config.temperature,
@@ -1210,7 +1210,7 @@ class EnhancedLLMFactory:
                 api_key=config.api_key or llm_config.openai_api_key,
             )
         elif config.provider_type == "ollama":
-            from langchain_community.embeddings import OllamaEmbeddings
+            from langchain_ollama import OllamaEmbeddings
             return OllamaEmbeddings(
                 model=config.model,
                 base_url=config.api_base_url or llm_config.ollama_host,
@@ -1548,7 +1548,7 @@ async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
         base_url: Optional Ollama API base URL. Defaults to config value.
 
     Returns:
-        dict: Contains 'success', 'chat_models', 'embedding_models', and 'total'
+        dict: Contains 'success', 'chat_models', 'embedding_models', 'vision_models', and 'total'
     """
     import httpx
 
@@ -1565,24 +1565,32 @@ async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
                 models = data.get("models", [])
                 chat_models = []
                 embedding_models = []
+                vision_models = []
 
                 for m in models:
                     name = m.get("name", "")
+                    families = m.get("details", {}).get("families", [])
                     info = {
                         "name": name,
                         "size": m.get("size"),
                         "family": m.get("details", {}).get("family"),
+                        "families": families,
                         "parameter_size": m.get("details", {}).get("parameter_size"),
                     }
                     if "embed" in name.lower():
                         embedding_models.append(info)
                     else:
                         chat_models.append(info)
+                        # Also check if it's a vision model (has clip family or known vision pattern)
+                        is_vision = "clip" in families or is_vision_model(name)
+                        if is_vision:
+                            vision_models.append(info)
 
                 return {
                     "success": True,
                     "chat_models": chat_models,
                     "embedding_models": embedding_models,
+                    "vision_models": vision_models,
                     "total": len(models),
                 }
             return {
@@ -1590,6 +1598,7 @@ async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
                 "error": f"Ollama returned {response.status_code}",
                 "chat_models": [],
                 "embedding_models": [],
+                "vision_models": [],
             }
     except httpx.ConnectError:
         return {
@@ -1597,6 +1606,7 @@ async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
             "error": "Cannot connect to Ollama",
             "chat_models": [],
             "embedding_models": [],
+            "vision_models": [],
         }
     except Exception as e:
         return {
@@ -1604,6 +1614,7 @@ async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
             "error": str(e),
             "chat_models": [],
             "embedding_models": [],
+            "vision_models": [],
         }
 
 

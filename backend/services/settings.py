@@ -41,6 +41,7 @@ class SettingCategory(str, Enum):
     PROCESSING = "processing"  # Parallel processing configuration
     AUDIO = "audio"  # TTS and audio configuration
     INGESTION = "ingestion"  # Knowledge graph and entity extraction settings
+    SYSTEM = "system"  # System-wide configuration (custom instructions, language, etc.)
 
 
 class ValueType(str, Enum):
@@ -137,6 +138,13 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value="openai",
         value_type=ValueType.STRING,
         description="Embedding provider (openai, voyage, jina, cohere, gte, qwen3, gemini, bge-m3, ollama, auto)"
+    ),
+    SettingDefinition(
+        key="embedding.model",
+        category=SettingCategory.LLM,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Embedding model name (leave empty for provider default: nomic-embed-text for ollama, text-embedding-3-small for openai)"
     ),
     SettingDefinition(
         key="embedding.auto_select_enabled",
@@ -441,6 +449,43 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Generate captions for images during indexing"
+    ),
+
+    # Image Analysis Settings (extended multimodal)
+    SettingDefinition(
+        key="rag.image_analysis_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable AI image analysis during document processing"
+    ),
+    SettingDefinition(
+        key="rag.image_duplicate_detection",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Skip analyzing duplicate images (saves time and API costs)"
+    ),
+    SettingDefinition(
+        key="rag.max_images_per_document",
+        category=SettingCategory.RAG,
+        default_value=50,
+        value_type=ValueType.NUMBER,
+        description="Maximum images to analyze per document (0 = unlimited)"
+    ),
+    SettingDefinition(
+        key="rag.min_image_size_kb",
+        category=SettingCategory.RAG,
+        default_value=5,
+        value_type=ValueType.NUMBER,
+        description="Minimum image size to analyze in KB (skip tiny icons)"
+    ),
+    SettingDefinition(
+        key="rag.vision_model_warning_enabled",
+        category=SettingCategory.NOTIFICATIONS,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Show warning when vision model is not configured"
     ),
 
     # Real-Time Updates Settings
@@ -802,7 +847,7 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="rag.sufficiency_checker_enabled",
         category=SettingCategory.RAG,
-        default_value=False,
+        default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Enable RAG sufficiency detection to skip unnecessary retrieval rounds (ICLR 2025)"
     ),
@@ -818,7 +863,7 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="processing.fast_chunking_enabled",
         category=SettingCategory.PROCESSING,
-        default_value=False,
+        default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Enable Chonkie fast chunking (33x faster than LangChain, 10-50x less memory)"
     ),
@@ -935,7 +980,7 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="ocr.provider",
         category=SettingCategory.OCR,
-        default_value="paddleocr",
+        default_value="tesseract",
         value_type=ValueType.STRING,
         description="OCR provider (paddleocr, easyocr, tesseract, auto)"
     ),
@@ -1089,16 +1134,16 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="processing.ray_enabled",
         category=SettingCategory.PROCESSING,
-        default_value=False,
+        default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Enable Ray for distributed parallel processing of large document batches"
     ),
     SettingDefinition(
         key="processing.ray_address",
         category=SettingCategory.PROCESSING,
-        default_value="auto",
+        default_value="",
         value_type=ValueType.STRING,
-        description="Ray cluster address ('auto' for local, or 'ray://host:10001' for remote cluster)"
+        description="Ray cluster address (empty for local, or 'ray://host:10001' for remote cluster)"
     ),
     SettingDefinition(
         key="processing.ray_num_cpus",
@@ -1125,6 +1170,20 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     # ==========================================================================
     # Phase 71: Parallel Processing Settings
     # ==========================================================================
+    SettingDefinition(
+        key="processing.sequential_upload_processing",
+        category=SettingCategory.PROCESSING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Process uploaded files one at a time (sequential). When disabled, files are processed in parallel which is faster but uses more CPU/memory."
+    ),
+    SettingDefinition(
+        key="processing.max_parallel_uploads",
+        category=SettingCategory.PROCESSING,
+        default_value=2,
+        value_type=ValueType.NUMBER,
+        description="Maximum number of files to process simultaneously when parallel processing is enabled (1-8)"
+    ),
     SettingDefinition(
         key="processing.max_concurrent_pdf_pages",
         category=SettingCategory.PROCESSING,
@@ -1337,6 +1396,48 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         value_type=ValueType.NUMBER,
         description="Delay between requests in milliseconds to avoid overloading servers (500-5000)"
     ),
+    SettingDefinition(
+        key="scraping.proxy_enabled",
+        category=SettingCategory.SCRAPING,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable proxy rotation for web scraping. Uses a pool of proxy servers to distribute requests and avoid IP-based blocking."
+    ),
+    SettingDefinition(
+        key="scraping.proxy_list",
+        category=SettingCategory.SCRAPING,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Comma-separated list of proxy URLs (e.g., http://proxy1:8080,socks5://proxy2:1080). Leave empty if proxy is disabled."
+    ),
+    SettingDefinition(
+        key="scraping.proxy_rotation_strategy",
+        category=SettingCategory.SCRAPING,
+        default_value="round_robin",
+        value_type=ValueType.STRING,
+        description="Proxy rotation strategy: 'round_robin' cycles through proxies sequentially, 'random' selects randomly each request."
+    ),
+    SettingDefinition(
+        key="scraping.jina_reader_fallback",
+        category=SettingCategory.SCRAPING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Use Jina Reader API (r.jina.ai) as fallback when Crawl4AI and basic HTTP scraping fail. Free tier: up to 1000 requests/day."
+    ),
+    SettingDefinition(
+        key="scraping.adaptive_crawling",
+        category=SettingCategory.SCRAPING,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable adaptive crawling with confidence-based stopping. Automatically determines when a site has been sufficiently crawled based on content coverage and saturation."
+    ),
+    SettingDefinition(
+        key="scraping.crash_recovery_enabled",
+        category=SettingCategory.SCRAPING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable crash recovery for long-running crawl jobs. Persists crawl state to allow resuming after failures."
+    ),
 
     # ==========================================================================
     # Phase 65: Scaling & Performance (1M+ Documents)
@@ -1523,7 +1624,7 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="rag.self_rag_enabled",
         category=SettingCategory.RAG,
-        default_value=False,
+        default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Enable Self-RAG with reflection for +18% factuality improvement"
     ),
@@ -1539,7 +1640,7 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="rag.adaptive_routing_enabled",
         category=SettingCategory.RAG,
-        default_value=False,
+        default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Enable adaptive routing based on query complexity (simple/multi-hop/analytical)"
     ),
@@ -1754,6 +1855,29 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         description="Enable multi-tenant data isolation"
     ),
 
+    # Embedding Inversion Defense (OWASP LLM08:2025)
+    SettingDefinition(
+        key="security.embedding_defense_enabled",
+        category=SettingCategory.SECURITY,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable embedding inversion defense (noise injection, dimension shuffle, norm clipping)"
+    ),
+    SettingDefinition(
+        key="security.defense_noise_scale",
+        category=SettingCategory.SECURITY,
+        default_value=0.01,
+        value_type=ValueType.NUMBER,
+        description="Gaussian noise standard deviation added to embeddings (0.001-0.1)"
+    ),
+    SettingDefinition(
+        key="security.defense_clip_norm",
+        category=SettingCategory.SECURITY,
+        default_value=1.0,
+        value_type=ValueType.NUMBER,
+        description="Maximum L2 norm for stored embeddings to limit information leakage (0.5-2.0)"
+    ),
+
     # ==========================================================================
     # Phase 66: Adaptive RAG Routing
     # ==========================================================================
@@ -1850,6 +1974,74 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value="sentence",
         value_type=ValueType.STRING,
         description="AttentionRAG compression unit: token, sentence, paragraph"
+    ),
+    SettingDefinition(
+        key="rag.llmlingua_compression_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable LLMLingua-2 context compression (3-6x token reduction while preserving answer quality)"
+    ),
+    # Speculative RAG
+    SettingDefinition(
+        key="rag.speculative_rag_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable Speculative RAG: parallel draft generation from document subsets, verified by main model (15-50% latency reduction)"
+    ),
+    SettingDefinition(
+        key="rag.speculative_rag_num_drafts",
+        category=SettingCategory.RAG,
+        default_value=3,
+        value_type=ValueType.NUMBER,
+        description="Number of parallel draft answers to generate in Speculative RAG (2-5)"
+    ),
+
+    # Matryoshka Adaptive Retrieval
+    SettingDefinition(
+        key="rag.matryoshka_retrieval_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable Matryoshka adaptive retrieval: two-stage search using low-dim embeddings for fast shortlisting, then full-dim reranking (5-14x speed improvement)"
+    ),
+    SettingDefinition(
+        key="rag.matryoshka_shortlist_factor",
+        category=SettingCategory.RAG,
+        default_value=5,
+        value_type=ValueType.NUMBER,
+        description="Matryoshka shortlist multiplier: stage 1 retrieves top_k * factor candidates for reranking (higher = better recall, slower rerank)"
+    ),
+    SettingDefinition(
+        key="rag.matryoshka_fast_dims",
+        category=SettingCategory.RAG,
+        default_value=128,
+        value_type=ValueType.NUMBER,
+        description="Number of leading embedding dimensions for Matryoshka fast pass (128 recommended; must be < full embedding dims)"
+    ),
+
+    # Smart Model Routing
+    SettingDefinition(
+        key="rag.smart_model_routing_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Route queries to cost-optimal LLM models based on complexity (simple→cheap, complex→premium)"
+    ),
+    SettingDefinition(
+        key="rag.smart_routing_simple_model",
+        category=SettingCategory.RAG,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Model for simple factual queries (e.g., 'gpt-4o-mini', 'ollama/llama3.2'). Empty = auto-detect."
+    ),
+    SettingDefinition(
+        key="rag.smart_routing_complex_model",
+        category=SettingCategory.RAG,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Model for complex multi-hop queries (e.g., 'gpt-4o', 'anthropic/claude-3-opus'). Empty = auto-detect."
     ),
     SettingDefinition(
         key="rag.context_reorder_strategy",
@@ -2062,6 +2254,716 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         value_type=ValueType.BOOLEAN,
         description="Use DSPy modules at inference time (default: compilation-only, exported as text prompts)"
     ),
+
+    # Phase 95K: Content Freshness Scoring
+    SettingDefinition(
+        key="rag.content_freshness_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable content freshness scoring to boost recent documents and penalize stale ones"
+    ),
+    SettingDefinition(
+        key="rag.freshness_decay_days",
+        category=SettingCategory.RAG,
+        default_value=180,
+        value_type=ValueType.NUMBER,
+        description="Number of days after which documents are considered stale and penalized (30-730)"
+    ),
+    SettingDefinition(
+        key="rag.freshness_boost_factor",
+        category=SettingCategory.RAG,
+        default_value=1.05,
+        value_type=ValueType.NUMBER,
+        description="Score multiplier for documents updated in the last 30 days (1.0-1.5)"
+    ),
+    SettingDefinition(
+        key="rag.freshness_penalty_factor",
+        category=SettingCategory.RAG,
+        default_value=0.95,
+        value_type=ValueType.NUMBER,
+        description="Score multiplier for documents older than freshness_decay_days (0.5-1.0)"
+    ),
+
+    # ==========================================================================
+    # Phase 97: AI Processing Settings (frontend ai.* namespace)
+    # ==========================================================================
+
+    # Text Preprocessing
+    SettingDefinition(
+        key="ai.enable_preprocessing",
+        category=SettingCategory.PROCESSING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable text preprocessing before embedding to reduce token costs (10-20% savings)"
+    ),
+    SettingDefinition(
+        key="ai.remove_boilerplate",
+        category=SettingCategory.PROCESSING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Strip headers, footers, page numbers and other boilerplate content"
+    ),
+    SettingDefinition(
+        key="ai.normalize_whitespace",
+        category=SettingCategory.PROCESSING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Collapse multiple spaces and newlines to normalize whitespace"
+    ),
+    SettingDefinition(
+        key="ai.deduplicate_content",
+        category=SettingCategory.PROCESSING,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Remove near-duplicate chunks during ingestion"
+    ),
+
+    # Document Summarization
+    SettingDefinition(
+        key="ai.enable_summarization",
+        category=SettingCategory.PROCESSING,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Generate summaries for large documents before chunking (30-40% token savings)"
+    ),
+    SettingDefinition(
+        key="ai.summarization_threshold_pages",
+        category=SettingCategory.PROCESSING,
+        default_value=50,
+        value_type=ValueType.NUMBER,
+        description="Page count threshold above which documents are summarized before chunking"
+    ),
+    SettingDefinition(
+        key="ai.summarization_threshold_kb",
+        category=SettingCategory.PROCESSING,
+        default_value=100,
+        value_type=ValueType.NUMBER,
+        description="Size threshold (KB) above which documents are summarized before chunking"
+    ),
+    SettingDefinition(
+        key="ai.summarization_model",
+        category=SettingCategory.PROCESSING,
+        default_value="gpt-4o-mini",
+        value_type=ValueType.STRING,
+        description="Model to use for document summarization (gpt-4o-mini, gpt-4o, claude-3-haiku)"
+    ),
+
+    # Adaptive and Hierarchical Chunking
+    SettingDefinition(
+        key="ai.enable_adaptive_chunking",
+        category=SettingCategory.PROCESSING,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Auto-detect document type and adjust chunk size accordingly (10-15% token savings)"
+    ),
+    SettingDefinition(
+        key="ai.enable_hierarchical_chunking",
+        category=SettingCategory.PROCESSING,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Create multi-level chunk hierarchy (document/section/detail) for large docs (20-30% savings)"
+    ),
+    SettingDefinition(
+        key="ai.hierarchical_threshold_chars",
+        category=SettingCategory.PROCESSING,
+        default_value=100000,
+        value_type=ValueType.NUMBER,
+        description="Character threshold above which hierarchical chunking is applied"
+    ),
+    SettingDefinition(
+        key="ai.sections_per_document",
+        category=SettingCategory.PROCESSING,
+        default_value=10,
+        value_type=ValueType.NUMBER,
+        description="Target number of section summaries per document in hierarchical chunking (3-20)"
+    ),
+
+    # ==========================================================================
+    # Phase 97: Semantic Cache & Query Expansion (rag.* namespace)
+    # ==========================================================================
+
+    SettingDefinition(
+        key="rag.semantic_cache_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable semantic query caching to serve similar queries from cache (up to 68% API cost reduction)"
+    ),
+    SettingDefinition(
+        key="rag.semantic_similarity_threshold",
+        category=SettingCategory.RAG,
+        default_value=0.95,
+        value_type=ValueType.NUMBER,
+        description="Minimum cosine similarity for a cache hit (0.8-1.0, higher = stricter matching)"
+    ),
+    SettingDefinition(
+        key="rag.max_semantic_cache_entries",
+        category=SettingCategory.RAG,
+        default_value=10000,
+        value_type=ValueType.NUMBER,
+        description="Maximum number of entries in the semantic cache before eviction"
+    ),
+    SettingDefinition(
+        key="rag.query_expansion_model",
+        category=SettingCategory.RAG,
+        default_value="gpt-4o-mini",
+        value_type=ValueType.STRING,
+        description="Model to use for generating query variations (gpt-4o-mini, gpt-4o, claude-3-haiku)"
+    ),
+
+    # ==========================================================================
+    # Phase 97: Advanced Retrieval Methods (LightRAG, RAPTOR, SELF-RAG extras)
+    # ==========================================================================
+
+    SettingDefinition(
+        key="rag.lightrag_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable LightRAG dual-level retrieval with entity-based and relationship-aware search (10x token reduction)"
+    ),
+    SettingDefinition(
+        key="rag.lightrag_mode",
+        category=SettingCategory.RAG,
+        default_value="hybrid",
+        value_type=ValueType.STRING,
+        description="LightRAG retrieval mode: local (entity-focused), global (relationship-focused), hybrid (both)"
+    ),
+    SettingDefinition(
+        key="rag.lightrag_max_entities",
+        category=SettingCategory.RAG,
+        default_value=20,
+        value_type=ValueType.NUMBER,
+        description="Maximum entities to consider per query in LightRAG (5-50)"
+    ),
+    SettingDefinition(
+        key="rag.raptor_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable RAPTOR tree-organized retrieval for hierarchical document understanding (97% token reduction)"
+    ),
+    SettingDefinition(
+        key="rag.raptor_tree_depth",
+        category=SettingCategory.RAG,
+        default_value=3,
+        value_type=ValueType.NUMBER,
+        description="Number of hierarchy levels in RAPTOR document tree (2-6)"
+    ),
+    SettingDefinition(
+        key="rag.raptor_cluster_size",
+        category=SettingCategory.RAG,
+        default_value=5,
+        value_type=ValueType.NUMBER,
+        description="Number of chunks per cluster at each RAPTOR tree level (3-15)"
+    ),
+    SettingDefinition(
+        key="rag.raptor_use_summaries",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Generate summary nodes at each RAPTOR tree level for multi-level understanding"
+    ),
+    SettingDefinition(
+        key="rag.self_rag_confidence_threshold",
+        category=SettingCategory.RAG,
+        default_value=0.7,
+        value_type=ValueType.NUMBER,
+        description="Minimum confidence score before SELF-RAG triggers re-retrieval (0.5-0.95)"
+    ),
+    SettingDefinition(
+        key="rag.self_rag_max_retries",
+        category=SettingCategory.RAG,
+        default_value=2,
+        value_type=ValueType.NUMBER,
+        description="Maximum number of re-retrieval attempts for low-confidence SELF-RAG answers (1-5)"
+    ),
+
+    # Jina Reranker v3 (Listwise, 131K context)
+    SettingDefinition(
+        key="rerank.jina_v3_enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable Jina reranker v3 (listwise scoring, 131K context, BEIR 61.94 nDCG@10)"
+    ),
+
+    # ==========================================================================
+    # Phase 97: Tiered Reranking Pipeline
+    # ==========================================================================
+
+    SettingDefinition(
+        key="rerank.tiered_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable 3-stage tiered reranking pipeline (ColBERT → Cross-Encoder → LLM) for 87% multi-hop accuracy"
+    ),
+    SettingDefinition(
+        key="rerank.stage1_top_k",
+        category=SettingCategory.RAG,
+        default_value=100,
+        value_type=ValueType.NUMBER,
+        description="Number of candidates from ColBERT stage 1 (20-200)"
+    ),
+    SettingDefinition(
+        key="rerank.stage2_top_k",
+        category=SettingCategory.RAG,
+        default_value=20,
+        value_type=ValueType.NUMBER,
+        description="Number of candidates from cross-encoder stage 2 (5-50)"
+    ),
+    SettingDefinition(
+        key="rerank.final_top_k",
+        category=SettingCategory.RAG,
+        default_value=5,
+        value_type=ValueType.NUMBER,
+        description="Final number of results returned after all reranking stages (3-20)"
+    ),
+    SettingDefinition(
+        key="rerank.use_llm_stage",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable LLM-based stage 3 reranking for highest quality (increases cost and latency)"
+    ),
+
+    # ==========================================================================
+    # Phase 97: Memory Settings
+    # ==========================================================================
+
+    SettingDefinition(
+        key="memory.enabled",
+        category=SettingCategory.RAG,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable persistent agent memory for context retention across conversations (91% lower latency)"
+    ),
+    SettingDefinition(
+        key="memory.provider",
+        category=SettingCategory.RAG,
+        default_value="mem0",
+        value_type=ValueType.STRING,
+        description="Memory backend provider: mem0 (recommended) or amem (agentic)"
+    ),
+    SettingDefinition(
+        key="memory.max_entries",
+        category=SettingCategory.RAG,
+        default_value=1000,
+        value_type=ValueType.NUMBER,
+        description="Maximum memory entries per user (100-10000)"
+    ),
+    SettingDefinition(
+        key="memory.decay_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Automatically deprioritize old memories based on access frequency and age"
+    ),
+
+    # ==========================================================================
+    # Phase 97: Context Compression Settings
+    # ==========================================================================
+
+    SettingDefinition(
+        key="compression.enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable context compression to reduce token costs for long conversations (32x compression, 85% savings)"
+    ),
+    SettingDefinition(
+        key="compression.recent_turns",
+        category=SettingCategory.RAG,
+        default_value=10,
+        value_type=ValueType.NUMBER,
+        description="Number of recent conversation turns to keep uncompressed (3-20)"
+    ),
+    SettingDefinition(
+        key="compression.level",
+        category=SettingCategory.RAG,
+        default_value="moderate",
+        value_type=ValueType.STRING,
+        description="Compression aggressiveness: minimal (keep more context), moderate (balanced), aggressive (max savings)"
+    ),
+    SettingDefinition(
+        key="compression.enable_anchoring",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Never compress critical information like names, dates, and key facts"
+    ),
+
+    # ==========================================================================
+    # System Settings (Custom Instructions, Language, etc.)
+    # ==========================================================================
+    SettingDefinition(
+        key="system.custom_instructions_enabled",
+        category=SettingCategory.SYSTEM,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable custom system instructions for RAG responses"
+    ),
+    SettingDefinition(
+        key="system.org_system_prompt",
+        category=SettingCategory.SYSTEM,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Organization-level custom system prompt appended to RAG prompts"
+    ),
+    SettingDefinition(
+        key="system.default_response_language",
+        category=SettingCategory.SYSTEM,
+        default_value="auto",
+        value_type=ValueType.STRING,
+        description="Default language for RAG responses (auto, en, es, fr, de, ja, zh, ko, pt, ar, hi)"
+    ),
+    SettingDefinition(
+        key="system.custom_instructions_append_mode",
+        category=SettingCategory.SYSTEM,
+        default_value="append",
+        value_type=ValueType.STRING,
+        description="How custom instructions are combined with system prompt (prepend, append, replace)"
+    ),
+
+    # ==========================================================================
+    # Generation Settings (Vision Analysis, Slide Constraints)
+    # ==========================================================================
+    SettingDefinition(
+        key="generation.enable_template_vision_analysis",
+        category=SettingCategory.GENERATION,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable vision model analysis of uploaded templates for layout matching"
+    ),
+    SettingDefinition(
+        key="generation.template_vision_model",
+        category=SettingCategory.GENERATION,
+        default_value="gpt-4o",
+        value_type=ValueType.STRING,
+        description="Vision model to use for template analysis (gpt-4o, claude-3-5-sonnet)"
+    ),
+    SettingDefinition(
+        key="generation.enable_per_slide_constraints",
+        category=SettingCategory.GENERATION,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable per-slide content constraints for presentation generation"
+    ),
+
+    # ==========================================================================
+    # Observability / Distributed Tracing (OpenTelemetry)
+    # ==========================================================================
+    SettingDefinition(
+        key="observability.tracing_enabled",
+        category=SettingCategory.GENERAL,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable OpenTelemetry distributed tracing for the RAG pipeline"
+    ),
+    SettingDefinition(
+        key="observability.tracing_sample_rate",
+        category=SettingCategory.GENERAL,
+        default_value=0.1,
+        value_type=ValueType.NUMBER,
+        description="Head-based sampling rate for traces (0.0 = none, 1.0 = all requests)"
+    ),
+    SettingDefinition(
+        key="observability.otlp_endpoint",
+        category=SettingCategory.GENERAL,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="OTLP/gRPC collector endpoint for exporting traces (e.g. http://localhost:4317)"
+    ),
+
+    # ==========================================================================
+    # Memory Management Settings (Phase 2.2)
+    # ==========================================================================
+    SettingDefinition(
+        key="system.memory_cleanup_interval_minutes",
+        category=SettingCategory.SYSTEM,
+        default_value=10,
+        value_type=ValueType.NUMBER,
+        description="Run memory cleanup task every N minutes (5-60)"
+    ),
+    SettingDefinition(
+        key="system.model_idle_timeout_minutes",
+        category=SettingCategory.SYSTEM,
+        default_value=15,
+        value_type=ValueType.NUMBER,
+        description="Unload ML models after N minutes of inactivity (5-60)"
+    ),
+    SettingDefinition(
+        key="system.max_memory_usage_percent",
+        category=SettingCategory.SYSTEM,
+        default_value=85,
+        value_type=ValueType.NUMBER,
+        description="Trigger aggressive cleanup when memory usage exceeds this percentage (50-95)"
+    ),
+
+    # ==========================================================================
+    # OCR Settings (Phase 2.2)
+    # ==========================================================================
+    SettingDefinition(
+        key="ocr.timeout_seconds",
+        category=SettingCategory.OCR,
+        default_value=30,
+        value_type=ValueType.NUMBER,
+        description="OCR timeout per page in seconds (10-120)"
+    ),
+    SettingDefinition(
+        key="ocr.max_reload_uses",
+        category=SettingCategory.OCR,
+        default_value=50,
+        value_type=ValueType.NUMBER,
+        description="Reload OCR model after N uses to prevent memory bloat (10-200)"
+    ),
+    SettingDefinition(
+        key="ocr.force_cpu",
+        category=SettingCategory.OCR,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Force CPU mode for OCR (recommended for Mac stability)"
+    ),
+
+    # ==========================================================================
+    # Hybrid Search Settings (Phase 2.2 - OpenClaw-inspired)
+    # ==========================================================================
+    SettingDefinition(
+        key="search.hybrid_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable hybrid search combining vector similarity and keyword matching"
+    ),
+    SettingDefinition(
+        key="search.vector_weight",
+        category=SettingCategory.RAG,
+        default_value=0.7,
+        value_type=ValueType.NUMBER,
+        description="Weight for vector (semantic) similarity in hybrid search (0.0-1.0)"
+    ),
+    SettingDefinition(
+        key="search.bm25_weight",
+        category=SettingCategory.RAG,
+        default_value=0.3,
+        value_type=ValueType.NUMBER,
+        description="Weight for BM25 (keyword) matching in hybrid search (0.0-1.0)"
+    ),
+    SettingDefinition(
+        key="search.rrf_k",
+        category=SettingCategory.RAG,
+        default_value=60,
+        value_type=ValueType.NUMBER,
+        description="Reciprocal Rank Fusion K parameter (40-100, higher = less penalty for low ranks)"
+    ),
+
+    # ==========================================================================
+    # Query Cache Settings (Phase 2.2 - LightRAG-inspired)
+    # ==========================================================================
+    SettingDefinition(
+        key="cache.query_cache_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable Q&A query caching to reduce redundant LLM calls"
+    ),
+    SettingDefinition(
+        key="cache.query_similarity_threshold",
+        category=SettingCategory.RAG,
+        default_value=0.95,
+        value_type=ValueType.NUMBER,
+        description="Cosine similarity threshold for query cache hits (0.90-0.99)"
+    ),
+    SettingDefinition(
+        key="cache.query_cache_ttl_hours",
+        category=SettingCategory.RAG,
+        default_value=24,
+        value_type=ValueType.NUMBER,
+        description="Query cache time-to-live in hours (1-168)"
+    ),
+    SettingDefinition(
+        key="cache.query_cache_max_entries",
+        category=SettingCategory.RAG,
+        default_value=10000,
+        value_type=ValueType.NUMBER,
+        description="Maximum cached query-answer pairs (1000-100000)"
+    ),
+
+    # ==========================================================================
+    # Ray / Distributed Processing Settings (Phase 2.2)
+    # ==========================================================================
+    SettingDefinition(
+        key="processing.use_ray",
+        category=SettingCategory.PROCESSING,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Use Ray for distributed processing (requires Ray installation)"
+    ),
+    SettingDefinition(
+        key="processing.ray_num_workers",
+        category=SettingCategory.PROCESSING,
+        default_value=4,
+        value_type=ValueType.NUMBER,
+        description="Number of Ray workers for parallel processing (1-16)"
+    ),
+    SettingDefinition(
+        key="processing.ray_fallback_to_local",
+        category=SettingCategory.PROCESSING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Fallback to local ThreadPoolExecutor if Ray unavailable"
+    ),
+    SettingDefinition(
+        key="processing.max_concurrent_embeddings",
+        category=SettingCategory.PROCESSING,
+        default_value=4,
+        value_type=ValueType.NUMBER,
+        description="Max concurrent embedding batches (1-16)"
+    ),
+
+    # ==========================================================================
+    # VLM / Vision Settings (Phase 2.2)
+    # ==========================================================================
+    SettingDefinition(
+        key="rag.vlm_provider",
+        category=SettingCategory.RAG,
+        default_value="auto",
+        value_type=ValueType.STRING,
+        description="Vision model provider: auto, ollama, openai, anthropic"
+    ),
+    SettingDefinition(
+        key="rag.vlm_model",
+        category=SettingCategory.RAG,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Vision model name (empty = auto-detect). E.g., llava, gpt-4o, claude-3-haiku"
+    ),
+    SettingDefinition(
+        key="rag.image_duplicate_detection",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Skip re-analyzing duplicate images (use cached captions)"
+    ),
+    SettingDefinition(
+        key="rag.max_images_per_document",
+        category=SettingCategory.RAG,
+        default_value=50,
+        value_type=ValueType.NUMBER,
+        description="Maximum images to analyze per document (0 = unlimited)"
+    ),
+    SettingDefinition(
+        key="rag.min_image_size_kb",
+        category=SettingCategory.RAG,
+        default_value=5,
+        value_type=ValueType.NUMBER,
+        description="Minimum image size in KB to analyze (skip tiny icons)"
+    ),
+
+    # ==========================================================================
+    # SMTP / Email Notification Settings (Phase 2.2)
+    # ==========================================================================
+    SettingDefinition(
+        key="notifications.smtp_host",
+        category=SettingCategory.NOTIFICATIONS,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="SMTP server hostname for email notifications"
+    ),
+    SettingDefinition(
+        key="notifications.smtp_port",
+        category=SettingCategory.NOTIFICATIONS,
+        default_value=587,
+        value_type=ValueType.NUMBER,
+        description="SMTP server port (25, 465 for SSL, 587 for TLS)"
+    ),
+    SettingDefinition(
+        key="notifications.smtp_user",
+        category=SettingCategory.NOTIFICATIONS,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="SMTP authentication username"
+    ),
+    SettingDefinition(
+        key="notifications.smtp_password",
+        category=SettingCategory.NOTIFICATIONS,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="SMTP authentication password (stored encrypted)"
+    ),
+    SettingDefinition(
+        key="notifications.smtp_from_email",
+        category=SettingCategory.NOTIFICATIONS,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Default sender email address for notifications"
+    ),
+    SettingDefinition(
+        key="notifications.smtp_from_name",
+        category=SettingCategory.NOTIFICATIONS,
+        default_value="AIDocumentIndexer",
+        value_type=ValueType.STRING,
+        description="Default sender display name for email notifications"
+    ),
+
+    # ==========================================================================
+    # Adaptive Chunking Settings (Phase 2.2 - Moltbot-inspired)
+    # ==========================================================================
+    SettingDefinition(
+        key="rag.chunk_target_tokens",
+        category=SettingCategory.RAG,
+        default_value=400,
+        value_type=ValueType.NUMBER,
+        description="Target chunk size in tokens (200-800)"
+    ),
+    SettingDefinition(
+        key="rag.chunk_overlap_tokens",
+        category=SettingCategory.RAG,
+        default_value=80,
+        value_type=ValueType.NUMBER,
+        description="Chunk overlap in tokens (20-200)"
+    ),
+    SettingDefinition(
+        key="rag.adaptive_chunking_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enable adaptive chunking with progressive fallback for oversized chunks"
+    ),
+
+    # ==========================================================================
+    # Provider Failover Settings (Phase 2.2 - OpenClaw-inspired)
+    # ==========================================================================
+    SettingDefinition(
+        key="llm.enable_provider_failover",
+        category=SettingCategory.LLM,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Automatically failover to backup providers on error"
+    ),
+    SettingDefinition(
+        key="llm.failover_providers",
+        category=SettingCategory.LLM,
+        default_value="openai,anthropic,ollama",
+        value_type=ValueType.STRING,
+        description="Comma-separated list of fallback LLM providers in priority order"
+    ),
+    SettingDefinition(
+        key="embedding.enable_provider_failover",
+        category=SettingCategory.LLM,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Automatically failover to backup embedding providers on error"
+    ),
+    SettingDefinition(
+        key="embedding.failover_providers",
+        category=SettingCategory.LLM,
+        default_value="openai,voyage,ollama",
+        value_type=ValueType.STRING,
+        description="Comma-separated list of fallback embedding providers in priority order"
+    ),
 ]
 
 # Build lookup dictionary
@@ -2152,6 +3054,44 @@ class SettingsService:
 
         async with async_session_context() as db:
             return await _get(db)
+
+    async def get_settings_batch(
+        self,
+        keys: List[str],
+        session: Optional[AsyncSession] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get multiple settings in a single database query.
+
+        Returns a dict mapping each key to its value (or default if not set).
+        Much more efficient than calling get_setting() for each key individually.
+        """
+        # Build defaults map
+        defaults = {}
+        type_map = {}
+        for key in keys:
+            definition = SETTINGS_DEFINITIONS.get(key)
+            defaults[key] = definition.default_value if definition else None
+            type_map[key] = definition.value_type if definition else ValueType.STRING
+
+        async def _get_batch(db: AsyncSession) -> Dict[str, Any]:
+            query = select(SystemSettings).where(SystemSettings.key.in_(keys))
+            result = await db.execute(query)
+            settings_rows = result.scalars().all()
+
+            # Start with defaults, override with stored values
+            values = dict(defaults)
+            for setting in settings_rows:
+                vtype = type_map.get(setting.key, ValueType.STRING)
+                values[setting.key] = self._convert_value(setting.value, vtype)
+
+            return values
+
+        if session:
+            return await _get_batch(session)
+
+        async with async_session_context() as db:
+            return await _get_batch(db)
 
     async def set_setting(
         self,

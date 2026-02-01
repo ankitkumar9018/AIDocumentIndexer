@@ -42,6 +42,11 @@ class SufficiencyResult:
     suggested_action: str  # "proceed", "retrieve_more", "rerank", "abstain"
     coverage_score: float  # How much of the query is covered by context
     relevance_score: float  # How relevant the retrieved context is
+    missing_information: list = None  # List of information that would improve context
+
+    def __post_init__(self):
+        if self.missing_information is None:
+            self.missing_information = []
 
 
 class SufficiencyChecker:

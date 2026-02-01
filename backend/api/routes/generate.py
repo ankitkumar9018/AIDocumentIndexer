@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
-from backend.db.database import get_async_session
+from backend.db.database import get_async_session, async_session_context
 from backend.api.middleware.auth import AuthenticatedUser
 from backend.services.generator import (
     DocumentGenerationService,
@@ -527,18 +527,16 @@ async def create_generation_job(
     # Store PPTX template if provided
     if request.template_pptx_id:
         # Look up template from uploaded documents
-        from backend.db.database import get_async_session
         from backend.db.models import Document
         from sqlalchemy import select
 
         template_path = None
-        async for session in get_async_session():
+        async with async_session_context() as session:
             query = select(Document).where(Document.id == request.template_pptx_id)
             result = await session.execute(query)
             doc = result.scalar_one_or_none()
             if doc and doc.file_path and os.path.exists(doc.file_path):
                 template_path = doc.file_path
-            break
 
         if not template_path:
             raise HTTPException(
@@ -1852,14 +1850,13 @@ async def list_pptx_templates(
     user: AuthenticatedUser,
 ) -> List[dict]:
     """List all uploaded PPTX documents that can be used as templates."""
-    from backend.db.database import get_async_session
     from backend.db.models import Document
     from sqlalchemy import select, or_
 
     templates = []
 
     # Query uploaded PPTX documents from database
-    async for session in get_async_session():
+    async with async_session_context() as session:
         query = select(Document).where(
             or_(
                 Document.file_type == "pptx",
@@ -1947,13 +1944,12 @@ async def suggest_pptx_templates(
     new document topic, returning a ranked list with explanations.
     """
     from backend.services.llm import EnhancedLLMFactory
-    from backend.db.database import get_async_session
     from backend.db.models import Document
     from sqlalchemy import select, or_
 
     # Query uploaded PPTX documents from database
     templates = []
-    async for session in get_async_session():
+    async with async_session_context() as session:
         # Get PPTX documents that can serve as templates
         query = select(Document).where(
             or_(

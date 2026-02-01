@@ -142,7 +142,7 @@ async def get_database_metrics() -> Dict[str, Any]:
             # Chunk counts
             total_chunks = await db.scalar(select(func.count(Chunk.id))) or 0
             chunks_with_embeddings = await db.scalar(
-                select(func.count(Chunk.id)).where(Chunk.embedding.isnot(None))
+                select(func.count(Chunk.id)).where(Chunk.has_embedding == True)
             ) or 0
 
             # Chat metrics

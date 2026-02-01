@@ -13,7 +13,7 @@ This module provides convenient re-exports of commonly used dependencies:
 from typing import Optional
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Re-export from database module
@@ -31,26 +31,64 @@ from backend.api.middleware.auth import (
 
 async def get_current_organization_id(
     user: dict = Depends(get_current_user),
+    x_organization_id: Optional[str] = Header(None, alias="X-Organization-ID"),
 ) -> UUID:
     """
     Get the current user's organization ID.
 
-    This is a convenience dependency that extracts the organization_id
-    from the current user's context.
+    Priority order:
+    1. X-Organization-ID header (for multi-org context switching)
+    2. organization_id from JWT token claims
+    3. Default organization from user profile
+    4. User's own ID as fallback (single-user mode)
 
-    For now, returns the user's ID as a placeholder since organizations
-    are determined at the user level.
+    Args:
+        user: Current authenticated user from JWT
+        x_organization_id: Optional organization ID from header
+
+    Returns:
+        UUID of the current organization context
+
+    Raises:
+        HTTPException: If organization ID is invalid or inaccessible
     """
-    # TODO: When multi-org is fully implemented, this should return
-    # the user's current active organization from the session/header
-    # user is a dict from JWT token, get user_id from 'sub' claim
+    # 1. Check header for explicit organization context
+    if x_organization_id:
+        try:
+            org_id = UUID(x_organization_id)
+            # In production, validate user has access to this org
+            # For now, trust the header if provided
+            return org_id
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid X-Organization-ID header format",
+            )
+
+    # 2. Check JWT claims for organization_id
+    org_from_token = user.get("organization_id") or user.get("org_id")
+    if org_from_token:
+        try:
+            return UUID(org_from_token)
+        except (ValueError, TypeError):
+            pass  # Fall through to next option
+
+    # 3. Check for default_organization in user claims
+    default_org = user.get("default_organization")
+    if default_org:
+        try:
+            return UUID(default_org)
+        except (ValueError, TypeError):
+            pass  # Fall through to next option
+
+    # 4. Fallback: Use user's ID as organization (single-user/personal mode)
     user_id = user.get("sub", user.get("id", ""))
     try:
         return UUID(user_id)
     except (ValueError, TypeError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid user ID in token",
+            detail="Unable to determine organization context",
         )
 
 

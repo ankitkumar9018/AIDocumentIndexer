@@ -2,12 +2,16 @@
 Embedding System API Routes
 """
 
-from typing import List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, func, Integer
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from sqlalchemy import select, func, Integer, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 import os
+import asyncio
+from datetime import datetime
+import threading
+import uuid as uuid_module
 
 from backend.db.database import get_async_session
 from backend.db.models import Document, Chunk, get_embedding_dimension
@@ -17,6 +21,237 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+
+# =============================================================================
+# Background Job Tracking
+# =============================================================================
+
+class BackgroundJobStatus:
+    """Track status of background embedding jobs."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._jobs: Dict[str, Dict[str, Any]] = {}
+
+    def create_job(self, job_type: str, user_id: str) -> str:
+        """Create a new job and return its ID."""
+        job_id = str(uuid_module.uuid4())
+        with self._lock:
+            self._jobs[job_id] = {
+                "id": job_id,
+                "type": job_type,
+                "user_id": user_id,
+                "status": "pending",
+                "progress": 0,
+                "total": 0,
+                "processed": 0,
+                "errors": [],
+                "created_at": datetime.utcnow().isoformat(),
+                "started_at": None,
+                "completed_at": None,
+            }
+        return job_id
+
+    def update_job(self, job_id: str, **kwargs):
+        """Update job status."""
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id].update(kwargs)
+                if "processed" in kwargs and "total" in kwargs:
+                    total = kwargs.get("total", 1)
+                    if total > 0:
+                        self._jobs[job_id]["progress"] = int((kwargs["processed"] / total) * 100)
+
+    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get job status."""
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def list_jobs(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List all jobs, optionally filtered by user."""
+        with self._lock:
+            jobs = list(self._jobs.values())
+            if user_id:
+                jobs = [j for j in jobs if j["user_id"] == user_id]
+            return sorted(jobs, key=lambda x: x["created_at"], reverse=True)[:20]
+
+
+# Global job tracker
+_job_tracker = BackgroundJobStatus()
+
+
+async def _run_embedding_backfill(job_id: str, batch_size: int = 50):
+    """Background task to generate missing embeddings."""
+    from backend.db.database import async_session_maker
+    from backend.services.embeddings import get_embedding_service
+
+    _job_tracker.update_job(job_id, status="running", started_at=datetime.utcnow().isoformat())
+
+    try:
+        async with async_session_maker() as db:
+            # Count chunks without embeddings (use has_embedding flag for consistency)
+            count_result = await db.execute(
+                select(func.count(Chunk.id)).where(
+                    Chunk.has_embedding == False
+                )
+            )
+            total_missing = count_result.scalar() or 0
+
+            _job_tracker.update_job(job_id, total=total_missing)
+
+            if total_missing == 0:
+                _job_tracker.update_job(
+                    job_id,
+                    status="completed",
+                    completed_at=datetime.utcnow().isoformat(),
+                    message="No missing embeddings found",
+                )
+                return
+
+            embedding_service = get_embedding_service()
+            processed = 0
+            errors = []
+
+            while processed < total_missing:
+                # Fetch batch of chunks without embeddings
+                result = await db.execute(
+                    select(Chunk).where(
+                        Chunk.has_embedding == False
+                    ).limit(batch_size)
+                )
+                chunks = result.scalars().all()
+
+                if not chunks:
+                    break
+
+                for chunk in chunks:
+                    try:
+                        # Generate embedding
+                        embedding = await embedding_service.embed_text(chunk.content)
+                        chunk.embedding = embedding
+                        chunk.has_embedding = True  # Track for UI consistency
+                        processed += 1
+
+                    except Exception as e:
+                        errors.append(f"Chunk {chunk.id}: {str(e)}")
+                        logger.warning("Failed to embed chunk", chunk_id=str(chunk.id), error=str(e))
+
+                    # Update progress every 10 items
+                    if processed % 10 == 0:
+                        _job_tracker.update_job(job_id, processed=processed, errors=errors[-5:])
+
+                await db.commit()
+
+            _job_tracker.update_job(
+                job_id,
+                status="completed",
+                completed_at=datetime.utcnow().isoformat(),
+                processed=processed,
+                errors=errors[-10:],
+            )
+
+            logger.info("Embedding backfill completed", job_id=job_id, processed=processed, errors=len(errors))
+
+    except Exception as e:
+        logger.error("Embedding backfill failed", job_id=job_id, error=str(e))
+        _job_tracker.update_job(
+            job_id,
+            status="failed",
+            completed_at=datetime.utcnow().isoformat(),
+            error=str(e),
+        )
+
+
+async def _run_document_embedding_generation(job_id: str, document_id: str):
+    """Background task to generate embeddings for a specific document."""
+    from backend.db.database import async_session_maker
+    from backend.services.embeddings import get_embedding_service
+
+    _job_tracker.update_job(job_id, status="running", started_at=datetime.utcnow().isoformat())
+
+    try:
+        async with async_session_maker() as db:
+            # Count chunks without embeddings for this document
+            doc_uuid = uuid_module.UUID(document_id)
+            count_result = await db.execute(
+                select(func.count(Chunk.id)).where(
+                    and_(
+                        Chunk.document_id == doc_uuid,
+                        Chunk.has_embedding == False,
+                    )
+                )
+            )
+            total_missing = count_result.scalar() or 0
+
+            _job_tracker.update_job(job_id, total=total_missing)
+
+            if total_missing == 0:
+                _job_tracker.update_job(
+                    job_id,
+                    status="completed",
+                    completed_at=datetime.utcnow().isoformat(),
+                    message="No missing embeddings found for this document",
+                )
+                return
+
+            embedding_service = get_embedding_service()
+            processed = 0
+            errors = []
+
+            # Fetch all chunks for this document without embeddings
+            result = await db.execute(
+                select(Chunk).where(
+                    and_(
+                        Chunk.document_id == doc_uuid,
+                        Chunk.has_embedding == False,
+                    )
+                )
+            )
+            chunks = result.scalars().all()
+
+            for chunk in chunks:
+                try:
+                    # Generate embedding
+                    embedding = await embedding_service.embed_text(chunk.content)
+                    chunk.embedding = embedding
+                    chunk.has_embedding = True  # Track for UI consistency
+                    processed += 1
+
+                except Exception as e:
+                    errors.append(f"Chunk {chunk.id}: {str(e)}")
+                    logger.warning("Failed to embed chunk", chunk_id=str(chunk.id), error=str(e))
+
+                # Update progress every 5 items
+                if processed % 5 == 0:
+                    _job_tracker.update_job(job_id, processed=processed, errors=errors[-5:])
+
+            await db.commit()
+
+            _job_tracker.update_job(
+                job_id,
+                status="completed",
+                completed_at=datetime.utcnow().isoformat(),
+                processed=processed,
+                errors=errors[-10:],
+            )
+
+            logger.info(
+                "Document embedding generation completed",
+                job_id=job_id,
+                document_id=document_id,
+                processed=processed,
+                errors=len(errors),
+            )
+
+    except Exception as e:
+        logger.error("Document embedding generation failed", job_id=job_id, document_id=document_id, error=str(e))
+        _job_tracker.update_job(
+            job_id,
+            status="failed",
+            completed_at=datetime.utcnow().isoformat(),
+            error=str(e),
+        )
 
 
 class ProviderStats(BaseModel):
@@ -61,9 +296,9 @@ async def get_embedding_stats(
         result = await db.execute(select(func.count(Chunk.id)))
         total_chunks = result.scalar_one() or 0
 
-        # Count chunks with embeddings
+        # Count chunks with embeddings (use has_embedding flag for consistency)
         result = await db.execute(
-            select(func.count(Chunk.id)).where(Chunk.embedding.isnot(None))
+            select(func.count(Chunk.id)).where(Chunk.has_embedding == True)
         )
         chunks_with_embeddings = result.scalar_one() or 0
 
@@ -148,24 +383,178 @@ async def get_embedding_stats(
         )
 
 
-@router.post("/embeddings/generate-missing")
+class GenerateEmbeddingsRequest(BaseModel):
+    """Request to generate missing embeddings."""
+    batch_size: int = 50
+
+
+class JobStatusResponse(BaseModel):
+    """Response with job status."""
+    job_id: str
+    status: str
+    progress: int
+    total: int
+    processed: int
+    errors: List[str]
+    created_at: str
+    started_at: Optional[str]
+    completed_at: Optional[str]
+
+
+@router.post("/embeddings/generate-missing", response_model=JobStatusResponse)
 async def generate_missing_embeddings(
+    request: GenerateEmbeddingsRequest = None,
+    background_tasks: BackgroundTasks = None,
     db: AsyncSession = Depends(get_async_session),
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """
     Trigger background job to generate missing embeddings.
 
-    This endpoint is a placeholder for future implementation.
-    Currently, use the CLI scripts:
-    - python backend/scripts/backfill_chunk_embeddings.py
-    - python backend/scripts/backfill_entity_embeddings.py
+    This starts an async job that processes chunks without embeddings.
+    Use the /embeddings/jobs/{job_id} endpoint to check progress.
+
+    Returns job ID for status tracking.
     """
-    # TODO: Implement background job system
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Background embedding generation not yet implemented. Use CLI scripts instead."
+    batch_size = request.batch_size if request else 50
+
+    # Create job
+    user_id = current_user.get("sub", current_user.get("id", "unknown"))
+    job_id = _job_tracker.create_job("embedding_backfill", user_id)
+
+    # Start background task
+    asyncio.create_task(_run_embedding_backfill(job_id, batch_size))
+
+    logger.info(
+        "Started embedding backfill job",
+        job_id=job_id,
+        user_id=user_id,
+        batch_size=batch_size,
     )
+
+    job = _job_tracker.get_job(job_id)
+    return JobStatusResponse(
+        job_id=job["id"],
+        status=job["status"],
+        progress=job["progress"],
+        total=job["total"],
+        processed=job["processed"],
+        errors=job["errors"],
+        created_at=job["created_at"],
+        started_at=job.get("started_at"),
+        completed_at=job.get("completed_at"),
+    )
+
+
+@router.post("/embeddings/generate/{document_id}", response_model=JobStatusResponse)
+async def generate_document_embeddings(
+    document_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: CurrentUser = Depends(get_current_user)
+):
+    """
+    Generate embeddings for a specific document.
+
+    This starts a background job to generate embeddings for all chunks
+    of the specified document that don't already have embeddings.
+
+    Returns job ID for status tracking.
+    """
+    # Verify document exists
+    try:
+        doc_uuid = uuid_module.UUID(document_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document ID format",
+        )
+
+    result = await db.execute(
+        select(Document.id).where(Document.id == doc_uuid)
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document {document_id} not found",
+        )
+
+    # Create job
+    user_id = current_user.get("sub", current_user.get("id", "unknown"))
+    job_id = _job_tracker.create_job("document_embedding", user_id)
+
+    # Start background task
+    asyncio.create_task(_run_document_embedding_generation(job_id, document_id))
+
+    logger.info(
+        "Started document embedding job",
+        job_id=job_id,
+        document_id=document_id,
+        user_id=user_id,
+    )
+
+    job = _job_tracker.get_job(job_id)
+    return JobStatusResponse(
+        job_id=job["id"],
+        status=job["status"],
+        progress=job["progress"],
+        total=job["total"],
+        processed=job["processed"],
+        errors=job["errors"],
+        created_at=job["created_at"],
+        started_at=job.get("started_at"),
+        completed_at=job.get("completed_at"),
+    )
+
+
+@router.get("/embeddings/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_embedding_job_status(
+    job_id: str,
+    current_user: CurrentUser = Depends(get_current_user)
+):
+    """Get status of an embedding generation job."""
+    job = _job_tracker.get_job(job_id)
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job {job_id} not found",
+        )
+
+    return JobStatusResponse(
+        job_id=job["id"],
+        status=job["status"],
+        progress=job["progress"],
+        total=job["total"],
+        processed=job["processed"],
+        errors=job["errors"],
+        created_at=job["created_at"],
+        started_at=job.get("started_at"),
+        completed_at=job.get("completed_at"),
+    )
+
+
+@router.get("/embeddings/jobs", response_model=List[JobStatusResponse])
+async def list_embedding_jobs(
+    current_user: CurrentUser = Depends(get_current_user)
+):
+    """List recent embedding generation jobs."""
+    user_id = current_user.get("sub", current_user.get("id", "unknown"))
+    jobs = _job_tracker.list_jobs(user_id)
+
+    return [
+        JobStatusResponse(
+            job_id=job["id"],
+            status=job["status"],
+            progress=job["progress"],
+            total=job["total"],
+            processed=job["processed"],
+            errors=job["errors"],
+            created_at=job["created_at"],
+            started_at=job.get("started_at"),
+            completed_at=job.get("completed_at"),
+        )
+        for job in jobs
+    ]
 
 
 class ProviderInfo(BaseModel):

@@ -16,15 +16,16 @@ Features:
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import time
 import uuid
 import unicodedata
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Set
-from collections import defaultdict
 
 import structlog
 from sqlalchemy import select, func, and_, or_, case, String
@@ -541,6 +542,11 @@ class KnowledgeGraphService:
         self.llm = llm_service
         self.embeddings = embedding_service
 
+        # LRU cache for graph_search results to avoid re-querying identical paths.
+        # Keys are cache keys derived from query parameters; values are GraphRAGContext.
+        self._graph_search_cache: OrderedDict[str, GraphRAGContext] = OrderedDict()
+        self._graph_search_cache_max_size: int = 128
+
         # Phase 60: GraphRAG enhancement components
         self.graphrag_enhancer: Optional[GraphRAGEnhancer] = None
         self.kggen_extractor: Optional[KGGenExtractor] = None
@@ -800,65 +806,31 @@ class KnowledgeGraphService:
         Returns:
             Tuple of (entities, relations)
         """
+        # Check if entity extraction is enabled via settings service
+        try:
+            from backend.services.settings import get_settings_service
+            settings_svc = get_settings_service()
+            entity_extraction_enabled = await settings_svc.get_setting("rag.entity_extraction_enabled")
+            if entity_extraction_enabled is False:
+                logger.debug("Entity extraction disabled via settings")
+                return [], []
+
+            # Read dependency extraction settings
+            dep_extraction_enabled = await settings_svc.get_setting("kg.dependency_extraction_enabled")
+            if dep_extraction_enabled is not None:
+                use_fast_extraction = dep_extraction_enabled
+        except Exception:
+            pass  # Fall through to defaults
+
         # Phase 60: Initialize GraphRAG enhancements if not done
         await self._init_graphrag_enhancements()
 
-        # Phase 60: Use KGGen extractor if enabled (94% quality, 5x cheaper than standard LLM)
-        if self.kggen_extractor and settings.KG_USE_KGGEN_EXTRACTOR:
-            try:
-                extraction_result = await self.kggen_extractor.extract(text)
+        # OPTIMIZATION: Try extraction methods in order of cost (cheapest first)
+        # 1. Dependency extractor (FREE, ~10-100x faster than LLM)
+        # 2. KGGen extractor (cheaper LLM, 5x savings vs raw LLM)
+        # 3. Raw LLM (most expensive, highest quality)
 
-                # Convert to our ExtractedEntity/ExtractedRelation format
-                entities = []
-                relations = []
-
-                for entity_data in extraction_result.get("entities", []):
-                    try:
-                        # Map entity type
-                        entity_type_str = entity_data.get("type", "OTHER").upper()
-                        entity_type = getattr(EntityType, entity_type_str, EntityType.OTHER)
-
-                        entities.append(ExtractedEntity(
-                            name=entity_data.get("name", ""),
-                            entity_type=entity_type,
-                            description=entity_data.get("description"),
-                            confidence=entity_data.get("confidence", 0.9),
-                            language=document_language,
-                        ))
-                    except Exception:
-                        pass
-
-                for rel_data in extraction_result.get("relations", []):
-                    try:
-                        rel_type_str = rel_data.get("type", "OTHER").upper()
-                        rel_type = getattr(RelationType, rel_type_str, RelationType.OTHER)
-
-                        relations.append(ExtractedRelation(
-                            source_entity=rel_data.get("source", ""),
-                            target_entity=rel_data.get("target", ""),
-                            relation_type=rel_type,
-                            relation_label=rel_data.get("label"),
-                            confidence=rel_data.get("confidence", 0.9),
-                        ))
-                    except Exception:
-                        pass
-
-                # Apply entity standardization if enabled
-                if self.entity_standardizer and settings.KG_USE_ENTITY_STANDARDIZATION:
-                    entities = await self._standardize_entities(entities)
-
-                if entities:
-                    logger.info(
-                        "KGGen extraction completed (Phase 60 - 5x cheaper)",
-                        entity_count=len(entities),
-                        relation_count=len(relations),
-                    )
-                    return entities, relations
-
-            except Exception as e:
-                logger.warning("KGGen extraction failed, falling back to standard methods", error=str(e))
-
-        # Phase 2: Try fast extraction first (80-90% cost reduction)
+        # Phase 1: Try FREE dependency extraction first for simple English text
         if use_fast_extraction and document_language == "en":  # Fast extraction currently English-only
             try:
                 from backend.services.dependency_entity_extractor import get_dependency_extractor
@@ -931,7 +903,62 @@ class KnowledgeGraphService:
             except Exception as e:
                 logger.warning("Fast extraction failed, falling back to LLM", error=str(e))
 
-        # Fall back to LLM extraction for complex text or non-English
+        # Phase 2: Use KGGen extractor if enabled (94% quality, 5x cheaper than raw LLM)
+        if self.kggen_extractor and settings.KG_USE_KGGEN_EXTRACTOR:
+            try:
+                extraction_result = await self.kggen_extractor.extract(text)
+
+                # Convert to our ExtractedEntity/ExtractedRelation format
+                entities = []
+                relations = []
+
+                for entity_data in extraction_result.get("entities", []):
+                    try:
+                        # Map entity type
+                        entity_type_str = entity_data.get("type", "OTHER").upper()
+                        entity_type = getattr(EntityType, entity_type_str, EntityType.OTHER)
+
+                        entities.append(ExtractedEntity(
+                            name=entity_data.get("name", ""),
+                            entity_type=entity_type,
+                            description=entity_data.get("description"),
+                            confidence=entity_data.get("confidence", 0.9),
+                            language=document_language,
+                        ))
+                    except Exception:
+                        pass
+
+                for rel_data in extraction_result.get("relations", []):
+                    try:
+                        rel_type_str = rel_data.get("type", "OTHER").upper()
+                        rel_type = getattr(RelationType, rel_type_str, RelationType.OTHER)
+
+                        relations.append(ExtractedRelation(
+                            source_entity=rel_data.get("source", ""),
+                            target_entity=rel_data.get("target", ""),
+                            relation_type=rel_type,
+                            relation_label=rel_data.get("label"),
+                            confidence=rel_data.get("confidence", 0.9),
+                        ))
+                    except Exception:
+                        pass
+
+                # Apply entity standardization if enabled
+                if self.entity_standardizer and settings.KG_USE_ENTITY_STANDARDIZATION:
+                    entities = await self._standardize_entities(entities)
+
+                if entities:
+                    logger.info(
+                        "KGGen extraction completed (5x cheaper than raw LLM)",
+                        entity_count=len(entities),
+                        relation_count=len(relations),
+                    )
+                    return entities, relations
+
+            except Exception as e:
+                logger.warning("KGGen extraction failed, falling back to raw LLM", error=str(e))
+
+        # Phase 3: Fall back to raw LLM extraction for complex text or non-English
         llm = await self._get_llm()
 
         # Graceful fallback: Return empty if LLM unavailable
@@ -1460,9 +1487,12 @@ Only include entities and relations clearly supported by the text."""
         """
         stats = {"entities": 0, "relations": 0, "mentions": 0}
 
-        # Load document to get language
+        # Load document to get language and access tier
+        from sqlalchemy.orm import selectinload
         doc_result = await self.db.execute(
-            select(Document).where(Document.id == document_id)
+            select(Document)
+            .options(selectinload(Document.access_tier))
+            .where(Document.id == document_id)
         )
         document = doc_result.scalar_one_or_none()
 
@@ -1472,6 +1502,11 @@ Only include entities and relations clearly supported by the text."""
 
         # Get document language (default to English if not set)
         document_language = document.language or "en"
+
+        # Get document access tier level for entity tier tracking
+        doc_access_tier_level = 1
+        if document.access_tier:
+            doc_access_tier_level = document.access_tier.level
 
         # Load chunks if not provided
         if not chunks:
@@ -1531,7 +1566,10 @@ Only include entities and relations clearly supported by the text."""
         # Store entities in database
         entity_map = {}  # norm_name -> Entity model
         for norm_name, extracted in all_entities.items():
-            entity = await self._upsert_entity(extracted)
+            entity = await self._upsert_entity(
+                extracted,
+                doc_access_tier_level=doc_access_tier_level,
+            )
             entity_map[norm_name] = entity
 
             # Create mention with language context
@@ -1611,7 +1649,11 @@ Only include entities and relations clearly supported by the text."""
             return ""
         return unidecode(name.casefold()).strip()
 
-    async def _upsert_entity(self, extracted: ExtractedEntity) -> Entity:
+    async def _upsert_entity(
+        self,
+        extracted: ExtractedEntity,
+        doc_access_tier_level: int = 1,
+    ) -> Entity:
         """
         Create or update entity in database with language-aware matching.
 
@@ -1619,6 +1661,9 @@ Only include entities and relations clearly supported by the text."""
         1. Exact normalized name match (same language)
         2. Canonical name match (cross-language linking)
         3. ASCII-normalized match (cross-script matching)
+
+        Also updates min_access_tier_level to track the minimum tier
+        across all source documents mentioning this entity.
         """
         norm_name = self._normalize_entity_name(extracted.name)
         canonical = extracted.canonical_name or extracted.name
@@ -1666,6 +1711,11 @@ Only include entities and relations clearly supported by the text."""
         if entity:
             # Update existing entity
             entity.mention_count += 1
+
+            # Update min_access_tier_level - take minimum of current and new doc tier
+            # This ensures entity is visible to users who can access ANY source doc
+            if doc_access_tier_level < entity.min_access_tier_level:
+                entity.min_access_tier_level = doc_access_tier_level
 
             # Update description if not set
             if extracted.description and not entity.description:
@@ -1738,6 +1788,7 @@ Only include entities and relations clearly supported by the text."""
                 canonical_name=canonical,
                 language_variants={extracted.language: extracted.name} if extracted.language else None,
                 mention_count=1,
+                min_access_tier_level=doc_access_tier_level,  # Track access tier from source doc
                 embedding=embedding,  # Store embedding
                 confidence=extracted.confidence,  # Phase 2: Confidence scoring
                 extraction_method=extraction_method,  # Phase 2: Track extraction method
@@ -1801,6 +1852,76 @@ Only include entities and relations clearly supported by the text."""
             self.db.add(relation)
 
         return relation
+
+    # -------------------------------------------------------------------------
+    # Document Cleanup
+    # -------------------------------------------------------------------------
+
+    async def delete_document_data(
+        self,
+        document_id: uuid.UUID,
+    ) -> Dict[str, int]:
+        """
+        Delete all Knowledge Graph data associated with a document.
+
+        This removes:
+        - EntityMentions linked to this document
+        - EntityRelations where this document was the source
+
+        Note: Entities themselves are NOT deleted as they may be referenced
+        by other documents. Orphan entity cleanup should be done separately.
+
+        Args:
+            document_id: UUID of the document to clean up
+
+        Returns:
+            Dict with counts of deleted mentions and relations
+        """
+        from sqlalchemy import delete as sql_delete
+
+        deleted_mentions = 0
+        deleted_relations = 0
+
+        try:
+            # Delete entity mentions for this document
+            mention_result = await self.db.execute(
+                sql_delete(EntityMention).where(
+                    EntityMention.document_id == document_id
+                )
+            )
+            deleted_mentions = mention_result.rowcount
+
+            # Delete entity relations where this document was the source
+            # (relations have document_id with SET NULL, but we want to clean them up)
+            relation_result = await self.db.execute(
+                sql_delete(EntityRelation).where(
+                    EntityRelation.document_id == document_id
+                )
+            )
+            deleted_relations = relation_result.rowcount
+
+            await self.db.commit()
+
+            logger.info(
+                "Deleted Knowledge Graph data for document",
+                document_id=str(document_id),
+                mentions_deleted=deleted_mentions,
+                relations_deleted=deleted_relations,
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to delete Knowledge Graph data for document",
+                document_id=str(document_id),
+                error=str(e),
+            )
+            await self.db.rollback()
+            raise
+
+        return {
+            "mentions_deleted": deleted_mentions,
+            "relations_deleted": deleted_relations,
+        }
 
     # -------------------------------------------------------------------------
     # Graph Retrieval
@@ -2295,6 +2416,27 @@ Only include entities and relations clearly supported by the text."""
         Returns:
             GraphRAGContext with entities, relations, and chunks
         """
+        # Read max_hops from settings service if using default
+        if max_hops == 2:
+            try:
+                from backend.services.settings import get_settings_service
+                settings_svc = get_settings_service()
+                stored_hops = await settings_svc.get_setting("rag.graph_max_hops")
+                if stored_hops is not None:
+                    max_hops = int(stored_hops)
+            except Exception:
+                pass
+        # --- LRU cache lookup ---
+        cache_key = hashlib.sha256(
+            f"{query}|{max_hops}|{top_k}|{organization_id}|{access_tier_level}|{user_id}|{is_superadmin}".encode()
+        ).hexdigest()
+
+        if cache_key in self._graph_search_cache:
+            # Move to end (most-recently-used) and return cached result
+            self._graph_search_cache.move_to_end(cache_key)
+            logger.debug("graph_search cache hit", query=query)
+            return self._graph_search_cache[cache_key]
+
         # Step 1: Find query entities (filtered by organization)
         query_entities = await self.find_entities_by_query(
             query,
@@ -2302,15 +2444,51 @@ Only include entities and relations clearly supported by the text."""
             organization_id=organization_id,
         )
 
+        # Step 1b: Query expansion for improved recall
+        # If the initial entity lookup returned few results, use query expansion
+        # to generate alternative phrasings and find additional entities.
+        try:
+            from backend.services.settings import get_settings_service
+            settings_svc = get_settings_service()
+            expansion_enabled = settings_svc.get_default_value("rag.query_expansion_enabled")
+            if expansion_enabled:
+                from backend.services.query_expander import QueryExpander
+                expander = QueryExpander()
+                expanded = await expander.expand_query(query)
+                seen_ids = {e.id for e in query_entities}
+                for eq in expanded.expanded_queries:
+                    extra_entities = await self.find_entities_by_query(
+                        eq,
+                        limit=3,
+                        organization_id=organization_id,
+                    )
+                    for ent in extra_entities:
+                        if ent.id not in seen_ids:
+                            query_entities.append(ent)
+                            seen_ids.add(ent.id)
+                if len(query_entities) > 5 + len(expanded.expanded_queries):
+                    # Keep a reasonable cap so we don't blow up traversal
+                    query_entities = query_entities[:10]
+                logger.debug(
+                    "query expansion applied for graph_search",
+                    original_query=query,
+                    expanded_count=len(expanded.expanded_queries),
+                    total_entities=len(query_entities),
+                )
+        except Exception as exc:
+            # Query expansion is best-effort; never break the main search flow
+            logger.debug("query expansion skipped in graph_search", reason=str(exc))
+
         if not query_entities:
             logger.debug("No entities found for query", query=query)
-            return GraphRAGContext(
+            empty_result = GraphRAGContext(
                 entities=[],
                 relations=[],
                 chunks=[],
                 graph_summary="No relevant entities found in knowledge graph.",
                 entity_context="",
             )
+            return empty_result
 
         # Step 2: Expand through graph (filtered by organization)
         all_entities: Dict[uuid.UUID, Entity] = {}
@@ -2392,13 +2570,21 @@ Only include entities and relations clearly supported by the text."""
             list(all_entities.values()),
         )
 
-        return GraphRAGContext(
+        result = GraphRAGContext(
             entities=list(all_entities.values()),
             relations=all_relations,
             chunks=chunks[:top_k],
             graph_summary=graph_summary,
             entity_context=entity_context,
         )
+
+        # --- Store result in LRU cache ---
+        self._graph_search_cache[cache_key] = result
+        if len(self._graph_search_cache) > self._graph_search_cache_max_size:
+            # Evict the least-recently-used entry (first item)
+            self._graph_search_cache.popitem(last=False)
+
+        return result
 
     def _build_graph_summary(
         self,
@@ -3493,6 +3679,46 @@ Only include entities and relations clearly supported by the text."""
             "total_mentions": mention_count,
             "entity_type_distribution": type_dist,
         }
+
+    # -------------------------------------------------------------------------
+    # Graph RAG Context (used by document generator and other sections)
+    # -------------------------------------------------------------------------
+
+    async def get_graph_rag_context(
+        self,
+        session: Optional[AsyncSession] = None,
+        query: str = "",
+        top_k: int = 10,
+        organization_id: Optional[str] = None,
+        access_tier_level: int = 100,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
+    ) -> "GraphRAGContext":
+        """
+        Convenience wrapper for graph_search used by document generation
+        and other non-chat sections.
+
+        Args:
+            session: Optional database session (ignored, uses self.db)
+            query: Search query
+            top_k: Max results
+            organization_id: Organization filter
+            access_tier_level: Access tier filter
+            user_id: User filter
+            is_superadmin: Superadmin flag
+
+        Returns:
+            GraphRAGContext with entities, relations, and chunks
+        """
+        return await self.graph_search(
+            query=query,
+            max_hops=2,
+            top_k=top_k,
+            organization_id=organization_id,
+            access_tier_level=access_tier_level,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
+        )
 
 
 # =============================================================================

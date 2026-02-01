@@ -422,10 +422,16 @@ class ColBERTRetriever:
         documents: List[Dict[str, Any]],
     ) -> bool:
         """
-        Add documents to existing index (incremental update).
+        Add documents to existing index with smart incremental update.
 
-        Note: RAGatouille's default behavior is to rebuild the index.
-        For truly incremental updates, consider using ColBERT directly.
+        Strategy:
+        1. If index is empty, build it with new documents
+        2. If new docs < 10% of existing, queue for batch rebuild
+        3. If new docs >= 10% or queue is large, trigger rebuild
+        4. Use background task for rebuilds to avoid blocking
+
+        Note: True incremental indexing requires ColBERT v2 with PLAID.
+        RAGatouille wraps ColBERT and currently requires full rebuilds.
 
         Args:
             documents: Documents to add
@@ -436,17 +442,96 @@ class ColBERTRetriever:
         if not self._index_built:
             return await self.index_documents(documents)
 
-        # For now, trigger rebuild with new documents
-        # TODO: Implement true incremental indexing when RAGatouille supports it
-        logger.info(
-            "Adding documents triggers index rebuild",
-            new_docs=len(documents),
-            existing_docs=len(self._indexed_doc_ids)
-        )
+        # Filter out already indexed documents
+        new_docs = [
+            doc for doc in documents
+            if doc.get("document_id") not in self._indexed_doc_ids
+        ]
 
-        # Get existing documents and merge
-        # This is a placeholder - in production you'd fetch from DB
-        return await self.index_documents(documents, force_rebuild=True)
+        if not new_docs:
+            logger.info("All documents already indexed, skipping")
+            return True
+
+        # Initialize pending queue if not exists
+        if not hasattr(self, "_pending_docs"):
+            self._pending_docs: List[Dict[str, Any]] = []
+
+        # Add to pending queue
+        self._pending_docs.extend(new_docs)
+
+        # Calculate threshold for rebuild
+        existing_count = len(self._indexed_doc_ids)
+        pending_count = len(self._pending_docs)
+        threshold = max(10, existing_count * 0.1)  # At least 10, or 10% of existing
+
+        if pending_count >= threshold:
+            logger.info(
+                "Triggering index rebuild",
+                new_docs=pending_count,
+                existing_docs=existing_count,
+                threshold=threshold,
+            )
+
+            # Merge pending docs with rebuild
+            docs_to_add = self._pending_docs.copy()
+            self._pending_docs.clear()
+
+            # Trigger async rebuild
+            import asyncio
+            asyncio.create_task(self._background_rebuild(docs_to_add))
+
+            return True
+        else:
+            logger.info(
+                "Queued documents for batch rebuild",
+                queued=pending_count,
+                threshold=threshold,
+                will_rebuild_at=int(threshold),
+            )
+            return True
+
+    async def _background_rebuild(self, new_documents: List[Dict[str, Any]]):
+        """
+        Rebuild index in background with new documents.
+
+        This allows the API to return quickly while rebuild happens async.
+        """
+        try:
+            logger.info("Starting background index rebuild", new_docs=len(new_documents))
+
+            # Mark rebuild in progress
+            self._rebuild_in_progress = True
+
+            # Perform the rebuild
+            success = await self.index_documents(new_documents, force_rebuild=True)
+
+            if success:
+                logger.info("Background index rebuild completed successfully")
+            else:
+                logger.warning("Background index rebuild completed with issues")
+
+        except Exception as e:
+            logger.error("Background index rebuild failed", error=str(e))
+
+        finally:
+            self._rebuild_in_progress = False
+
+    def force_rebuild_pending(self) -> bool:
+        """
+        Force rebuild with any pending documents.
+
+        Useful for flushing the queue manually.
+
+        Returns:
+            True if rebuild was triggered
+        """
+        if hasattr(self, "_pending_docs") and self._pending_docs:
+            import asyncio
+            docs = self._pending_docs.copy()
+            self._pending_docs.clear()
+            asyncio.create_task(self._background_rebuild(docs))
+            return True
+        return False
 
     async def delete_documents(self, document_ids: List[str]) -> bool:
         """

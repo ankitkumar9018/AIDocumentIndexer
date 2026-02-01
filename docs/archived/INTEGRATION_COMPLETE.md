@@ -1,4 +1,8 @@
-# 🎉 Embedding Dashboard Integration - COMPLETE
+> **ARCHIVED**: This document is retained for historical reference only and may contain outdated information. See [docs/INDEX.md](../INDEX.md) for current documentation.
+
+---
+
+# Embedding Dashboard Integration - COMPLETE
 
 **Date:** January 20, 2026
 **Status:** ✅ **BUILD SUCCESSFUL - READY FOR TESTING**

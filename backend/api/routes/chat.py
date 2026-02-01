@@ -750,27 +750,35 @@ async def create_chat_completion(
             sources = []
             if request.include_sources:
                 for source in response.sources[:request.max_sources]:
+                    # Handle both dict and object access patterns
+                    def get_attr(obj, key, default=None):
+                        if isinstance(obj, dict):
+                            return obj.get(key, default)
+                        return getattr(obj, key, default)
+
                     # Parse UUIDs safely, falling back to generated ones
                     try:
-                        doc_uuid = UUID(source.document_id) if source.document_id else uuid4()
+                        doc_id = get_attr(source, 'document_id')
+                        doc_uuid = UUID(doc_id) if doc_id else uuid4()
                     except ValueError:
                         doc_uuid = uuid4()
 
                     try:
-                        chunk_uuid = UUID(source.chunk_id) if source.chunk_id else uuid4()
+                        chunk_id = get_attr(source, 'chunk_id')
+                        chunk_uuid = UUID(chunk_id) if chunk_id else uuid4()
                     except ValueError:
                         chunk_uuid = uuid4()
 
                     sources.append(ChatSource(
                         document_id=doc_uuid,
-                        document_name=source.document_name,
+                        document_name=get_attr(source, 'document_name', 'Unknown'),
                         chunk_id=chunk_uuid,
-                        page_number=source.page_number,
-                        relevance_score=source.relevance_score,
-                        similarity_score=source.similarity_score if hasattr(source, 'similarity_score') else None,
-                        snippet=source.snippet,
-                        full_content=source.full_content if hasattr(source, 'full_content') else None,
-                        collection=source.collection if hasattr(source, 'collection') else None,
+                        page_number=get_attr(source, 'page_number'),
+                        relevance_score=get_attr(source, 'relevance_score', 0.0),
+                        similarity_score=get_attr(source, 'similarity_score'),
+                        snippet=get_attr(source, 'snippet', ''),
+                        full_content=get_attr(source, 'full_content'),
+                        collection=get_attr(source, 'collection'),
                     ))
 
             # Cache the response for query_only requests

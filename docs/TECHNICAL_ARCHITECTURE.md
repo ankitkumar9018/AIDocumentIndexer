@@ -14,12 +14,15 @@
 6. [Database Schema](#database-schema)
 7. [Scalability & Performance](#scalability--performance)
 8. [Configuration Reference](#configuration-reference)
+9. [Recent Architecture Updates (Phase 78-83)](#recent-architecture-updates-phase-78-83-january-2026)
+10. [Architecture Updates (Phase 84-95)](#architecture-updates-phase-84-95-january-2026)
+11. [Phase 95 Architecture: UI Overhaul](#phase-95-architecture-ui-overhaul)
 
 ---
 
 ## System Overview
 
-AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) system designed for intelligent document management and AI-powered search. The system processes, indexes, and enables natural language querying of documents across 25+ file formats.
+AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) system designed for intelligent document management and AI-powered search. The system processes, indexes, and enables natural language querying of documents across 25+ file formats. The backend comprises 145+ service files, 50 route files, and 60+ database models. The frontend admin panel features 19 settings tabs.
 
 ### High-Level Architecture
 
@@ -190,6 +193,11 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 | Hybrid Search | Combines vector similarity + BM25 keyword search | `vectorstore.py:hybrid_search()` |
 | Access Tier Filter | Enforces user permission level | `vectorstore.py:_filter_by_tier()` |
 | Cross-Encoder Reranking | Re-scores results for precision | `vectorstore.py:rerank()` |
+| DSPy Inference | Optimized prompt execution via BootstrapFewShot/MIPROv2 (Phase 93) | `services/dspy_rag.py` |
+| Content Freshness Scoring | Time-decay scoring for source recency (Phase 95K) | `services/rag.py:_score_freshness()` |
+| Hallucination Detection | Cross-reference scoring against source material (Phase 95J) | `services/rag.py:_hallucination_score()` |
+| Conversation-Aware Retrieval | Uses conversation history to refine retrieval context (Phase 95L) | `services/rag.py:_conversation_context()` |
+| Cross-Section RAG Routing | Unified retrieval across KG, Web Crawler, and Text-to-SQL (Phase 94) | `services/rag.py:_cross_section_retrieve()` |
 
 ### 3. Agent Execution Flow
 
@@ -1277,9 +1285,499 @@ Query → Adaptive Router → Retrieval Strategy
 
 ### Test Coverage
 
-- Import smoke test (`tests/test_imports.py`): Verifies all 145 service modules and 48 route modules import cleanly
+- Import smoke test (`tests/test_imports.py`): Verifies all 145+ service modules and 50 route modules import cleanly
 - CI command: `pytest backend/tests/test_imports.py -v`
 
 ---
 
-*Last updated: 2026-01-25*
+## Architecture Updates (Phase 84-95, January 2026)
+
+### Phase 84: Sandbox Execution Security
+
+Introduced hardened sandbox wrappers to prevent code injection and denial-of-service attacks from user-supplied content.
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| SafeRegex | `services/sandbox.py` | Wraps `re.compile()` with timeout and complexity limits to prevent ReDoS |
+| SafeJson | `services/sandbox.py` | Validates and size-limits JSON payloads before deserialization |
+| AST Validator | `services/sandbox.py` | Validates dynamically-constructed code via `ast.parse()` before `exec()` |
+
+**Design principle:** All user-supplied content that reaches regex, JSON, or eval-like operations is routed through these wrappers. Direct `re.compile()` and `json.loads()` on user input are prohibited by linting rules.
+
+### Phase 85: Authentication Hardening
+
+| Feature | Description |
+|---------|-------------|
+| Auth Rate Limiting | Per-IP and per-user rate limits on login/register endpoints (5 attempts/min, 30-min lockout) |
+| Input Validation | Pydantic validators on all user-facing endpoints with strict type coercion |
+| Collection Name Validation | Regex-based validation preventing path traversal and injection in collection names (`^[a-zA-Z0-9_-]{1,64}$`) |
+
+### Phase 86: Retry Budget Pattern
+
+Implemented a global retry budget to prevent cascading retry storms across dependent services.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Retry Budget Pattern                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Request enters service layer                                    │
+│       │                                                          │
+│       ▼                                                          │
+│  ┌─────────────────┐                                             │
+│  │ Check Budget    │── Budget exhausted (3 retries) ──▶ Fail    │
+│  │ (per-request)   │                                             │
+│  └────────┬────────┘                                             │
+│           │ Budget available                                     │
+│           ▼                                                      │
+│  ┌─────────────────┐                                             │
+│  │ Execute with    │── Success ──▶ Return                        │
+│  │ exponential     │                                             │
+│  │ backoff         │── Failure ──▶ Decrement budget, retry       │
+│  └─────────────────┘                                             │
+│                                                                  │
+│  Budget: max 3 retries per request across ALL services           │
+│  Backoff: 1s, 2s, 4s (exponential with jitter)                  │
+│  Scope: LLM calls, embedding API, vector store, web crawler     │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key constraint:** A single user request can trigger at most 3 retries total, even if it passes through multiple services (e.g., embedding + LLM + reranking). This prevents a single bad request from consuming excessive resources.
+
+### Phase 87: Dependency Pinning & SDK Migration
+
+- All Python dependencies pinned with upper bounds (e.g., `langchain>=0.3.0,<0.4.0`) to prevent breaking upgrades
+- Migrated from `google-generativeai` to `google-genai` SDK for Gemini model access
+- Added `pip-audit` to CI pipeline for vulnerability scanning
+
+### Phase 88: Error Handling & Diagnostics
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/diagnostics` | Returns system health, dependency versions, and configuration validation |
+| `GET /api/v1/admin/diagnostics/errors` | Returns recent error log with stack traces (admin only) |
+
+- Standardized error response format across all endpoints with `error_code`, `message`, `details`, and `request_id`
+- Added structured logging with correlation IDs for request tracing
+
+### Phase 89: Configuration Audit
+
+- Comprehensive audit of all settings ensuring defaults are production-safe
+- Validated all environment variables have sensible fallbacks
+- Added startup configuration validation that warns about insecure defaults (e.g., default SECRET_KEY)
+
+### Phase 90: Testing Infrastructure
+
+- Import smoke tests (`tests/test_imports.py`) validate that all 145+ service modules and 50 route modules import without errors
+- Tests run in under 5 seconds and catch circular imports, missing dependencies, and syntax errors
+- CI gate: import tests must pass before any other test suite runs
+
+### Phase 91: Security & Agent Memory Tests
+
+| Test Suite | File | Coverage |
+|------------|------|----------|
+| Sandbox Security | `tests/test_sandbox.py` | SafeRegex ReDoS prevention, SafeJson size limits, AST injection blocking |
+| Agent Memory | `tests/test_agent_memory.py` | Memory persistence, context window management, memory eviction |
+
+### Phase 92: Binary Quantization
+
+Implemented binary quantization for vector search indices, achieving 32x memory reduction.
+
+| Metric | Before (float32) | After (binary) | Improvement |
+|--------|-------------------|-----------------|-------------|
+| Memory per vector (1536 dims) | 6,144 bytes | 192 bytes | 32x reduction |
+| Index size (1M vectors) | ~6 GB | ~192 MB | 32x reduction |
+| Search latency | Baseline | ~1.5x faster | Hamming distance is cheaper |
+| Recall@10 | 100% | ~95% | Acceptable trade-off |
+
+**Implementation:** Vectors are binarized (sign bit) at index time. Search uses Hamming distance for candidate retrieval, then rescores top-N candidates with full float32 vectors for precision.
+
+### Phase 93: DSPy Prompt Optimization
+
+Integrated DSPy for automated prompt optimization, replacing hand-tuned prompts with data-driven optimization.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     DSPy Optimization Pipeline                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Training Data (user feedback + golden examples)                 │
+│       │                                                          │
+│       ▼                                                          │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Optimizer Selection                          │    │
+│  │                                                           │    │
+│  │  BootstrapFewShot    MIPROv2                              │    │
+│  │  ├─ Few examples     ├─ Instruction optimization          │    │
+│  │  ├─ Fast iteration   ├─ Bayesian search                   │    │
+│  │  └─ Good baseline    └─ Higher quality, slower            │    │
+│  └──────────────────────────┬──────────────────────────────┘    │
+│                              │                                    │
+│                              ▼                                    │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Optimized Program                            │    │
+│  │  - Compiled prompt with few-shot examples                 │    │
+│  │  - Stored as versioned artifact                           │    │
+│  │  - A/B tested via traffic splitting                       │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                                                                  │
+│  Inference: DSPy program replaces raw LLM call in RAG pipeline  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Integration point:** The DSPy inference step sits between retrieval and LLM generation in the RAG pipeline. When a compiled DSPy program is available, it replaces the standard prompt template.
+
+### Phase 94: Cross-Section RAG Integration
+
+Unified retrieval across Knowledge Graph, Web Crawler, and Text-to-SQL into a single retrieval pipeline.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Cross-Section RAG Router (Phase 94)                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  User Query                                                              │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌─────────────────┐                                                     │
+│  │ Query Classifier │  Determines which retrieval sources are relevant   │
+│  └────────┬────────┘                                                     │
+│           │                                                              │
+│    ┌──────┼──────────────────┐                                           │
+│    │      │                  │                                           │
+│    ▼      ▼                  ▼                                           │
+│  ┌──────┐ ┌──────────────┐ ┌───────────────┐                            │
+│  │  KG  │ │ Web Crawler  │ │ Text-to-SQL   │                            │
+│  │Query │ │ Cache Search │ │ (structured)  │                            │
+│  └──┬───┘ └──────┬───────┘ └───────┬───────┘                            │
+│     │            │                 │                                      │
+│     ▼            ▼                 ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │                  Unified Result Merger                            │     │
+│  │  - Reciprocal Rank Fusion across all sources                     │     │
+│  │  - Source-type weighting (configurable)                          │     │
+│  │  - Deduplication across sources                                  │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│           │                                                              │
+│           ▼                                                              │
+│  ┌─────────────────┐                                                     │
+│  │ Standard RAG    │  Continue with reranking, generation, etc.          │
+│  │ Pipeline        │                                                     │
+│  └─────────────────┘                                                     │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Services involved:**
+
+| Service | Role in Cross-Section RAG |
+|---------|---------------------------|
+| `services/knowledge_graph.py` | Entity-based retrieval from graph store |
+| `services/web_crawler.py` | Retrieval from cached web content |
+| `services/text_to_sql/service.py` | SQL query generation for structured data |
+| `services/rag.py` | Orchestrates routing and result merging |
+
+### Phase 95: UI Overhaul (18 Sub-Features)
+
+Phase 95 is a comprehensive UI overhaul spanning sub-features 95A through 95R. See the dedicated [Phase 95 Architecture](#phase-95-architecture-ui-overhaul) section below.
+
+### Enhanced RAG Pipeline (Phase 84-95 Cumulative)
+
+The full RAG pipeline with all Phase 84-95 enhancements:
+
+```
+Query
+  │
+  ▼
+Sandbox Validation (Phase 84: SafeRegex, SafeJson on user input)
+  │
+  ▼
+Auth & Rate Limit Check (Phase 85: per-IP/user rate limiting)
+  │
+  ▼
+Conversation-Aware Context Injection (Phase 95L: recent turns inform retrieval)
+  │
+  ▼
+Adaptive Router (Phase 66)
+  │
+  ├──▶ Cross-Section RAG Router (Phase 94)
+  │     ├── Knowledge Graph query
+  │     ├── Web Crawler cache search
+  │     └── Text-to-SQL structured query
+  │
+  ▼
+Hybrid Search (vector + BM25) with Binary Quantization (Phase 92)
+  │
+  ▼
+Content Freshness Scoring (Phase 95K: time-decay weighting)
+  │
+  ▼
+Cross-Encoder Reranking
+  │
+  ▼
+DSPy Inference (Phase 93: optimized prompt if available)
+  │
+  ▼
+LLM Generation (with retry budget, Phase 86: max 3 retries)
+  │
+  ▼
+Hallucination Detection Scoring (Phase 95J: cross-reference against sources)
+  │
+  ▼
+Streaming Response with Inline Citations (Phase 95A)
+  │
+  ▼
+Thinking Transparency (Phase 95B: SSE events for reasoning steps)
+```
+
+### Module Counts (as of Phase 95)
+
+| Category | Count | Notes |
+|----------|-------|-------|
+| Backend service files | 145+ | Under `backend/services/` |
+| Backend route files | 50 | Under `backend/routes/` |
+| Database models | 60+ | SQLAlchemy models in `backend/models/` |
+| Frontend admin settings tabs | 19 | Under `frontend/app/dashboard/admin/settings/components/` |
+| API endpoints | 200+ | Across all route modules |
+| Test files | 30+ | Under `backend/tests/` |
+
+---
+
+## Phase 95 Architecture: UI Overhaul
+
+Phase 95 introduces 18 sub-features (95A through 95R) that transform the frontend and backend to support a modern, feature-rich user experience.
+
+### Sub-Feature Overview
+
+| Sub-Feature | Name | Category |
+|-------------|------|----------|
+| 95A | Inline Citations | Chat UI |
+| 95B | Thinking Transparency | Chat UI |
+| 95C | Canvas / Artifacts Panel | Chat UI |
+| 95D | Prompt Library | Chat UI |
+| 95E | BYOK (Bring Your Own Key) | Admin Settings |
+| 95F | Advanced RAG Settings | Admin Settings |
+| 95G | Audio Settings Tab | Admin Settings |
+| 95H | Ingestion Settings Tab | Admin Settings |
+| 95I | Scraper Settings Tab | Admin Settings |
+| 95J | Hallucination Scoring | RAG Pipeline |
+| 95K | Content Freshness | RAG Pipeline |
+| 95L | Conversation-Aware Retrieval | RAG Pipeline |
+| 95M | Notification Settings | Admin Settings |
+| 95N | Security Settings | Admin Settings |
+| 95O | Generation Settings | Admin Settings |
+| 95P | Provider Management | Admin Settings |
+| 95Q | Settings Page Layout | Admin Settings |
+| 95R | UI Component Library | Shared Components |
+
+### Frontend Component Architecture: Admin Settings (19 Tabs)
+
+The admin settings page uses a tab-based architecture with lazy-loaded components.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│              Admin Settings Page (page.tsx)                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌─────────────┐                                                         │
+│  │ Tab Router   │  Renders one tab component at a time                   │
+│  └──────┬──────┘                                                         │
+│         │                                                                │
+│    ┌────┴────────────────────────────────────────────────────┐           │
+│    │                    Tab Components                        │           │
+│    │                                                          │           │
+│    │  ┌─────────────────┐  ┌─────────────────┐               │           │
+│    │  │ general-tab.tsx │  │ rag-tab.tsx     │               │           │
+│    │  │ (App name, env) │  │ (RAG config)    │               │           │
+│    │  └─────────────────┘  └─────────────────┘               │           │
+│    │  ┌─────────────────┐  ┌─────────────────┐               │           │
+│    │  │ providers-tab   │  │ security-tab    │               │           │
+│    │  │ (LLM providers) │  │ (Auth, CORS)    │               │           │
+│    │  └─────────────────┘  └─────────────────┘               │           │
+│    │  ┌─────────────────┐  ┌─────────────────┐               │           │
+│    │  │ audio-tab.tsx   │  │ ingestion-tab   │               │           │
+│    │  │ (TTS config)    │  │ (Upload config) │               │           │
+│    │  └─────────────────┘  └─────────────────┘               │           │
+│    │  ┌─────────────────┐  ┌─────────────────┐               │           │
+│    │  │ scraper-tab.tsx │  │ generation-tab  │               │           │
+│    │  │ (Web crawling)  │  │ (Doc gen)       │               │           │
+│    │  └─────────────────┘  └─────────────────┘               │           │
+│    │  ┌─────────────────┐  ┌─────────────────┐               │           │
+│    │  │notifications-tab│  │ ... (19 total)  │               │           │
+│    │  │ (Alert config)  │  │                 │               │           │
+│    │  └─────────────────┘  └─────────────────┘               │           │
+│    └─────────────────────────────────────────────────────────┘           │
+│                                                                          │
+│  Pattern: Each tab is a self-contained component that:                   │
+│  - Fetches its own settings via TanStack Query                           │
+│  - Manages local form state with React Hook Form                         │
+│  - Submits changes via PATCH /api/v1/admin/settings/{category}          │
+│  - Shows toast notifications on save/error                               │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Tab component files** (under `frontend/app/dashboard/admin/settings/components/`):
+
+| File | Tab | Phase |
+|------|-----|-------|
+| `general-tab.tsx` | General | Pre-95 |
+| `rag-tab.tsx` | RAG Configuration | 95F |
+| `providers-tab.tsx` | LLM Providers | 95P |
+| `security-tab.tsx` | Security | 95N |
+| `audio-tab.tsx` | Audio / TTS | 95G |
+| `ingestion-tab.tsx` | Document Ingestion | 95H |
+| `scraper-tab.tsx` | Web Scraper | 95I |
+| `generation-tab.tsx` | Document Generation | 95O |
+| `notifications-tab.tsx` | Notifications | 95M |
+
+### BYOK (Bring Your Own Key) Architecture (Phase 95E)
+
+BYOK allows end-users to supply their own API keys for LLM providers, keeping keys client-side for security.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    BYOK Key Management (Phase 95E)                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  CLIENT SIDE                          SERVER SIDE                        │
+│  ─────────────                        ───────────                        │
+│                                                                          │
+│  ┌─────────────────┐                                                     │
+│  │ User enters     │                                                     │
+│  │ API key in UI   │                                                     │
+│  └────────┬────────┘                                                     │
+│           │                                                              │
+│           ▼                                                              │
+│  ┌─────────────────┐                                                     │
+│  │ Key stored in   │  Keys NEVER sent to backend for storage             │
+│  │ browser only    │  (localStorage or sessionStorage based on           │
+│  │ (encrypted)     │   user preference for persistence)                  │
+│  └────────┬────────┘                                                     │
+│           │                                                              │
+│           ▼                                                              │
+│  ┌─────────────────┐                  ┌─────────────────┐                │
+│  │ Key attached to │ ──────────────▶  │ Key used for    │                │
+│  │ API request     │  Per-request     │ single LLM call │                │
+│  │ header          │  transmission    │ then discarded  │                │
+│  └─────────────────┘  only            └─────────────────┘                │
+│                                                                          │
+│  Security guarantees:                                                    │
+│  - Keys never persisted on server                                        │
+│  - Keys transmitted over HTTPS only                                      │
+│  - Keys held in memory for single request lifecycle                      │
+│  - Server falls back to system keys if no BYOK key provided             │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### SSE Streaming for Thinking Transparency (Phase 95B)
+
+The thinking transparency feature exposes the LLM's reasoning process to the user in real time via Server-Sent Events.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                 Thinking Transparency SSE Protocol (Phase 95B)            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Backend (FastAPI)                     Frontend (React)                   │
+│  ─────────────────                     ────────────────                   │
+│                                                                          │
+│  POST /chat/completions/stream                                           │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌─────────────────┐                  ┌─────────────────┐                │
+│  │ SSE Event:      │ ──────────────▶  │ "Thinking..."   │                │
+│  │ thinking_start  │                  │ indicator shown  │                │
+│  └─────────────────┘                  └─────────────────┘                │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌─────────────────┐                  ┌─────────────────┐                │
+│  │ SSE Event:      │ ──────────────▶  │ Reasoning steps │                │
+│  │ thinking_step   │  (repeats)       │ rendered in      │                │
+│  │ {step, detail}  │                  │ collapsible UI   │                │
+│  └─────────────────┘                  └─────────────────┘                │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌─────────────────┐                  ┌─────────────────┐                │
+│  │ SSE Event:      │ ──────────────▶  │ Thinking panel  │                │
+│  │ thinking_end    │                  │ collapses        │                │
+│  └─────────────────┘                  └─────────────────┘                │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌─────────────────┐                  ┌─────────────────┐                │
+│  │ SSE Event:      │ ──────────────▶  │ Content streams │                │
+│  │ content         │  (standard)      │ as before        │                │
+│  └─────────────────┘                  └─────────────────┘                │
+│                                                                          │
+│  New SSE event types:                                                    │
+│  - thinking_start: Signals reasoning phase has begun                     │
+│  - thinking_step:  Individual reasoning step with description            │
+│  - thinking_end:   Reasoning complete, content generation begins         │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Canvas / Artifacts Side Panel Pattern (Phase 95C)
+
+The canvas panel provides a persistent side panel for viewing and editing artifacts generated during chat.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Canvas Panel Architecture (Phase 95C)                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────┐      │
+│  │                     Chat Page Layout                            │      │
+│  │                                                                 │      │
+│  │  ┌──────────────────────────┐  ┌──────────────────────────┐    │      │
+│  │  │     Chat Panel           │  │    Canvas Panel          │    │      │
+│  │  │     (primary)            │  │    (secondary, toggle)   │    │      │
+│  │  │                          │  │                          │    │      │
+│  │  │  Messages list           │  │  Artifact viewer:        │    │      │
+│  │  │  ├─ User message         │  │  ├─ Code blocks          │    │      │
+│  │  │  ├─ AI response          │  │  ├─ Generated docs       │    │      │
+│  │  │  │  └─ [View in Canvas]  │──│──│  ├─ Markdown render   │    │      │
+│  │  │  │     button            │  │  │  ├─ Copy/Download     │    │      │
+│  │  │  └─ AI response          │  │  │  └─ Edit inline       │    │      │
+│  │  │                          │  │  ├─ Tables               │    │      │
+│  │  │  Input bar               │  │  └─ Diagrams             │    │      │
+│  │  │                          │  │                          │    │      │
+│  │  └──────────────────────────┘  └──────────────────────────┘    │      │
+│  │                                                                 │      │
+│  │  Width: 50/50 split when canvas open, 100% chat when closed    │      │
+│  └────────────────────────────────────────────────────────────────┘      │
+│                                                                          │
+│  State management:                                                       │
+│  - Canvas visibility toggled via React state                             │
+│  - Active artifact stored in context provider                            │
+│  - Artifacts persisted in chat message metadata (jsonb)                  │
+│  - Canvas content synced with chat via shared artifact ID                │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Artifact types supported:**
+
+| Type | Trigger | Canvas Behavior |
+|------|---------|-----------------|
+| Code block | Fenced code in response | Syntax-highlighted editor with copy/run |
+| Document | Generated DOCX/PDF | Preview with download button |
+| Table | Structured data in response | Sortable, filterable table view |
+| Markdown | Long-form content | Rendered markdown with edit toggle |
+| Diagram | Mermaid/ASCII diagrams | Visual rendering |
+
+### Prompt Library (Phase 95D)
+
+Pre-built prompt templates accessible from the chat input, stored in the database and user-customizable.
+
+- Templates organized by category (analysis, summarization, extraction, creative)
+- User favorites and recent usage tracking
+- Admin-managed system templates plus user-created personal templates
+- Template variables with placeholder substitution (e.g., `{{document_name}}`)
+
+---
+
+*Last updated: 2026-01-26*

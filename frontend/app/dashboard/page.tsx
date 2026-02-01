@@ -155,12 +155,12 @@ export default function DashboardPage() {
             <CardContent>
               <div className="text-2xl font-bold">{formatNumber(processingJobs)}</div>
               <div className="flex items-center gap-2 text-xs">
-                <span className="text-green-600 flex items-center">
+                <span className="text-green-600 dark:text-green-400 flex items-center">
                   <CheckCircle className="h-3 w-3 mr-1" />
                   {completedItems.length} completed
                 </span>
                 {failedItems.length > 0 && (
-                  <span className="text-red-600 flex items-center">
+                  <span className="text-red-600 dark:text-red-400 flex items-center">
                     <AlertCircle className="h-3 w-3 mr-1" />
                     {failedItems.length} failed
                   </span>
@@ -201,14 +201,14 @@ export default function DashboardPage() {
                 {costChange != null ? (
                   costChange > 0 ? (
                     <>
-                      <ArrowUpRight className="h-3 w-3 text-red-500 mr-1" />
-                      <span className="text-red-500">+{costChange.toFixed(1)}%</span>
+                      <ArrowUpRight className="h-3 w-3 text-red-500 dark:text-red-400 mr-1" />
+                      <span className="text-red-500 dark:text-red-400">+{costChange.toFixed(1)}%</span>
                       <span className="ml-1">from last week</span>
                     </>
                   ) : (
                     <>
-                      <ArrowDownRight className="h-3 w-3 text-green-500 mr-1" />
-                      <span className="text-green-500">{costChange.toFixed(1)}%</span>
+                      <ArrowDownRight className="h-3 w-3 text-green-500 dark:text-green-400 mr-1" />
+                      <span className="text-green-500 dark:text-green-400">{costChange.toFixed(1)}%</span>
                       <span className="ml-1">from last week</span>
                     </>
                   )
@@ -240,8 +240,8 @@ export default function DashboardPage() {
         <Link href="/dashboard/upload">
           <Card className="hover:bg-muted/50 transition-colors cursor-pointer h-full">
             <CardContent className="pt-6 flex flex-col items-center text-center">
-              <div className="p-3 rounded-full bg-green-500/10 mb-3">
-                <Upload className="h-6 w-6 text-green-600" />
+              <div className="p-3 rounded-full bg-green-500/10 dark:bg-green-500/20 mb-3">
+                <Upload className="h-6 w-6 text-green-600 dark:text-green-400" />
               </div>
               <h3 className="font-medium">Upload Files</h3>
               <p className="text-sm text-muted-foreground mt-1">
@@ -254,8 +254,8 @@ export default function DashboardPage() {
         <Link href="/dashboard/create">
           <Card className="hover:bg-muted/50 transition-colors cursor-pointer h-full">
             <CardContent className="pt-6 flex flex-col items-center text-center">
-              <div className="p-3 rounded-full bg-purple-500/10 mb-3">
-                <FileText className="h-6 w-6 text-purple-600" />
+              <div className="p-3 rounded-full bg-purple-500/10 dark:bg-purple-500/20 mb-3">
+                <FileText className="h-6 w-6 text-purple-600 dark:text-purple-400" />
               </div>
               <h3 className="font-medium">Create Document</h3>
               <p className="text-sm text-muted-foreground mt-1">
@@ -268,8 +268,8 @@ export default function DashboardPage() {
         <Link href="/dashboard/documents">
           <Card className="hover:bg-muted/50 transition-colors cursor-pointer h-full">
             <CardContent className="pt-6 flex flex-col items-center text-center">
-              <div className="p-3 rounded-full bg-orange-500/10 mb-3">
-                <FolderOpen className="h-6 w-6 text-orange-600" />
+              <div className="p-3 rounded-full bg-orange-500/10 dark:bg-orange-500/20 mb-3">
+                <FolderOpen className="h-6 w-6 text-orange-600 dark:text-orange-400" />
               </div>
               <h3 className="font-medium">Browse Documents</h3>
               <p className="text-sm text-muted-foreground mt-1">
@@ -470,25 +470,25 @@ export default function DashboardPage() {
                     <div
                       className={`p-2 rounded-full ${
                         item.status === "completed"
-                          ? "bg-green-500/10"
+                          ? "bg-green-500/10 dark:bg-green-500/20"
                           : item.status === "failed"
-                          ? "bg-red-500/10"
+                          ? "bg-red-500/10 dark:bg-red-500/20"
                           : item.status === "processing"
-                          ? "bg-blue-500/10"
-                          : "bg-gray-500/10"
+                          ? "bg-blue-500/10 dark:bg-blue-500/20"
+                          : "bg-gray-500/10 dark:bg-gray-500/20"
                       }`}
                     >
                       {item.status === "completed" && (
-                        <CheckCircle className="h-4 w-4 text-green-600" />
+                        <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
                       )}
                       {item.status === "failed" && (
-                        <AlertCircle className="h-4 w-4 text-red-600" />
+                        <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
                       )}
                       {item.status === "processing" && (
-                        <Loader2 className="h-4 w-4 text-blue-600 animate-spin" />
+                        <Loader2 className="h-4 w-4 text-blue-600 dark:text-blue-400 animate-spin" />
                       )}
                       {item.status === "pending" && (
-                        <Clock className="h-4 w-4 text-gray-600" />
+                        <Clock className="h-4 w-4 text-gray-600 dark:text-gray-400" />
                       )}
                     </div>
                     <div className="flex-1 min-w-0">

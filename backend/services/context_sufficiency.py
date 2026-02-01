@@ -334,12 +334,102 @@ class ContextSufficiencyChecker:
                     })
 
         # Also check for semantic contradictions if LLM is enabled
-        if self.use_llm_for_conflicts and len(conflicts) == 0:
-            # TODO: Implement LLM-based contradiction detection
-            pass
+        if self.use_llm_for_conflicts and len(conflicts) == 0 and len(contexts) >= 2:
+            llm_conflicts = await self._detect_semantic_contradictions(contexts, context_metadata)
+            conflicts.extend(llm_conflicts)
 
         has_conflicts = len(conflicts) > 0
         return conflicts, has_conflicts
+
+    async def _detect_semantic_contradictions(
+        self,
+        contexts: List[str],
+        context_metadata: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Use LLM to detect semantic contradictions between sources.
+
+        This catches contradictions that aren't numerical, like:
+        - "The project was successful" vs "The project failed to meet goals"
+        - "Company X acquired Company Y" vs "Company Y acquired Company X"
+
+        Args:
+            contexts: List of context passages
+            context_metadata: Metadata for each context
+
+        Returns:
+            List of detected semantic contradictions
+        """
+        from backend.services.llm import LLMFactory
+
+        if len(contexts) < 2:
+            return []
+
+        # Build comparison prompt
+        sources_text = ""
+        for i, ctx in enumerate(contexts[:5]):  # Limit to 5 sources
+            source_name = "Unknown"
+            if context_metadata and i < len(context_metadata):
+                source_name = context_metadata[i].get("document_name", f"Source {i+1}")
+            sources_text += f"\n[{source_name}]:\n{ctx[:500]}\n"
+
+        prompt = f"""Analyze these source passages for factual contradictions.
+
+SOURCES:
+{sources_text}
+
+Look for statements that directly contradict each other, such as:
+- Conflicting dates, names, or facts
+- Opposite claims about the same topic
+- Mutually exclusive statements
+
+If you find contradictions, list them in this JSON format:
+```json
+[
+  {{
+    "type": "semantic_conflict",
+    "source1": "Source name 1",
+    "source2": "Source name 2",
+    "statement1": "First conflicting claim",
+    "statement2": "Second conflicting claim",
+    "description": "Brief explanation of the contradiction"
+  }}
+]
+```
+
+If no contradictions found, return: []
+
+CONTRADICTIONS:"""
+
+        try:
+            llm = LLMFactory.get_chat_model(
+                provider=self.provider,
+                model=self.model,
+                temperature=0.1,  # Low temp for factual analysis
+                max_tokens=1024,
+            )
+
+            response = await llm.ainvoke(prompt)
+            output = response.content
+
+            # Parse JSON response
+            import json
+            import re
+
+            json_match = re.search(r'\[.*\]', output, re.DOTALL)
+            if json_match:
+                conflicts = json.loads(json_match.group())
+                # Validate structure
+                valid_conflicts = []
+                for c in conflicts:
+                    if all(k in c for k in ["type", "source1", "source2", "description"]):
+                        valid_conflicts.append(c)
+                return valid_conflicts[:5]  # Limit to 5 conflicts
+
+        except Exception as e:
+            logger.warning("LLM contradiction detection failed", error=str(e))
+
+        return []
 
     async def _identify_gaps(
         self,

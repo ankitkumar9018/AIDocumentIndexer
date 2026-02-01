@@ -347,6 +347,76 @@ class ScriptGenerator(BaseService):
         ):
             yield turn
 
+    def _repair_json(self, json_str: str) -> str:
+        """
+        Attempt to repair common JSON issues from LLM output.
+
+        Handles:
+        - Trailing commas before } or ]
+        - Smart quotes (curly quotes) → straight quotes
+        - Unescaped newlines in strings
+        - Single quotes used instead of double quotes (carefully)
+        - Control characters in strings
+        """
+        repaired = json_str
+
+        # Replace smart quotes with straight quotes
+        repaired = repaired.replace('"', '"').replace('"', '"')
+        repaired = repaired.replace(''', "'").replace(''', "'")
+
+        # Remove trailing commas before } or ]
+        # This handles: {"a": 1,} and ["a",]
+        repaired = re.sub(r',(\s*[}\]])', r'\1', repaired)
+
+        # Handle unescaped newlines within strings
+        # First, let's track if we're inside a string and escape any raw newlines
+        result = []
+        in_string = False
+        escape_next = False
+        i = 0
+        while i < len(repaired):
+            char = repaired[i]
+
+            if escape_next:
+                result.append(char)
+                escape_next = False
+                i += 1
+                continue
+
+            if char == '\\':
+                escape_next = True
+                result.append(char)
+                i += 1
+                continue
+
+            if char == '"':
+                in_string = not in_string
+                result.append(char)
+                i += 1
+                continue
+
+            if in_string:
+                # If we find a raw newline inside a string, escape it
+                if char == '\n':
+                    result.append('\\n')
+                elif char == '\r':
+                    result.append('\\r')
+                elif char == '\t':
+                    result.append('\\t')
+                # Remove other control characters
+                elif ord(char) < 32:
+                    pass  # Skip control characters
+                else:
+                    result.append(char)
+            else:
+                result.append(char)
+            i += 1
+
+        repaired = ''.join(result)
+
+        self.log_info("JSON repair attempted", original_len=len(json_str), repaired_len=len(repaired))
+        return repaired
+
     def _build_document_context(self, document_contents: List[Dict[str, Any]]) -> str:
         """Build context string from document contents."""
         context_parts = []
@@ -558,7 +628,15 @@ Generate the complete script in JSON format."""
                     cleaned_content = json_match.group(1).strip()
 
             self.log_info("Parsing JSON response", cleaned_length=len(cleaned_content))
-            return json.loads(cleaned_content)
+
+            # Try to parse, and if it fails, attempt to repair common LLM JSON issues
+            try:
+                return json.loads(cleaned_content)
+            except json.JSONDecodeError:
+                # Attempt to repair common JSON issues from LLMs
+                repaired = self._repair_json(cleaned_content)
+                return json.loads(repaired)
+
         except json.JSONDecodeError as e:
             self.log_error("Failed to parse LLM response as JSON", error=e, raw_content=content[:1000] if content else "empty")
             raise ServiceException(
@@ -671,7 +749,12 @@ Generate the next turn:"""
                     if json_match:
                         cleaned_content = json_match.group(1).strip()
 
-                turn_data = json.loads(cleaned_content)
+                # Try to parse, and if it fails, attempt to repair
+                try:
+                    turn_data = json.loads(cleaned_content)
+                except json.JSONDecodeError:
+                    cleaned_content = self._repair_json(cleaned_content)
+                    turn_data = json.loads(cleaned_content)
                 turn = DialogueTurn(
                     speaker=turn_data["speaker"],
                     text=turn_data["text"],

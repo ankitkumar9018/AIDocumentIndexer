@@ -491,22 +491,34 @@ class FeedbackCollector:
                     "timestamp": item.timestamp.isoformat(),
                 })
 
-            # Note: Cohere's actual feedback API endpoint may be different
-            # This is a placeholder for the conceptual flow
+            # Store feedback locally for analysis and future model fine-tuning
+            # Note: Cohere doesn't currently provide a public feedback API.
+            # This feedback is stored locally and can be used for:
+            # 1. Internal reranking model improvement
+            # 2. Custom model fine-tuning datasets
+            # 3. Analytics on search relevance
+
+            # Log the feedback for local analysis
             logger.info(
-                "Would send feedback to Cohere",
+                "Reranker feedback collected",
                 batch_id=batch.batch_id,
                 items=len(feedback_data),
+                feedback_types=[f["feedback_type"] for f in feedback_data],
+                avg_relevance=sum(f["relevance_score"] for f in feedback_data) / len(feedback_data) if feedback_data else 0,
             )
 
-            # When Cohere provides official feedback API:
-            # response = await self._cohere_client.feedback(
-            #     model="rerank-v4",
-            #     feedback=feedback_data,
-            # )
-            # batch.cohere_response = response
+            # Store the feedback data in the batch for potential export/analysis
+            batch.cohere_response = {
+                "status": "stored_locally",
+                "message": "Feedback stored for analysis. Cohere does not currently support feedback API.",
+                "feedback_count": len(feedback_data),
+                "feedback_summary": {
+                    "total_items": len(feedback_data),
+                    "avg_relevance": sum(f["relevance_score"] for f in feedback_data) / len(feedback_data) if feedback_data else 0,
+                },
+            }
 
-            batch.status = "sent"
+            batch.status = "stored"  # Changed from "sent" to be accurate
             batch.sent_at = datetime.now(timezone.utc)
 
         except Exception as e:

@@ -45,12 +45,14 @@ from backend.api.websocket import (
     notify_processing_error,
 )
 from backend.services.auto_tagger import AutoTaggerService
-from backend.db.database import get_async_session
+from backend.db.database import get_async_session, async_session_context
 from backend.db.models import Document, Chunk, AccessTier
 from backend.api.middleware.auth import get_user_context_optional
 from backend.services.permissions import UserContext
 from sqlalchemy import select, and_, update, delete
 from sqlalchemy.orm import selectinload
+
+from backend.utils.async_helpers import create_safe_task
 
 logger = structlog.get_logger(__name__)
 
@@ -76,7 +78,7 @@ async def reset_stuck_upload_jobs() -> int:
 
     fixed_count = 0
 
-    async for session in get_async_session():
+    async with async_session_context() as session:
         # 1. Mark jobs as COMPLETED if document already completed
         result = await session.execute(
             select(UploadJob).where(
@@ -112,32 +114,194 @@ async def reset_stuck_upload_jobs() -> int:
         )
         stuck_jobs = result.scalars().all()
 
-        for job in stuck_jobs:
-            # Check if document already completed for this job
-            doc_result = await session.execute(
-                select(Document).where(Document.file_hash == job.file_hash,
-                                       Document.processing_status == "COMPLETED")
-            )
-            existing_doc = doc_result.scalar_one_or_none()
+        # Batch query: Find all completed documents for stuck jobs in ONE query
+        if stuck_jobs:
+            stuck_hashes = [job.file_hash for job in stuck_jobs if job.file_hash]
+            completed_hashes = set()
 
-            if existing_doc:
-                job.status = UploadStatus.COMPLETED
-                job.progress = 100
-                job.current_step = "Completed"
-                logger.info("Marked stuck job as completed (document exists)",
-                           job_id=str(job.id), filename=job.filename)
-            else:
-                job.status = UploadStatus.QUEUED
-                job.progress = 0
-                job.current_step = "Queued"
-                job.error_message = None
-                logger.info("Reset stuck job to queued",
-                           job_id=str(job.id), filename=job.filename)
-            fixed_count += 1
+            if stuck_hashes:
+                completed_result = await session.execute(
+                    select(Document.file_hash).where(
+                        Document.file_hash.in_(stuck_hashes),
+                        Document.processing_status == "COMPLETED"
+                    )
+                )
+                completed_hashes = {row[0] for row in completed_result.all()}
+
+            for job in stuck_jobs:
+                if job.file_hash in completed_hashes:
+                    job.status = UploadStatus.COMPLETED
+                    job.progress = 100
+                    job.current_step = "Completed"
+                    logger.info("Marked stuck job as completed (document exists)",
+                               job_id=str(job.id), filename=job.filename)
+                else:
+                    job.status = UploadStatus.QUEUED
+                    job.progress = 0
+                    job.current_step = "Queued"
+                    job.error_message = None
+                    logger.info("Reset stuck job to queued",
+                               job_id=str(job.id), filename=job.filename)
+                fixed_count += 1
 
         await session.commit()
 
     return fixed_count
+
+
+async def process_queued_uploads_startup():
+    """
+    Process all queued uploads on server startup.
+
+    This runs as a background task after the server starts to ensure
+    any uploads that were queued but not processed (e.g., due to server restart)
+    are picked up and processed.
+    """
+    import asyncio
+    # Wait a bit for server to fully initialize
+    await asyncio.sleep(3)
+
+    logger.info("Checking for queued uploads to process")
+
+    async with async_session_context() as session:
+        # Get all queued upload jobs
+        result = await session.execute(
+            select(UploadJob).where(UploadJob.status == UploadStatus.QUEUED)
+        )
+        queued_jobs = result.scalars().all()
+
+        if not queued_jobs:
+            logger.info("No queued uploads to process")
+            return
+
+        logger.info("Found queued uploads to process", count=len(queued_jobs))
+
+        # Collect files for sequential processing (one at a time to avoid system overload)
+        files_to_process = []
+        for job in queued_jobs:
+            file_path = job.file_path
+
+            # Check if file still exists
+            if not file_path or not Path(file_path).exists():
+                logger.warning("File not found for queued job", file_id=str(job.id))
+                continue
+
+            options = UploadOptions(
+                collection=job.collection,
+                folder_id=None,
+                access_tier=job.access_tier or 1,
+                enable_ocr=job.enable_ocr if job.enable_ocr is not None else True,
+                enable_image_analysis=job.enable_image_analysis if job.enable_image_analysis is not None else True,
+                auto_generate_tags=job.auto_generate_tags if job.auto_generate_tags is not None else False,
+            )
+
+            files_to_process.append({
+                "job_id": job.id,
+                "file_path": file_path,
+                "options": options,
+                "filename": job.filename,
+            })
+
+        # Process files sequentially in background (one at a time)
+        if files_to_process:
+            create_safe_task(
+                _process_files_with_settings(files_to_process),
+                name=f"process_upload_{len(files_to_process)}_files",
+                on_error=lambda e: logger.error("Upload processing failed", error=str(e))
+            )
+
+
+# Flag to track if periodic processor is running
+_periodic_processor_running = False
+
+
+async def start_periodic_queue_processor(interval_seconds: int = 30):
+    """
+    Start a periodic background task that checks for and processes queued uploads.
+
+    This runs continuously in the background, checking every `interval_seconds`
+    for new queued uploads that need processing.
+
+    Args:
+        interval_seconds: How often to check for queued uploads (default 30 seconds)
+    """
+    global _periodic_processor_running
+
+    if _periodic_processor_running:
+        logger.debug("Periodic queue processor already running")
+        return
+
+    _periodic_processor_running = True
+    logger.info("Starting periodic queue processor", interval=interval_seconds)
+
+    try:
+        while _periodic_processor_running:
+            await asyncio.sleep(interval_seconds)
+
+            try:
+                # Check for queued uploads
+                async with async_session_context() as session:
+                    result = await session.execute(
+                        select(UploadJob).where(UploadJob.status == UploadStatus.QUEUED)
+                    )
+                    queued_jobs = result.scalars().all()
+
+                    if not queued_jobs:
+                        continue  # No queued jobs, check again later
+
+                    logger.info("Periodic processor found queued uploads", count=len(queued_jobs))
+
+                    # Collect files for processing
+                    files_to_process = []
+                    for job in queued_jobs:
+                        file_path = job.file_path
+
+                        # Check if file still exists
+                        if not file_path or not Path(file_path).exists():
+                            logger.warning("File not found for queued job", file_id=str(job.id))
+                            job.status = UploadStatus.FAILED
+                            job.error_message = "File not found"
+                            continue
+
+                        options = UploadOptions(
+                            collection=job.collection,
+                            folder_id=None,
+                            access_tier=job.access_tier or 1,
+                            enable_ocr=job.enable_ocr if job.enable_ocr is not None else True,
+                            enable_image_analysis=job.enable_image_analysis if job.enable_image_analysis is not None else True,
+                            auto_generate_tags=job.auto_generate_tags if job.auto_generate_tags is not None else False,
+                        )
+
+                        files_to_process.append({
+                            "job_id": job.id,
+                            "file_path": file_path,
+                            "options": options,
+                            "filename": job.filename,
+                        })
+
+                    await session.commit()
+
+                    # Process files if any found
+                    if files_to_process:
+                        # Process synchronously in this task (not spawning another task)
+                        # This ensures we finish processing before checking for more
+                        await _process_files_with_settings(files_to_process)
+
+            except Exception as e:
+                logger.error("Error in periodic queue processor", error=str(e))
+                # Continue running despite errors
+
+    except asyncio.CancelledError:
+        logger.info("Periodic queue processor cancelled")
+    finally:
+        _periodic_processor_running = False
+        logger.info("Periodic queue processor stopped")
+
+
+def stop_periodic_queue_processor():
+    """Stop the periodic queue processor."""
+    global _periodic_processor_running
+    _periodic_processor_running = False
 
 
 # Track last sync time to avoid running on every request
@@ -167,7 +331,7 @@ async def sync_upload_jobs_with_documents(force: bool = False) -> int:
     _last_sync_time = datetime.now()
     synced_count = 0
 
-    async for session in get_async_session():
+    async with async_session_context() as session:
         # Find jobs that are not COMPLETED but their document IS completed
         result = await session.execute(
             select(UploadJob).where(
@@ -336,7 +500,7 @@ async def create_upload_job(
     auto_generate_tags: bool = False,
 ) -> UploadJob:
     """Create a new upload job in the database."""
-    async for session in get_async_session():
+    async with async_session_context() as session:
         job = UploadJob(
             id=file_id,
             filename=filename,
@@ -383,7 +547,7 @@ async def get_upload_job(file_id: str) -> Optional[Dict]:
         return _processing_status_cache[file_id]
 
     # Fall back to database
-    async for session in get_async_session():
+    async with async_session_context() as session:
         result = await session.execute(
             select(UploadJob).where(UploadJob.id == file_id)
         )
@@ -433,7 +597,7 @@ async def update_upload_job_status(
         logger.error("Invalid file_id format for status update", file_id=file_id)
         return
 
-    async for session in get_async_session():
+    async with async_session_context() as session:
         # Build update dict
         update_dict = {
             "status": status,
@@ -474,8 +638,9 @@ async def update_upload_job_status(
 
 
 async def check_duplicate_upload(file_hash: str) -> Optional[Dict]:
-    """Check if a file with the same hash already exists."""
-    async for session in get_async_session():
+    """Check if a file with the same hash already exists AND the document still exists."""
+    async with async_session_context() as session:
+        # First check if there's a completed upload job with this hash
         result = await session.execute(
             select(UploadJob)
             .where(
@@ -489,18 +654,46 @@ async def check_duplicate_upload(file_hash: str) -> Optional[Dict]:
         )
         job = result.scalar_one_or_none()
 
-        if job:
+        if job and job.document_id:
+            # Verify the document still exists (not deleted)
+            doc_result = await session.execute(
+                select(Document.id).where(Document.id == job.document_id)
+            )
+            doc_exists = doc_result.scalar_one_or_none()
+
+            if doc_exists:
+                return {
+                    "file_id": str(job.id),
+                    "filename": job.filename,
+                    "document_id": str(job.document_id),
+                }
+            else:
+                # Document was deleted - this is not a duplicate anymore
+                logger.debug(f"Upload job {job.id} has document_id {job.document_id} but document was deleted")
+                return None
+
+        # Also check the Document table directly for the file hash
+        # (in case upload job was cleaned up but document exists)
+        doc_result = await session.execute(
+            select(Document)
+            .where(Document.file_hash == file_hash)
+            .limit(1)
+        )
+        existing_doc = doc_result.scalar_one_or_none()
+
+        if existing_doc:
             return {
-                "file_id": str(job.id),
-                "filename": job.filename,
-                "document_id": str(job.document_id) if job.document_id else None,
+                "file_id": str(existing_doc.id),
+                "filename": existing_doc.filename,
+                "document_id": str(existing_doc.id),
             }
+
         return None
 
 
 async def get_all_upload_jobs(limit: int = 100) -> List[Dict]:
     """Get all recent upload jobs."""
-    async for session in get_async_session():
+    async with async_session_context() as session:
         result = await session.execute(
             select(UploadJob)
             .order_by(UploadJob.created_at.desc())
@@ -575,7 +768,7 @@ async def update_processing_status(file_id: str, status: PipelineStatus):
     )
 
 
-def run_async_task(coro):
+def run_async_task(coro, task_name: str = "background_task"):
     """
     Run an async coroutine in the current event loop.
 
@@ -585,13 +778,17 @@ def run_async_task(coro):
     try:
         try:
             loop = asyncio.get_running_loop()
-            # Event loop is running, create a task
-            asyncio.create_task(coro)
+            # Event loop is running, create a safe task with error logging
+            create_safe_task(
+                coro,
+                name=task_name,
+                on_error=lambda e: logger.error(f"Background task {task_name} failed", error=str(e))
+            )
         except RuntimeError:
             # No running loop, use asyncio.run()
             asyncio.run(coro)
     except Exception as e:
-        logger.error("Failed to run async task", error=str(e))
+        logger.error("Failed to run async task", task_name=task_name, error=str(e))
 
 
 async def _auto_tag_document(document_id: str, filename: str):
@@ -610,7 +807,7 @@ async def _auto_tag_document(document_id: str, filename: str):
             logger.error("Invalid document ID for auto-tagging", document_id=document_id)
             return
 
-        async for session in get_async_session():
+        async with async_session_context() as session:
             # Get document
             doc_query = select(Document).where(Document.id == doc_uuid)
             result = await session.execute(doc_query)
@@ -749,13 +946,37 @@ async def process_document_background(
             current_step=current_step,
         )
 
+    # Get embedding settings from database (Phase 94: Database-driven embedding config)
+    from backend.services.settings import SettingsService
+    settings = SettingsService()
+    embedding_provider = await settings.get_setting("embedding.provider")
+    embedding_model = await settings.get_setting("embedding.model")
+
+    # Use database settings if available, otherwise fall back to env vars
+    if not embedding_provider:
+        embedding_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+    if not embedding_model:
+        if embedding_provider == "ollama":
+            embedding_model = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+        else:
+            embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
+    # Check if Ray is available (started during server init)
+    try:
+        import ray
+        use_ray = ray.is_initialized()
+    except ImportError:
+        use_ray = False
+
     # Create pipeline config with status and progress callbacks
     config = PipelineConfig(
         processing_mode=processing_mode,
-        use_ray=True,
+        use_ray=use_ray,
         check_duplicates=options.detect_duplicates,
         on_status_change=status_callback,
         on_progress=progress_callback,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
     )
 
     pipeline = DocumentPipeline(config=config)
@@ -865,6 +1086,9 @@ async def upload_single_file(
         "Uploading single file",
         filename=file.filename,
         content_type=file.content_type,
+        auto_generate_tags=auto_generate_tags,
+        enable_ocr=enable_ocr,
+        detect_duplicates=detect_duplicates,
     )
 
     # Validate file
@@ -992,6 +1216,8 @@ async def upload_batch(
     folder_id: Optional[str] = Form(None, description="Target folder ID for the documents"),
     access_tier: int = Form(default=1, ge=1, le=100),
     enable_ocr: bool = Form(True),
+    enable_image_analysis: bool = Form(True, description="Enable image analysis and captioning"),
+    auto_generate_tags: bool = Form(False, description="Auto-generate tags using LLM"),
     is_private: bool = Form(False, description="Make documents private (only visible to uploader)"),
     user: Optional[UserContext] = Depends(get_user_context_optional),
 ):
@@ -1000,7 +1226,7 @@ async def upload_batch(
 
     All files are validated and queued for parallel processing with Ray.
     """
-    logger.info("Uploading batch", file_count=len(files))
+    logger.info("Uploading batch", file_count=len(files), enable_ocr=enable_ocr, enable_image_analysis=enable_image_analysis)
 
     if len(files) > 50:
         raise HTTPException(
@@ -1066,6 +1292,8 @@ async def upload_batch(
                 collection=collection,
                 access_tier=access_tier,
                 enable_ocr=enable_ocr,
+                enable_image_analysis=enable_image_analysis,
+                auto_generate_tags=auto_generate_tags,
             )
 
             # Queue for background processing with multi-tenant fields
@@ -1074,6 +1302,8 @@ async def upload_batch(
                 folder_id=folder_id,
                 access_tier=access_tier,
                 enable_ocr=enable_ocr,
+                enable_image_analysis=enable_image_analysis,
+                auto_generate_tags=auto_generate_tags,
                 # Multi-tenant fields from authenticated user
                 organization_id=user.organization_id if user else None,
                 uploaded_by_id=user.user_id if user else None,
@@ -1093,6 +1323,8 @@ async def upload_batch(
                         "file_id": str(file_id),
                         "file_hash": file_hash,
                         "enable_ocr": options.enable_ocr,
+                        "enable_image_analysis": options.enable_image_analysis,
+                        "auto_generate_tags": options.auto_generate_tags,
                         "folder_id": options.folder_id,
                         "organization_id": options.organization_id,
                         "is_private": options.is_private,
@@ -1577,14 +1809,14 @@ async def cancel_processing(
     logger.info("Cancelling processing", file_id=str(file_id))
 
     # Check if file exists and is in a cancellable state (from database)
-    status = await get_upload_job(str(file_id))
-    if not status:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    job_info = await get_upload_job(str(file_id))
+    if not job_info:
+        raise HTTPException(status_code=404, detail="File not found")
 
-    if status.get("status") not in ["queued", "pending"]:
+    if job_info.get("status") not in ["queued", "pending"]:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot cancel file in '{status.get('status')}' state. Only queued files can be cancelled."
+            status_code=400,
+            detail=f"Cannot cancel file in '{job_info.get('status')}' state. Only queued files can be cancelled."
         )
 
     # Mark as cancelled in database
@@ -1611,21 +1843,21 @@ async def retry_processing(
     logger.info("Retrying processing", file_id=str(file_id))
 
     # Check if file exists and is in a retriable state (from database)
-    status = await get_upload_job(str(file_id))
-    if not status:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    job_info = await get_upload_job(str(file_id))
+    if not job_info:
+        raise HTTPException(status_code=404, detail="File not found")
 
-    if status.get("status") not in ["failed", "cancelled"]:
+    if job_info.get("status") not in ["failed", "cancelled", "queued"]:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot retry file in '{status.get('status')}' state. Only failed or cancelled files can be retried."
+            status_code=400,
+            detail=f"Cannot retry file in '{job_info.get('status')}' state. Only failed, cancelled, or queued files can be retried."
         )
 
     # Check if file still exists on disk
-    file_path = status.get("file_path")
+    file_path = job_info.get("file_path")
     if not file_path or not Path(file_path).exists():
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=400,
             detail="Original file no longer exists. Please re-upload."
         )
 
@@ -1640,8 +1872,8 @@ async def retry_processing(
 
     # Re-queue for background processing
     options = UploadOptions(
-        collection=status.get("collection"),
-        access_tier=status.get("access_tier", 1),
+        collection=job_info.get("collection"),
+        access_tier=job_info.get("access_tier", 1),
     )
 
     # Use Celery if available, otherwise BackgroundTasks
@@ -1649,7 +1881,7 @@ async def retry_processing(
         submit_default_task(
             process_document_with_progress,
             file_path=file_path,
-            original_filename=status.get("filename", "unknown"),
+            original_filename=job_info.get("filename", "unknown"),
             user_id="anonymous",
             collection=options.collection,
             access_tier=options.access_tier,
@@ -1658,15 +1890,75 @@ async def retry_processing(
             file_id=str(file_id),
         )
     else:
-        background_tasks.add_task(
-            process_document_background,
-            file_id=file_id,
-            file_path=file_path,
-            options=options,
+        # Use safe task for async background processing with error logging
+        # BackgroundTasks doesn't reliably execute async functions
+        create_safe_task(
+            process_document_background(
+                file_id=file_id,
+                file_path=file_path,
+                options=options,
+            ),
+            name=f"reprocess_doc_{file_id}",
+            on_error=lambda e: logger.error("Document reprocessing failed", file_id=str(file_id), error=str(e))
         )
 
     logger.info("File re-queued for processing", file_id=str(file_id))
     return {"message": "File queued for reprocessing", "file_id": str(file_id)}
+
+
+async def _process_files_with_settings(files: list):
+    """
+    Process files based on settings - either sequentially or in parallel.
+    OCR processing is CPU-intensive, so sequential is recommended for most systems.
+    """
+    from backend.services.settings import SettingsService
+
+    settings = SettingsService()
+    # Get settings (defaults are defined in settings.py)
+    sequential = await settings.get_setting("processing.sequential_upload_processing")
+    max_parallel = await settings.get_setting("processing.max_parallel_uploads")
+
+    # Use defaults if settings return None
+    if sequential is None:
+        sequential = True
+    if max_parallel is None:
+        max_parallel = 2
+
+    if sequential:
+        logger.info(f"Starting SEQUENTIAL processing of {len(files)} files")
+        for i, file_info in enumerate(files):
+            logger.info(f"Processing file {i+1}/{len(files)}: {file_info['filename']}")
+            try:
+                await process_document_background(
+                    file_id=file_info["job_id"],
+                    file_path=file_info["file_path"],
+                    options=file_info["options"],
+                )
+                logger.info(f"Completed processing: {file_info['filename']}")
+            except Exception as e:
+                logger.error(f"Error processing {file_info['filename']}: {e}")
+            await asyncio.sleep(1)
+    else:
+        # Parallel processing with semaphore to limit concurrency
+        logger.info(f"Starting PARALLEL processing of {len(files)} files (max {max_parallel} concurrent)")
+        semaphore = asyncio.Semaphore(max_parallel)
+
+        async def process_with_semaphore(file_info):
+            async with semaphore:
+                logger.info(f"Processing: {file_info['filename']}")
+                try:
+                    await process_document_background(
+                        file_id=file_info["job_id"],
+                        file_path=file_info["file_path"],
+                        options=file_info["options"],
+                    )
+                    logger.info(f"Completed: {file_info['filename']}")
+                except Exception as e:
+                    logger.error(f"Error processing {file_info['filename']}: {e}")
+
+        await asyncio.gather(*[process_with_semaphore(f) for f in files])
+
+    logger.info("File processing complete")
 
 
 @router.post("/retry-queued")
@@ -1684,8 +1976,9 @@ async def retry_all_queued(
     started_count = 0
     skipped_count = 0
     errors = []
+    files_to_process = []  # Collect files for sequential processing
 
-    async for session in get_async_session():
+    async with async_session_context() as session:
         # Get all queued upload jobs
         result = await session.execute(
             select(UploadJob).where(UploadJob.status == UploadStatus.QUEUED)
@@ -1732,14 +2025,23 @@ async def retry_all_queued(
                     file_id=str(job.id),
                 )
             else:
-                background_tasks.add_task(
-                    process_document_background,
-                    file_id=job.id,
-                    file_path=file_path,
-                    options=options,
-                )
+                # Add to batch for sequential processing
+                files_to_process.append({
+                    "job_id": job.id,
+                    "file_path": file_path,
+                    "options": options,
+                    "filename": job.filename,
+                })
             started_count += 1
             logger.info("Re-queued file for processing", file_id=str(job.id), filename=job.filename)
+
+    # Process files sequentially in background (one at a time to avoid system overload)
+    if files_to_process:
+        create_safe_task(
+            _process_files_with_settings(files_to_process),
+            name=f"retry_queued_{len(files_to_process)}_files",
+            on_error=lambda e: logger.error("Retry queue processing failed", error=str(e))
+        )
 
     logger.info("Retry queued complete", queued=queued_count, started=started_count, skipped=skipped_count)
 
@@ -1784,7 +2086,7 @@ async def clear_completed_uploads():
     logger.info("Clearing completed upload jobs")
 
     deleted_count = 0
-    async for session in get_async_session():
+    async with async_session_context() as session:
         # Delete completed upload jobs
         result = await session.execute(
             delete(UploadJob).where(UploadJob.status == UploadStatus.COMPLETED)

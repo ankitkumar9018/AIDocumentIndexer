@@ -1,3 +1,7 @@
+> **ARCHIVED**: This document is retained for historical reference only and may contain outdated information. See [docs/INDEX.md](../INDEX.md) for current documentation.
+
+---
+
 # Verification Checklist - Embedding Dashboard Integration
 
 **Date:** January 20, 2026
