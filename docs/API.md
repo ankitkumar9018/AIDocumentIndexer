@@ -474,7 +474,70 @@ curl -X POST "http://localhost:8000/api/upload" \
 
 ### POST /upload/batch
 
-Upload multiple files. Accepts same options as single upload.
+Upload multiple files at once for batch processing.
+
+**Request:** multipart/form-data
+- `files`: Array of files to upload (required)
+- `collection` (optional): Collection name for all files
+- `folder_id` (optional): Target folder UUID
+- `access_tier` (optional): Access tier level (1-100)
+- `is_private` (optional, default: false): Mark documents as private
+- `enable_ocr` (optional, default: true): Enable OCR for scanned documents
+- `enable_image_analysis` (optional, default: true): Enable AI image captioning and analysis
+- `auto_generate_tags` (optional, default: false): Auto-generate tags using LLM after processing
+- `detect_duplicates` (optional, default: true): Skip duplicate files based on content hash
+
+**Example - Batch Upload with All Options:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/upload/batch" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "files=@document1.pdf" \
+  -F "files=@document2.pdf" \
+  -F "files=@document3.pdf" \
+  -F "collection=quarterly-reports" \
+  -F "enable_ocr=true" \
+  -F "enable_image_analysis=true" \
+  -F "auto_generate_tags=true"
+```
+
+**Example - Batch Upload with Folder:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/upload/batch" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "files=@report1.pdf" \
+  -F "files=@report2.pdf" \
+  -F "folder_id=550e8400-e29b-41d4-a716-446655440000" \
+  -F "auto_generate_tags=true"
+```
+
+**Response:**
+```json
+{
+  "batch_id": "uuid",
+  "files": [
+    {
+      "file_id": "uuid-1",
+      "filename": "document1.pdf",
+      "status": "queued"
+    },
+    {
+      "file_id": "uuid-2",
+      "filename": "document2.pdf",
+      "status": "queued"
+    }
+  ],
+  "total_files": 2,
+  "queued": 2,
+  "failed": 0
+}
+```
+
+**Processing Options Explained:**
+
+| Option | Description |
+|--------|-------------|
+| `enable_image_analysis` | When `true`, images in documents are analyzed using the configured vision model (Ollama llava by default). Generates searchable captions for each image. |
+| `auto_generate_tags` | When `true`, after document processing completes, the LLM analyzes document content and generates up to 5 relevant tags. The first tag is set as the document's collection. Uses the configured `auto_tagging` operation LLM (see Admin > Settings > LLM Configuration). |
 
 ### GET /upload/status/{file_id}
 

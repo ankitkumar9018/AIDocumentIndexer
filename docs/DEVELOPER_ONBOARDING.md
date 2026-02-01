@@ -1257,6 +1257,48 @@ async def action(request: MyRequest):
     return {"result": result}
 ```
 
+### Restarting Services After Code Changes
+
+When you modify Python files, different services need to be restarted:
+
+| Modified File Location | What to Restart |
+|------------------------|-----------------|
+| `backend/api/routes/*` | Backend only (auto-reload if using `--reload`) |
+| `backend/services/*` | Backend + Celery workers |
+| `backend/tasks/*` | Celery workers only |
+| `backend/db/models.py` | Backend + Celery + run migrations |
+
+**Recommended: Use setup.py for clean restarts**
+
+```bash
+# Full restart (clears bytecode cache, restarts all services)
+python scripts/setup.py restart
+
+# Or stop and start
+python scripts/setup.py stop
+python scripts/setup.py
+```
+
+**Manual Celery Restart (if needed)**
+
+If your code changes aren't being picked up by Celery workers:
+
+```bash
+# 1. Kill existing workers
+pkill -f "celery.*worker"
+
+# 2. Clear Python bytecode cache (critical!)
+find backend -name "*.pyc" -delete
+find backend -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
+
+# 3. Restart workers
+PYTHONPATH=/path/to/project \
+  uv run --project backend celery -A backend.services.task_queue:celery_app \
+  worker --loglevel=info --pool=threads --concurrency=4
+```
+
+**Why bytecode cache matters:** Python caches compiled `.pyc` files for faster imports. When you modify a `.py` file, the cached `.pyc` may still be loaded by Celery workers, causing them to run old code. The setup script automatically clears this cache before starting workers.
+
 ---
 
 ## Debugging Guide

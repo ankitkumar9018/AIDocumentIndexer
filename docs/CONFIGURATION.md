@@ -362,15 +362,44 @@ Users can click the "Documents to Search" button in the chat header to:
 |---------|-------------|---------|
 | `rag.multimodal_enabled` | Enable image/table processing | `true` |
 | `rag.vision_provider` | Vision model provider | `auto` |
+| `rag.vlm_provider` | Alternative key for vision provider | `auto` |
 | `rag.ollama_vision_model` | Ollama vision model name | `llava` |
 | `rag.caption_images` | Generate captions for images | `true` |
 | `rag.extract_tables` | Extract and structure tables | `true` |
 
 **Vision Provider Options:**
-- `auto` - Automatically select based on available providers
-- `ollama` - Use Ollama with LLaVA (free, local)
-- `openai` - Use OpenAI GPT-4V (requires API key)
-- `anthropic` - Use Anthropic Claude Vision (requires API key)
+- `auto` - Automatically select based on available providers (checks Ollama first, then cloud APIs)
+- `ollama` - **Use Ollama EXCLUSIVELY** with LLaVA (free, local, no fallback to cloud)
+- `openai` - Use OpenAI GPT-4V (requires valid `OPENAI_API_KEY`)
+- `anthropic` - Use Anthropic Claude Vision (requires valid `ANTHROPIC_API_KEY`)
+
+**⚠️ IMPORTANT: Provider Enforcement**
+
+When `rag.vision_provider` is explicitly set to `ollama`:
+1. The system uses **only** Ollama for image captioning
+2. **No fallback** to OpenAI or Anthropic occurs
+3. If Ollama fails (not installed, model not available), captioning is skipped
+4. This prevents accidental API key usage and unexpected cloud costs
+
+**Configuring Vision Provider via Admin UI:**
+1. Navigate to **Admin > Settings > RAG Configuration**
+2. Find the **Multimodal RAG** section
+3. Set `rag.vision_provider` to `ollama`
+4. Set `rag.ollama_vision_model` to your preferred vision model (e.g., `llava`, `qwen2.5vl`)
+
+**Verifying Vision Model Configuration:**
+Check Celery worker logs for these messages:
+```
+Vision model selection         db_model=llava db_provider=ollama
+Using Ollama vision model (from DB setting): llava at http://localhost:11434
+```
+
+**Recommended Ollama Vision Models:**
+| Model | Best For | Notes |
+|-------|----------|-------|
+| `llava` | General image understanding | Good balance of speed and quality |
+| `qwen2.5vl` | Document OCR, tables | Best accuracy (95.7% DocVQA) |
+| `llava-phi3` | Fast inference | Lighter weight, faster responses |
 
 #### Real-Time Updates
 

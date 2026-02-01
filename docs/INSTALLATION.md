@@ -59,14 +59,50 @@ python scripts/setup.py --skip-ollama
 # Skip Redis/Celery (disable async processing)
 python scripts/setup.py --skip-redis
 
+# Skip Celery only (keep Redis for caching)
+python scripts/setup.py --skip-celery
+
 # Include optional models (mistral, codellama, llama3.3:70b)
 python scripts/setup.py --pull-optional
 
+# Auto-install optional system dependencies (ffmpeg, libreoffice, tesseract)
+python scripts/setup.py --install-optional
+
 # Verbose output for debugging
 python scripts/setup.py --verbose
+
+# Write logs to a specific file
+python scripts/setup.py --log-file /path/to/setup.log
 ```
 
-For detailed setup script documentation, see [SETUP.md](SETUP.md).
+### Setup Script Commands
+
+```bash
+# Start all services (default)
+python scripts/setup.py start
+
+# Stop all services
+python scripts/setup.py stop
+
+# Restart all services (recommended after code changes)
+python scripts/setup.py restart
+```
+
+### What the Setup Script Does
+
+1. **Checks system dependencies** - Verifies Python, Node.js, npm, and optional tools
+2. **Stops existing services** - Kills processes on ports 8000, 3000, 6379, 11434
+3. **Installs Python packages** - Uses UV for fast dependency management
+4. **Installs Node.js packages** - Uses npm ci for frontend dependencies
+5. **Sets up Ollama** - Installs Ollama and pulls required models (llama3.2, nomic-embed-text, llava)
+6. **Creates environment files** - Generates `.env` files if missing, forces `APP_ENV=development`
+7. **Runs database migrations** - Executes Alembic migrations for schema setup
+8. **Starts Redis** - Required for Celery task queue
+9. **Clears Python bytecode cache** - Removes `.pyc` files and `__pycache__` directories to ensure fresh code
+10. **Starts Celery worker** - Background task processor for document processing
+11. **Starts backend and frontend** - Uvicorn API server and Next.js frontend
+
+**Note:** The setup script automatically clears Python bytecode cache before starting Celery workers. This prevents issues where workers might load stale compiled code after file modifications.
 
 ---
 

@@ -305,6 +305,133 @@ EMBEDDING_DIMENSION=768  # For Ollama nomic-embed-text
 pip install -U langchain-ollama
 ```
 
+### Image Captioning Using OpenAI Instead of Ollama
+
+**Problem:** Image captioning fails with `401 - Incorrect API key provided: sk-your-***` even though Ollama is configured.
+
+**Causes & Solutions:**
+
+1. **Vision provider not explicitly set to `ollama`:**
+   ```bash
+   # Check current setting in Admin UI:
+   # Admin > Settings > RAG Configuration > rag.vision_provider
+
+   # Or check database directly:
+   sqlite3 backend/data/aidocindexer.db \
+     "SELECT value FROM system_settings WHERE key='rag.vision_provider';"
+
+   # Should return: ollama
+   ```
+
+2. **Celery workers running old code (see Celery section below)**
+
+3. **Ollama llava model not installed:**
+   ```bash
+   # Pull the vision model
+   ollama pull llava
+
+   # Verify it's installed
+   ollama list | grep llava
+   ```
+
+4. **Cached image captions from previous failed attempts:**
+   ```bash
+   # Clear cached error captions
+   sqlite3 backend/data/aidocindexer.db \
+     "DELETE FROM analyzed_images WHERE caption LIKE '%401%' OR caption LIKE '%error%';"
+   ```
+
+**Verifying Correct Configuration:**
+After fixing, check Celery logs for these messages:
+```
+Vision model selection         db_model=llava db_provider=ollama
+Using Ollama vision model (from DB setting): llava at http://localhost:11434
+```
+
+If you see these messages, image captioning is correctly using Ollama.
+
+---
+
+## Celery Worker Issues
+
+### Celery Workers Not Picking Up Code Changes
+
+**Problem:** After modifying Python files, Celery workers still run old code. Changes like logging statements don't appear in logs.
+
+**Root Cause:** Python bytecode cache (`.pyc` files and `__pycache__` directories) can cause workers to load stale compiled code even after restart.
+
+**Solution:**
+```bash
+# Stop Celery workers
+pkill -f "celery.*worker"
+
+# Clear Python bytecode cache
+find backend -name "*.pyc" -delete
+find backend -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
+
+# Restart with setup.py (recommended - automatically clears cache)
+python scripts/setup.py
+
+# OR restart manually:
+PYTHONPATH=/path/to/project \
+  uv run --project backend celery -A backend.services.task_queue:celery_app \
+  worker --loglevel=info --pool=threads --concurrency=4
+```
+
+**Note:** As of the latest update, `setup.py` automatically clears the bytecode cache before starting Celery workers to prevent this issue.
+
+### Celery Worker Crashes or Won't Start
+
+**Problem:** Celery worker exits immediately or shows import errors.
+
+**Solution:**
+```bash
+# Check if Redis is running
+redis-cli ping
+# Should return: PONG
+
+# Start Redis if needed
+redis-server &
+
+# Check for import errors by running Celery in foreground
+PYTHONPATH=/path/to/project \
+  uv run --project backend celery -A backend.services.task_queue:celery_app \
+  worker --loglevel=debug
+
+# Common fixes:
+# 1. Ensure PYTHONPATH includes project root
+# 2. Clear bytecode cache (see above)
+# 3. Verify database URL is correct
+```
+
+### Tasks Not Being Processed
+
+**Problem:** Documents uploaded but processing never starts.
+
+**Causes & Solutions:**
+
+1. **Celery not connected to Redis:**
+   ```bash
+   # Check Celery log for:
+   # "Connected to redis://localhost:6379/0"
+   # "celery@hostname ready."
+   ```
+
+2. **No workers available:**
+   ```bash
+   # Check running workers
+   ps aux | grep "celery.*worker"
+   ```
+
+3. **Task queue full or stuck:**
+   ```bash
+   # Check Redis queue length
+   redis-cli LLEN celery
+
+   # Clear stuck tasks (careful in production!)
+   redis-cli DEL celery
+   ```
+
 ---
 
 ## Document Processing Issues

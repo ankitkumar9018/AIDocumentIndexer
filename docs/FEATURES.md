@@ -28,6 +28,7 @@ This guide covers the new features introduced in AIDocumentIndexer, including th
     - [Memory Manager](#memory-manager-openclaw-inspired)
     - [Adaptive Chunking](#adaptive-chunking-moltbot-inspired)
     - [Auto-Tagging](#auto-tagging)
+    - [AI Image Analysis](#ai-image-analysis-multimodal-rag)
     - [Duplicate Detection Improvements](#duplicate-detection-improvements)
 15. [Future Roadmap (Research-Based)](#future-roadmap-research-based)
 
@@ -1673,6 +1674,76 @@ The LLM provider and model for auto-tagging is configured via Admin UI:
 **Example Generated Tags:**
 - For a project management guide: `["Project Management", "Software Development", "Guide", "Best Practices"]`
 - For a marketing presentation: `["Marketing", "FedEx Campaign", "Presentation", "Q4 2023"]`
+
+---
+
+### AI Image Analysis (Multimodal RAG)
+
+Vision-based image captioning that makes images in your documents searchable by generating AI descriptions.
+
+**Features:**
+- **Local Vision Models**: Uses Ollama llava by default (free, private, no cloud costs)
+- **Automatic Detection**: Extracts images from PDFs and documents during processing
+- **Intelligent Caching**: Same images across documents are only analyzed once (deduplication)
+- **Searchable Captions**: Generated descriptions are indexed and searchable via chat
+- **Provider Flexibility**: Supports Ollama (recommended), OpenAI GPT-4V, or Anthropic Claude Vision
+
+**How to Use:**
+1. Enable "AI Image Analysis" during upload (enabled by default)
+2. Images are automatically extracted during document processing
+3. Vision model generates descriptions for each significant image
+4. Descriptions are embedded and stored with document chunks
+
+**Single File Upload:**
+```bash
+curl -X POST "/api/v1/upload/single" \
+  -F "file=@document.pdf" \
+  -F "enable_image_analysis=true"
+```
+
+**Batch Upload (Multiple Files):**
+```bash
+curl -X POST "/api/v1/upload/batch" \
+  -F "files=@doc1.pdf" \
+  -F "files=@doc2.pdf" \
+  -F "enable_image_analysis=true" \
+  -F "auto_generate_tags=true"
+```
+
+**Vision Provider Configuration:**
+
+Configure the vision model via **Admin > Settings > RAG Configuration**:
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `rag.vision_provider` | Vision model provider | `auto` |
+| `rag.ollama_vision_model` | Ollama vision model name | `llava` |
+
+**Provider Options:**
+- `ollama` - **Recommended**: Uses Ollama locally (free, private). When set, system uses Ollama ONLY with no fallback to cloud APIs
+- `auto` - Automatically selects best available provider
+- `openai` - Uses GPT-4V (requires valid API key)
+- `anthropic` - Uses Claude Vision (requires valid API key)
+
+**Recommended Ollama Vision Models:**
+| Model | Best For |
+|-------|----------|
+| `llava` | General image understanding (default) |
+| `qwen2.5vl` | Document OCR, tables (highest accuracy) |
+| `llava-phi3` | Fast inference on resource-constrained systems |
+
+**Verifying Image Analysis:**
+Check Celery worker logs for successful image processing:
+```
+Vision model selection         db_model=llava db_provider=ollama
+Using Ollama vision model (from DB setting): llava at http://localhost:11434
+Image processing complete      images_analyzed=5 images_found=8
+```
+
+**Troubleshooting:**
+- If you see `401 Incorrect API key` errors, ensure `rag.vision_provider` is set to `ollama` in Admin Settings
+- For "Image - captioning error" messages, pull the vision model: `ollama pull llava`
+- See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#image-captioning-using-openai-instead-of-ollama) for detailed solutions
 
 ---
 
