@@ -417,13 +417,13 @@ class QwenVLMProvider(BaseVLMProvider):
                 success=False,
             )
 
+        pil_images = []  # Track for cleanup
         try:
             await self._load_model()
 
             from PIL import Image
 
             # Convert bytes to PIL Images
-            pil_images = []
             for img_data in images[:self.config.max_images_per_request]:
                 pil_images.append(Image.open(io.BytesIO(img_data)))
 
@@ -487,6 +487,119 @@ class QwenVLMProvider(BaseVLMProvider):
                 content="",
                 provider=VLMProvider.QWEN,
                 model=self.config.qwen_model,
+                error=str(e),
+                success=False,
+                processing_time_ms=(time.time() - start_time) * 1000,
+            )
+        finally:
+            # Clean up PIL images to prevent memory leaks
+            for img in pil_images:
+                try:
+                    img.close()
+                except Exception:
+                    pass
+
+
+# =============================================================================
+# GLM-4.6V Provider
+# =============================================================================
+
+class GLMVLMProvider(BaseVLMProvider):
+    """GLM-4.6V vision provider via ZhipuAI API."""
+
+    def __init__(self, config: VLMConfig):
+        super().__init__(config)
+        self._api_key = os.getenv("ZHIPUAI_API_KEY") or getattr(settings, "ZHIPUAI_API_KEY", None)
+
+    async def is_available(self) -> bool:
+        """Check if ZhipuAI API is configured."""
+        return bool(self._api_key)
+
+    async def analyze(
+        self,
+        images: List[bytes],
+        prompt: str,
+        output_format: str = "text",
+    ) -> VLMResult:
+        """Analyze images using GLM-4.6V."""
+        import time
+        start_time = time.time()
+
+        if not await self.is_available():
+            return VLMResult(
+                content="",
+                provider=VLMProvider.GLM,
+                model=self.config.glm_model,
+                error="ZhipuAI API key not configured",
+                success=False,
+            )
+
+        try:
+            import httpx
+
+            if output_format == "json":
+                prompt = f"{prompt}\n\nRespond with valid JSON only."
+            elif output_format == "html":
+                prompt = f"{prompt}\n\nFormat the output as HTML."
+
+            # Build content with images
+            content = []
+            for img_data in images[:self.config.max_images_per_request]:
+                mime_type = self._get_image_mime_type(img_data)
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{self._encode_image(img_data)}",
+                    }
+                })
+
+            content.append({"type": "text", "text": prompt})
+
+            # Call ZhipuAI API
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.config.glm_model,
+                        "messages": [{"role": "user", "content": content}],
+                        "max_tokens": 4096,
+                    },
+                    timeout=self.config.timeout_seconds,
+                )
+
+                if response.status_code != 200:
+                    raise RuntimeError(f"GLM API error: {response.text}")
+
+                result = response.json()
+                result_text = result["choices"][0]["message"]["content"]
+
+            # Parse structured output if requested
+            structured_data = None
+            if output_format == "json":
+                try:
+                    import json
+                    structured_data = json.loads(result_text)
+                except json.JSONDecodeError:
+                    pass  # Invalid JSON, leave structured_data as None
+
+            return VLMResult(
+                content=result_text,
+                provider=VLMProvider.GLM,
+                model=self.config.glm_model,
+                structured_data=structured_data,
+                processing_time_ms=(time.time() - start_time) * 1000,
+            )
+
+        except Exception as e:
+            logger.error("GLM VLM error", error=str(e))
+            return VLMResult(
+                content="",
+                provider=VLMProvider.GLM,
+                model=self.config.glm_model,
                 error=str(e),
                 success=False,
                 processing_time_ms=(time.time() - start_time) * 1000,
@@ -624,6 +737,7 @@ class VLMProcessor:
             VLMProvider.CLAUDE: ClaudeVLMProvider(self.config),
             VLMProvider.OPENAI: OpenAIVLMProvider(self.config),
             VLMProvider.QWEN: QwenVLMProvider(self.config),
+            VLMProvider.GLM: GLMVLMProvider(self.config),
             VLMProvider.LOCAL: LocalVLMProvider(self.config),
         }
 

@@ -93,6 +93,111 @@ Verify token validity.
 
 ---
 
+## Health & Monitoring Endpoints
+
+These endpoints are used for health checks, monitoring, and cloud deployments (Kubernetes, AWS ALB, etc.).
+
+### GET /health
+
+Comprehensive health check including all subsystems.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-02-02T10:30:00Z",
+  "version": "1.0.0",
+  "checks": {
+    "database": "healthy",
+    "redis": "healthy",
+    "celery": "healthy",
+    "disk_space": "healthy"
+  },
+  "performance": {
+    "cython_enabled": true,
+    "gpu_enabled": true,
+    "minhash_enabled": true
+  }
+}
+```
+
+### GET /health/live
+
+Kubernetes liveness probe - indicates if the process is alive.
+
+**Response:**
+```json
+{
+  "status": "alive",
+  "timestamp": "2026-02-02T10:30:00Z"
+}
+```
+
+**Use Case:** Kubernetes uses this to determine if a pod should be restarted.
+
+### GET /health/ready
+
+Kubernetes readiness probe - indicates if the service can accept traffic.
+
+**Response:**
+```json
+{
+  "status": "ready",
+  "timestamp": "2026-02-02T10:30:00Z",
+  "checks": {
+    "database": true,
+    "redis": true
+  }
+}
+```
+
+**Use Case:** Kubernetes/ALB uses this to determine if traffic should be routed to this instance.
+
+### GET /metrics
+
+Prometheus-format metrics for monitoring.
+
+**Response (text/plain):**
+```prometheus
+# HELP aidoc_cython_enabled Cython optimization status
+# TYPE aidoc_cython_enabled gauge
+aidoc_cython_enabled 1
+
+# HELP aidoc_gpu_enabled GPU acceleration status
+# TYPE aidoc_gpu_enabled gauge
+aidoc_gpu_enabled 1
+
+# HELP aidoc_minhash_enabled MinHash deduplication status
+# TYPE aidoc_minhash_enabled gauge
+aidoc_minhash_enabled 1
+
+# HELP aidoc_memory_rss_bytes Memory RSS in bytes
+# TYPE aidoc_memory_rss_bytes gauge
+aidoc_memory_rss_bytes 2147483648
+
+# HELP aidoc_memory_vms_bytes Memory VMS in bytes
+# TYPE aidoc_memory_vms_bytes gauge
+aidoc_memory_vms_bytes 4294967296
+
+# HELP aidoc_documents_total Total documents indexed
+# TYPE aidoc_documents_total counter
+aidoc_documents_total 15234
+
+# HELP aidoc_requests_total Total API requests
+# TYPE aidoc_requests_total counter
+aidoc_requests_total{method="GET",endpoint="/chat"} 1523
+
+# HELP aidoc_request_duration_seconds Request duration histogram
+# TYPE aidoc_request_duration_seconds histogram
+aidoc_request_duration_seconds_bucket{le="0.1"} 1200
+aidoc_request_duration_seconds_bucket{le="0.5"} 1450
+aidoc_request_duration_seconds_bucket{le="1.0"} 1500
+```
+
+**Use Case:** Prometheus scraping for dashboards (Grafana) and alerting.
+
+---
+
 ## Document Endpoints
 
 ### GET /documents
@@ -1533,6 +1638,635 @@ Execute a request through the multi-agent system.
   "context": {}
 }
 ```
+
+---
+
+## Workflow Endpoints
+
+### GET /workflows
+
+List all workflows for the current user/organization.
+
+**Query Parameters:**
+- `skip` (int): Number of items to skip (default: 0)
+- `limit` (int): Maximum items to return (default: 50)
+- `is_draft` (bool): Filter by draft status
+
+**Response:**
+```json
+{
+  "workflows": [
+    {
+      "id": "uuid",
+      "name": "My Workflow",
+      "description": "...",
+      "is_active": true,
+      "is_draft": false,
+      "trigger_type": "manual",
+      "created_at": "2026-02-01T10:00:00Z"
+    }
+  ],
+  "total": 10
+}
+```
+
+### POST /workflows
+
+Create a new workflow.
+
+**Request:**
+```json
+{
+  "name": "My Workflow",
+  "description": "Workflow description",
+  "nodes": [],
+  "edges": []
+}
+```
+
+### GET /workflows/{workflow_id}
+
+Get workflow details by ID.
+
+### PUT /workflows/{workflow_id}/nodes
+
+Update workflow nodes and edges.
+
+**Request:**
+```json
+{
+  "nodes": [...],
+  "edges": [...],
+  "input_schema": [...]
+}
+```
+
+### DELETE /workflows/{workflow_id}
+
+Delete a workflow.
+
+### POST /workflows/{workflow_id}/duplicate
+
+Create a copy of a workflow.
+
+### POST /workflows/{workflow_id}/execute
+
+Execute a workflow.
+
+**Request:**
+```json
+{
+  "inputs": {
+    "param1": "value1"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "execution_id": "uuid",
+  "status": "pending",
+  "workflow_id": "uuid"
+}
+```
+
+### POST /workflows/{workflow_id}/execute/stream
+
+Execute workflow with streaming response via Server-Sent Events.
+
+### GET /workflows/{workflow_id}/executions
+
+List execution history for a workflow.
+
+**Query Parameters:**
+- `skip` (int): Pagination offset
+- `limit` (int): Maximum items
+
+### GET /workflows/executions/{execution_id}
+
+Get execution details by ID.
+
+### POST /workflows/executions/{execution_id}/cancel
+
+Cancel a running execution.
+
+---
+
+## Workflow Deployment Endpoints
+
+### POST /workflows/{workflow_id}/deploy
+
+Deploy a workflow for public access.
+
+**Request:**
+```json
+{
+  "public_slug": "my-workflow",
+  "branding": {
+    "logo": "https://example.com/logo.png",
+    "primaryColor": "#8b5cf6",
+    "companyName": "My Company"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "workflow_id": "uuid",
+  "public_slug": "my-workflow",
+  "public_url": "https://app.example.com/w/my-workflow",
+  "is_published": true
+}
+```
+
+### POST /workflows/{workflow_id}/undeploy
+
+Remove public access from a deployed workflow.
+
+### GET /workflows/{workflow_id}/deploy-status
+
+Get the deployment status of a workflow.
+
+**Response:**
+```json
+{
+  "is_published": true,
+  "public_slug": "my-workflow",
+  "public_url": "https://app.example.com/w/my-workflow",
+  "deployed_at": "2026-02-01T10:00:00Z"
+}
+```
+
+---
+
+## Workflow Sharing Endpoints
+
+### POST /workflows/{workflow_id}/share
+
+Create a share link for a workflow.
+
+**Request:**
+```json
+{
+  "permission_level": "executor",
+  "password": "optional-password",
+  "expires_at": "2026-03-01T00:00:00Z",
+  "max_uses": 100
+}
+```
+
+**Permission Levels:**
+- `viewer`: View workflow details only
+- `executor`: View and execute workflow
+- `editor`: View, execute, and duplicate workflow
+
+**Response:**
+```json
+{
+  "share_id": "uuid",
+  "token": "abc123xyz",
+  "share_url": "https://app.example.com/shared/workflow/abc123xyz",
+  "permission_level": "executor",
+  "expires_at": "2026-03-01T00:00:00Z",
+  "max_uses": 100,
+  "use_count": 0,
+  "requires_password": true
+}
+```
+
+### GET /workflows/{workflow_id}/shares
+
+List all share links for a workflow.
+
+**Response:**
+```json
+{
+  "shares": [
+    {
+      "share_id": "uuid",
+      "token": "abc123xyz",
+      "permission_level": "executor",
+      "expires_at": "2026-03-01T00:00:00Z",
+      "max_uses": 100,
+      "use_count": 5,
+      "created_at": "2026-02-01T10:00:00Z"
+    }
+  ]
+}
+```
+
+### DELETE /workflows/{workflow_id}/shares/{share_id}
+
+Revoke a share link.
+
+---
+
+## Workflow Scheduling Endpoints
+
+### POST /workflows/{workflow_id}/schedule
+
+Schedule a workflow for recurring execution.
+
+**Request:**
+```json
+{
+  "cron_expression": "0 9 * * *",
+  "timezone": "America/New_York",
+  "input_data": {
+    "param1": "value"
+  }
+}
+```
+
+**Cron Expression Format:** `minute hour day_of_month month_of_year day_of_week`
+
+**Response:**
+```json
+{
+  "schedule_id": "uuid",
+  "workflow_id": "uuid",
+  "cron_expression": "0 9 * * *",
+  "timezone": "America/New_York",
+  "next_run": "2026-02-03T09:00:00-05:00",
+  "is_active": true
+}
+```
+
+### GET /workflows/{workflow_id}/schedule
+
+Get the current schedule for a workflow.
+
+### DELETE /workflows/{workflow_id}/schedule
+
+Remove the schedule from a workflow.
+
+### GET /workflows/schedules/upcoming
+
+List upcoming scheduled executions across all workflows.
+
+**Query Parameters:**
+- `limit` (int): Maximum items to return (default: 10)
+
+**Response:**
+```json
+{
+  "upcoming": [
+    {
+      "workflow_id": "uuid",
+      "workflow_name": "Daily Report",
+      "cron": "0 9 * * *",
+      "timezone": "UTC",
+      "next_run": "2026-02-03T09:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+## Workflow Trigger Endpoints
+
+### POST /workflows/{workflow_id}/form-trigger
+
+Configure a form trigger for a workflow.
+
+**Request:**
+```json
+{
+  "enabled": true,
+  "title": "Contact Form",
+  "description": "Submit your inquiry",
+  "success_message": "Thank you for your submission!",
+  "rate_limit_per_minute": 10
+}
+```
+
+### POST /workflows/{workflow_id}/form-submit
+
+Submit data to a form-triggered workflow.
+
+**Request:**
+```json
+{
+  "field1": "value1",
+  "field2": "value2"
+}
+```
+
+### POST /workflows/{workflow_id}/event-trigger
+
+Configure an event trigger for a workflow.
+
+**Request:**
+```json
+{
+  "event_type": "document.created",
+  "filter_conditions": {
+    "source": "notion",
+    "tags": ["important"]
+  }
+}
+```
+
+**Supported Event Types:**
+- `document.created`
+- `document.updated`
+- `connector.sync_completed`
+- `chat.message_received`
+
+### GET /workflows/event-triggers
+
+List all configured event triggers.
+
+### POST /workflows/webhook/{workflow_id}
+
+Trigger a workflow via webhook.
+
+**Request:** Any JSON payload (passed to workflow as input)
+
+---
+
+## Workflow Versioning Endpoints
+
+### GET /workflows/{workflow_id}/versions
+
+List version history for a workflow.
+
+**Response:**
+```json
+{
+  "versions": [
+    {
+      "version": 3,
+      "created_at": "2026-02-02T10:30:00Z",
+      "created_by": "user-uuid",
+      "node_count": 5,
+      "is_current": true
+    }
+  ]
+}
+```
+
+### POST /workflows/{workflow_id}/versions/{version}/restore
+
+Restore a previous version (creates a new version with restored content).
+
+---
+
+## Public Workflow Endpoints
+
+These endpoints are accessible without authentication for deployed/shared workflows.
+
+### GET /public/workflows/{public_slug}
+
+Get public workflow information.
+
+**Response:**
+```json
+{
+  "id": "uuid",
+  "name": "My Workflow",
+  "description": "...",
+  "input_schema": [
+    {
+      "name": "text",
+      "type": "textarea",
+      "label": "Input Text",
+      "required": true
+    }
+  ],
+  "branding": {
+    "logo": "https://...",
+    "primaryColor": "#8b5cf6"
+  }
+}
+```
+
+### POST /public/workflows/{public_slug}/execute
+
+Execute a public workflow.
+
+**Request:**
+```json
+{
+  "inputs": {
+    "text": "Content to process..."
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "execution_id": "uuid",
+  "status": "pending"
+}
+```
+
+### GET /public/workflows/{public_slug}/status/{execution_id}
+
+Get execution status for a public workflow.
+
+### GET /public/shared/workflow/{token}
+
+Get shared workflow information.
+
+**Response:**
+```json
+{
+  "workflow_id": "uuid",
+  "workflow_name": "My Workflow",
+  "workflow_description": "...",
+  "permission_level": "executor",
+  "input_schema": [...],
+  "requires_password": true,
+  "is_valid": true
+}
+```
+
+### POST /public/shared/workflow/{token}/verify
+
+Verify password for a password-protected share link.
+
+**Request:**
+```json
+{
+  "password": "share-password"
+}
+```
+
+### POST /public/shared/workflow/{token}/execute
+
+Execute a shared workflow.
+
+**Request:**
+```json
+{
+  "inputs": {...},
+  "password": "optional-if-protected"
+}
+```
+
+### GET /public/shared/workflow/{token}/status/{execution_id}
+
+Get execution status for a shared workflow.
+
+---
+
+## Skills Endpoints
+
+### GET /skills/list
+
+List all skills.
+
+**Query Parameters:**
+- `category` (string): Filter by category
+- `is_builtin` (bool): Filter built-in vs custom skills
+
+### POST /skills
+
+Create a custom skill.
+
+**Request:**
+```json
+{
+  "name": "My Skill",
+  "description": "Skill description",
+  "category": "analysis",
+  "system_prompt": "You are an expert at...",
+  "input_schema": [
+    {
+      "name": "text",
+      "type": "textarea",
+      "label": "Input Text",
+      "required": true
+    }
+  ],
+  "output_schema": {
+    "type": "object",
+    "properties": {...}
+  }
+}
+```
+
+### POST /skills/execute
+
+Execute a skill.
+
+**Request:**
+```json
+{
+  "skill_id": "uuid",
+  "inputs": {
+    "text": "Content to analyze..."
+  },
+  "model": "gpt-4o"
+}
+```
+
+### GET /skills/{skill_id}
+
+Get skill details.
+
+### PUT /skills/{skill_id}
+
+Update a skill.
+
+### DELETE /skills/{skill_id}
+
+Delete a skill.
+
+### GET /skills/{skill_id}/executions
+
+Get execution history for a skill.
+
+---
+
+## Skill Publishing Endpoints
+
+### POST /skills/{skill_id}/publish
+
+Publish a skill for public access.
+
+**Request:**
+```json
+{
+  "public_slug": "my-summarizer"
+}
+```
+
+**Response:**
+```json
+{
+  "skill_id": "uuid",
+  "public_slug": "my-summarizer",
+  "public_url": "https://app.example.com/api/v1/public/skills/my-summarizer",
+  "is_published": true
+}
+```
+
+### POST /skills/{skill_id}/unpublish
+
+Remove public access from a skill.
+
+### GET /skills/{skill_id}/publish-status
+
+Get the publish status of a skill.
+
+---
+
+## Public Skill Endpoints
+
+### GET /public/skills/{public_slug}
+
+Get public skill information.
+
+### POST /public/skills/{public_slug}/execute
+
+Execute a public skill.
+
+**Request:**
+```json
+{
+  "inputs": {
+    "text": "Content to process..."
+  }
+}
+```
+
+---
+
+## External Agent Skills Endpoints
+
+### POST /skills/external/test
+
+Test an external agent configuration.
+
+**Request:**
+```json
+{
+  "api_url": "https://api.example.com/agent",
+  "api_key": "sk-...",
+  "request_format": {
+    "method": "POST",
+    "headers": {...}
+  }
+}
+```
+
+### POST /skills/external
+
+Create a skill from an external agent.
+
+### POST /skills/external/{skill_id}/execute
+
+Execute an external agent skill.
+
+### GET /skills/external/{skill_id}/config
+
+Get external agent configuration.
 
 ---
 

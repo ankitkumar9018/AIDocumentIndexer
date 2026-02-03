@@ -1,0 +1,88 @@
+[package]
+name = "aidocindexer-desktop"
+version = "1.0.0"
+description = "AIDocumentIndexer Desktop App - LOCAL MODE & SERVER MODE"
+authors = ["AIDocumentIndexer Team"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.70"
+
+[lib]
+name = "aidocindexer_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "devtools"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-process = "2"
+tauri-plugin-http = "2"
+tauri-plugin-store = "2"
+tauri-plugin-os = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client for API calls
+reqwest = { version = "0.12", features = ["json"] }
+
+# Database for local storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# File watching
+notify = "6"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Cryptography for license validation
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+
+# Date/time for license expiration
+chrono = { version = "0.4", features = ["serde"] }
+
+# Get hostname for machine fingerprint
+hostname = "0.4"
+
+# Home directory for license file
+dirs = "5"
+
+# Ollama client for LOCAL MODE
+ollama-rs = { version = "0.2", features = ["stream"] }
+
+# Embedding support
+fastembed = { version = "4", optional = true }
+
+# Vector similarity
+simsimd = { version = "5", optional = true }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+local-embeddings = ["fastembed"]
+simd = ["simsimd"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

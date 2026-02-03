@@ -1,0 +1,10 @@
+{
+  "id": "aidocindexer",
+  "name": "AIDocumentIndexer",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "RAG-powered search and chat for your Obsidian vault. Connect to AIDocumentIndexer for semantic search, knowledge graph, and AI chat.",
+  "author": "AIDocumentIndexer Team",
+  "authorUrl": "https://github.com/your-repo/AIDocumentIndexer",
+  "isDesktopOnly": false
+}

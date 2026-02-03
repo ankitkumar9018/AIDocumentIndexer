@@ -5297,6 +5297,7 @@ class CeleryStatusResponse(BaseModel):
     workers: List[str] = []
     worker_count: int = 0
     active_tasks: int = 0
+    concurrency: int = 4  # Current configured concurrency from settings
     message: Optional[str] = None
 
 
@@ -5345,12 +5346,21 @@ async def get_celery_status(
             except Exception as e:
                 logger.debug("Failed to get active Celery tasks", error=str(e))
 
+        # Get configured concurrency from settings
+        try:
+            settings_service = get_settings_service()
+            concurrency = await settings_service.get_setting("queue.max_workers") or 4
+            concurrency = int(concurrency)
+        except Exception:
+            concurrency = 4
+
         return CeleryStatusResponse(
             enabled=worker_stats.get("enabled", False),
             available=is_available,
             workers=worker_stats.get("workers", []),
             worker_count=worker_stats.get("count", 0),
             active_tasks=active_count,
+            concurrency=concurrency,
             message=worker_stats.get("message"),
         )
     except ImportError:
@@ -5543,6 +5553,56 @@ async def stop_celery_worker(
         success=True,
         message="Celery worker stop signal sent. Workers will terminate gracefully.",
     )
+
+
+class CeleryRestartResponse(BaseModel):
+    """Response for Celery worker restart."""
+    success: bool
+    message: str
+    concurrency: Optional[int] = None
+
+
+@router.post("/celery/restart", response_model=CeleryRestartResponse)
+async def restart_celery_workers(admin: AdminUser):
+    """
+    Restart Celery workers with updated settings.
+
+    Reads queue.max_workers from database settings and restarts workers
+    with the new concurrency. Use this after changing queue settings.
+
+    Admin only endpoint.
+    """
+    from backend.services.celery_manager import restart_celery_worker, get_worker_status
+
+    try:
+        # Restart the worker (will read new settings from DB)
+        success = await restart_celery_worker()
+
+        # Get the new status including concurrency
+        status = await get_worker_status()
+        concurrency = status.get("concurrency", 4)
+
+        if success:
+            logger.info("Celery workers restarted with new settings",
+                       admin_id=admin.user_id, concurrency=concurrency)
+            return CeleryRestartResponse(
+                success=True,
+                message=f"Celery workers restarted with concurrency={concurrency}",
+                concurrency=concurrency,
+            )
+        else:
+            return CeleryRestartResponse(
+                success=False,
+                message="Failed to restart Celery workers. Check logs for details.",
+                concurrency=concurrency,
+            )
+
+    except Exception as e:
+        logger.error("Error restarting Celery workers", error=str(e), admin_id=admin.user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to restart workers: {str(e)}"
+        )
 
 
 @router.get("/celery/running")
@@ -7093,4 +7153,43 @@ async def reset_circuit_breaker(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to reset circuit breaker: {str(e)}"
+        )
+
+
+# =============================================================================
+# Performance Optimization Status (Phase 3-4)
+# =============================================================================
+
+@router.get(
+    "/performance",
+    tags=["admin"],
+    summary="Get performance optimization status",
+    response_model=Dict[str, Any],
+)
+async def get_performance_status(
+    admin: AdminUser,
+) -> Dict[str, Any]:
+    """
+    Get status of all performance optimizations.
+
+    Returns information about:
+    - Cython extensions (compiled vs fallback)
+    - GPU acceleration (device, memory)
+    - MinHash deduplicator (method, complexity)
+    """
+    try:
+        from backend.services.performance_init import get_performance_status
+        return get_performance_status()
+    except ImportError:
+        return {
+            "error": "Performance module not available",
+            "cython": {"status": "not_installed"},
+            "gpu": {"status": "not_installed"},
+            "minhash": {"status": "not_installed"},
+        }
+    except Exception as e:
+        logger.error("Failed to get performance status", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get performance status: {str(e)}"
         )

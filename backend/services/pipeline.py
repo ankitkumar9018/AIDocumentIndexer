@@ -129,7 +129,7 @@ class PipelineConfig:
         semantic_chunking_mode: str = "section_headers",  # none, title_only, section_headers, full_context
 
         # Embedding settings (uses env var fallback, can be overridden via Admin UI)
-        embedding_provider: str = None,  # Will use DEFAULT_LLM_PROVIDER env var
+        embedding_provider: str = None,  # Will use EMBEDDING_PROVIDER env var (independent of chat LLM)
         embedding_model: Optional[str] = None,  # Will use OLLAMA_EMBEDDING_MODEL env var
         embedding_batch_size: int = 100,
 
@@ -164,8 +164,10 @@ class PipelineConfig:
         else:
             self.use_semantic_chunker = use_semantic_chunker
         self.semantic_chunking_mode = semantic_chunking_mode
-        # Use provided value, or fall back to env var, or default to "openai"
-        self.embedding_provider = embedding_provider or os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+        # Use provided value, or fall back to env var, or default to "ollama"
+        # IMPORTANT: Use EMBEDDING_PROVIDER, NOT DEFAULT_LLM_PROVIDER
+        # Embeddings must be independent of chat LLM to allow switching LLMs without re-indexing
+        self.embedding_provider = embedding_provider or os.getenv("EMBEDDING_PROVIDER", "ollama")
         # Use provided model, or fall back to provider-specific env var
         if embedding_model:
             self.embedding_model = embedding_model

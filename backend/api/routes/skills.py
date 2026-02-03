@@ -131,6 +131,99 @@ class SkillUpdateRequest(BaseModel):
 
 
 # =============================================================================
+# External Agent Models
+# =============================================================================
+
+class ExternalAgentAuthType(str):
+    """Authentication types for external agents."""
+    NONE = "none"
+    API_KEY = "api_key"
+    BEARER = "bearer"
+    BASIC = "basic"
+    OAUTH2 = "oauth2"
+    CUSTOM = "custom"
+
+
+class ExternalAgentAuth(BaseModel):
+    """Authentication configuration for external agents."""
+    type: str = Field(default="api_key", description="Authentication type")
+    api_key: Optional[str] = Field(None, description="API key for api_key auth")
+    api_key_header: Optional[str] = Field(default="X-API-Key", description="Header name for API key")
+    bearer_token: Optional[str] = Field(None, description="Bearer token for bearer auth")
+    username: Optional[str] = Field(None, description="Username for basic auth")
+    password: Optional[str] = Field(None, description="Password for basic auth")
+    oauth2_client_id: Optional[str] = Field(None, description="OAuth2 client ID")
+    oauth2_client_secret: Optional[str] = Field(None, description="OAuth2 client secret")
+    oauth2_token_url: Optional[str] = Field(None, description="OAuth2 token URL")
+    custom_headers: Optional[Dict[str, str]] = Field(None, description="Custom headers")
+
+
+class ExternalAgentInputMapping(BaseModel):
+    """Mapping from skill inputs to external API request."""
+    skill_input: str = Field(..., description="Name of the skill input")
+    api_path: str = Field(..., description="JSON path in request body (e.g., 'data.prompt')")
+    transform: Optional[str] = Field(None, description="Optional transformation: stringify, parse_json")
+
+
+class ExternalAgentOutputMapping(BaseModel):
+    """Mapping from external API response to skill outputs."""
+    api_path: str = Field(..., description="JSON path in response (e.g., 'result.text')")
+    skill_output: str = Field(..., description="Name of the skill output")
+    transform: Optional[str] = Field(None, description="Optional transformation")
+
+
+class ExternalAgentCreateRequest(BaseModel):
+    """Request to create a skill from an external agent/API."""
+    # Basic info
+    name: str = Field(..., description="Name for the skill")
+    description: str = Field(..., description="Description of what the external agent does")
+    category: str = Field(default="integration", description="Skill category")
+    icon: str = Field(default="external-link", description="Icon name")
+    tags: List[str] = Field(default_factory=list, description="Tags")
+
+    # External API configuration
+    endpoint_url: str = Field(..., description="External API endpoint URL")
+    method: str = Field(default="POST", description="HTTP method")
+    content_type: str = Field(default="application/json", description="Content type")
+
+    # Authentication
+    auth: ExternalAgentAuth = Field(default_factory=ExternalAgentAuth, description="Authentication config")
+
+    # Input/Output mapping
+    inputs: List[SkillInput] = Field(..., description="Skill inputs (what user provides)")
+    outputs: List[SkillOutput] = Field(default_factory=list, description="Skill outputs")
+    input_mapping: List[ExternalAgentInputMapping] = Field(..., description="Map inputs to API request")
+    output_mapping: List[ExternalAgentOutputMapping] = Field(default_factory=list, description="Map API response to outputs")
+
+    # Request template
+    request_template: Optional[Dict[str, Any]] = Field(None, description="Base request body template")
+
+    # Advanced settings
+    timeout_seconds: int = Field(default=60, description="Request timeout")
+    retry_count: int = Field(default=1, description="Number of retries on failure")
+    rate_limit_per_minute: int = Field(default=60, description="Rate limit for this agent")
+    is_public: bool = Field(default=False, description="Make skill public")
+
+
+class ExternalAgentTestRequest(BaseModel):
+    """Request to test an external agent configuration."""
+    endpoint_url: str
+    method: str = "POST"
+    auth: ExternalAgentAuth
+    request_body: Dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: int = 30
+
+
+class ExternalAgentTestResponse(BaseModel):
+    """Response from testing external agent."""
+    success: bool
+    status_code: Optional[int]
+    response_body: Optional[Any]
+    error: Optional[str]
+    latency_ms: int
+
+
+# =============================================================================
 # Built-in Skill Prompts (for seeding database)
 # =============================================================================
 
@@ -716,63 +809,76 @@ async def list_skills(
     """
     List all available skills (built-in, public, and user's custom skills).
     """
-    # Ensure built-in skills exist
-    await ensure_builtin_skills(db)
+    try:
+        # Ensure built-in skills exist
+        await ensure_builtin_skills(db)
+    except Exception as e:
+        logger.warning("Failed to ensure builtin skills, continuing anyway", error=str(e))
+        # Don't fail the whole request if builtin skills can't be created
+        await db.rollback()
 
-    user_uuid = _to_uuid(user.user_id)
+    try:
+        user_uuid = _to_uuid(user.user_id)
 
-    # Build query
-    conditions = [Skill.is_active == True]
+        # Build query
+        conditions = [Skill.is_active == True]
 
-    # Access control: user's own skills, public skills, or built-in skills
-    access_conditions = [Skill.user_id == user_uuid]
-    if include_public:
-        access_conditions.append(Skill.is_public == True)
-    access_conditions.append(Skill.is_builtin == True)
-    conditions.append(or_(*access_conditions))
+        # Access control: user's own skills, public skills, or built-in skills
+        access_conditions = [Skill.user_id == user_uuid]
+        if include_public:
+            access_conditions.append(Skill.is_public == True)
+        access_conditions.append(Skill.is_builtin == True)
+        conditions.append(or_(*access_conditions))
 
-    if category:
-        conditions.append(Skill.category == category)
+        if category:
+            conditions.append(Skill.category == category)
 
-    if builtin_only:
-        conditions.append(Skill.is_builtin == True)
+        if builtin_only:
+            conditions.append(Skill.is_builtin == True)
 
-    if search:
-        search_pattern = f"%{search}%"
-        conditions.append(
-            or_(
-                Skill.name.ilike(search_pattern),
-                Skill.description.ilike(search_pattern),
+        if search:
+            search_pattern = f"%{search}%"
+            conditions.append(
+                or_(
+                    Skill.name.ilike(search_pattern),
+                    Skill.description.ilike(search_pattern),
+                )
             )
+
+        query = select(Skill).where(and_(*conditions)).order_by(Skill.is_builtin.desc(), Skill.use_count.desc())
+        result = await db.execute(query)
+        skills = result.scalars().all()
+
+        # Format response
+        skills_list = []
+        for skill in skills:
+            skills_list.append({
+                "id": str(skill.id),
+                "skill_key": skill.skill_key,
+                "name": skill.name,
+                "description": skill.description,
+                "category": skill.category,
+                "icon": skill.icon,
+                "tags": skill.tags or [],
+                "inputs": skill.inputs or [],
+                "outputs": skill.outputs or [],
+                "is_public": skill.is_public,
+                "is_builtin": skill.is_builtin,
+                "version": skill.version,
+                "use_count": skill.use_count,
+                "avg_execution_time_ms": skill.avg_execution_time_ms,
+                "is_owner": skill.user_id == user_uuid if skill.user_id else False,
+                "created_at": skill.created_at.isoformat() if skill.created_at else None,
+            })
+
+        return {"skills": skills_list, "total": len(skills_list)}
+
+    except Exception as e:
+        logger.error("Failed to list skills", error=str(e), user_id=user.user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load skills: {str(e)}"
         )
-
-    query = select(Skill).where(and_(*conditions)).order_by(Skill.is_builtin.desc(), Skill.use_count.desc())
-    result = await db.execute(query)
-    skills = result.scalars().all()
-
-    # Format response
-    skills_list = []
-    for skill in skills:
-        skills_list.append({
-            "id": str(skill.id),
-            "skill_key": skill.skill_key,
-            "name": skill.name,
-            "description": skill.description,
-            "category": skill.category,
-            "icon": skill.icon,
-            "tags": skill.tags or [],
-            "inputs": skill.inputs or [],
-            "outputs": skill.outputs or [],
-            "is_public": skill.is_public,
-            "is_builtin": skill.is_builtin,
-            "version": skill.version,
-            "use_count": skill.use_count,
-            "avg_execution_time_ms": skill.avg_execution_time_ms,
-            "is_owner": skill.user_id == user_uuid if skill.user_id else False,
-            "created_at": skill.created_at.isoformat() if skill.created_at else None,
-        })
-
-    return {"skills": skills_list, "total": len(skills_list)}
 
 
 @router.get("/{skill_id}")
@@ -979,4 +1085,639 @@ async def get_skill_executions(
         "total": total,
         "limit": limit,
         "offset": offset,
+    }
+
+
+# =============================================================================
+# External Agent Endpoints
+# =============================================================================
+
+import httpx
+import time
+import json as json_module
+
+
+def _apply_json_path(data: Any, path: str) -> Any:
+    """Apply a JSON path to extract nested values (e.g., 'result.data.text')."""
+    parts = path.split(".")
+    current = data
+    for part in parts:
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list) and part.isdigit():
+            idx = int(part)
+            current = current[idx] if idx < len(current) else None
+        else:
+            return None
+        if current is None:
+            return None
+    return current
+
+
+def _set_json_path(data: Dict, path: str, value: Any) -> Dict:
+    """Set a value at a JSON path (e.g., 'data.prompt')."""
+    parts = path.split(".")
+    current = data
+    for part in parts[:-1]:
+        if part not in current:
+            current[part] = {}
+        current = current[part]
+    current[parts[-1]] = value
+    return data
+
+
+def _build_auth_headers(auth: ExternalAgentAuth) -> Dict[str, str]:
+    """Build authentication headers from auth config."""
+    headers = {}
+
+    if auth.type == "none":
+        pass
+    elif auth.type == "api_key":
+        if auth.api_key:
+            header_name = auth.api_key_header or "X-API-Key"
+            headers[header_name] = auth.api_key
+    elif auth.type == "bearer":
+        if auth.bearer_token:
+            headers["Authorization"] = f"Bearer {auth.bearer_token}"
+    elif auth.type == "basic":
+        if auth.username and auth.password:
+            import base64
+            credentials = base64.b64encode(f"{auth.username}:{auth.password}".encode()).decode()
+            headers["Authorization"] = f"Basic {credentials}"
+    elif auth.type == "custom":
+        if auth.custom_headers:
+            headers.update(auth.custom_headers)
+
+    return headers
+
+
+@router.post("/external/test", response_model=ExternalAgentTestResponse)
+async def test_external_agent(
+    request: ExternalAgentTestRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Test an external agent configuration before creating the skill.
+    Verifies connectivity, authentication, and response format.
+    """
+    start_time = time.time()
+
+    try:
+        headers = _build_auth_headers(request.auth)
+        headers["Content-Type"] = "application/json"
+
+        async with httpx.AsyncClient(timeout=request.timeout_seconds) as client:
+            if request.method.upper() == "GET":
+                response = await client.get(request.endpoint_url, headers=headers)
+            elif request.method.upper() == "POST":
+                response = await client.post(
+                    request.endpoint_url,
+                    headers=headers,
+                    json=request.request_body,
+                )
+            elif request.method.upper() == "PUT":
+                response = await client.put(
+                    request.endpoint_url,
+                    headers=headers,
+                    json=request.request_body,
+                )
+            else:
+                return ExternalAgentTestResponse(
+                    success=False,
+                    status_code=None,
+                    response_body=None,
+                    error=f"Unsupported HTTP method: {request.method}",
+                    latency_ms=int((time.time() - start_time) * 1000),
+                )
+
+            latency_ms = int((time.time() - start_time) * 1000)
+
+            # Try to parse response body
+            response_body = None
+            try:
+                response_body = response.json()
+            except Exception:
+                response_body = response.text[:1000] if response.text else None
+
+            success = 200 <= response.status_code < 300
+
+            return ExternalAgentTestResponse(
+                success=success,
+                status_code=response.status_code,
+                response_body=response_body,
+                error=None if success else f"HTTP {response.status_code}",
+                latency_ms=latency_ms,
+            )
+
+    except httpx.TimeoutException:
+        return ExternalAgentTestResponse(
+            success=False,
+            status_code=None,
+            response_body=None,
+            error=f"Request timed out after {request.timeout_seconds} seconds",
+            latency_ms=int((time.time() - start_time) * 1000),
+        )
+    except httpx.ConnectError as e:
+        return ExternalAgentTestResponse(
+            success=False,
+            status_code=None,
+            response_body=None,
+            error=f"Connection failed: {str(e)}",
+            latency_ms=int((time.time() - start_time) * 1000),
+        )
+    except Exception as e:
+        return ExternalAgentTestResponse(
+            success=False,
+            status_code=None,
+            response_body=None,
+            error=f"Error: {str(e)}",
+            latency_ms=int((time.time() - start_time) * 1000),
+        )
+
+
+@router.post("/external", response_model=SkillCreateResponse)
+async def create_external_agent_skill(
+    request: ExternalAgentCreateRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a skill from an external agent/API.
+    This wraps an external API endpoint as a skill that users can execute.
+    """
+    user_uuid = _to_uuid(user.user_id)
+
+    # Generate skill key
+    skill_key = f"external-{request.name.lower().replace(' ', '-')}-{str(uuid4())[:8]}"
+
+    # Store the external agent configuration in the system prompt (as JSON metadata)
+    external_config = {
+        "type": "external_agent",
+        "endpoint_url": request.endpoint_url,
+        "method": request.method,
+        "content_type": request.content_type,
+        "auth": request.auth.model_dump(),
+        "input_mapping": [m.model_dump() for m in request.input_mapping],
+        "output_mapping": [m.model_dump() for m in request.output_mapping],
+        "request_template": request.request_template,
+        "timeout_seconds": request.timeout_seconds,
+        "retry_count": request.retry_count,
+        "rate_limit_per_minute": request.rate_limit_per_minute,
+    }
+
+    # Create skill with external config stored as system_prompt JSON
+    skill = Skill(
+        skill_key=skill_key,
+        name=request.name,
+        description=request.description,
+        category=request.category,
+        icon=request.icon,
+        tags=request.tags,
+        system_prompt=f"__EXTERNAL_AGENT_CONFIG__:{json_module.dumps(external_config)}",
+        inputs=[inp.model_dump() for inp in request.inputs],
+        outputs=[out.model_dump() for out in request.outputs],
+        is_builtin=False,
+        is_public=request.is_public,
+        is_active=True,
+        user_id=user_uuid,
+        version="1.0.0",
+    )
+
+    db.add(skill)
+    await db.commit()
+    await db.refresh(skill)
+
+    logger.info(
+        "External agent skill created",
+        skill_id=str(skill.id),
+        skill_key=skill_key,
+        endpoint_url=request.endpoint_url,
+    )
+
+    return SkillCreateResponse(
+        id=str(skill.id),
+        skill_key=skill_key,
+        name=request.name,
+        message=f"External agent skill '{request.name}' created successfully",
+    )
+
+
+@router.post("/external/{skill_id}/execute", response_model=SkillExecuteResponse)
+async def execute_external_agent_skill(
+    skill_id: str,
+    inputs: Dict[str, Any],
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Execute an external agent skill by calling the configured API endpoint.
+    """
+    start_time = time.time()
+
+    # Get the skill
+    skill = await get_skill_by_id_or_key(db, skill_id, user.user_id)
+    if not skill:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill not found: {skill_id}",
+        )
+
+    # Check if it's an external agent skill
+    if not skill.system_prompt.startswith("__EXTERNAL_AGENT_CONFIG__:"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This endpoint is only for external agent skills",
+        )
+
+    # Parse the external config
+    try:
+        config_json = skill.system_prompt.replace("__EXTERNAL_AGENT_CONFIG__:", "")
+        config = json_module.loads(config_json)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse external agent configuration: {str(e)}",
+        )
+
+    user_uuid = _to_uuid(user.user_id)
+
+    # Build the request body from inputs
+    request_body = config.get("request_template", {}).copy() if config.get("request_template") else {}
+
+    for mapping in config.get("input_mapping", []):
+        skill_input = mapping["skill_input"]
+        api_path = mapping["api_path"]
+        transform = mapping.get("transform")
+
+        value = inputs.get(skill_input)
+        if value is not None:
+            if transform == "stringify":
+                value = str(value)
+            elif transform == "parse_json":
+                try:
+                    value = json_module.loads(value) if isinstance(value, str) else value
+                except Exception:
+                    pass
+            _set_json_path(request_body, api_path, value)
+
+    # Build auth headers
+    auth_config = ExternalAgentAuth(**config.get("auth", {}))
+    headers = _build_auth_headers(auth_config)
+    headers["Content-Type"] = config.get("content_type", "application/json")
+
+    # Execute the request
+    execution = SkillExecution(
+        skill_id=skill.id,
+        user_id=user_uuid,
+        inputs=inputs,
+        status=SkillExecutionStatus.RUNNING,
+        model_used="external_api",
+        provider_used="external",
+    )
+    db.add(execution)
+    await db.commit()
+
+    try:
+        timeout = config.get("timeout_seconds", 60)
+        retry_count = config.get("retry_count", 1)
+
+        last_error = None
+        response = None
+
+        for attempt in range(retry_count):
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    method = config.get("method", "POST").upper()
+                    endpoint_url = config.get("endpoint_url")
+
+                    if method == "GET":
+                        response = await client.get(endpoint_url, headers=headers)
+                    elif method == "POST":
+                        response = await client.post(endpoint_url, headers=headers, json=request_body)
+                    elif method == "PUT":
+                        response = await client.put(endpoint_url, headers=headers, json=request_body)
+                    else:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Unsupported HTTP method: {method}",
+                        )
+
+                    if 200 <= response.status_code < 300:
+                        break
+                    else:
+                        last_error = f"HTTP {response.status_code}: {response.text[:500]}"
+
+            except httpx.TimeoutException:
+                last_error = f"Request timed out after {timeout} seconds"
+            except httpx.ConnectError as e:
+                last_error = f"Connection failed: {str(e)}"
+            except Exception as e:
+                last_error = str(e)
+
+        if response is None or not (200 <= response.status_code < 300):
+            execution.status = SkillExecutionStatus.FAILED
+            execution.error_message = last_error
+            execution.execution_time_ms = int((time.time() - start_time) * 1000)
+            await db.commit()
+
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"External agent request failed: {last_error}",
+            )
+
+        # Parse response
+        try:
+            response_data = response.json()
+        except Exception:
+            response_data = {"raw": response.text}
+
+        # Apply output mapping
+        output = {}
+        for mapping in config.get("output_mapping", []):
+            api_path = mapping["api_path"]
+            skill_output = mapping["skill_output"]
+            transform = mapping.get("transform")
+
+            value = _apply_json_path(response_data, api_path)
+            if transform == "stringify":
+                value = str(value) if value is not None else None
+            elif transform == "parse_json":
+                try:
+                    value = json_module.loads(value) if isinstance(value, str) else value
+                except Exception:
+                    pass
+            output[skill_output] = value
+
+        # If no output mapping, use raw response
+        if not output:
+            output = response_data
+
+        execution_time_ms = int((time.time() - start_time) * 1000)
+
+        # Update execution record
+        execution.status = SkillExecutionStatus.COMPLETED
+        execution.output = output
+        execution.execution_time_ms = execution_time_ms
+        await db.commit()
+
+        # Update skill use count
+        skill.use_count = (skill.use_count or 0) + 1
+        await db.commit()
+
+        return SkillExecuteResponse(
+            output=output,
+            execution_time_ms=execution_time_ms,
+            model_used="external_api",
+            tokens_used=None,
+            execution_id=str(execution.id),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        execution.status = SkillExecutionStatus.FAILED
+        execution.error_message = str(e)
+        execution.execution_time_ms = int((time.time() - start_time) * 1000)
+        await db.commit()
+
+        logger.error("External agent execution failed", error=str(e), skill_id=skill_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"External agent execution failed: {str(e)}",
+        )
+
+
+@router.get("/external/{skill_id}/config")
+async def get_external_agent_config(
+    skill_id: str,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get the configuration for an external agent skill (without secrets).
+    """
+    skill = await get_skill_by_id_or_key(db, skill_id, user.user_id)
+    if not skill:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill not found: {skill_id}",
+        )
+
+    # Check ownership
+    user_uuid = _to_uuid(user.user_id)
+    if skill.user_id != user_uuid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only view config for your own skills",
+        )
+
+    if not skill.system_prompt.startswith("__EXTERNAL_AGENT_CONFIG__:"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This skill is not an external agent",
+        )
+
+    try:
+        config_json = skill.system_prompt.replace("__EXTERNAL_AGENT_CONFIG__:", "")
+        config = json_module.loads(config_json)
+
+        # Remove secrets from auth
+        if "auth" in config:
+            auth = config["auth"]
+            if auth.get("api_key"):
+                auth["api_key"] = "***hidden***"
+            if auth.get("bearer_token"):
+                auth["bearer_token"] = "***hidden***"
+            if auth.get("password"):
+                auth["password"] = "***hidden***"
+            if auth.get("oauth2_client_secret"):
+                auth["oauth2_client_secret"] = "***hidden***"
+
+        return {
+            "skill_id": str(skill.id),
+            "skill_key": skill.skill_key,
+            "name": skill.name,
+            "config": config,
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse configuration: {str(e)}",
+        )
+
+
+# =============================================================================
+# Publishing Endpoints
+# =============================================================================
+
+class SkillPublishRequest(BaseModel):
+    """Request to publish a skill."""
+    rate_limit: int = Field(default=100, description="Max executions per minute")
+    allowed_domains: List[str] = Field(default=["*"], description="Allowed origin domains")
+    require_api_key: bool = Field(default=False, description="Require API key for access")
+    custom_slug: Optional[str] = Field(None, description="Custom URL slug")
+    branding: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Custom branding")
+
+
+class SkillPublishResponse(BaseModel):
+    """Response from publishing a skill."""
+    skill_id: str
+    public_slug: str
+    public_url: str
+    embed_code: str
+    is_published: bool
+
+
+def _generate_slug(name: str) -> str:
+    """Generate a URL-friendly slug from name."""
+    import re
+    slug = name.lower().strip()
+    slug = re.sub(r'[^\w\s-]', '', slug)
+    slug = re.sub(r'[-\s]+', '-', slug)
+    return f"{slug}-{uuid4().hex[:8]}"
+
+
+@router.post("/{skill_id}/publish", response_model=SkillPublishResponse)
+async def publish_skill(
+    skill_id: str,
+    request: SkillPublishRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Publish a skill for external access via public URL.
+
+    Once published, the skill can be accessed without authentication
+    at /api/v1/public/skills/{public_slug}.
+    """
+    skill = await get_skill_by_id_or_key(db, skill_id, user.user_id)
+
+    if not skill:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill not found: {skill_id}",
+        )
+
+    user_uuid = _to_uuid(user.user_id)
+    if skill.user_id != user_uuid and not skill.is_builtin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only publish your own skills",
+        )
+
+    # Generate or use custom slug
+    if request.custom_slug:
+        # Check if slug is already taken
+        existing = await db.execute(
+            select(Skill).where(
+                Skill.public_slug == request.custom_slug,
+                Skill.id != skill.id,
+            )
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Slug '{request.custom_slug}' is already taken",
+            )
+        public_slug = request.custom_slug
+    else:
+        public_slug = _generate_slug(skill.name)
+
+    # Update skill
+    skill.is_published = True
+    skill.public_slug = public_slug
+    skill.publish_config = {
+        "rate_limit": request.rate_limit,
+        "allowed_domains": request.allowed_domains,
+        "require_api_key": request.require_api_key,
+        "branding": request.branding,
+    }
+
+    await db.commit()
+    await db.refresh(skill)
+
+    # Generate URLs
+    base_url = settings.server.frontend_url or "http://localhost:3000"
+    public_url = f"{base_url}/s/{public_slug}"
+    api_url = f"{settings.server.backend_url or 'http://localhost:8000'}/api/v1/public/skills/{public_slug}"
+
+    # Generate embed code
+    embed_code = f'''<iframe
+  src="{public_url}/embed"
+  width="400"
+  height="600"
+  frameborder="0"
+  allow="clipboard-write"
+></iframe>'''
+
+    logger.info(
+        "Skill published",
+        skill_id=str(skill.id),
+        public_slug=public_slug,
+        user_id=user.user_id,
+    )
+
+    return SkillPublishResponse(
+        skill_id=str(skill.id),
+        public_slug=public_slug,
+        public_url=public_url,
+        embed_code=embed_code,
+        is_published=True,
+    )
+
+
+@router.post("/{skill_id}/unpublish")
+async def unpublish_skill(
+    skill_id: str,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Unpublish a skill, removing public access."""
+    skill = await get_skill_by_id_or_key(db, skill_id, user.user_id)
+
+    if not skill:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill not found: {skill_id}",
+        )
+
+    user_uuid = _to_uuid(user.user_id)
+    if skill.user_id != user_uuid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only unpublish your own skills",
+        )
+
+    skill.is_published = False
+    # Keep the slug for re-publishing
+
+    await db.commit()
+
+    return {"message": f"Skill '{skill.name}' unpublished successfully"}
+
+
+@router.get("/{skill_id}/publish-status")
+async def get_skill_publish_status(
+    skill_id: str,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get the publish status and public URL for a skill."""
+    skill = await get_skill_by_id_or_key(db, skill_id, user.user_id)
+
+    if not skill:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill not found: {skill_id}",
+        )
+
+    base_url = settings.server.frontend_url or "http://localhost:3000"
+
+    return {
+        "skill_id": str(skill.id),
+        "is_published": skill.is_published,
+        "public_slug": skill.public_slug,
+        "public_url": f"{base_url}/s/{skill.public_slug}" if skill.public_slug else None,
+        "publish_config": skill.publish_config,
     }

@@ -292,3 +292,273 @@ Per-node error handling:
 - Workflows are versioned automatically
 - Roll back to previous versions
 - Compare version differences
+
+---
+
+## Publishing & Deployment
+
+Deploy workflows for public access, allowing external users to execute them without authentication.
+
+### Deploying a Workflow
+
+1. Open the workflow in the designer
+2. Click the **Deploy** button in the toolbar
+3. Configure deployment settings:
+   - **Public Slug**: URL-friendly name (e.g., `my-workflow`)
+   - **Branding**: Optional logo, primary color, company name
+4. Click **Deploy**
+5. Copy the public URL to share
+
+### Public Workflow Page
+
+The deployed workflow is accessible at `/w/{public_slug}`:
+
+- Displays workflow name and description
+- Auto-generates input form from workflow schema
+- Executes workflow and shows results
+- Shows loading states and error messages
+
+### Undeploying
+
+1. Open the deployed workflow
+2. Click **Undeploy**
+3. The public URL becomes inactive
+
+### API Access
+
+```bash
+# Deploy
+POST /api/v1/workflows/{workflow_id}/deploy
+{
+  "public_slug": "my-workflow",
+  "branding": {
+    "logo": "https://...",
+    "primaryColor": "#8b5cf6"
+  }
+}
+
+# Check status
+GET /api/v1/workflows/{workflow_id}/deploy-status
+
+# Undeploy
+POST /api/v1/workflows/{workflow_id}/undeploy
+```
+
+---
+
+## Sharing Workflows
+
+Create secure share links with fine-grained permissions for team collaboration.
+
+### Permission Levels
+
+| Level | What Users Can Do |
+|-------|------------------|
+| **Viewer** | View workflow details and input schema |
+| **Executor** | View and execute the workflow |
+| **Editor** | View, execute, and duplicate the workflow |
+
+### Creating a Share Link
+
+1. Open the workflow
+2. Click **Share** in the toolbar
+3. Configure:
+   - **Permission Level**: viewer, executor, or editor
+   - **Password** (optional): Require password to access
+   - **Expiration** (optional): Set an expiry date
+   - **Max Uses** (optional): Limit number of accesses
+4. Click **Create Link**
+5. Copy the share URL
+
+### Managing Shares
+
+View and revoke share links:
+1. Open the workflow
+2. Click **Share** → **Manage Links**
+3. See all active shares with usage stats
+4. Click **Revoke** to disable a link
+
+### Share Link Access
+
+When accessing via share link:
+- If password-protected, user must enter password first
+- User sees workflow based on permission level
+- Usage is tracked (count, last accessed)
+
+---
+
+## Scheduling
+
+Schedule workflows to run automatically on a recurring basis.
+
+### Setting Up a Schedule
+
+1. Open the workflow
+2. Click **Schedule** in the toolbar
+3. Enter a cron expression or select a preset:
+   - Every hour: `0 * * * *`
+   - Daily at 9 AM: `0 9 * * *`
+   - Weekdays at 9 AM: `0 9 * * 1-5`
+   - Weekly on Monday: `0 9 * * 1`
+   - Monthly on 1st: `0 0 1 * *`
+4. Select timezone
+5. (Optional) Set default input values
+6. Click **Save Schedule**
+
+### Cron Expression Format
+
+```
+┌───────────── minute (0-59)
+│ ┌─────────── hour (0-23)
+│ │ ┌───────── day of month (1-31)
+│ │ │ ┌─────── month (1-12)
+│ │ │ │ ┌───── day of week (0-6, Sun=0)
+│ │ │ │ │
+* * * * *
+```
+
+**Examples:**
+- `*/15 * * * *` — Every 15 minutes
+- `0 */6 * * *` — Every 6 hours
+- `30 2 * * 1` — 2:30 AM every Monday
+- `0 9 15 * *` — 9 AM on the 15th of each month
+
+### Viewing Scheduled Executions
+
+1. Go to **Workflows** page
+2. Look for the clock icon on scheduled workflows
+3. Click to see next run time and history
+
+### Removing a Schedule
+
+1. Open the scheduled workflow
+2. Click **Schedule**
+3. Click **Remove Schedule**
+
+---
+
+## Form Triggers
+
+Create public forms that trigger workflow execution when submitted.
+
+### Configuring a Form Trigger
+
+1. Open the workflow
+2. Click **Triggers** → **Form**
+3. Configure:
+   - **Title**: Form heading
+   - **Description**: Instructions for users
+   - **Success Message**: Shown after submission
+   - **Rate Limit**: Max submissions per minute
+4. Click **Enable**
+5. Copy the form URL
+
+### Form Features
+
+- Input fields auto-generated from workflow input schema
+- Field validation (required, type checking)
+- Rate limiting to prevent abuse
+- Customizable success message
+- Submission tracking
+
+---
+
+## Event Triggers
+
+Automatically trigger workflows based on system events.
+
+### Supported Events
+
+| Event Type | When It Fires |
+|------------|---------------|
+| `document.created` | New document indexed |
+| `document.updated` | Document content changed |
+| `connector.sync_completed` | Connector sync finished |
+| `chat.message_received` | New chat message received |
+
+### Configuring an Event Trigger
+
+1. Open the workflow
+2. Click **Triggers** → **Event**
+3. Select event type
+4. (Optional) Add filter conditions:
+   - Filter by source (e.g., only Notion documents)
+   - Filter by tags
+   - Custom field matching
+5. Click **Save**
+
+### Filter Conditions
+
+```json
+{
+  "source": "notion",
+  "tags": ["important", "urgent"],
+  "metadata.priority": "high"
+}
+```
+
+Only events matching ALL conditions will trigger the workflow.
+
+---
+
+## Webhook Triggers
+
+Trigger workflows from external systems via HTTP POST.
+
+### Webhook URL
+
+Each workflow has a unique webhook endpoint:
+
+```
+POST /api/v1/workflows/webhook/{workflow_id}
+```
+
+### Usage Example
+
+```bash
+curl -X POST "https://app.example.com/api/v1/workflows/webhook/{id}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event": "new_order",
+    "order_id": "12345",
+    "customer": "John Doe"
+  }'
+```
+
+The entire payload becomes available as workflow input.
+
+### Webhook Security
+
+- Validate the source using custom headers
+- Use secret tokens in the payload
+- Configure IP allowlisting in settings
+
+---
+
+## Version Management
+
+Track changes and restore previous versions.
+
+### Viewing Version History
+
+1. Open the workflow
+2. Click **Versions** in the toolbar
+3. See list of all versions with:
+   - Version number
+   - Creation timestamp
+   - Author
+   - Node count
+
+### Restoring a Version
+
+1. Click on a version in the history
+2. Click **Restore This Version**
+3. A new version is created with the restored content
+
+Note: Restoring doesn't delete history—it creates a new version.
+
+### Best Practices
+
+- Make descriptive changes in logical units
+- Test before making changes to production workflows
+- Use restore for rollbacks, not manual re-creation

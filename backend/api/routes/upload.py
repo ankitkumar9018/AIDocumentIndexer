@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import tempfile
 import shutil
+import psutil
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict
@@ -375,6 +376,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # =============================================================================
 
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+MIN_FREE_DISK_GB = 10  # Minimum 10GB free disk space required for uploads
 ALLOWED_EXTENSIONS = {
     # Documents
     "pdf", "doc", "docx", "txt", "md", "rtf", "odt",
@@ -391,6 +393,47 @@ ALLOWED_EXTENSIONS = {
     # Other
     "json", "xml", "html", "htm",
 }
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def check_disk_space(required_gb: float = MIN_FREE_DISK_GB) -> tuple[bool, float]:
+    """
+    Check if there's enough free disk space for uploads.
+
+    Args:
+        required_gb: Minimum required free space in GB
+
+    Returns:
+        Tuple of (has_enough_space, free_space_gb)
+    """
+    try:
+        disk_usage = psutil.disk_usage(str(UPLOAD_DIR))
+        free_gb = disk_usage.free / (1024 ** 3)
+        return free_gb >= required_gb, free_gb
+    except Exception as e:
+        logger.warning("Failed to check disk space", error=str(e))
+        # If we can't check, assume it's OK but log warning
+        return True, -1
+
+
+def estimate_upload_size(files: List[UploadFile]) -> float:
+    """
+    Estimate total size of files to be uploaded in GB.
+
+    Since we can't know exact sizes before reading, use content_length or estimate.
+    """
+    total_bytes = 0
+    for file in files:
+        # Try to get size from content-length header
+        if hasattr(file, 'size') and file.size:
+            total_bytes += file.size
+        else:
+            # Assume worst case: MAX_FILE_SIZE per file
+            total_bytes += MAX_FILE_SIZE
+    return total_bytes / (1024 ** 3)
 
 
 # =============================================================================
@@ -1091,6 +1134,14 @@ async def upload_single_file(
         detect_duplicates=detect_duplicates,
     )
 
+    # Check disk space first (quick check)
+    has_space, free_gb = check_disk_space(MIN_FREE_DISK_GB)
+    if not has_space:
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail=f"Insufficient disk space. Available: {free_gb:.1f}GB, Required: {MIN_FREE_DISK_GB}GB",
+        )
+
     # Validate file
     is_valid, error_message = validate_file(file)
     if not is_valid:
@@ -1456,6 +1507,24 @@ async def upload_bulk(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Maximum 1000 files per bulk upload. For larger uploads, split into multiple batches.",
+        )
+
+    # Check disk space before accepting bulk upload
+    estimated_size_gb = estimate_upload_size(files)
+    required_space_gb = max(MIN_FREE_DISK_GB, estimated_size_gb * 1.5)  # Need 1.5x for processing overhead
+    has_space, free_gb = check_disk_space(required_space_gb)
+
+    if not has_space:
+        logger.warning(
+            "Insufficient disk space for bulk upload",
+            required_gb=required_space_gb,
+            free_gb=free_gb,
+            file_count=len(files),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail=f"Insufficient disk space. Required: {required_space_gb:.1f}GB, Available: {free_gb:.1f}GB. "
+                   f"Please free up space or reduce the number of files.",
         )
 
     # Get user info

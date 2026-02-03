@@ -424,3 +424,41 @@ def get_org_filter(user: UserContext) -> Optional[UUID]:
 AuthenticatedUser = Annotated[UserContext, Depends(get_user_context)]
 OptionalUser = Annotated[Optional[UserContext], Depends(get_user_context_optional)]
 AdminUser = Annotated[UserContext, Depends(require_admin)]
+
+
+# =============================================================================
+# Helper Functions for Safe UUID Conversion
+# =============================================================================
+
+def safe_uuid(value: Optional[str]) -> Optional[UUID]:
+    """
+    Safely convert a string to UUID, returning None if invalid.
+
+    Use this instead of UUID(value) to avoid ValueError on invalid UUIDs.
+    """
+    if not value:
+        return None
+    try:
+        return UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def get_org_id(user: UserContext) -> Optional[UUID]:
+    """
+    Safely get organization_id as UUID from user context.
+
+    Usage:
+        org_id = get_org_id(user)  # Returns UUID or None
+    """
+    return safe_uuid(user.organization_id) if user else None
+
+
+def get_user_uuid(user: UserContext) -> Optional[UUID]:
+    """
+    Safely get user_id as UUID from user context.
+
+    Usage:
+        user_uuid = get_user_uuid(user)  # Returns UUID or None
+    """
+    return safe_uuid(user.user_id) if user else None

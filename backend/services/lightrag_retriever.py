@@ -83,6 +83,11 @@ class LightRAGResult:
     entity_matches: List[str] = field(default_factory=list)
     concept_matches: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Document metadata for proper citation
+    document_filename: Optional[str] = None
+    document_title: Optional[str] = None
+    page_number: Optional[int] = None
+    section_title: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -181,6 +186,8 @@ class LightRAGRetriever:
         top_k: Optional[int] = None,
         document_ids: Optional[List[str]] = None,
         access_tier_level: int = 100,
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[LightRAGResult]:
         """
         Perform LightRAG dual-level retrieval.
@@ -199,7 +206,8 @@ class LightRAGRetriever:
         if not await self.initialize():
             logger.warning("LightRAG not initialized, falling back to vector search")
             return await self._vector_only_search(
-                query, query_embedding, top_k or self.config.final_top_k
+                query, query_embedding, top_k or self.config.final_top_k,
+                organization_id, is_superadmin
             )
 
         import time
@@ -217,21 +225,25 @@ class LightRAGRetriever:
         # Parallel retrieval based on level
         if level == RetrievalLevel.LOW:
             results = await self._low_level_retrieve(
-                query, query_embedding, final_top_k, document_ids, access_tier_level
+                query, query_embedding, final_top_k, document_ids, access_tier_level,
+                organization_id, is_superadmin
             )
         elif level == RetrievalLevel.HIGH:
             results = await self._high_level_retrieve(
-                query, query_embedding, final_top_k, document_ids, access_tier_level
+                query, query_embedding, final_top_k, document_ids, access_tier_level,
+                organization_id, is_superadmin
             )
         else:  # HYBRID
             # Run both levels in parallel
             low_task = self._low_level_retrieve(
                 query, query_embedding,
-                self.config.low_level_top_k, document_ids, access_tier_level
+                self.config.low_level_top_k, document_ids, access_tier_level,
+                organization_id, is_superadmin
             )
             high_task = self._high_level_retrieve(
                 query, query_embedding,
-                self.config.high_level_top_k, document_ids, access_tier_level
+                self.config.high_level_top_k, document_ids, access_tier_level,
+                organization_id, is_superadmin
             )
 
             low_results, high_results = await asyncio.gather(low_task, high_task)
@@ -257,6 +269,8 @@ class LightRAGRetriever:
         top_k: int,
         document_ids: Optional[List[str]],
         access_tier_level: int,
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[LightRAGResult]:
         """
         Low-level retrieval: Focus on specific entities and facts.
@@ -306,6 +320,8 @@ class LightRAGRetriever:
             top_k=top_k * 2,  # Get more for filtering
             access_tier_level=access_tier_level,
             document_ids=document_ids,
+            organization_id=organization_id,
+            is_superadmin=is_superadmin,
         )
 
         # Step 5: Score and combine
@@ -331,6 +347,11 @@ class LightRAGRetriever:
                     "entity_boost": entity_boost,
                     **vr.metadata,
                 },
+                # Include document metadata for proper citations
+                document_filename=getattr(vr, 'document_filename', None) or vr.metadata.get('document_filename'),
+                document_title=getattr(vr, 'document_title', None) or vr.metadata.get('document_title'),
+                page_number=getattr(vr, 'page_number', None) or vr.metadata.get('page_number'),
+                section_title=getattr(vr, 'section_title', None) or vr.metadata.get('section_title'),
             ))
 
         # Sort by score and take top_k
@@ -344,6 +365,8 @@ class LightRAGRetriever:
         top_k: int,
         document_ids: Optional[List[str]],
         access_tier_level: int,
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[LightRAGResult]:
         """
         High-level retrieval: Focus on concepts and themes.
@@ -395,6 +418,8 @@ class LightRAGRetriever:
             top_k=top_k * 2,
             access_tier_level=access_tier_level,
             document_ids=search_doc_ids,
+            organization_id=organization_id,
+            is_superadmin=is_superadmin,
         )
 
         # Step 5: Score and combine
@@ -419,6 +444,11 @@ class LightRAGRetriever:
                     "concept_boost": concept_boost,
                     **vr.metadata,
                 },
+                # Include document metadata for proper citations
+                document_filename=getattr(vr, 'document_filename', None) or vr.metadata.get('document_filename'),
+                document_title=getattr(vr, 'document_title', None) or vr.metadata.get('document_title'),
+                page_number=getattr(vr, 'page_number', None) or vr.metadata.get('page_number'),
+                section_title=getattr(vr, 'section_title', None) or vr.metadata.get('section_title'),
             ))
 
         results.sort(key=lambda r: r.score, reverse=True)
@@ -712,6 +742,8 @@ class LightRAGRetriever:
         query: str,
         query_embedding: Optional[List[float]],
         top_k: int,
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[LightRAGResult]:
         """Fallback to vector-only search."""
         from backend.services.vectorstore import SearchType
@@ -721,6 +753,8 @@ class LightRAGRetriever:
             query_embedding=query_embedding,
             search_type=SearchType.HYBRID,
             top_k=top_k,
+            organization_id=organization_id,
+            is_superadmin=is_superadmin,
         )
 
         return [
@@ -731,6 +765,11 @@ class LightRAGRetriever:
                 score=r.score,
                 level=RetrievalLevel.HYBRID,
                 metadata=r.metadata,
+                # Include document metadata for proper citations
+                document_filename=getattr(r, 'document_filename', None) or r.metadata.get('document_filename'),
+                document_title=getattr(r, 'document_title', None) or r.metadata.get('document_title'),
+                page_number=getattr(r, 'page_number', None) or r.metadata.get('page_number'),
+                section_title=getattr(r, 'section_title', None) or r.metadata.get('section_title'),
             )
             for r in results
         ]

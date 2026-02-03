@@ -135,7 +135,7 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="embedding.provider",
         category=SettingCategory.LLM,
-        default_value="openai",
+        default_value="ollama",  # Default to Ollama for local embedding (independent of chat LLM)
         value_type=ValueType.STRING,
         description="Embedding provider (openai, voyage, jina, cohere, gte, qwen3, gemini, bge-m3, ollama, auto)"
     ),
@@ -1085,6 +1085,31 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=4,
         value_type=ValueType.NUMBER,
         description="Maximum concurrent Celery workers"
+    ),
+
+    # ==========================================================================
+    # Server Configuration (Scalability)
+    # ==========================================================================
+    SettingDefinition(
+        key="server.uvicorn_workers",
+        category=SettingCategory.GENERAL,
+        default_value=1,
+        value_type=ValueType.NUMBER,
+        description="Number of Uvicorn worker processes (1-16). More workers = more concurrent users. Requires server restart."
+    ),
+    SettingDefinition(
+        key="server.db_pool_size",
+        category=SettingCategory.DATABASE,
+        default_value=30,
+        value_type=ValueType.NUMBER,
+        description="Database connection pool size (10-200). Increase for high concurrency."
+    ),
+    SettingDefinition(
+        key="server.db_pool_overflow",
+        category=SettingCategory.DATABASE,
+        default_value=20,
+        value_type=ValueType.NUMBER,
+        description="Maximum overflow connections beyond pool size (10-100)."
     ),
 
     # Embedding Cache Settings

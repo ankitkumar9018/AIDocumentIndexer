@@ -1,0 +1,486 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.5rem;
+    --success: 142 76% 36%;
+    --warning: 38 92% 50%;
+  }
+
+  .dark {
+    --background: 224 71% 4%;
+    --foreground: 213 31% 91%;
+    --card: 224 71% 7%;
+    --card-foreground: 213 31% 91%;
+    --popover: 224 71% 7%;
+    --popover-foreground: 213 31% 91%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 216 34% 17%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+    --success: 142 69% 58%;
+    --warning: 38 92% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* ============================================
+   Custom scrollbar - Sleek & Minimal
+   ============================================ */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-muted-foreground/20 rounded-full;
+  transition: background-color 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/40;
+}
+
+/* Hide scrollbar when not scrolling (macOS-like) */
+.scrollbar-hidden {
+  scrollbar-width: none;
+}
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+/* ============================================
+   Window drag region for titlebar
+   ============================================ */
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+}
+
+[data-tauri-drag-region] button,
+[data-tauri-drag-region] a,
+[data-tauri-drag-region] input {
+  -webkit-app-region: no-drag;
+}
+
+/* ============================================
+   Animations & Transitions
+   ============================================ */
+@layer utilities {
+  /* Page entrance animation */
+  .page-enter {
+    animation: page-enter 0.3s ease-out;
+  }
+
+  @keyframes page-enter {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Fade in animation */
+  .fade-in {
+    animation: fade-in 0.2s ease-out;
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  /* Slide in from left */
+  .slide-in-left {
+    animation: slide-in-left 0.3s ease-out;
+  }
+
+  @keyframes slide-in-left {
+    from {
+      opacity: 0;
+      transform: translateX(-20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  /* Slide in from right */
+  .slide-in-right {
+    animation: slide-in-right 0.3s ease-out;
+  }
+
+  @keyframes slide-in-right {
+    from {
+      opacity: 0;
+      transform: translateX(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  /* Slide in from bottom */
+  .slide-in-up {
+    animation: slide-in-up 0.3s ease-out;
+  }
+
+  @keyframes slide-in-up {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Scale in */
+  .scale-in {
+    animation: scale-in 0.2s ease-out;
+  }
+
+  @keyframes scale-in {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  /* Bounce animation */
+  .bounce-subtle {
+    animation: bounce-subtle 0.5s ease-out;
+  }
+
+  @keyframes bounce-subtle {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-4px); }
+  }
+
+  /* Pulse glow */
+  .pulse-glow {
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% {
+      box-shadow: 0 0 0 0 hsl(var(--primary) / 0.4);
+    }
+    50% {
+      box-shadow: 0 0 0 8px hsl(var(--primary) / 0);
+    }
+  }
+
+  /* Shimmer loading effect */
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      hsl(var(--muted)) 0%,
+      hsl(var(--muted-foreground) / 0.1) 50%,
+      hsl(var(--muted)) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  /* Typing indicator */
+  .typing-dot {
+    animation: typing-bounce 1.4s infinite ease-in-out;
+  }
+
+  .typing-dot:nth-child(1) { animation-delay: 0s; }
+  .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes typing-bounce {
+    0%, 80%, 100% { transform: translateY(0); }
+    40% { transform: translateY(-6px); }
+  }
+
+  /* Message appear animation */
+  .message-appear {
+    animation: message-appear 0.3s ease-out;
+  }
+
+  @keyframes message-appear {
+    from {
+      opacity: 0;
+      transform: translateY(10px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+}
+
+/* ============================================
+   Component Styles
+   ============================================ */
+@layer components {
+  /* Glass effect */
+  .glass {
+    @apply bg-card/80 backdrop-blur-lg border border-border/50;
+  }
+
+  /* Gradient button */
+  .btn-gradient {
+    @apply bg-gradient-to-r from-primary to-primary/80 text-primary-foreground font-medium
+           shadow-lg shadow-primary/20 hover:shadow-xl hover:shadow-primary/30
+           transition-all duration-200 hover:-translate-y-0.5;
+  }
+
+  /* Glass button */
+  .btn-glass {
+    @apply bg-background/50 backdrop-blur-md border border-border/50
+           hover:bg-background/70 transition-all duration-200;
+  }
+
+  /* Card hover effect */
+  .card-hover {
+    @apply transition-all duration-200 ease-out;
+  }
+  .card-hover:hover {
+    @apply shadow-lg -translate-y-0.5;
+  }
+
+  /* Nav item styles */
+  .nav-item {
+    @apply relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium
+           transition-all duration-200;
+  }
+
+  .nav-item-active {
+    @apply bg-primary text-primary-foreground shadow-md shadow-primary/20;
+  }
+
+  .nav-item-active::before {
+    content: '';
+    @apply absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-primary-foreground rounded-r-full;
+  }
+
+  /* Status indicator */
+  .status-dot {
+    @apply relative w-2 h-2 rounded-full;
+  }
+
+  .status-dot.connected {
+    @apply bg-green-500;
+  }
+
+  .status-dot.connected::after {
+    content: '';
+    @apply absolute inset-0 rounded-full bg-green-500 animate-ping opacity-75;
+  }
+
+  .status-dot.disconnected {
+    @apply bg-red-500;
+  }
+
+  /* Mode badge */
+  .mode-badge {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg
+           bg-gradient-to-r from-primary/10 to-primary/5 border border-primary/20;
+  }
+
+  /* Input modern style */
+  .input-modern {
+    @apply bg-muted/50 border-0 rounded-xl
+           focus:bg-background focus:ring-2 focus:ring-primary/20
+           transition-all duration-200 placeholder:text-muted-foreground/60;
+  }
+
+  /* Message bubble styles */
+  .message-user {
+    @apply bg-gradient-to-br from-primary to-primary/90 text-primary-foreground
+           rounded-2xl rounded-tr-md shadow-md;
+  }
+
+  .message-assistant {
+    @apply bg-card border border-border/50 text-foreground
+           rounded-2xl rounded-tl-md shadow-sm;
+  }
+
+  /* Source card */
+  .source-card {
+    @apply p-3 rounded-xl bg-muted/50 border border-border/30
+           hover:bg-muted/70 transition-colors cursor-pointer;
+  }
+
+  /* Empty state */
+  .empty-state {
+    @apply flex flex-col items-center justify-center py-12 text-center;
+  }
+
+  .empty-state-icon {
+    @apply w-16 h-16 rounded-2xl bg-muted/50 flex items-center justify-center mb-4;
+  }
+}
+
+/* ============================================
+   Chat message content styles
+   ============================================ */
+.message-content {
+  @apply selection:bg-primary/30;
+}
+
+.message-content pre {
+  @apply bg-muted/50 p-4 rounded-xl overflow-x-auto my-3 border border-border/30;
+}
+
+.message-content code {
+  @apply bg-muted/70 px-1.5 py-0.5 rounded-md text-sm font-mono;
+}
+
+.message-content pre code {
+  @apply bg-transparent p-0;
+}
+
+.message-content ul,
+.message-content ol {
+  @apply pl-6 my-3;
+}
+
+.message-content ul {
+  @apply list-disc;
+}
+
+.message-content ol {
+  @apply list-decimal;
+}
+
+.message-content li {
+  @apply my-1.5;
+}
+
+.message-content a {
+  @apply text-primary hover:underline underline-offset-2;
+}
+
+.message-content blockquote {
+  @apply border-l-4 border-primary/30 pl-4 italic my-3 text-muted-foreground;
+}
+
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4,
+.message-content h5,
+.message-content h6 {
+  @apply font-semibold mt-6 mb-3 first:mt-0;
+}
+
+.message-content h1 { @apply text-2xl; }
+.message-content h2 { @apply text-xl; }
+.message-content h3 { @apply text-lg; }
+.message-content h4 { @apply text-base; }
+
+.message-content p {
+  @apply my-2 first:mt-0 last:mb-0 leading-relaxed;
+}
+
+.message-content table {
+  @apply w-full my-3 border-collapse;
+}
+
+.message-content th,
+.message-content td {
+  @apply border border-border/50 px-3 py-2 text-left;
+}
+
+.message-content th {
+  @apply bg-muted/50 font-semibold;
+}
+
+.message-content hr {
+  @apply my-6 border-border/50;
+}
+
+/* ============================================
+   Utility overrides
+   ============================================ */
+
+/* Smooth transitions for theme switching */
+* {
+  transition-property: background-color, border-color, color, fill, stroke;
+  transition-duration: 0.15s;
+  transition-timing-function: ease-out;
+}
+
+/* Disable animations for reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Focus visible styles */
+:focus-visible {
+  @apply outline-none ring-2 ring-primary/50 ring-offset-2 ring-offset-background;
+}
+
+/* Selection color */
+::selection {
+  @apply bg-primary/30 text-foreground;
+}

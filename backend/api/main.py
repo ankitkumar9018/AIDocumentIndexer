@@ -36,10 +36,24 @@ def _install_uvloop():
 _uvloop_installed = _install_uvloop()
 
 import os
+import signal
 from pathlib import Path
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
+
+# Graceful shutdown flag
+_shutdown_requested = False
+
+def _signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    # Let uvicorn handle the actual shutdown
+
+# Register signal handlers for graceful shutdown (SIGTERM from K8s, SIGINT from Ctrl+C)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 # Try to load from project root .env file
 env_file = Path(__file__).parent.parent.parent / ".env"
@@ -56,6 +70,7 @@ import structlog
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 
 # Phase 35: Use ORJSON for 20-50% faster JSON serialization
 try:
@@ -69,7 +84,28 @@ from backend.api.middleware.request_id import RequestIDMiddleware
 from backend.api.errors import register_exception_handlers as register_app_exception_handlers
 from backend.utils.async_helpers import create_safe_task
 
-# Configure structured logging
+# Cloud-ready logging configuration
+# Set LOG_FORMAT=json for Kubernetes/AWS CloudWatch/GCP Logging
+# Additional context is added from K8s downward API environment variables
+_log_format = os.getenv("LOG_FORMAT", "console")
+_is_json_logging = _log_format == "json"
+
+def _add_cloud_context(logger, method_name, event_dict):
+    """Add cloud/k8s context to log entries."""
+    # Kubernetes pod info (set via downward API)
+    if pod_name := os.getenv("POD_NAME"):
+        event_dict["pod_name"] = pod_name
+    if namespace := os.getenv("POD_NAMESPACE"):
+        event_dict["namespace"] = namespace
+    if node_name := os.getenv("NODE_NAME"):
+        event_dict["node_name"] = node_name
+    # AWS/Cloud metadata
+    if aws_region := os.getenv("AWS_REGION"):
+        event_dict["aws_region"] = aws_region
+    if deployment := os.getenv("DEPLOYMENT_NAME", os.getenv("K8S_DEPLOYMENT")):
+        event_dict["deployment"] = deployment
+    return event_dict
+
 structlog.configure(
     processors=[
         structlog.stdlib.filter_by_level,
@@ -77,10 +113,11 @@ structlog.configure(
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
         structlog.processors.TimeStamper(fmt="iso"),
+        _add_cloud_context,  # Add K8s/AWS context
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer() if os.getenv("LOG_FORMAT") == "json"
+        structlog.processors.JSONRenderer() if _is_json_logging
         else structlog.dev.ConsoleRenderer(),
     ],
     wrapper_class=structlog.stdlib.BoundLogger,
@@ -165,6 +202,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("ORJSON enabled - 20-50% faster JSON serialization")
     else:
         logger.info("ORJSON not available - using standard JSON serialization")
+
+    # Initialize performance optimizations (Phase 3-4: Cython, GPU, MinHash)
+    try:
+        from backend.services.performance_init import initialize_performance_optimizations
+        perf_status = await initialize_performance_optimizations(
+            compile_cython=True,  # Compile Cython extensions at startup
+            init_gpu=True,        # Initialize GPU acceleration
+            init_minhash=True,    # Initialize MinHash deduplicator
+            warmup_gpu=False,     # Skip GPU warmup for faster startup
+        )
+        logger.info(
+            "Performance optimizations ready",
+            cython=perf_status["cython"]["status"],
+            gpu=perf_status["gpu"]["status"],
+            minhash=perf_status["minhash"]["status"],
+        )
+    except Exception as perf_error:
+        logger.warning(
+            "Performance optimization init failed (using fallbacks)",
+            error=str(perf_error)
+        )
 
     # Startup tasks
     try:
@@ -423,6 +481,10 @@ def create_app() -> FastAPI:
         expose_headers=["X-Request-ID"],  # Allow clients to read request ID
     )
 
+    # Add GZip compression middleware (60-70% smaller responses)
+    # Only compresses responses > 500 bytes to avoid overhead on small responses
+    app.add_middleware(GZipMiddleware, minimum_size=500)
+
     # Register routes
     register_routes(app)
 
@@ -439,14 +501,117 @@ def create_app() -> FastAPI:
 def register_routes(app: FastAPI) -> None:
     """Register all API routes."""
 
-    # Health check (no auth required)
+    # ==========================================================================
+    # Kubernetes-Ready Health Probes
+    # ==========================================================================
+
+    # Liveness probe - basic check that the process is alive
+    @app.get("/health/live", tags=["Health"])
+    async def liveness_probe():
+        """
+        Kubernetes liveness probe.
+        Returns 200 if the process is running.
+        Use for: livenessProbe in k8s deployment.
+        """
+        return {"status": "alive"}
+
+    # Readiness probe - checks if the service can handle traffic
+    @app.get("/health/ready", tags=["Health"])
+    async def readiness_probe():
+        """
+        Kubernetes readiness probe.
+        Checks database, Redis, and critical services.
+        Use for: readinessProbe in k8s deployment.
+        """
+        checks = {
+            "database": "unknown",
+            "redis": "unknown",
+            "celery": "unknown",
+        }
+        all_healthy = True
+
+        # Check database connection
+        try:
+            from backend.db.database import get_async_session
+            async with get_async_session() as session:
+                from sqlalchemy import text
+                await session.execute(text("SELECT 1"))
+                checks["database"] = "healthy"
+        except Exception as e:
+            checks["database"] = f"unhealthy: {str(e)[:50]}"
+            all_healthy = False
+
+        # Check Redis connection
+        try:
+            from backend.services.cache import get_redis_client
+            redis = await get_redis_client()
+            if redis:
+                await redis.ping()
+                checks["redis"] = "healthy"
+            else:
+                checks["redis"] = "not_configured"
+        except Exception as e:
+            checks["redis"] = f"unhealthy: {str(e)[:50]}"
+            # Redis is optional, don't fail readiness
+
+        # Check Celery worker
+        try:
+            from backend.services.celery_manager import is_celery_running
+            if await is_celery_running():
+                checks["celery"] = "healthy"
+            else:
+                checks["celery"] = "not_running"
+        except Exception:
+            checks["celery"] = "not_configured"
+
+        status_code = 200 if all_healthy else 503
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "status": "ready" if all_healthy else "not_ready",
+                "checks": checks,
+            }
+        )
+
+    # Combined health check (backwards compatible)
     @app.get("/health", tags=["Health"])
     async def health_check():
-        """Check if the API is running and healthy."""
+        """
+        Combined health check for backwards compatibility.
+        Returns basic status + performance optimization info.
+        """
+        import time
+        start = time.perf_counter()
+
+        # Get performance status
+        perf_status = {}
+        try:
+            from backend.services.performance_init import get_performance_status
+            perf_status = get_performance_status()
+        except Exception:
+            pass
+
+        # Get memory info
+        memory_mb = 0
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_mb = round(process.memory_info().rss / 1024 / 1024, 1)
+        except Exception:
+            pass
+
         return {
             "status": "healthy",
             "service": "AIDocumentIndexer",
             "version": "0.1.0",
+            "response_time_ms": round((time.perf_counter() - start) * 1000, 2),
+            "memory_mb": memory_mb,
+            "optimizations": {
+                "uvloop": _uvloop_installed,
+                "orjson": ORJSON_AVAILABLE,
+                "cython": perf_status.get("cython", {}).get("using_cython", False),
+                "gpu": perf_status.get("gpu", {}).get("has_gpu", False),
+            },
         }
 
     @app.get("/", tags=["Root"])
@@ -522,6 +687,8 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.speculative_rag import router as speculative_rag_router
     from backend.api.routes.otel_tracing import router as otel_tracing_router
     from backend.api.routes.skills import router as skills_router
+    from backend.api.routes.public import router as public_router
+    from backend.api.routes.external_api import router as external_api_router
     from backend.api.routes.moodboard import router as moodboard_router
     from backend.api.routes.research import router as research_router
     from backend.api.routes.reports import router as reports_router
@@ -533,7 +700,26 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.query_analysis import router as query_analysis_router
     from backend.api.routes.intelligence import router as intelligence_router
     from backend.api.routes.tool_streaming import router as tool_streaming_router
+    from backend.api.routes.menu import router as menu_router
+    from backend.api.routes.link_groups import router as link_groups_router
+    from backend.api.routes.integrations import router as integrations_router
+    from backend.api.routes.pdf_tools import router as pdf_tools_router
+    from backend.api.routes.visualization import router as visualization_router
+    from backend.api.routes.analytics import router as usage_analytics_router
+    from backend.api.routes.websocket import router as websocket_router
+    from backend.api.routes.license import router as license_router
+    from backend.api.routes.sso import router as sso_router
+    from backend.api.routes.messaging import router as messaging_router
+    app.include_router(license_router, prefix="/api/v1", tags=["License Management"])
+    app.include_router(sso_router, prefix="/api/v1", tags=["Enterprise SSO"])
+    app.include_router(messaging_router, prefix="/api/v1", tags=["Messaging Bots"])
     app.include_router(scraper_router, prefix="/api/v1/scraper", tags=["Scraper"])
+    app.include_router(usage_analytics_router, prefix="/api/v1/usage-analytics", tags=["Usage Analytics"])
+    app.include_router(websocket_router, prefix="/api/v1", tags=["WebSocket"])
+    app.include_router(pdf_tools_router, prefix="/api/v1/pdf-tools", tags=["PDF Tools"])
+    app.include_router(visualization_router, prefix="/api/v1/visualization", tags=["Visualization"])
+    app.include_router(link_groups_router, prefix="/api/v1/link-groups", tags=["Link Groups"])
+    app.include_router(integrations_router, prefix="/api/v1/integrations", tags=["Feature Integrations"])
     app.include_router(costs_router, prefix="/api/v1/costs", tags=["Costs"])
     app.include_router(templates_router, prefix="/api/v1", tags=["Prompt Templates"])
     app.include_router(generation_templates_router, prefix="/api/v1", tags=["Generation Templates"])
@@ -580,6 +766,8 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(speculative_rag_router, prefix="/api/v1", tags=["Speculative RAG"])
     app.include_router(otel_tracing_router, prefix="/api/v1", tags=["OpenTelemetry Tracing"])
     app.include_router(skills_router, prefix="/api/v1/skills", tags=["Skills Marketplace"])
+    app.include_router(public_router, prefix="/api/v1/public", tags=["Public API (No Auth)"])
+    app.include_router(external_api_router, prefix="/api/v1", tags=["External API"])
     app.include_router(moodboard_router, prefix="/api/v1/moodboard", tags=["Mood Board"])
     app.include_router(research_router, prefix="/api/v1/research", tags=["Deep Research"])
     app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports (Sparkpages)"])
@@ -590,6 +778,7 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(knowledge_analytics_router, prefix="/api/v1/analytics", tags=["Knowledge Analytics"])
     app.include_router(intelligence_router, prefix="/api/v1", tags=["Intelligence Enhancement"])
     app.include_router(tool_streaming_router, prefix="/api/v1", tags=["Tool Streaming"])
+    app.include_router(menu_router, prefix="/api/v1", tags=["Menu Configuration"])
 
     # WebSocket endpoint for real-time updates
     register_websocket_routes(app)

@@ -601,3 +601,224 @@ def check_gpu_availability() -> Dict[str, Any]:
         info["recommended_backend"] = "faiss_cpu"
 
     return info
+
+
+# =============================================================================
+# General GPU Acceleration Utilities (Phase 3+4)
+# =============================================================================
+
+# Try to import PyTorch for general GPU ops
+try:
+    import torch
+    import torch.nn.functional as F
+    HAS_TORCH = True
+    # Check device availability
+    if torch.cuda.is_available():
+        _TORCH_DEVICE = "cuda"
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        _TORCH_DEVICE = "mps"
+    else:
+        _TORCH_DEVICE = "cpu"
+except ImportError:
+    HAS_TORCH = False
+    torch = None
+    F = None
+    _TORCH_DEVICE = "cpu"
+
+
+class GPUSimilarityAccelerator:
+    """
+    GPU-accelerated similarity computations with automatic fallback.
+
+    Provides GPU acceleration for cosine similarity and related operations.
+    Falls back to NumPy if GPU unavailable or on OOM errors.
+    """
+
+    def __init__(self, prefer_gpu: bool = True, mixed_precision: bool = True):
+        """
+        Initialize the accelerator.
+
+        Args:
+            prefer_gpu: Use GPU if available
+            mixed_precision: Use FP16 for faster computation
+        """
+        self.prefer_gpu = prefer_gpu
+        self.mixed_precision = mixed_precision
+        self.device = _TORCH_DEVICE if (prefer_gpu and HAS_TORCH) else "cpu"
+        self._has_gpu = self.device in ("cuda", "mps")
+
+        if self._has_gpu:
+            logger.info(f"GPU similarity accelerator using {self.device}")
+        else:
+            logger.info("GPU similarity accelerator using CPU fallback")
+
+    def cosine_similarity_batch(
+        self,
+        query: np.ndarray,
+        corpus: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Compute cosine similarity between query and all corpus vectors.
+
+        Uses GPU if available, automatically falls back to CPU on OOM.
+
+        Args:
+            query: Query vector [D]
+            corpus: Corpus matrix [N, D]
+
+        Returns:
+            Similarity scores [N]
+        """
+        if not self._has_gpu or not HAS_TORCH:
+            return self._cosine_similarity_numpy(query, corpus)
+
+        try:
+            return self._cosine_similarity_torch(query, corpus)
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.warning("GPU OOM, falling back to CPU")
+                if self.device == "cuda":
+                    torch.cuda.empty_cache()
+                return self._cosine_similarity_numpy(query, corpus)
+            raise
+
+    def _cosine_similarity_numpy(
+        self,
+        query: np.ndarray,
+        corpus: np.ndarray,
+    ) -> np.ndarray:
+        """NumPy CPU fallback for cosine similarity."""
+        query = query.astype(np.float32)
+        corpus = corpus.astype(np.float32)
+
+        query_norm = np.linalg.norm(query)
+        if query_norm == 0:
+            return np.zeros(len(corpus), dtype=np.float32)
+        query = query / query_norm
+
+        corpus_norms = np.linalg.norm(corpus, axis=1, keepdims=True)
+        corpus_norms = np.where(corpus_norms == 0, 1, corpus_norms)
+        corpus = corpus / corpus_norms
+
+        return np.dot(corpus, query).astype(np.float32)
+
+    def _cosine_similarity_torch(
+        self,
+        query: np.ndarray,
+        corpus: np.ndarray,
+    ) -> np.ndarray:
+        """PyTorch GPU implementation."""
+        dtype = torch.float16 if self.mixed_precision else torch.float32
+
+        with torch.no_grad():
+            query_t = torch.from_numpy(query).to(device=self.device, dtype=dtype)
+            corpus_t = torch.from_numpy(corpus).to(device=self.device, dtype=dtype)
+
+            query_t = F.normalize(query_t.unsqueeze(0), p=2, dim=1).squeeze(0)
+            corpus_t = F.normalize(corpus_t, p=2, dim=1)
+
+            similarities = torch.mv(corpus_t, query_t)
+
+            return similarities.cpu().float().numpy()
+
+    def similarity_matrix(
+        self,
+        matrix_a: np.ndarray,
+        matrix_b: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Compute pairwise cosine similarity matrix.
+
+        Args:
+            matrix_a: First matrix [M, D]
+            matrix_b: Second matrix [N, D]
+
+        Returns:
+            Similarity matrix [M, N]
+        """
+        if not self._has_gpu or not HAS_TORCH:
+            return self._similarity_matrix_numpy(matrix_a, matrix_b)
+
+        try:
+            return self._similarity_matrix_torch(matrix_a, matrix_b)
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.warning("GPU OOM on matrix op, falling back to CPU")
+                if self.device == "cuda":
+                    torch.cuda.empty_cache()
+                return self._similarity_matrix_numpy(matrix_a, matrix_b)
+            raise
+
+    def _similarity_matrix_numpy(
+        self,
+        matrix_a: np.ndarray,
+        matrix_b: np.ndarray,
+    ) -> np.ndarray:
+        """NumPy CPU fallback."""
+        matrix_a = matrix_a.astype(np.float32)
+        matrix_b = matrix_b.astype(np.float32)
+
+        norms_a = np.linalg.norm(matrix_a, axis=1, keepdims=True)
+        norms_a = np.where(norms_a == 0, 1, norms_a)
+        matrix_a = matrix_a / norms_a
+
+        norms_b = np.linalg.norm(matrix_b, axis=1, keepdims=True)
+        norms_b = np.where(norms_b == 0, 1, norms_b)
+        matrix_b = matrix_b / norms_b
+
+        return np.dot(matrix_a, matrix_b.T).astype(np.float32)
+
+    def _similarity_matrix_torch(
+        self,
+        matrix_a: np.ndarray,
+        matrix_b: np.ndarray,
+    ) -> np.ndarray:
+        """PyTorch GPU implementation."""
+        dtype = torch.float16 if self.mixed_precision else torch.float32
+
+        with torch.no_grad():
+            a_t = torch.from_numpy(matrix_a).to(device=self.device, dtype=dtype)
+            b_t = torch.from_numpy(matrix_b).to(device=self.device, dtype=dtype)
+
+            a_t = F.normalize(a_t, p=2, dim=1)
+            b_t = F.normalize(b_t, p=2, dim=1)
+
+            result = torch.mm(a_t, b_t.T)
+
+            return result.cpu().float().numpy()
+
+    def get_status(self) -> dict:
+        """Get accelerator status."""
+        status = {
+            "device": self.device,
+            "has_gpu": self._has_gpu,
+            "pytorch_available": HAS_TORCH,
+            "mixed_precision": self.mixed_precision,
+        }
+
+        if HAS_TORCH and self.device == "cuda":
+            status["cuda_memory_allocated_gb"] = torch.cuda.memory_allocated() / (1024 ** 3)
+            status["cuda_memory_cached_gb"] = torch.cuda.memory_reserved() / (1024 ** 3)
+
+        return status
+
+
+# Singleton for similarity accelerator
+_similarity_accelerator: Optional[GPUSimilarityAccelerator] = None
+
+
+def get_similarity_accelerator(
+    prefer_gpu: bool = True,
+) -> GPUSimilarityAccelerator:
+    """Get or create the GPU similarity accelerator singleton."""
+    global _similarity_accelerator
+
+    if _similarity_accelerator is None:
+        _similarity_accelerator = GPUSimilarityAccelerator(prefer_gpu=prefer_gpu)
+
+    return _similarity_accelerator
+
+
+def is_gpu_available() -> bool:
+    """Quick check if any GPU acceleration is available."""
+    return HAS_FAISS_GPU or HAS_CUVS or (HAS_TORCH and _TORCH_DEVICE != "cpu")

@@ -173,3 +173,395 @@
 .prose-chat blockquote {
   @apply border-l-4 border-muted-foreground/30 pl-4 italic;
 }
+
+/* ============================================
+   Enhanced UI/UX Animations & Transitions
+   ============================================ */
+
+@layer utilities {
+  /* Smooth page transitions */
+  .page-transition {
+    animation: page-fade-in 0.3s ease-out;
+  }
+
+  @keyframes page-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Card hover effects */
+  .card-hover {
+    @apply transition-all duration-200 ease-out;
+  }
+
+  .card-hover:hover {
+    @apply shadow-lg -translate-y-0.5;
+  }
+
+  /* Glow effect for primary elements */
+  .glow-primary {
+    @apply shadow-lg shadow-primary/20;
+  }
+
+  .glow-primary:hover {
+    @apply shadow-xl shadow-primary/30;
+  }
+
+  /* Shimmer loading effect */
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      hsl(var(--muted)) 0%,
+      hsl(var(--muted-foreground) / 0.1) 50%,
+      hsl(var(--muted)) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+
+  @keyframes shimmer {
+    0% {
+      background-position: 200% 0;
+    }
+    100% {
+      background-position: -200% 0;
+    }
+  }
+
+  /* Pulse animation for notifications */
+  .pulse-dot {
+    @apply relative;
+  }
+
+  .pulse-dot::after {
+    content: '';
+    @apply absolute -top-1 -right-1 w-3 h-3 bg-destructive rounded-full;
+    animation: pulse-ring 1.5s infinite;
+  }
+
+  @keyframes pulse-ring {
+    0% {
+      transform: scale(1);
+      opacity: 1;
+    }
+    50% {
+      transform: scale(1.3);
+      opacity: 0.5;
+    }
+    100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+
+  /* Slide animations */
+  .slide-in-right {
+    animation: slide-in-right 0.3s ease-out;
+  }
+
+  @keyframes slide-in-right {
+    from {
+      opacity: 0;
+      transform: translateX(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .slide-in-left {
+    animation: slide-in-left 0.3s ease-out;
+  }
+
+  @keyframes slide-in-left {
+    from {
+      opacity: 0;
+      transform: translateX(-20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .slide-in-up {
+    animation: slide-in-up 0.3s ease-out;
+  }
+
+  @keyframes slide-in-up {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Scale animations */
+  .scale-in {
+    animation: scale-in 0.2s ease-out;
+  }
+
+  @keyframes scale-in {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  /* Bounce animation */
+  .bounce-in {
+    animation: bounce-in 0.5s ease-out;
+  }
+
+  @keyframes bounce-in {
+    0% {
+      opacity: 0;
+      transform: scale(0.3);
+    }
+    50% {
+      transform: scale(1.05);
+    }
+    70% {
+      transform: scale(0.9);
+    }
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  /* Gradient text */
+  .gradient-text {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary to-primary/60;
+  }
+
+  /* Glass effect */
+  .glass {
+    @apply bg-background/80 backdrop-blur-lg border border-border/50;
+  }
+
+  /* Floating animation */
+  .float {
+    animation: float 3s ease-in-out infinite;
+  }
+
+  @keyframes float {
+    0%, 100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-10px);
+    }
+  }
+
+  /* Stagger children animation */
+  .stagger-children > * {
+    animation: stagger-fade-in 0.4s ease-out backwards;
+  }
+
+  .stagger-children > *:nth-child(1) { animation-delay: 0.05s; }
+  .stagger-children > *:nth-child(2) { animation-delay: 0.1s; }
+  .stagger-children > *:nth-child(3) { animation-delay: 0.15s; }
+  .stagger-children > *:nth-child(4) { animation-delay: 0.2s; }
+  .stagger-children > *:nth-child(5) { animation-delay: 0.25s; }
+  .stagger-children > *:nth-child(6) { animation-delay: 0.3s; }
+  .stagger-children > *:nth-child(7) { animation-delay: 0.35s; }
+  .stagger-children > *:nth-child(8) { animation-delay: 0.4s; }
+
+  @keyframes stagger-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Progress bar animation */
+  .progress-animate {
+    animation: progress-grow 1s ease-out;
+  }
+
+  @keyframes progress-grow {
+    from {
+      width: 0;
+    }
+  }
+
+  /* Subtle border glow on focus */
+  .focus-glow:focus-within {
+    @apply ring-2 ring-primary/20 ring-offset-2 ring-offset-background;
+  }
+
+  /* Icon spin on hover */
+  .icon-spin-hover:hover svg {
+    animation: spin-once 0.5s ease-out;
+  }
+
+  @keyframes spin-once {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Success checkmark animation */
+  .checkmark-animate {
+    animation: checkmark-draw 0.5s ease-out forwards;
+  }
+
+  @keyframes checkmark-draw {
+    0% {
+      stroke-dashoffset: 100;
+    }
+    100% {
+      stroke-dashoffset: 0;
+    }
+  }
+}
+
+/* Enhanced button styles */
+@layer components {
+  .btn-gradient {
+    @apply bg-gradient-to-r from-primary to-primary/80 text-primary-foreground font-medium
+           shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30
+           transition-all duration-200 hover:-translate-y-0.5;
+  }
+
+  .btn-glass {
+    @apply bg-background/50 backdrop-blur-md border border-border/50
+           hover:bg-background/70 transition-all duration-200;
+  }
+
+  /* Modern input style */
+  .input-modern {
+    @apply bg-muted/50 border-0 focus:bg-background focus:ring-2 focus:ring-primary/20
+           transition-all duration-200;
+  }
+
+  /* Status badges with pulse */
+  .status-online {
+    @apply relative;
+  }
+
+  .status-online::before {
+    content: '';
+    @apply absolute -left-2 top-1/2 -translate-y-1/2 w-2 h-2 bg-green-500 rounded-full;
+  }
+
+  .status-online::after {
+    content: '';
+    @apply absolute -left-2 top-1/2 -translate-y-1/2 w-2 h-2 bg-green-500 rounded-full
+           animate-ping opacity-75;
+  }
+
+  /* Notification badge */
+  .notification-badge {
+    @apply absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1
+           bg-destructive text-destructive-foreground text-xs font-bold
+           rounded-full flex items-center justify-center
+           animate-bounce;
+    animation-duration: 0.5s;
+    animation-iteration-count: 3;
+  }
+
+  /* Sidebar nav item */
+  .nav-item {
+    @apply relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium
+           transition-all duration-200 hover:bg-accent;
+  }
+
+  .nav-item.active {
+    @apply bg-primary text-primary-foreground shadow-md shadow-primary/20;
+  }
+
+  .nav-item.active::before {
+    content: '';
+    @apply absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-primary-foreground rounded-r-full;
+  }
+
+  /* Feature card */
+  .feature-card {
+    @apply relative overflow-hidden rounded-xl border bg-card p-6
+           transition-all duration-300 hover:shadow-xl hover:-translate-y-1;
+  }
+
+  .feature-card::before {
+    content: '';
+    @apply absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-primary via-primary/50 to-transparent
+           opacity-0 transition-opacity duration-300;
+  }
+
+  .feature-card:hover::before {
+    @apply opacity-100;
+  }
+
+  /* Stats card */
+  .stats-card {
+    @apply relative overflow-hidden rounded-xl border bg-gradient-to-br from-card to-muted/30 p-6;
+  }
+
+  .stats-card .stats-value {
+    @apply text-3xl font-bold tracking-tight;
+  }
+
+  .stats-card .stats-label {
+    @apply text-sm text-muted-foreground;
+  }
+
+  .stats-card .stats-trend {
+    @apply text-xs font-medium;
+  }
+
+  .stats-card .stats-trend.positive {
+    @apply text-green-600 dark:text-green-400;
+  }
+
+  .stats-card .stats-trend.negative {
+    @apply text-red-600 dark:text-red-400;
+  }
+}
+
+/* Better dark mode contrast */
+.dark {
+  --card: 224 71% 7%;
+  --card-foreground: 213 31% 91%;
+  --popover: 224 71% 7%;
+  --border: 216 34% 17%;
+}
+
+/* Smooth transitions for theme switching */
+* {
+  transition-property: background-color, border-color;
+  transition-duration: 0.2s;
+  transition-timing-function: ease-out;
+}
+
+/* Disable transitions for user preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

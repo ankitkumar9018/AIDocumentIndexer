@@ -32,7 +32,7 @@ from backend.db.models import (
     WorkflowNodeType,
     WorkflowTriggerType,
 )
-from backend.api.middleware.auth import get_user_context, UserContext
+from backend.api.middleware.auth import get_user_context, UserContext, get_org_id, get_user_uuid
 from backend.services.workflow_engine import (
     get_workflow_service,
     get_execution_engine,
@@ -334,34 +334,41 @@ async def list_workflows(
     search: Optional[str] = Query(default=None, description="Search in name/description"),
 ):
     """List workflows with pagination and filtering."""
-    logger.info(
-        "Listing workflows",
-        user_id=user.user_id,
-        page=page,
-        page_size=page_size,
-        status=status,
-    )
+    try:
+        logger.info(
+            "Listing workflows",
+            user_id=user.user_id,
+            page=page,
+            page_size=page_size,
+            status=status,
+        )
 
-    service = get_workflow_service(
-        session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
-    )
+        service = get_workflow_service(
+            session=db,
+            organization_id=get_org_id(user),
+        )
 
-    workflows, total = await service.list_with_stats(
-        page=page,
-        page_size=page_size,
-        status=status,
-        trigger_type=trigger_type,
-        search=search,
-    )
+        workflows, total = await service.list_with_stats(
+            page=page,
+            page_size=page_size,
+            status=status,
+            trigger_type=trigger_type,
+            search=search,
+        )
 
-    return WorkflowListResponse(
-        workflows=[WorkflowListItem(**wf) for wf in workflows],
-        total=total,
-        page=page,
-        page_size=page_size,
-        has_more=(page * page_size) < total,
-    )
+        return WorkflowListResponse(
+            workflows=[WorkflowListItem(**wf) for wf in workflows],
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=(page * page_size) < total,
+        )
+    except Exception as e:
+        logger.error("Failed to list workflows", error=str(e), user_id=user.user_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load workflows: {str(e)}"
+        )
 
 
 @router.post("", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED)
@@ -375,7 +382,7 @@ async def create_workflow(
 
     service = get_workflow_service(
         session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
+        organization_id=get_org_id(user),
     )
 
     try:
@@ -386,7 +393,7 @@ async def create_workflow(
             trigger_config=request.trigger_config,
             nodes=[n.model_dump() for n in request.nodes] if request.nodes else None,
             edges=[e.model_dump() for e in request.edges] if request.edges else None,
-            created_by_id=uuid.UUID(user.user_id),
+            created_by_id=get_user_uuid(user),
         )
 
         return workflow_to_response(workflow)
@@ -646,7 +653,7 @@ async def get_workflow(
 
     service = get_workflow_service(
         session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
+        organization_id=get_org_id(user),
     )
 
     workflow = await service.get_by_id(workflow_id)
@@ -677,7 +684,7 @@ async def update_workflow(
 
     service = get_workflow_service(
         session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
+        organization_id=get_org_id(user),
     )
 
     try:
@@ -720,7 +727,7 @@ async def update_workflow_nodes(
 
     service = get_workflow_service(
         session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
+        organization_id=get_org_id(user),
     )
 
     try:
@@ -756,7 +763,7 @@ async def delete_workflow(
 
     service = get_workflow_service(
         session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
+        organization_id=get_org_id(user),
     )
 
     try:
@@ -780,9 +787,9 @@ async def duplicate_workflow(
 
     service = get_workflow_service(
         session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
+        organization_id=get_org_id(user),
     )
-    service.user_id = uuid.UUID(user.user_id)
+    service.user_id = get_user_uuid(user)
 
     try:
         workflow = await service.duplicate_workflow(workflow_id, new_name)
@@ -806,7 +813,7 @@ async def publish_workflow(
 
     service = get_workflow_service(
         session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
+        organization_id=get_org_id(user),
     )
 
     try:
@@ -845,7 +852,7 @@ async def execute_workflow(
 
     engine = get_execution_engine(
         session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
+        organization_id=get_org_id(user),
     )
 
     try:
@@ -854,7 +861,7 @@ async def execute_workflow(
             trigger_type=WorkflowTriggerType.MANUAL.value,
             trigger_data=request.trigger_data,
             input_data=request.input_data,
-            triggered_by_id=uuid.UUID(user.user_id),
+            triggered_by_id=get_user_uuid(user),
         )
 
         return execution_to_response(execution)
@@ -900,7 +907,7 @@ async def execute_workflow_stream(
 
     engine = get_execution_engine(
         session=db,
-        organization_id=uuid.UUID(user.organization_id) if user.organization_id else None,
+        organization_id=get_org_id(user),
     )
 
     async def generate():
@@ -910,7 +917,7 @@ async def execute_workflow_stream(
                 trigger_type=WorkflowTriggerType.MANUAL.value,
                 trigger_data=request.trigger_data,
                 input_data=request.input_data,
-                triggered_by_id=uuid.UUID(user.user_id),
+                triggered_by_id=get_user_uuid(user),
             ):
                 yield f"data: {json.dumps(event)}\n\n"
 
@@ -1104,3 +1111,1231 @@ async def webhook_trigger(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Workflow execution failed: {str(e)}",
         )
+
+
+# =============================================================================
+# Publishing Endpoints
+# =============================================================================
+
+
+class WorkflowInputField(BaseModel):
+    """Input field definition for published workflow."""
+    name: str
+    type: str = "text"  # text, number, textarea, select, checkbox, date
+    label: str
+    description: Optional[str] = None
+    required: bool = True
+    default: Optional[Any] = None
+    options: Optional[List[str]] = None  # For select type
+
+
+class WorkflowPublishRequest(BaseModel):
+    """Request to publish a workflow."""
+    input_schema: List[WorkflowInputField] = Field(default_factory=list, description="Input fields for public form")
+    rate_limit: int = Field(default=100, description="Max executions per minute")
+    allowed_domains: List[str] = Field(default=["*"], description="Allowed origin domains")
+    require_api_key: bool = Field(default=False, description="Require API key for access")
+    custom_slug: Optional[str] = Field(None, description="Custom URL slug")
+    branding: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Custom branding")
+
+
+class WorkflowPublishResponse(BaseModel):
+    """Response from publishing a workflow."""
+    workflow_id: str
+    public_slug: str
+    public_url: str
+    embed_code: str
+    is_published: bool
+
+
+def _generate_workflow_slug(name: str) -> str:
+    """Generate a URL-friendly slug from name."""
+    import re
+    slug = name.lower().strip()
+    slug = re.sub(r'[^\w\s-]', '', slug)
+    slug = re.sub(r'[-\s]+', '-', slug)
+    return f"{slug}-{uuid.uuid4().hex[:8]}"
+
+
+@router.post("/{workflow_id}/deploy", response_model=WorkflowPublishResponse)
+async def publish_workflow_for_external(
+    workflow_id: uuid.UUID,
+    request: WorkflowPublishRequest,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Publish a workflow for external access via public URL.
+
+    Once published, the workflow can be accessed without authentication
+    at /api/v1/public/workflows/{public_slug}.
+
+    The input_schema defines what form fields will be shown to users.
+    """
+    from backend.core.config import settings
+
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    # Verify ownership
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only publish your own workflows",
+        )
+
+    # Workflow must be active and not draft
+    if workflow.is_draft:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot publish a draft workflow. Please publish it first.",
+        )
+
+    # Generate or use custom slug
+    if request.custom_slug:
+        # Check if slug is already taken
+        existing = await db.execute(
+            select(Workflow).where(
+                Workflow.public_slug == request.custom_slug,
+                Workflow.id != workflow.id,
+            )
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Slug '{request.custom_slug}' is already taken",
+            )
+        public_slug = request.custom_slug
+    else:
+        public_slug = _generate_workflow_slug(workflow.name)
+
+    # Update workflow
+    workflow.is_published = True
+    workflow.public_slug = public_slug
+    workflow.publish_config = {
+        "input_schema": [f.model_dump() for f in request.input_schema],
+        "rate_limit": request.rate_limit,
+        "allowed_domains": request.allowed_domains,
+        "require_api_key": request.require_api_key,
+        "branding": request.branding,
+    }
+
+    await db.commit()
+    await db.refresh(workflow)
+
+    # Generate URLs
+    base_url = settings.server.frontend_url or "http://localhost:3000"
+    public_url = f"{base_url}/w/{public_slug}"
+
+    # Generate embed code
+    embed_code = f'''<iframe
+  src="{public_url}/embed"
+  width="100%"
+  height="600"
+  frameborder="0"
+  allow="clipboard-write"
+></iframe>'''
+
+    logger.info(
+        "Workflow published for external access",
+        workflow_id=str(workflow.id),
+        public_slug=public_slug,
+        user_id=user.user_id,
+    )
+
+    return WorkflowPublishResponse(
+        workflow_id=str(workflow.id),
+        public_slug=public_slug,
+        public_url=public_url,
+        embed_code=embed_code,
+        is_published=True,
+    )
+
+
+@router.post("/{workflow_id}/undeploy")
+async def unpublish_workflow_external(
+    workflow_id: uuid.UUID,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Unpublish a workflow, removing public access."""
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only unpublish your own workflows",
+        )
+
+    workflow.is_published = False
+    # Keep the slug for re-publishing
+
+    await db.commit()
+
+    return {"message": f"Workflow '{workflow.name}' unpublished successfully"}
+
+
+@router.get("/{workflow_id}/deploy-status")
+async def get_workflow_deploy_status(
+    workflow_id: uuid.UUID,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get the deployment status and public URL for a workflow."""
+    from backend.core.config import settings
+
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    base_url = settings.server.frontend_url or "http://localhost:3000"
+
+    return {
+        "workflow_id": str(workflow.id),
+        "is_published": workflow.is_published,
+        "public_slug": workflow.public_slug,
+        "public_url": f"{base_url}/w/{workflow.public_slug}" if workflow.public_slug else None,
+        "publish_config": workflow.publish_config,
+    }
+
+
+# =============================================================================
+# Scheduling Endpoints
+# =============================================================================
+
+
+class ScheduleRequest(BaseModel):
+    """Request to schedule a workflow."""
+    cron_expression: str = Field(..., description="Cron expression (e.g., '0 9 * * *')")
+    timezone: str = Field(default="UTC", description="Timezone for the schedule")
+
+
+class ScheduleResponse(BaseModel):
+    """Workflow schedule information."""
+    workflow_id: str
+    cron: str
+    timezone: str
+    next_run: Optional[str] = None
+    is_scheduled: bool
+
+
+@router.post("/{workflow_id}/schedule", response_model=ScheduleResponse)
+async def schedule_workflow(
+    workflow_id: uuid.UUID,
+    request: ScheduleRequest,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Schedule a workflow for periodic execution.
+
+    The workflow will be executed automatically based on the cron expression.
+
+    Cron expression format: minute hour day_of_month month day_of_week
+    Examples:
+    - "0 9 * * *" - Every day at 9:00 AM
+    - "0 9 * * 1-5" - Weekdays at 9:00 AM
+    - "*/15 * * * *" - Every 15 minutes
+    - "0 0 1 * *" - First day of each month at midnight
+    """
+    from backend.services.workflow_scheduler import (
+        get_workflow_scheduler,
+        validate_cron_expression,
+        get_next_run_time,
+    )
+
+    logger.info(
+        "Scheduling workflow",
+        user_id=user.user_id,
+        workflow_id=str(workflow_id),
+        cron=request.cron_expression,
+    )
+
+    # Validate cron expression
+    if not validate_cron_expression(request.cron_expression):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid cron expression. Use format: minute hour day_of_month month day_of_week",
+        )
+
+    # Get workflow and verify ownership
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only schedule your own workflows",
+        )
+
+    if workflow.is_draft:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot schedule a draft workflow. Please publish it first.",
+        )
+
+    # Update workflow trigger config
+    workflow.trigger_type = WorkflowTriggerType.SCHEDULED.value
+    workflow.trigger_config = {
+        "cron": request.cron_expression,
+        "timezone": request.timezone,
+    }
+
+    await db.commit()
+
+    # Register with scheduler
+    scheduler = get_workflow_scheduler()
+    await scheduler.schedule_workflow(
+        workflow_id=str(workflow_id),
+        cron_expression=request.cron_expression,
+        timezone=request.timezone,
+    )
+
+    # Calculate next run time
+    next_run = await get_next_run_time(request.cron_expression, request.timezone)
+
+    return ScheduleResponse(
+        workflow_id=str(workflow_id),
+        cron=request.cron_expression,
+        timezone=request.timezone,
+        next_run=next_run.isoformat() if next_run else None,
+        is_scheduled=True,
+    )
+
+
+@router.delete("/{workflow_id}/schedule")
+async def unschedule_workflow(
+    workflow_id: uuid.UUID,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Remove a workflow from the schedule."""
+    from backend.services.workflow_scheduler import get_workflow_scheduler
+
+    logger.info(
+        "Unscheduling workflow",
+        user_id=user.user_id,
+        workflow_id=str(workflow_id),
+    )
+
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only unschedule your own workflows",
+        )
+
+    # Update workflow trigger type back to manual
+    workflow.trigger_type = WorkflowTriggerType.MANUAL.value
+    workflow.trigger_config = {}
+
+    await db.commit()
+
+    # Remove from scheduler
+    scheduler = get_workflow_scheduler()
+    await scheduler.unschedule_workflow(str(workflow_id))
+
+    return {"message": f"Workflow '{workflow.name}' unscheduled successfully"}
+
+
+@router.get("/{workflow_id}/schedule", response_model=ScheduleResponse)
+async def get_workflow_schedule(
+    workflow_id: uuid.UUID,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get the current schedule for a workflow."""
+    from backend.services.workflow_scheduler import get_next_run_time
+
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    is_scheduled = workflow.trigger_type == WorkflowTriggerType.SCHEDULED.value
+    trigger_config = workflow.trigger_config or {}
+    cron = trigger_config.get("cron", "")
+    timezone = trigger_config.get("timezone", "UTC")
+
+    next_run = None
+    if is_scheduled and cron:
+        next_run = await get_next_run_time(cron, timezone)
+
+    return ScheduleResponse(
+        workflow_id=str(workflow_id),
+        cron=cron,
+        timezone=timezone,
+        next_run=next_run.isoformat() if next_run else None,
+        is_scheduled=is_scheduled,
+    )
+
+
+@router.get("/schedules/upcoming")
+async def list_upcoming_scheduled_executions(
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    """
+    List upcoming scheduled workflow executions.
+
+    Returns the next scheduled runs across all scheduled workflows.
+    """
+    from backend.services.workflow_scheduler import get_next_run_time
+
+    # Get all scheduled workflows for this user/org
+    query = select(Workflow).where(
+        Workflow.trigger_type == WorkflowTriggerType.SCHEDULED.value,
+        Workflow.is_active == True,
+        Workflow.is_draft == False,
+    )
+
+    org_id = get_org_id(user)
+    user_uuid = get_user_uuid(user)
+    if org_id:
+        from sqlalchemy import or_
+        query = query.where(
+            or_(
+                Workflow.organization_id == org_id,
+                Workflow.created_by_id == user_uuid,
+            )
+        )
+
+    result = await db.execute(query)
+    workflows = list(result.scalars().all())
+
+    upcoming = []
+    for workflow in workflows:
+        trigger_config = workflow.trigger_config or {}
+        cron = trigger_config.get("cron")
+        timezone = trigger_config.get("timezone", "UTC")
+
+        if cron:
+            next_run = await get_next_run_time(cron, timezone)
+            if next_run:
+                upcoming.append({
+                    "workflow_id": str(workflow.id),
+                    "workflow_name": workflow.name,
+                    "cron": cron,
+                    "timezone": timezone,
+                    "next_run": next_run.isoformat(),
+                })
+
+    # Sort by next run time
+    upcoming.sort(key=lambda x: x["next_run"])
+
+    return {
+        "upcoming": upcoming[:limit],
+        "total": len(upcoming),
+    }
+
+
+# =============================================================================
+# Sharing Endpoints
+# =============================================================================
+
+
+class ShareWorkflowRequest(BaseModel):
+    """Request to share a workflow."""
+    permission_level: str = Field(
+        default="viewer",
+        description="Permission level: viewer, editor, or executor",
+    )
+    password: Optional[str] = Field(None, description="Optional password protection")
+    expires_in_days: Optional[int] = Field(None, description="Expiration in days (null = never)")
+    max_uses: Optional[int] = Field(None, description="Max uses (null = unlimited)")
+    allow_copy: bool = Field(default=False, description="Allow recipient to copy the workflow")
+
+
+class ShareLinkResponse(BaseModel):
+    """Share link information."""
+    share_id: str
+    token: str
+    share_url: str
+    permission_level: str
+    expires_at: Optional[str] = None
+    max_uses: Optional[int] = None
+    use_count: int = 0
+    is_active: bool = True
+    created_at: str
+
+
+@router.post("/{workflow_id}/share", response_model=ShareLinkResponse)
+async def share_workflow(
+    workflow_id: uuid.UUID,
+    request: ShareWorkflowRequest,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Create a share link for a workflow.
+
+    Share links allow others to view, execute, or edit a workflow
+    without needing to be added to the organization.
+
+    Permission levels:
+    - viewer: Can view workflow definition
+    - executor: Can view and execute the workflow
+    - editor: Can view, execute, and make a copy
+    """
+    import secrets
+    import hashlib
+    from backend.core.config import settings
+
+    logger.info(
+        "Creating share link for workflow",
+        user_id=user.user_id,
+        workflow_id=str(workflow_id),
+    )
+
+    # Get workflow and verify ownership
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only share your own workflows",
+        )
+
+    # Generate share token
+    token = secrets.token_urlsafe(32)
+
+    # Calculate expiration
+    expires_at = None
+    if request.expires_in_days:
+        from datetime import timedelta
+        expires_at = datetime.utcnow() + timedelta(days=request.expires_in_days)
+
+    # Hash password if provided
+    password_hash = None
+    if request.password:
+        password_hash = hashlib.sha256(request.password.encode()).hexdigest()
+
+    # Create share link record
+    share_id = uuid.uuid4()
+
+    # Use raw SQL since ShareLink model may not exist yet
+    from sqlalchemy import text
+
+    await db.execute(
+        text("""
+            INSERT INTO share_links (
+                id, organization_id, resource_id, resource_type, token,
+                permission_level, password_hash, expires_at, max_uses,
+                use_count, allow_download, require_login, created_by_id,
+                is_active, created_at, updated_at
+            ) VALUES (
+                :id, :org_id, :resource_id, 'workflow', :token,
+                :permission, :password_hash, :expires_at, :max_uses,
+                0, :allow_copy, false, :created_by,
+                true, :now, :now
+            )
+        """),
+        {
+            "id": str(share_id),
+            "org_id": user.organization_id,
+            "resource_id": str(workflow_id),
+            "token": token,
+            "permission": request.permission_level,
+            "password_hash": password_hash,
+            "expires_at": expires_at,
+            "max_uses": request.max_uses,
+            "allow_copy": request.allow_copy,
+            "created_by": user.user_id,
+            "now": datetime.utcnow(),
+        },
+    )
+    await db.commit()
+
+    # Generate share URL
+    base_url = settings.server.frontend_url or "http://localhost:3000"
+    share_url = f"{base_url}/shared/workflow/{token}"
+
+    return ShareLinkResponse(
+        share_id=str(share_id),
+        token=token,
+        share_url=share_url,
+        permission_level=request.permission_level,
+        expires_at=expires_at.isoformat() if expires_at else None,
+        max_uses=request.max_uses,
+        use_count=0,
+        is_active=True,
+        created_at=datetime.utcnow().isoformat(),
+    )
+
+
+@router.get("/{workflow_id}/shares")
+async def list_workflow_shares(
+    workflow_id: uuid.UUID,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """List all share links for a workflow."""
+    from sqlalchemy import text
+    from backend.core.config import settings
+
+    # Verify ownership
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only view shares for your own workflows",
+        )
+
+    # Get share links
+    result = await db.execute(
+        text("""
+            SELECT id, token, permission_level, expires_at, max_uses,
+                   use_count, is_active, created_at
+            FROM share_links
+            WHERE resource_id = :workflow_id
+            AND resource_type = 'workflow'
+            ORDER BY created_at DESC
+        """),
+        {"workflow_id": str(workflow_id)},
+    )
+    shares = result.fetchall()
+
+    base_url = settings.server.frontend_url or "http://localhost:3000"
+
+    return {
+        "shares": [
+            {
+                "share_id": str(s[0]),
+                "token": s[1],
+                "share_url": f"{base_url}/shared/workflow/{s[1]}",
+                "permission_level": s[2],
+                "expires_at": s[3].isoformat() if s[3] else None,
+                "max_uses": s[4],
+                "use_count": s[5],
+                "is_active": s[6],
+                "created_at": s[7].isoformat() if s[7] else None,
+            }
+            for s in shares
+        ],
+        "total": len(shares),
+    }
+
+
+@router.delete("/{workflow_id}/shares/{share_id}")
+async def revoke_workflow_share(
+    workflow_id: uuid.UUID,
+    share_id: uuid.UUID,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Revoke a share link."""
+    from sqlalchemy import text
+
+    # Verify ownership
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only revoke shares for your own workflows",
+        )
+
+    # Deactivate share link
+    result = await db.execute(
+        text("""
+            UPDATE share_links
+            SET is_active = false, updated_at = :now
+            WHERE id = :share_id
+            AND resource_id = :workflow_id
+            AND resource_type = 'workflow'
+        """),
+        {
+            "share_id": str(share_id),
+            "workflow_id": str(workflow_id),
+            "now": datetime.utcnow(),
+        },
+    )
+    await db.commit()
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Share link not found",
+        )
+
+    return {"message": "Share link revoked"}
+
+
+# =============================================================================
+# Versioning Endpoints
+# =============================================================================
+
+
+class WorkflowVersionResponse(BaseModel):
+    """Workflow version information."""
+    version: int
+    created_at: str
+    created_by: Optional[str] = None
+    change_summary: Optional[str] = None
+    node_count: int
+    edge_count: int
+
+
+@router.get("/{workflow_id}/versions")
+async def list_workflow_versions(
+    workflow_id: uuid.UUID,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    List version history for a workflow.
+
+    Each time a workflow is updated, a new version is created.
+    """
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    # For now, return current version info
+    # TODO: Implement full version history table
+    versions = [
+        WorkflowVersionResponse(
+            version=workflow.version,
+            created_at=workflow.updated_at.isoformat() if workflow.updated_at else workflow.created_at.isoformat(),
+            created_by=str(workflow.created_by_id) if workflow.created_by_id else None,
+            change_summary="Current version",
+            node_count=len(workflow.nodes) if workflow.nodes else 0,
+            edge_count=len(workflow.edges) if workflow.edges else 0,
+        )
+    ]
+
+    return {
+        "versions": [v.model_dump() for v in versions],
+        "current_version": workflow.version,
+        "total": len(versions),
+    }
+
+
+@router.post("/{workflow_id}/versions/{version}/restore")
+async def restore_workflow_version(
+    workflow_id: uuid.UUID,
+    version: int,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Restore a workflow to a previous version.
+
+    Creates a new version with the contents of the specified version.
+    """
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only restore your own workflows",
+        )
+
+    # TODO: Implement version restore from history
+    # For now, just bump version number
+    if version != workflow.version:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Version history not yet implemented. Only current version available.",
+        )
+
+    return {
+        "message": f"Workflow restored to version {version}",
+        "new_version": workflow.version,
+    }
+
+
+# =============================================================================
+# Form Trigger Endpoints
+# =============================================================================
+
+
+class FormTriggerConfig(BaseModel):
+    """Configuration for form-triggered workflows."""
+    input_schema: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Input fields for the form",
+    )
+    success_message: str = Field(
+        default="Form submitted successfully!",
+        description="Message shown after submission",
+    )
+    redirect_url: Optional[str] = Field(
+        None,
+        description="URL to redirect after submission",
+    )
+    collect_metadata: bool = Field(
+        default=True,
+        description="Collect submission metadata (IP, timestamp)",
+    )
+
+
+@router.post("/{workflow_id}/form-trigger")
+async def configure_form_trigger(
+    workflow_id: uuid.UUID,
+    config: FormTriggerConfig,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Configure a workflow to be triggered by form submission.
+
+    Form-triggered workflows expose a form URL that anyone can submit.
+    Each submission triggers a new workflow execution.
+    """
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only configure your own workflows",
+        )
+
+    # Update trigger configuration
+    workflow.trigger_type = WorkflowTriggerType.FORM.value
+    workflow.trigger_config = {
+        "input_schema": config.input_schema,
+        "success_message": config.success_message,
+        "redirect_url": config.redirect_url,
+        "collect_metadata": config.collect_metadata,
+    }
+
+    await db.commit()
+
+    # Generate form URL
+    from backend.core.config import settings
+    base_url = settings.server.frontend_url or "http://localhost:3000"
+
+    # If workflow is published, use public slug, otherwise use form endpoint
+    form_url = f"{base_url}/w/{workflow.public_slug}" if workflow.is_published and workflow.public_slug else None
+
+    return {
+        "workflow_id": str(workflow_id),
+        "trigger_type": "form",
+        "form_url": form_url,
+        "input_schema": config.input_schema,
+        "message": "Form trigger configured. Publish the workflow to get a public form URL.",
+    }
+
+
+@router.post("/{workflow_id}/form-submit")
+async def submit_form_trigger(
+    workflow_id: uuid.UUID,
+    form_data: Dict[str, Any],
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Submit a form to trigger a workflow execution.
+
+    This endpoint is called when a user submits a form configured
+    for a form-triggered workflow.
+    """
+    from fastapi import Request
+
+    # Get workflow
+    service = get_workflow_service(session=db)
+    workflow = await service.get_by_id(workflow_id)
+
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if not workflow.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Workflow is not active",
+        )
+
+    if workflow.trigger_type != WorkflowTriggerType.FORM.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Workflow is not configured for form triggers",
+        )
+
+    # Execute workflow
+    engine = get_execution_engine(session=db, organization_id=workflow.organization_id)
+
+    trigger_config = workflow.trigger_config or {}
+
+    try:
+        execution = await engine.execute(
+            workflow_id=workflow_id,
+            trigger_type=WorkflowTriggerType.FORM.value,
+            trigger_data={
+                "form_data": form_data,
+                "submitted_at": datetime.utcnow().isoformat(),
+            },
+            input_data=form_data,
+            triggered_by_id=workflow.created_by_id,
+        )
+
+        return {
+            "message": trigger_config.get("success_message", "Form submitted successfully!"),
+            "execution_id": str(execution.id),
+            "status": execution.status,
+            "redirect_url": trigger_config.get("redirect_url"),
+        }
+
+    except Exception as e:
+        logger.error("Form trigger failed", error=str(e), exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Form submission failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# Event Trigger Endpoints
+# =============================================================================
+
+
+class EventTriggerConfig(BaseModel):
+    """Configuration for event-triggered workflows."""
+    event_types: List[str] = Field(
+        ...,
+        description="Event types that trigger this workflow",
+    )
+    filter_conditions: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Additional filter conditions for events",
+    )
+
+
+@router.post("/{workflow_id}/event-trigger")
+async def configure_event_trigger(
+    workflow_id: uuid.UUID,
+    config: EventTriggerConfig,
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Configure a workflow to be triggered by system events.
+
+    Event types include:
+    - document.uploaded: When a document is uploaded
+    - document.processed: When processing completes
+    - document.deleted: When a document is deleted
+    - connector.sync_completed: When connector sync finishes
+    - skill.executed: When a skill is executed
+    - workflow.completed: When another workflow completes
+    - workflow.failed: When another workflow fails
+    """
+    service = get_workflow_service(
+        session=db,
+        organization_id=get_org_id(user),
+    )
+
+    workflow = await service.get_by_id(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+
+    if workflow.created_by_id and str(workflow.created_by_id) != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only configure your own workflows",
+        )
+
+    # Validate event types
+    valid_events = {
+        "document.uploaded",
+        "document.processed",
+        "document.deleted",
+        "connector.sync_completed",
+        "skill.executed",
+        "workflow.completed",
+        "workflow.failed",
+        "chat.message",
+        "user.login",
+        "user.logout",
+    }
+
+    invalid_events = set(config.event_types) - valid_events
+    if invalid_events:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid event types: {', '.join(invalid_events)}. Valid types: {', '.join(sorted(valid_events))}",
+        )
+
+    # Update trigger configuration
+    workflow.trigger_type = WorkflowTriggerType.EVENT.value
+    workflow.trigger_config = {
+        "event_types": config.event_types,
+        "filter_conditions": config.filter_conditions,
+    }
+
+    await db.commit()
+
+    return {
+        "workflow_id": str(workflow_id),
+        "trigger_type": "event",
+        "event_types": config.event_types,
+        "filter_conditions": config.filter_conditions,
+        "message": "Event trigger configured successfully",
+    }
+
+
+@router.get("/event-triggers")
+async def list_event_triggers(
+    user: UserContext = Depends(get_user_context),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """List all event-triggered workflows for the user."""
+    from sqlalchemy import or_
+
+    query = select(Workflow).where(
+        Workflow.trigger_type == WorkflowTriggerType.EVENT.value,
+        Workflow.is_active == True,
+    )
+
+    org_id = get_org_id(user)
+    user_uuid = get_user_uuid(user)
+    if org_id:
+        query = query.where(
+            or_(
+                Workflow.organization_id == org_id,
+                Workflow.created_by_id == user_uuid,
+            )
+        )
+
+    result = await db.execute(query)
+    workflows = list(result.scalars().all())
+
+    return {
+        "triggers": [
+            {
+                "workflow_id": str(w.id),
+                "workflow_name": w.name,
+                "event_types": (w.trigger_config or {}).get("event_types", []),
+                "filter_conditions": (w.trigger_config or {}).get("filter_conditions"),
+                "is_active": w.is_active,
+            }
+            for w in workflows
+        ],
+        "total": len(workflows),
+    }
+
+
+async def trigger_event_workflows(
+    event_type: str,
+    event_data: Dict[str, Any],
+    organization_id: Optional[uuid.UUID] = None,
+    db: Optional[AsyncSession] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Trigger all workflows that listen for a specific event.
+
+    This is called internally when system events occur.
+
+    Args:
+        event_type: Type of event (e.g., "document.uploaded")
+        event_data: Event payload data
+        organization_id: Limit to workflows in this organization
+        db: Database session
+
+    Returns:
+        List of triggered execution info
+    """
+    from backend.db.database import get_async_session_context
+
+    triggered = []
+
+    async def _trigger(session: AsyncSession):
+        nonlocal triggered
+
+        query = select(Workflow).where(
+            Workflow.trigger_type == WorkflowTriggerType.EVENT.value,
+            Workflow.is_active == True,
+            Workflow.is_draft == False,
+        )
+
+        if organization_id:
+            query = query.where(Workflow.organization_id == organization_id)
+
+        result = await session.execute(query)
+        workflows = list(result.scalars().all())
+
+        for workflow in workflows:
+            trigger_config = workflow.trigger_config or {}
+            event_types = trigger_config.get("event_types", [])
+
+            if event_type not in event_types:
+                continue
+
+            # Check filter conditions
+            filter_conditions = trigger_config.get("filter_conditions")
+            if filter_conditions:
+                # Simple key-value matching for now
+                matches = all(
+                    event_data.get(k) == v
+                    for k, v in filter_conditions.items()
+                )
+                if not matches:
+                    continue
+
+            # Execute workflow
+            try:
+                engine = get_execution_engine(
+                    session=session,
+                    organization_id=workflow.organization_id,
+                )
+
+                execution = await engine.execute(
+                    workflow_id=workflow.id,
+                    trigger_type=WorkflowTriggerType.EVENT.value,
+                    trigger_data={
+                        "event_type": event_type,
+                        "event_data": event_data,
+                        "triggered_at": datetime.utcnow().isoformat(),
+                    },
+                    input_data=event_data,
+                    triggered_by_id=workflow.created_by_id,
+                )
+
+                triggered.append({
+                    "workflow_id": str(workflow.id),
+                    "workflow_name": workflow.name,
+                    "execution_id": str(execution.id),
+                    "status": execution.status,
+                })
+
+                logger.info(
+                    "Event triggered workflow execution",
+                    event_type=event_type,
+                    workflow_id=str(workflow.id),
+                    execution_id=str(execution.id),
+                )
+
+            except Exception as e:
+                logger.error(
+                    "Failed to trigger workflow for event",
+                    event_type=event_type,
+                    workflow_id=str(workflow.id),
+                    error=str(e),
+                )
+
+    if db:
+        await _trigger(db)
+    else:
+        async with get_async_session_context() as session:
+            await _trigger(session)
+
+    return triggered

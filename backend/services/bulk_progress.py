@@ -13,7 +13,6 @@ Features:
 - Persistent state for recovery after worker crashes
 """
 
-import json
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -21,6 +20,20 @@ from uuid import uuid4
 from enum import Enum
 
 import structlog
+
+# Use orjson for faster JSON serialization (2-3x faster)
+try:
+    import orjson
+    def _json_dumps(obj):
+        return or_json_dumps(obj).decode()
+    def _json_loads(s):
+        return or_json_loads(s)
+except ImportError:
+    import json
+    def _json_dumps(obj):
+        return _json_dumps(obj)
+    def _json_loads(s):
+        return _json_loads(s)
 
 logger = structlog.get_logger(__name__)
 
@@ -170,7 +183,7 @@ class BulkProgressTracker:
         if await self._is_redis_available():
             redis = await self._get_redis()
             key = f"{self.BATCH_KEY_PREFIX}{batch_id}"
-            await redis.set(key, json.dumps(batch_data), ex=self.TTL_SECONDS)
+            await redis.set(key, _json_dumps(batch_data), ex=self.TTL_SECONDS)
         else:
             self._local_cache[batch_id] = batch_data
 
@@ -190,7 +203,7 @@ class BulkProgressTracker:
             key = f"{self.BATCH_KEY_PREFIX}{batch_id}"
             data = await redis.get(key)
             if data:
-                return json.loads(data)
+                return _json_loads(data)
         else:
             return self._local_cache.get(batch_id)
         return None
@@ -202,7 +215,7 @@ class BulkProgressTracker:
         if await self._is_redis_available():
             redis = await self._get_redis()
             key = f"{self.BATCH_KEY_PREFIX}{batch_id}"
-            await redis.set(key, json.dumps(batch_data), ex=self.TTL_SECONDS)
+            await redis.set(key, _json_dumps(batch_data), ex=self.TTL_SECONDS)
         else:
             self._local_cache[batch_id] = batch_data
 
@@ -475,7 +488,7 @@ class BulkProgressTracker:
                 for key in keys:
                     data = await redis.get(key)
                     if data:
-                        batch = json.loads(data)
+                        batch = _json_loads(data)
                         if batch.get("user_id") == user_id:
                             if status is None or batch.get("status") == status:
                                 batches.append({
@@ -535,7 +548,7 @@ class BulkProgressTracker:
                 for key in keys:
                     data = await redis.get(key)
                     if data:
-                        batch = json.loads(data)
+                        batch = _json_loads(data)
                         created_at = datetime.fromisoformat(batch.get("created_at", ""))
                         if created_at < cutoff:
                             await redis.delete(key)

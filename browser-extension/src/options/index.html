@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIDocIndexer Settings</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <svg class="logo" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+        <polyline points="14 2 14 8 20 8"></polyline>
+        <line x1="16" y1="13" x2="8" y2="13"></line>
+        <line x1="16" y1="17" x2="8" y2="17"></line>
+        <polyline points="10 9 9 9 8 9"></polyline>
+      </svg>
+      <h1>AIDocIndexer Settings</h1>
+    </header>
+
+    <main class="main">
+      <!-- Connection Settings -->
+      <section class="section">
+        <h2>Connection</h2>
+        <div class="form-group">
+          <label for="server-url">Server URL</label>
+          <input
+            type="url"
+            id="server-url"
+            placeholder="http://localhost:8000"
+            value="http://localhost:8000"
+          />
+          <p class="hint">The URL of your AIDocIndexer backend server</p>
+        </div>
+
+        <div class="form-group">
+          <label for="api-key">API Key (Optional)</label>
+          <input
+            type="password"
+            id="api-key"
+            placeholder="Enter your API key"
+          />
+          <p class="hint">Required if your server has authentication enabled</p>
+        </div>
+
+        <div class="form-group">
+          <button id="test-connection" class="btn btn-secondary">
+            Test Connection
+          </button>
+          <span id="connection-status" class="status"></span>
+        </div>
+      </section>
+
+      <!-- Capture Settings -->
+      <section class="section">
+        <h2>Page Capture</h2>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="auto-capture" />
+            <span>Auto-capture pages on visit</span>
+          </label>
+          <p class="hint">Automatically save pages you visit (uses more bandwidth)</p>
+        </div>
+
+        <div class="form-group">
+          <label for="default-collection">Default Collection</label>
+          <select id="default-collection">
+            <option value="">No default (ask each time)</option>
+          </select>
+          <p class="hint">Automatically add captured pages to this collection</p>
+        </div>
+
+        <div class="form-group">
+          <label for="exclude-domains">Excluded Domains</label>
+          <textarea
+            id="exclude-domains"
+            placeholder="google.com&#10;facebook.com&#10;twitter.com"
+            rows="4"
+          ></textarea>
+          <p class="hint">Don't capture pages from these domains (one per line)</p>
+        </div>
+      </section>
+
+      <!-- Search Settings -->
+      <section class="section">
+        <h2>Search</h2>
+        <div class="form-group">
+          <label for="results-count">Results per search</label>
+          <select id="results-count">
+            <option value="3">3 results</option>
+            <option value="5" selected>5 results</option>
+            <option value="10">10 results</option>
+            <option value="20">20 results</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="show-citations" checked />
+            <span>Show source citations in chat</span>
+          </label>
+        </div>
+      </section>
+
+      <!-- Keyboard Shortcuts -->
+      <section class="section">
+        <h2>Keyboard Shortcuts</h2>
+        <div class="shortcuts-info">
+          <p>Configure shortcuts in Chrome's extension settings:</p>
+          <a href="chrome://extensions/shortcuts" id="shortcuts-link" class="link">
+            Open Extension Shortcuts
+          </a>
+        </div>
+        <div class="shortcut-list">
+          <div class="shortcut-item">
+            <span class="shortcut-name">Quick Search</span>
+            <kbd>Ctrl+Shift+S</kbd>
+          </div>
+          <div class="shortcut-item">
+            <span class="shortcut-name">Capture Page</span>
+            <kbd>Ctrl+Shift+C</kbd>
+          </div>
+          <div class="shortcut-item">
+            <span class="shortcut-name">Open Chat Panel</span>
+            <kbd>Ctrl+Shift+O</kbd>
+          </div>
+        </div>
+      </section>
+
+      <!-- Data & Privacy -->
+      <section class="section">
+        <h2>Data & Privacy</h2>
+        <div class="form-group">
+          <button id="clear-history" class="btn btn-danger">
+            Clear Capture History
+          </button>
+          <p class="hint">Remove local history of captured pages</p>
+        </div>
+        <div class="form-group">
+          <button id="export-data" class="btn btn-secondary">
+            Export Settings
+          </button>
+        </div>
+      </section>
+
+      <!-- About -->
+      <section class="section">
+        <h2>About</h2>
+        <p class="version">Version 1.0.0</p>
+        <p class="links">
+          <a href="https://github.com/your-repo/AIDocumentIndexer" target="_blank" class="link">
+            GitHub Repository
+          </a>
+          <span class="separator">•</span>
+          <a href="https://docs.example.com" target="_blank" class="link">
+            Documentation
+          </a>
+        </p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <button id="save-settings" class="btn btn-primary">Save Settings</button>
+      <button id="reset-settings" class="btn btn-secondary">Reset to Defaults</button>
+    </footer>
+  </div>
+
+  <script src="index.js"></script>
+</body>
+</html>

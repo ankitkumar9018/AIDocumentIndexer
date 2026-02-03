@@ -244,6 +244,8 @@ class ChatRequest(BaseModel):
     enhance_query: Optional[bool] = Field(default=None, description="Enable query enhancement (expansion + HyDE). None = use admin default setting.")
     # Restrict to documents only - when enabled in general mode, LLM won't use pre-trained knowledge
     restrict_to_documents: bool = Field(default=False, description="When enabled in general mode, the assistant will not use pre-trained knowledge and will suggest switching to document mode.")
+    # Cache bypass - force fresh response instead of using cached
+    skip_cache: bool = Field(default=False, description="Skip the query cache and generate a fresh response. Use this to get a new answer if the previous one was unsatisfactory.")
 
     @property
     def effective_collection_filters(self) -> Optional[List[str]]:
@@ -315,6 +317,103 @@ class SessionMessagesResponse(BaseModel):
     session_id: UUID
     messages: List[ChatMessage]
     sources: dict  # message_id -> sources
+
+
+# =============================================================================
+# Command Execution
+# =============================================================================
+
+class CommandRequest(BaseModel):
+    """Request to execute a slash command."""
+    command: str = Field(..., description="The full command string (e.g., '/help' or '/think what is RAG?')")
+    session_id: Optional[UUID] = None
+
+
+class CommandResponse(BaseModel):
+    """Response from command execution."""
+    success: bool
+    command: str
+    message: str
+    data: Optional[dict] = None
+    show_in_chat: bool = True
+    execute_rag: bool = False
+    modified_query: Optional[str] = None
+
+
+@router.post("/command", response_model=CommandResponse)
+async def execute_command(
+    request: CommandRequest,
+    user: AuthenticatedUser,
+):
+    """
+    Execute a slash command.
+
+    Supported commands:
+    - /help - Show available commands
+    - /think <query> - Use extended thinking
+    - /ensemble <query> - Query multiple models
+    - /verify <statement> - Verify an answer
+    - /cot <question> - Chain-of-thought reasoning
+    - /organize - Organize documents
+    - /insights - Show insight feed
+    - /agent <name> <query> - Call an agent
+    - /skill <name> <args> - Execute a skill
+    - /calc <expression> - Calculate math
+    - /convert <value> <from> <to> - Unit conversion
+    - /date <operation> - Date calculations
+    - /fact <claim> - Fact check
+    """
+    from backend.services.chat_commands import get_chat_commands_service
+
+    service = get_chat_commands_service()
+
+    # Parse the command first
+    parsed = service.parse(request.command)
+
+    # Execute the parsed command
+    result = await service.execute(
+        parsed=parsed,
+        user_id=user.id,
+        context={"session_id": str(request.session_id) if request.session_id else None},
+    )
+
+    return CommandResponse(
+        success=result.success,
+        command=result.command,
+        message=result.message,
+        data=result.data,
+        show_in_chat=result.show_in_chat,
+        execute_rag=result.execute_rag,
+        modified_query=result.modified_query,
+    )
+
+
+@router.get("/commands/list")
+async def list_available_commands():
+    """
+    List all available slash commands.
+
+    Returns command definitions for UI autocomplete.
+    """
+    from backend.services.chat_commands import get_chat_commands_service
+
+    service = get_chat_commands_service()
+    commands = service.get_all_commands()
+
+    return {
+        "commands": [
+            {
+                "name": cmd.name,
+                "aliases": cmd.aliases,
+                "description": cmd.description,
+                "usage": cmd.usage,
+                "examples": cmd.examples,
+                "category": cmd.category.value,
+                "requires_args": cmd.requires_args,
+            }
+            for cmd in commands
+        ]
+    }
 
 
 # =============================================================================
@@ -459,7 +558,8 @@ async def create_chat_completion(
             general_service = get_general_chat_service()
 
             # Check cache for general chat (only for query_only mode to avoid caching conversational context)
-            if request.query_only:
+            # Skip cache if user explicitly requested a fresh response
+            if request.query_only and not request.skip_cache:
                 async with async_session_context() as db:
                     # Check cache eligibility (low temperature)
                     temperature = 0.7  # Default temperature
@@ -476,6 +576,8 @@ async def create_chat_completion(
                                 sources=[],
                                 created_at=datetime.now(),
                             )
+            elif request.skip_cache:
+                logger.info("Skipping cache per user request", mode="general")
 
             response = await general_service.query(
                 question=request.message,
@@ -602,7 +704,8 @@ async def create_chat_completion(
                     )
 
             # Check cache for RAG queries (only for query_only mode)
-            if request.query_only:
+            # Skip cache if user explicitly requested a fresh response
+            if request.query_only and not request.skip_cache:
                 async with async_session_context() as db:
                     temperature = rag_service.config.temperature
                     cache_key = f"{request.message}|{request.first_collection_filter or ''}"
@@ -619,6 +722,8 @@ async def create_chat_completion(
                                 sources=[],  # Cached responses don't include sources
                                 created_at=datetime.now(),
                             )
+            elif request.skip_cache:
+                logger.info("Skipping cache per user request", mode="rag")
 
             # PHASE 40/48: Retrieve relevant memories to enhance context
             memory_context = None
@@ -728,6 +833,17 @@ async def create_chat_completion(
                     combined_context = f"{combined_context}\n\nUser preferences:\n{personalization_additions}"
                 else:
                     combined_context = f"User preferences:\n{personalization_additions}"
+
+            # DEBUG: Log user context for RAG query troubleshooting
+            logger.info(
+                "RAG query user context",
+                user_id=user.user_id,
+                organization_id=user.organization_id,
+                is_superadmin=user.is_superadmin,
+                access_tier_level=user.access_tier_level,
+                collection_filter=request.first_collection_filter,
+                folder_id=request.folder_id,
+            )
 
             response = await rag_service.query(
                 question=request.message,

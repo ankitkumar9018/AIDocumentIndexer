@@ -7,6 +7,7 @@ Provides access to entities, relationships, and graph statistics.
 """
 
 import uuid
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import structlog
@@ -21,7 +22,7 @@ from backend.db.models import (
     Entity, EntityMention, EntityRelation,
     EntityType, RelationType, Document, AccessTier,
 )
-from backend.api.middleware.auth import get_org_filter, AuthenticatedUser
+from backend.api.middleware.auth import get_org_filter, AuthenticatedUser, get_user_uuid, safe_uuid
 from backend.services.knowledge_graph import get_knowledge_graph_service
 
 logger = structlog.get_logger(__name__)
@@ -61,7 +62,7 @@ async def get_accessible_entity_ids(
                 Document.is_private == False,
                 and_(
                     Document.is_private == True,
-                    Document.uploaded_by_id == uuid.UUID(user.user_id),
+                    Document.uploaded_by_id == get_user_uuid(user),
                 ),
             )
         )
@@ -282,7 +283,7 @@ async def get_graph_stats(
                     Document.is_private == False,
                     and_(
                         Document.is_private == True,
-                        Document.uploaded_by_id == uuid.UUID(user.user_id),
+                        Document.uploaded_by_id == get_user_uuid(user),
                     ),
                 )
             )
@@ -1466,7 +1467,7 @@ async def start_extraction_job(
         service = KGExtractionJobService(db)
 
         # Check for existing running job
-        org_id = uuid.UUID(user.organization_id) if user.organization_id else None
+        org_id = safe_uuid(user.organization_id)
         existing = await service.get_running_job(org_id)
         if existing:
             return ExtractionJobResponse(
@@ -1477,18 +1478,30 @@ async def start_extraction_job(
 
         # Create new job
         job = await service.create_job(
-            user_id=uuid.UUID(user.user_id),
+            user_id=get_user_uuid(user),
             organization_id=org_id,
             only_new_documents=request.only_new_documents,
             document_ids=request.document_ids,
             provider_id=request.provider_id,
         )
 
-        # Start the job in background
-        await service.start_job(job.id)
+        # Dispatch to Celery worker (runs completely separate from backend)
+        # This prevents KG extraction from blocking the API
+        from backend.tasks.document_tasks import run_kg_extraction_job
+        run_kg_extraction_job.delay(
+            job_id=str(job.id),
+            user_id=user.user_id,
+            organization_id=str(org_id) if org_id else None,
+            provider_id=str(request.provider_id) if request.provider_id else None,
+        )
+
+        # Update job status to indicate it's queued for Celery
+        job.status = "running"
+        job.started_at = datetime.now(timezone.utc)
+        await db.commit()
 
         logger.info(
-            "Started KG extraction job",
+            "Started KG extraction job via Celery",
             job_id=str(job.id),
             user_id=user.user_id,
             only_new=request.only_new_documents,
@@ -1497,7 +1510,7 @@ async def start_extraction_job(
         return ExtractionJobResponse(
             job_id=str(job.id),
             status="started",
-            message="Extraction job started successfully. You can navigate away and check progress later.",
+            message="Extraction job started in background. You can navigate away and check progress later.",
         )
 
     except ValueError as e:
@@ -1523,7 +1536,7 @@ async def get_current_extraction_job(
 
     try:
         service = KGExtractionJobService(db)
-        org_id = uuid.UUID(user.organization_id) if user.organization_id else None
+        org_id = safe_uuid(user.organization_id)
         job = await service.get_running_job(org_id)
 
         if not job:
@@ -1550,7 +1563,7 @@ async def get_pending_extraction_count(
 
     try:
         service = KGExtractionJobService(db)
-        org_id = uuid.UUID(user.organization_id) if user.organization_id else None
+        org_id = safe_uuid(user.organization_id)
 
         pending_count = await service.get_documents_pending_extraction(org_id)
         running_job = await service.get_running_job(org_id)
@@ -1717,7 +1730,7 @@ async def list_extraction_jobs(
 
     try:
         service = KGExtractionJobService(db)
-        org_id = uuid.UUID(user.organization_id) if user.organization_id else None
+        org_id = safe_uuid(user.organization_id)
 
         jobs = await service.list_jobs(
             organization_id=org_id,

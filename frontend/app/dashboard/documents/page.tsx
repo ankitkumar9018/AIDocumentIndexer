@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { getErrorMessage } from "@/lib/errors";
 import {
@@ -53,6 +54,7 @@ import {
   GripVertical,
   Database,
   AlertCircle,
+  Maximize2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -127,6 +129,7 @@ import { SmartFolders, DocumentInsights } from "@/components/documents/smart-fol
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { UploadedDocumentPreview } from "@/components/preview/UploadedDocumentPreview";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useDocumentViewer } from "@/components/document-viewer";
 
 type ViewMode = "grid" | "list";
 
@@ -183,6 +186,7 @@ const DATE_RANGE_OPTIONS = [
 export default function DocumentsPage() {
   const { status } = useSession();
   const isAuthenticated = status === "authenticated";
+  const router = useRouter();
 
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [searchQuery, setSearchQuery] = useState("");
@@ -228,6 +232,9 @@ export default function DocumentsPage() {
   // Drag and drop state
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
+
+  // Full-screen document viewer
+  const { openDocument: openFullScreenViewer } = useDocumentViewer();
 
   // Load favorites and recently viewed from localStorage
   useEffect(() => {
@@ -615,8 +622,28 @@ export default function DocumentsPage() {
     }
   };
 
+  // Navigate to full document details page
+  const handleOpenDocumentDetails = (docId: string) => {
+    addToRecentlyViewed(docId);
+    router.push(`/dashboard/documents/${docId}`);
+  };
+
   const handleOpenFullView = (docId: string) => {
-    window.location.href = `/dashboard/documents/${docId}`;
+    const doc = filteredDocuments.find(d => d.id === docId) || previewDocument;
+    if (doc) {
+      // Get file extension from name or file_type
+      const ext = doc.file_type || doc.name?.split('.').pop()?.toLowerCase() || 'txt';
+
+      // Construct API URL for document content
+      const documentUrl = `/api/v1/documents/${docId}/content`;
+
+      openFullScreenViewer({
+        id: docId,
+        url: documentUrl,
+        name: doc.name || doc.title || 'Document',
+        type: ext,
+      });
+    }
   };
 
   // Generate embeddings for a specific document
@@ -1595,6 +1622,10 @@ export default function DocumentsPage() {
                                 <Eye className="h-4 w-4 mr-2" />
                                 View Details
                               </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => handleOpenDocumentDetails(doc.id)}>
+                                <FileText className="h-4 w-4 mr-2" />
+                                Full Details
+                              </DropdownMenuItem>
                               <DropdownMenuItem onClick={() => handleDownloadDocument(doc.id, doc.name)}>
                                 <Download className="h-4 w-4 mr-2" />
                                 Download
@@ -1692,6 +1723,10 @@ export default function DocumentsPage() {
                         <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleViewDocument(doc.id); }}>
                           <Eye className="h-4 w-4 mr-2" />
                           View Details
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleOpenDocumentDetails(doc.id); }}>
+                          <FileText className="h-4 w-4 mr-2" />
+                          Full Details
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleDownloadDocument(doc.id, doc.name); }}>
                           <Download className="h-4 w-4 mr-2" />
@@ -2114,11 +2149,11 @@ export default function DocumentsPage() {
                 <div className="flex items-center gap-2 mt-2">
                   <Button
                     size="sm"
-                    variant="outline"
+                    variant="default"
                     onClick={() => handleOpenFullView(previewDocument.id)}
                   >
-                    <Eye className="h-3 w-3 mr-1" />
-                    Full View
+                    <Maximize2 className="h-3 w-3 mr-1" />
+                    Full Screen
                   </Button>
                   <Button
                     size="sm"

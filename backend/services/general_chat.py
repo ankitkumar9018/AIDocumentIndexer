@@ -143,9 +143,9 @@ class GeneralChatService:
 
         # Use centralized session memory manager with LRU eviction (prevents memory leaks)
         self._session_memory = get_session_memory_manager(
-            max_sessions=1000,
+            max_sessions=200,  # Reduced from 1000 to prevent memory bloat
             memory_window_k=memory_window_k,
-            cleanup_stale_after_hours=24.0,
+            cleanup_stale_after_hours=4.0,  # Reduced from 24h to prevent stale sessions
         )
 
         logger.info(

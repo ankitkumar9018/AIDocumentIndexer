@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import json
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -324,7 +325,10 @@ class AMemMemoryService:
         self._memories: Dict[str, Memory] = {}
         self._agent = MemoryAgent(self.config)
         self._operation_count = 0
-        self._embeddings_cache: Dict[str, List[float]] = {}
+        # LRU cache with max 5000 entries to prevent memory bloat
+        self._embeddings_cache: OrderedDict[str, List[float]] = OrderedDict()
+        self._embeddings_cache_max_size = 5000
+        self._cache_lock = asyncio.Lock()  # Thread-safe for async operations
 
     def _generate_id(self, content: str) -> str:
         """Generate unique ID for memory."""
@@ -332,19 +336,28 @@ class AMemMemoryService:
         return hashlib.md5(f"{content}{timestamp}".encode()).hexdigest()[:12]
 
     async def _get_embedding(self, text: str) -> List[float]:
-        """Get embedding for text."""
-        if text in self._embeddings_cache:
-            return self._embeddings_cache[text]
+        """Get embedding for text with thread-safe LRU caching."""
+        # Check cache first (with lock)
+        async with self._cache_lock:
+            if text in self._embeddings_cache:
+                # Move to end (most recently used)
+                self._embeddings_cache.move_to_end(text)
+                return self._embeddings_cache[text]
 
+        # Generate embedding outside lock to avoid blocking
         try:
             from backend.services.embeddings import get_embedding_service
             service = await get_embedding_service()
             result = await service.embed_text(text)
             embedding = result.embedding
 
-            # Cache it
+            # Cache it with LRU eviction (with lock)
             if self.config.enable_caching:
-                self._embeddings_cache[text] = embedding
+                async with self._cache_lock:
+                    # Evict oldest entries if at capacity
+                    while len(self._embeddings_cache) >= self._embeddings_cache_max_size:
+                        self._embeddings_cache.popitem(last=False)
+                    self._embeddings_cache[text] = embedding
 
             return embedding
 
@@ -528,9 +541,17 @@ class AMemMemoryService:
             if combined >= self.config.relevance_threshold:
                 scored.append((memory, combined))
 
-        # Sort by score and take top_k
-        scored.sort(key=lambda x: x[1], reverse=True)
-        results = [mem for mem, _ in scored[:top_k]]
+        # Use heapq for O(n) top-k selection instead of O(n log n) full sort
+        import heapq
+        if len(scored) <= top_k:
+            # If we have fewer items than top_k, just sort them
+            scored.sort(key=lambda x: x[1], reverse=True)
+            top_items = scored
+        else:
+            # heapq.nlargest is O(n log k) which is faster than O(n log n) for small k
+            top_items = heapq.nlargest(top_k, scored, key=lambda x: x[1])
+
+        results = [mem for mem, _ in top_items]
 
         # Update access times and counts
         for mem in results:

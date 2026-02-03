@@ -274,6 +274,26 @@ def format_prometheus_metrics(metrics: Dict[str, Any]) -> str:
         add_metric("aidoc_embedding_latency_p95_seconds", embedding_latencies.get("p95", 0),
                    "Embedding generation latency 95th percentile")
 
+    # Performance optimization metrics
+    perf_metrics = metrics.get("performance", {})
+    add_metric("aidoc_cython_enabled", 1 if perf_metrics.get("cython_enabled") else 0,
+               "Cython optimizations enabled (1=yes, 0=no)")
+    add_metric("aidoc_gpu_enabled", 1 if perf_metrics.get("gpu_enabled") else 0,
+               "GPU acceleration enabled (1=yes, 0=no)")
+    add_metric("aidoc_minhash_enabled", 1 if perf_metrics.get("minhash_enabled") else 0,
+               "MinHash deduplication enabled (1=yes, 0=no)")
+    add_metric("aidoc_uvloop_enabled", 1 if perf_metrics.get("uvloop_enabled") else 0,
+               "uvloop async optimization enabled (1=yes, 0=no)")
+    add_metric("aidoc_orjson_enabled", 1 if perf_metrics.get("orjson_enabled") else 0,
+               "ORJSON fast serialization enabled (1=yes, 0=no)")
+
+    # Memory metrics
+    memory_metrics = metrics.get("memory", {})
+    add_metric("aidoc_memory_rss_bytes", memory_metrics.get("rss_bytes", 0),
+               "Resident set size in bytes")
+    add_metric("aidoc_memory_vms_bytes", memory_metrics.get("vms_bytes", 0),
+               "Virtual memory size in bytes")
+
     return "\n".join(lines)
 
 
@@ -322,10 +342,40 @@ async def get_metrics():
                 "p95": collector.get_percentile(collector.embedding_latencies, 95),
             }
 
+        # Get performance optimization status
+        perf_metrics = {}
+        try:
+            from backend.services.performance_init import get_performance_status
+            perf_status = get_performance_status()
+            perf_metrics = {
+                "cython_enabled": perf_status.get("cython", {}).get("using_cython", False),
+                "gpu_enabled": perf_status.get("gpu", {}).get("has_gpu", False),
+                "minhash_enabled": perf_status.get("minhash", {}).get("using_minhash", False),
+                "uvloop_enabled": True,  # Set at module import
+                "orjson_enabled": True,  # Set at module import
+            }
+        except Exception:
+            pass
+
+        # Get memory metrics
+        memory_metrics = {}
+        try:
+            import psutil
+            process = psutil.Process()
+            mem_info = process.memory_info()
+            memory_metrics = {
+                "rss_bytes": mem_info.rss,
+                "vms_bytes": mem_info.vms,
+            }
+        except Exception:
+            pass
+
         # Combine all metrics
         all_metrics = {
             "database": db_metrics,
             "collector": collector_metrics,
+            "performance": perf_metrics,
+            "memory": memory_metrics,
         }
 
         # Format for Prometheus

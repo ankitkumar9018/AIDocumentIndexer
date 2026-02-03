@@ -20,6 +20,8 @@ import {
   Webhook,
   FormInput,
   Zap,
+  ExternalLink,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,6 +48,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
 import {
   useWorkflows,
   useCreateWorkflow,
@@ -91,12 +96,14 @@ function WorkflowCard({
   onDelete,
   onDuplicate,
   onToggleActive,
+  onDeploy,
 }: {
   workflow: WorkflowListItem;
   onEdit: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
   onToggleActive: () => void;
+  onDeploy: () => void;
 }) {
   const TriggerIcon = triggerIcons[workflow.trigger_type] || Play;
   const successRate =
@@ -131,6 +138,10 @@ function WorkflowCard({
               <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onDuplicate(); }}>
                 <Copy className="mr-2 h-4 w-4" />
                 Duplicate
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onDeploy(); }}>
+                <ExternalLink className="mr-2 h-4 w-4" />
+                Deploy
               </DropdownMenuItem>
               <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onToggleActive(); }}>
                 {workflow.is_active ? (
@@ -205,6 +216,18 @@ export default function WorkflowsPage() {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [workflowToDelete, setWorkflowToDelete] = useState<WorkflowListItem | null>(null);
+  const [deployDialogOpen, setDeployDialogOpen] = useState(false);
+  const [workflowToDeploy, setWorkflowToDeploy] = useState<WorkflowListItem | null>(null);
+  const [deploySlug, setDeploySlug] = useState("");
+  const [deployAllowedDomains, setDeployAllowedDomains] = useState("*");
+  const [deployRateLimit, setDeployRateLimit] = useState("100");
+  const [deployRequireApiKey, setDeployRequireApiKey] = useState(false);
+  const [deployStatus, setDeployStatus] = useState<{
+    is_deployed: boolean;
+    public_slug?: string;
+    public_url?: string;
+  } | null>(null);
+  const [isDeploying, setIsDeploying] = useState(false);
   const [newWorkflowName, setNewWorkflowName] = useState("");
   const [newWorkflowDescription, setNewWorkflowDescription] = useState("");
   const [newWorkflowTrigger, setNewWorkflowTrigger] = useState<WorkflowTriggerType>("manual");
@@ -314,6 +337,101 @@ export default function WorkflowsPage() {
     }
   };
 
+  const fetchDeployStatus = async (workflowId: string) => {
+    try {
+      const response = await fetch(`/api/v1/workflows/${workflowId}/deploy-status`);
+      if (response.ok) {
+        const status = await response.json();
+        setDeployStatus(status);
+        if (status.is_deployed && status.public_slug) {
+          setDeploySlug(status.public_slug);
+        }
+      }
+    } catch {
+      console.error("Failed to fetch deploy status");
+    }
+  };
+
+  const handleOpenDeployDialog = async (workflow: WorkflowListItem) => {
+    setWorkflowToDeploy(workflow);
+    setDeploySlug(workflow.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""));
+    setDeployAllowedDomains("*");
+    setDeployRateLimit("100");
+    setDeployRequireApiKey(false);
+    setDeployStatus(null);
+    setDeployDialogOpen(true);
+    await fetchDeployStatus(workflow.id);
+  };
+
+  const handleDeploy = async () => {
+    if (!workflowToDeploy) return;
+
+    if (!deploySlug.trim()) {
+      toast.error("Please enter a public slug");
+      return;
+    }
+
+    setIsDeploying(true);
+    try {
+      const response = await fetch(`/api/v1/workflows/${workflowToDeploy.id}/deploy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          public_slug: deploySlug,
+          allowed_domains: deployAllowedDomains.split(",").map(d => d.trim()).filter(Boolean),
+          rate_limit: parseInt(deployRateLimit) || 100,
+          require_api_key: deployRequireApiKey,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || "Failed to deploy");
+      }
+
+      const result = await response.json();
+      setDeployStatus({
+        is_deployed: true,
+        public_slug: result.public_slug,
+        public_url: result.public_url,
+      });
+      toast.success("Workflow deployed successfully");
+      refetch();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to deploy workflow");
+    } finally {
+      setIsDeploying(false);
+    }
+  };
+
+  const handleUndeploy = async () => {
+    if (!workflowToDeploy) return;
+
+    setIsDeploying(true);
+    try {
+      const response = await fetch(`/api/v1/workflows/${workflowToDeploy.id}/undeploy`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to undeploy");
+      }
+
+      setDeployStatus({ is_deployed: false });
+      toast.success("Workflow undeployed");
+      refetch();
+    } catch {
+      toast.error("Failed to undeploy workflow");
+    } finally {
+      setIsDeploying(false);
+    }
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    toast.success("Copied to clipboard");
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -393,6 +511,7 @@ export default function WorkflowsPage() {
               }}
               onDuplicate={() => handleDuplicateWorkflow(workflow)}
               onToggleActive={() => handleToggleActive(workflow)}
+              onDeploy={() => handleOpenDeployDialog(workflow)}
             />
           ))}
         </div>
@@ -492,6 +611,171 @@ export default function WorkflowsPage() {
               {deleteWorkflow.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Delete
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Deploy Workflow Dialog */}
+      <Dialog open={deployDialogOpen} onOpenChange={setDeployDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Deploy Workflow</DialogTitle>
+            <DialogDescription>
+              Make &quot;{workflowToDeploy?.name}&quot; accessible via a public URL
+            </DialogDescription>
+          </DialogHeader>
+
+          {deployStatus?.is_deployed ? (
+            <div className="space-y-4 py-4">
+              <div className="flex items-center gap-2 text-green-600 bg-green-50 p-3 rounded-lg">
+                <Check className="h-5 w-5" />
+                <span className="font-medium">Workflow is deployed</span>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Public URL</Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={`${typeof window !== "undefined" ? window.location.origin : ""}/w/${deployStatus.public_slug}`}
+                    readOnly
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() =>
+                      copyToClipboard(
+                        `${typeof window !== "undefined" ? window.location.origin : ""}/w/${deployStatus.public_slug}`
+                      )
+                    }
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-2">
+                <Label>Embed Code</Label>
+                <Textarea
+                  value={`<iframe src="${typeof window !== "undefined" ? window.location.origin : ""}/w/${deployStatus.public_slug}" width="100%" height="600" frameborder="0"></iframe>`}
+                  readOnly
+                  rows={3}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    copyToClipboard(
+                      `<iframe src="${typeof window !== "undefined" ? window.location.origin : ""}/w/${deployStatus.public_slug}" width="100%" height="600" frameborder="0"></iframe>`
+                    )
+                  }
+                >
+                  <Copy className="h-4 w-4 mr-2" />
+                  Copy Embed Code
+                </Button>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-2">
+                <Label>API Endpoint</Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={`${typeof window !== "undefined" ? window.location.origin : ""}/api/v1/public/workflows/${deployStatus.public_slug}/execute`}
+                    readOnly
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() =>
+                      copyToClipboard(
+                        `${typeof window !== "undefined" ? window.location.origin : ""}/api/v1/public/workflows/${deployStatus.public_slug}/execute`
+                      )
+                    }
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="deploy-slug">Public Slug</Label>
+                <Input
+                  id="deploy-slug"
+                  placeholder="my-workflow"
+                  value={deploySlug}
+                  onChange={(e) => setDeploySlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  URL: {typeof window !== "undefined" ? window.location.origin : ""}/w/{deploySlug || "my-workflow"}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="deploy-domains">Allowed Domains</Label>
+                <Input
+                  id="deploy-domains"
+                  placeholder="*, example.com"
+                  value={deployAllowedDomains}
+                  onChange={(e) => setDeployAllowedDomains(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Comma-separated list. Use * to allow all domains.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="deploy-rate">Rate Limit (requests/minute)</Label>
+                <Input
+                  id="deploy-rate"
+                  type="number"
+                  value={deployRateLimit}
+                  onChange={(e) => setDeployRateLimit(e.target.value)}
+                />
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="deploy-apikey"
+                  checked={deployRequireApiKey}
+                  onChange={(e) => setDeployRequireApiKey(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <Label htmlFor="deploy-apikey">Require API Key</Label>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            {deployStatus?.is_deployed ? (
+              <>
+                <Button variant="outline" onClick={() => setDeployDialogOpen(false)}>
+                  Close
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={handleUndeploy}
+                  disabled={isDeploying}
+                >
+                  {isDeploying && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                  Undeploy
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button variant="outline" onClick={() => setDeployDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleDeploy} disabled={isDeploying}>
+                  {isDeploying && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                  Deploy Workflow
+                </Button>
+              </>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

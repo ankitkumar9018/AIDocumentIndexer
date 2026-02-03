@@ -90,9 +90,24 @@ class RAGConfig:
     ):
         from backend.services.settings import get_settings_service
 
-        # Default provider from environment variable
-        default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
         settings = get_settings_service()
+
+        # Read embedding provider from settings first, then environment, then default
+        # IMPORTANT: Use EMBEDDING_PROVIDER env var, NOT DEFAULT_LLM_PROVIDER
+        # Embeddings must be independent of chat LLM to allow switching LLMs without re-indexing
+        if embedding_provider is None:
+            embedding_provider = settings.get_default_value("embedding.provider")
+            if embedding_provider is None:
+                embedding_provider = os.getenv("EMBEDDING_PROVIDER", "ollama")
+
+        # Read embedding model from settings first, then environment
+        if embedding_model is None:
+            embedding_model = settings.get_default_value("embedding.model")
+            if embedding_model is None:
+                embedding_model = os.getenv("OLLAMA_EMBEDDING_MODEL" if embedding_provider == "ollama" else "DEFAULT_EMBEDDING_MODEL")
+
+        # Default provider for chat (separate from embedding)
+        default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
 
         # Read retrieval settings from settings service defaults
         # These are synchronous reads of default values; async DB values applied at runtime

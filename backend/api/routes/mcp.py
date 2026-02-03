@@ -10,26 +10,39 @@ Endpoints:
 - POST /tools/call - Call an MCP tool
 - POST /message - Handle raw MCP protocol messages
 - GET /health - Check MCP server health
+- GET /resources - List available MCP resources
+- WS /ws - WebSocket transport for MCP
+
+References:
+- MCP Spec: https://modelcontextprotocol.io/
+- JSON-RPC 2.0: https://www.jsonrpc.org/specification
 """
 
+import json
 from typing import Optional, List, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
-from backend.services.mcp_server import (
-    get_mcp_server,
-    get_mcp_protocol_handler,
-    MCPServer,
-    MCPProtocolHandler,
-)
-from backend.core.config import settings
-from backend.db.database import get_async_session
-from backend.api.middleware.auth import AuthenticatedUser, get_current_user_optional
+from backend.mcp import get_mcp_server, MCPServer
+from backend.api.middleware.auth import get_current_user_optional
+from backend.db.models import User
 
 logger = structlog.get_logger(__name__)
+
+# Global MCP server instance
+_mcp_server_instance: Optional[MCPServer] = None
+
+
+async def get_initialized_mcp_server() -> MCPServer:
+    """Get or initialize the MCP server singleton."""
+    global _mcp_server_instance
+    if _mcp_server_instance is None:
+        _mcp_server_instance = get_mcp_server()
+        await _mcp_server_instance.initialize()
+    return _mcp_server_instance
 
 router = APIRouter()
 
@@ -50,7 +63,6 @@ class MCPToolResult(BaseModel):
     success: bool
     result: Any
     error: Optional[str] = None
-    execution_time_ms: int
 
 
 class MCPToolDefinition(BaseModel):
@@ -61,10 +73,10 @@ class MCPToolDefinition(BaseModel):
 
 
 class MCPMessageRequest(BaseModel):
-    """Raw MCP protocol message."""
+    """Raw MCP protocol message (JSON-RPC 2.0)."""
     jsonrpc: str = Field(default="2.0")
-    id: Optional[str] = None
-    method: str = Field(..., description="Method to call (tools/list, tools/call)")
+    id: Optional[str | int] = None
+    method: str = Field(..., description="Method to call (tools/list, tools/call, resources/list, etc.)")
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -72,9 +84,22 @@ class MCPMessageRequest(BaseModel):
 # API Endpoints
 # =============================================================================
 
+@router.get("/info")
+async def get_mcp_info():
+    """Get MCP server information and capabilities."""
+    server = await get_initialized_mcp_server()
+    return {
+        "name": server.name,
+        "version": server.version,
+        "protocol_version": server.protocol_version,
+        "capabilities": server.capabilities,
+        "status": "ready" if server._initialized else "initializing",
+    }
+
+
 @router.get("/tools", response_model=List[MCPToolDefinition])
 async def list_mcp_tools(
-    user: Optional[AuthenticatedUser] = Depends(get_current_user_optional),
+    user: Optional[User] = Depends(get_current_user_optional),
 ):
     """
     List all available MCP tools.
@@ -82,22 +107,61 @@ async def list_mcp_tools(
     Returns a list of tool definitions with their names, descriptions,
     and input schemas. This follows the MCP protocol format.
     """
-    server = get_mcp_server()
-    tools = server.list_tools()
+    server = await get_initialized_mcp_server()
+    tools = server._tool_registry.get_tools()
 
     logger.info(
         "MCP tools listed",
         tool_count=len(tools),
-        user_id=user.user_id if user else None,
+        user_id=str(user.id) if user else None,
     )
 
-    return tools
+    return [
+        MCPToolDefinition(
+            name=tool["name"],
+            description=tool["description"],
+            input_schema=tool["inputSchema"],
+        )
+        for tool in tools
+    ]
+
+
+@router.get("/resources")
+async def list_mcp_resources(
+    user: Optional[User] = Depends(get_current_user_optional),
+):
+    """
+    List all available MCP resources.
+
+    Returns resource templates with URI patterns and descriptions.
+    """
+    server = await get_initialized_mcp_server()
+    templates = server._resource_provider.get_templates()
+
+    logger.info(
+        "MCP resources listed",
+        resource_count=len(templates),
+        user_id=str(user.id) if user else None,
+    )
+
+    return {
+        "resources": [
+            {
+                "uri_template": t["uri_template"],
+                "name": t["name"],
+                "description": t["description"],
+                "mime_type": t.get("mime_type"),
+            }
+            for t in templates
+        ],
+        "total": len(templates),
+    }
 
 
 @router.post("/tools/call", response_model=MCPToolResult)
 async def call_mcp_tool(
     request: MCPToolCallRequest,
-    user: Optional[AuthenticatedUser] = Depends(get_current_user_optional),
+    user: Optional[User] = Depends(get_current_user_optional),
 ):
     """
     Call an MCP tool by name.
@@ -106,61 +170,85 @@ async def call_mcp_tool(
     capabilities like RAG queries, document search, knowledge graph queries,
     and more.
     """
-    server = get_mcp_server()
+    server = await get_initialized_mcp_server()
 
     logger.info(
         "MCP tool call request",
         tool=request.name,
-        user_id=user.user_id if user else None,
+        user_id=str(user.id) if user else None,
     )
 
-    result = await server.call_tool(
-        tool_name=request.name,
-        arguments=request.arguments,
-        user_id=user.user_id if user else None,
-    )
+    try:
+        result = await server._tool_registry.call_tool(request.name, request.arguments)
+        is_error = result.get("isError", False)
 
-    if not result.success:
-        # Return result even on failure (with error details)
-        pass
-
-    return MCPToolResult(
-        tool_name=result.tool_name,
-        success=result.success,
-        result=result.result,
-        error=result.error,
-        execution_time_ms=result.execution_time_ms,
-    )
+        return MCPToolResult(
+            tool_name=request.name,
+            success=not is_error,
+            result=result.get("content", []),
+            error=result.get("content", [{}])[0].get("text") if is_error else None,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error("MCP tool call error", tool=request.name, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
 
 
 @router.post("/message")
 async def handle_mcp_message(
     request: MCPMessageRequest,
-    user: Optional[AuthenticatedUser] = Depends(get_current_user_optional),
+    user: Optional[User] = Depends(get_current_user_optional),
 ):
     """
-    Handle a raw MCP protocol message.
+    Handle a raw MCP protocol message (JSON-RPC 2.0).
 
     This endpoint accepts JSON-RPC style messages as per the MCP protocol:
+    - initialize: Initialize the MCP session
     - tools/list: List available tools
     - tools/call: Call a tool with arguments
-    - ping: Check server health
+    - resources/list: List available resources
+    - resources/read: Read a specific resource
+    - resources/templates/list: List resource templates
 
     This is useful for direct MCP protocol integration.
     """
-    handler = get_mcp_protocol_handler()
+    server = await get_initialized_mcp_server()
 
-    response = await handler.handle_message(
-        message={
+    logger.info(
+        "MCP message received",
+        method=request.method,
+        request_id=request.id,
+        user_id=str(user.id) if user else None,
+    )
+
+    try:
+        response = await server.handle_request({
             "jsonrpc": request.jsonrpc,
             "id": request.id,
             "method": request.method,
             "params": request.params,
-        },
-        user_id=user.user_id if user else None,
-    )
-
-    return response
+        })
+        return JSONResponse(content=response)
+    except Exception as e:
+        logger.error("MCP message error", method=request.method, error=str(e))
+        return JSONResponse(
+            content={
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32603,
+                    "message": f"Internal error: {str(e)}",
+                },
+                "id": request.id,
+            },
+            status_code=500,
+        )
 
 
 @router.get("/health")
@@ -168,34 +256,47 @@ async def mcp_health_check():
     """
     Check MCP server health.
 
-    Returns server status and available tool count.
+    Returns server status, available tool count, and resource count.
     """
-    server = get_mcp_server()
-    tools = server.list_tools()
+    try:
+        server = await get_initialized_mcp_server()
+        tools = server._tool_registry.get_tools()
+        resources = server._resource_provider.get_templates()
 
-    return {
-        "status": "healthy",
-        "server": "AIDocumentIndexer MCP",
-        "version": "1.0.0",
-        "tools_available": len(tools),
-        "protocol": "MCP/1.0",
-    }
+        return {
+            "status": "healthy",
+            "server": server.name,
+            "version": server.version,
+            "protocol_version": server.protocol_version,
+            "tools_available": len(tools),
+            "resources_available": len(resources),
+            "initialized": server._initialized,
+        }
+    except Exception as e:
+        return JSONResponse(
+            content={"status": "unhealthy", "error": str(e)},
+            status_code=503,
+        )
 
 
 @router.get("/tools/{tool_name}")
 async def get_tool_details(
     tool_name: str,
-    user: Optional[AuthenticatedUser] = Depends(get_current_user_optional),
+    user: Optional[User] = Depends(get_current_user_optional),
 ):
     """
     Get detailed information about a specific MCP tool.
     """
-    server = get_mcp_server()
-    tools = server.list_tools()
+    server = await get_initialized_mcp_server()
+    tools = server._tool_registry.get_tools()
 
     for tool in tools:
         if tool["name"] == tool_name:
-            return tool
+            return {
+                "name": tool["name"],
+                "description": tool["description"],
+                "inputSchema": tool["inputSchema"],
+            }
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -211,24 +312,98 @@ async def get_mcp_schema():
     This returns a schema document that can be used by MCP clients
     to understand the available capabilities.
     """
-    server = get_mcp_server()
-    tools = server.list_tools()
+    server = await get_initialized_mcp_server()
+    tools = server._tool_registry.get_tools()
+    resources = server._resource_provider.get_templates()
 
     return {
-        "name": "AIDocumentIndexer",
+        "name": server.name,
         "description": "Intelligent Document Archive with RAG capabilities",
-        "version": "1.0.0",
-        "protocol_version": "MCP/1.0",
-        "capabilities": {
-            "tools": True,
-            "resources": False,  # Not implemented yet
-            "prompts": False,    # Not implemented yet
-        },
-        "tools": tools,
+        "version": server.version,
+        "protocol_version": server.protocol_version,
+        "capabilities": server.capabilities,
+        "tools": [
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "inputSchema": t["inputSchema"],
+            }
+            for t in tools
+        ],
+        "resources": [
+            {
+                "uri_template": r["uri_template"],
+                "name": r["name"],
+                "description": r["description"],
+            }
+            for r in resources
+        ],
         "endpoints": {
+            "info": "/api/v1/mcp/info",
             "list_tools": "/api/v1/mcp/tools",
             "call_tool": "/api/v1/mcp/tools/call",
+            "list_resources": "/api/v1/mcp/resources",
             "message": "/api/v1/mcp/message",
             "health": "/api/v1/mcp/health",
+            "websocket": "/api/v1/mcp/ws",
         },
     }
+
+
+# =============================================================================
+# WebSocket Transport
+# =============================================================================
+
+@router.websocket("/ws")
+async def mcp_websocket(websocket: WebSocket):
+    """
+    WebSocket transport for MCP protocol.
+
+    Allows bidirectional JSON-RPC communication for:
+    - Real-time tool responses
+    - Streaming resource updates
+    - Server-initiated notifications
+    """
+    await websocket.accept()
+    server = await get_initialized_mcp_server()
+
+    logger.info("MCP WebSocket connection established")
+
+    try:
+        while True:
+            # Receive JSON-RPC request
+            data = await websocket.receive_text()
+
+            try:
+                request = json.loads(data)
+
+                # Handle the request
+                response = await server.handle_request(request)
+
+                # Send response
+                await websocket.send_json(response)
+
+            except json.JSONDecodeError:
+                await websocket.send_json({
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32700,
+                        "message": "Parse error: Invalid JSON",
+                    },
+                    "id": None,
+                })
+            except Exception as e:
+                logger.error("MCP WebSocket request error", error=str(e))
+                await websocket.send_json({
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32603,
+                        "message": f"Internal error: {str(e)}",
+                    },
+                    "id": None,
+                })
+
+    except WebSocketDisconnect:
+        logger.info("MCP WebSocket connection closed")
+    except Exception as e:
+        logger.error("MCP WebSocket fatal error", error=str(e))

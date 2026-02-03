@@ -517,9 +517,10 @@ class StreamingIngestionService:
 
         try:
             # Import here to avoid circular imports
-            from backend.services.rag import RAGService
+            # Use factory function for proper initialization (thread-safe, properly configured)
+            from backend.services.rag import get_rag_service
 
-            rag = RAGService()
+            rag = get_rag_service()
             doc = self._documents.get(chunk.document_id)
 
             await rag.index_chunk(
@@ -743,9 +744,10 @@ class PartialQueryService:
 
         # Perform search
         try:
-            from backend.services.rag import RAGService
+            # Use factory function for proper initialization (thread-safe, properly configured)
+            from backend.services.rag import get_rag_service
 
-            rag = RAGService()
+            rag = get_rag_service()
             doc_id_list = [d.document_id for d in queryable_docs]
 
             results = await rag.search(

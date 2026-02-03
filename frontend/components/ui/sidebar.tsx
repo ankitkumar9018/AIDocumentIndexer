@@ -16,6 +16,11 @@ import {
   ChevronRight,
   LogOut,
   Sparkles,
+  Link2,
+  Wrench,
+  FileType,
+  Mic,
+  FileSearch,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -62,9 +67,32 @@ const mainNavItems: NavItem[] = [
     icon: Globe,
   },
   {
+    title: "Link Groups",
+    href: "/dashboard/link-groups",
+    icon: Link2,
+  },
+  {
     title: "Collections",
     href: "/dashboard/collections",
     icon: FolderOpen,
+  },
+];
+
+const toolsNavItems: NavItem[] = [
+  {
+    title: "PDF Tools",
+    href: "/dashboard/tools/pdf",
+    icon: FileType,
+  },
+  {
+    title: "Audio Tools",
+    href: "/dashboard/audio",
+    icon: Mic,
+  },
+  {
+    title: "Deep Research",
+    href: "/dashboard/reports",
+    icon: FileSearch,
   },
 ];
 
@@ -143,6 +171,22 @@ export function Sidebar({ className }: SidebarProps) {
         <nav className="space-y-1 px-2">
           {/* Main Navigation */}
           {mainNavItems.map((item) => (
+            <NavLink
+              key={item.href}
+              item={item}
+              isActive={pathname === item.href || pathname.startsWith(item.href + "/")}
+              collapsed={collapsed}
+            />
+          ))}
+
+          {/* Tools Section */}
+          <div className="my-4 border-t" />
+          {!collapsed && (
+            <p className="mb-2 px-3 text-xs font-semibold uppercase text-muted-foreground">
+              Tools
+            </p>
+          )}
+          {toolsNavItems.map((item) => (
             <NavLink
               key={item.href}
               item={item}

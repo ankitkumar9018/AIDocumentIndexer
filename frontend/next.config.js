@@ -26,11 +26,27 @@ const nextConfig = {
     ];
   },
 
-  webpack: (config) => {
+  webpack: (config, { isServer }) => {
     config.resolve.fallback = {
       ...config.resolve.fallback,
       fs: false,
     };
+
+    // Fix pdfjs-dist ESM import and canvas module for SSR
+    // See: https://github.com/vercel/next.js/issues/58313
+    if (isServer) {
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        canvas: false,
+      };
+    }
+
+    // Ensure pdfjs-dist works with dynamic imports
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      'pdfjs-dist': 'pdfjs-dist/build/pdf.mjs',
+    };
+
     return config;
   },
 };

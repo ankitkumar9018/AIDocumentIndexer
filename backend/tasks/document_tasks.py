@@ -849,3 +849,104 @@ def extract_kg_task(
             "document_id": document_id,
             "error": str(e),
         }
+
+
+@shared_task(bind=True, name="backend.tasks.document_tasks.run_kg_extraction_job")
+def run_kg_extraction_job(
+    self,
+    job_id: str,
+    user_id: str,
+    organization_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    use_ray: bool = True,
+) -> Dict[str, Any]:
+    """
+    Run a bulk KG extraction job in Celery with Ray for parallel processing.
+
+    Architecture:
+    - Celery: Handles job dispatch (so API returns immediately)
+    - Ray: Handles parallel document processing (fast, distributed)
+
+    This runs in Celery worker, NOT in the backend event loop,
+    so it won't block the API.
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    logger.info(f"Starting bulk KG extraction job: job_id={job_id}, use_ray={use_ray}")
+
+    try:
+        from backend.services.kg_extraction_job import KGExtractionJobRunner
+        from backend.db.database import get_async_session_factory
+
+        async def _run_job():
+            session_factory = get_async_session_factory()
+            async with session_factory() as db_session:
+                runner = KGExtractionJobRunner(
+                    job_id=uuid.UUID(job_id),
+                    db_session=db_session,
+                    organization_id=uuid.UUID(organization_id) if organization_id else None,
+                    provider_id=uuid.UUID(provider_id) if provider_id else None,
+                )
+
+                # Check if Ray is available and enabled
+                try:
+                    import ray
+                    ray_available = True
+                except ImportError:
+                    ray_available = False
+
+                if use_ray and ray_available:
+                    # Use Ray for distributed parallel processing (fastest)
+                    logger.info(f"Using Ray for KG extraction: job_id={job_id}")
+                    await runner.run_with_ray()
+                else:
+                    # Fallback to asyncio parallel processing
+                    logger.info(f"Using asyncio parallel for KG extraction: job_id={job_id}")
+                    await runner.run_parallel()
+
+        result = run_async(_run_job())
+
+        logger.info(f"Bulk KG extraction job completed: job_id={job_id}")
+        return {
+            "status": "success",
+            "job_id": job_id,
+        }
+
+    except Exception as e:
+        logger.error(f"Bulk KG extraction job failed: job_id={job_id} - {str(e)}")
+
+        # Update job status to failed
+        try:
+            from backend.db.database import get_async_session_factory
+            from backend.db.models import KGExtractionJob
+            from sqlalchemy import select
+            import uuid
+
+            async def _mark_failed():
+                session_factory = get_async_session_factory()
+                async with session_factory() as db_session:
+                    result = await db_session.execute(
+                        select(KGExtractionJob).where(KGExtractionJob.id == uuid.UUID(job_id))
+                    )
+                    job = result.scalar_one_or_none()
+                    if job and job.status in ("queued", "running"):
+                        job.status = "failed"
+                        job.completed_at = datetime.now(timezone.utc)
+                        error_log = job.error_log or []
+                        error_log.append({
+                            "error": f"Celery task failed: {str(e)}",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        })
+                        job.error_log = error_log
+                        await db_session.commit()
+
+            run_async(_mark_failed())
+        except Exception as cleanup_error:
+            logger.error(f"Failed to update job status after failure: {cleanup_error}")
+
+        return {
+            "status": "failed",
+            "job_id": job_id,
+            "error": str(e),
+        }

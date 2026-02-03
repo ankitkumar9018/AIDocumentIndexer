@@ -29,7 +29,7 @@ async function fetchMentionSuggestions(partial: string): Promise<MentionSuggesti
 
   try {
     const response = await fetch(
-      `${API_BASE_URL}/api/v1/chat/mentions/autocomplete?partial=${encodeURIComponent(partial)}`,
+      `${API_BASE_URL}/chat/mentions/autocomplete?partial=${encodeURIComponent(partial)}`,
       {
         headers: {
           Authorization: `Bearer ${localStorage.getItem("authToken") || ""}`,

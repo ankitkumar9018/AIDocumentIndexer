@@ -18,6 +18,13 @@ from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
 import structlog
 
+# RapidFuzz for fast string similarity (C++ compiled, 100-1000x faster)
+try:
+    from rapidfuzz import fuzz
+    HAS_RAPIDFUZZ = True
+except ImportError:
+    HAS_RAPIDFUZZ = False
+
 logger = structlog.get_logger(__name__)
 
 
@@ -319,7 +326,13 @@ class TextPreprocessor:
         content_key: str,
     ) -> List[Dict[str, Any]]:
         """
-        Remove near-duplicate chunks using Jaccard similarity.
+        Remove near-duplicate chunks using optimized similarity detection.
+
+        Uses a multi-stage approach for efficiency:
+        1. Exact hash matching (fastest)
+        2. Length-based pre-filter (skip if lengths differ by >50%)
+        3. RapidFuzz quick similarity (C++ compiled, 100x faster)
+        4. Jaccard word similarity (only if RapidFuzz passes threshold)
 
         Args:
             chunks: List of chunk dictionaries
@@ -333,6 +346,9 @@ class TextPreprocessor:
 
         seen_hashes: Set[str] = set()
         unique_chunks = []
+        # Pre-compute word sets for unique chunks (avoids recomputation)
+        unique_word_sets: List[Set[str]] = []
+        threshold = self.config.dedup_similarity_threshold
 
         for chunk in chunks:
             content = chunk.get(content_key, "")
@@ -340,24 +356,49 @@ class TextPreprocessor:
             # Skip small chunks
             if len(content) < self.config.min_dedup_length:
                 unique_chunks.append(chunk)
+                unique_word_sets.append(set())  # Placeholder
                 continue
 
-            # Create content hash for exact dedup
+            # Stage 1: Exact hash matching (fastest)
             content_hash = hashlib.md5(content.encode()).hexdigest()
-
             if content_hash in seen_hashes:
                 continue
 
-            # Check similarity with existing chunks
+            # Stage 2: Check similarity with existing chunks
             is_duplicate = False
-            content_words = set(content.lower().split())
+            content_len = len(content)
+            content_lower = content.lower()
 
-            for existing in unique_chunks:
+            for i, existing in enumerate(unique_chunks):
                 existing_content = existing.get(content_key, "")
                 if len(existing_content) < self.config.min_dedup_length:
                     continue
 
-                existing_words = set(existing_content.lower().split())
+                # Length-based pre-filter: skip if lengths differ by >50%
+                existing_len = len(existing_content)
+                len_ratio = min(content_len, existing_len) / max(content_len, existing_len)
+                if len_ratio < 0.5:
+                    continue
+
+                # Stage 3: RapidFuzz quick check (C++ compiled, very fast)
+                if HAS_RAPIDFUZZ:
+                    # ratio() is faster than token_set_ratio for initial filter
+                    quick_sim = fuzz.ratio(content_lower, existing_content.lower()) / 100.0
+                    # Use slightly lower threshold as pre-filter
+                    if quick_sim < threshold * 0.8:
+                        continue
+
+                # Stage 4: Jaccard word similarity (more accurate)
+                # Lazily compute word set for current content
+                if not hasattr(self, '_current_words'):
+                    content_words = set(content_lower.split())
+                else:
+                    content_words = set(content_lower.split())
+
+                existing_words = unique_word_sets[i]
+                if not existing_words:
+                    existing_words = set(existing_content.lower().split())
+                    unique_word_sets[i] = existing_words
 
                 # Jaccard similarity
                 intersection = len(content_words & existing_words)
@@ -365,13 +406,14 @@ class TextPreprocessor:
 
                 if union > 0:
                     similarity = intersection / union
-                    if similarity >= self.config.dedup_similarity_threshold:
+                    if similarity >= threshold:
                         is_duplicate = True
                         break
 
             if not is_duplicate:
                 seen_hashes.add(content_hash)
                 unique_chunks.append(chunk)
+                unique_word_sets.append(set(content_lower.split()))
 
         return unique_chunks
 

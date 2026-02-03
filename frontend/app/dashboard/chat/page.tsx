@@ -108,6 +108,7 @@ import { ThinkingBlock } from "@/components/chat/thinking-block";
 import type { PipelineStep, ToolInvocation } from "@/components/chat/thinking-block";
 import { CanvasPanel } from "@/components/chat/canvas-panel";
 import { ToolStreamingContainer, type ToolExecution } from "@/components/chat/tool-streaming-block";
+import { SlashCommandAutocomplete } from "@/components/chat/slash-command-autocomplete";
 
 /**
  * Highlights matching query terms in text for source snippets.
@@ -814,9 +815,130 @@ export default function ChatPage() {
     }
   };
 
+  // Handle slash commands (e.g., /help, /think, /ensemble)
+  const handleSlashCommand = async (command: string) => {
+    setIsLoading(true);
+
+    // Add user message showing the command
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: "user",
+      content: command,
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
+
+    // Add placeholder assistant message
+    const assistantId = (Date.now() + 1).toString();
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: assistantId,
+        role: "assistant",
+        content: "Executing command...",
+        timestamp: new Date(),
+        isStreaming: true,
+      },
+    ]);
+
+    try {
+      const response = await fetch("/api/v1/chat/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command,
+          session_id: currentSessionId || undefined,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        // Format the command result message
+        let content = result.message;
+
+        // If there's data, format it nicely
+        if (result.data) {
+          if (result.data.commands) {
+            // Help command - format command list
+            content += "\n\n**Available Commands:**\n";
+            for (const cmd of result.data.commands) {
+              content += `- \`/${cmd.name}\` - ${cmd.description}\n`;
+            }
+          } else if (result.data.examples) {
+            // Show examples for missing args
+            content += "\n\n**Examples:**\n";
+            for (const ex of result.data.examples) {
+              content += `- \`${ex}\`\n`;
+            }
+          }
+        }
+
+        // Update the assistant message with the result
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? {
+                  ...m,
+                  content,
+                  isStreaming: false,
+                }
+              : m
+          )
+        );
+
+        // If the command wants to continue with RAG query
+        if (result.execute_rag && result.modified_query) {
+          // Reset input to modified query and trigger RAG
+          setInput(result.modified_query);
+          // Trigger submit after short delay
+          setTimeout(() => {
+            const form = document.querySelector('form[role="search"]') as HTMLFormElement;
+            if (form) form.requestSubmit();
+          }, 100);
+        }
+      } else {
+        // Command failed - show error
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? {
+                  ...m,
+                  content: `**Command Error:** ${result.message}${result.data?.suggestions ? `\n\nDid you mean: ${result.data.suggestions.map((s: string) => `\`/${s}\``).join(", ")}?` : ""}`,
+                  isStreaming: false,
+                }
+              : m
+          )
+        );
+      }
+    } catch (error) {
+      console.error("Command execution error:", error);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                content: "Failed to execute command. Please try again.",
+                isStreaming: false,
+              }
+            : m
+        )
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
+
+    // Check if input is a slash command
+    if (input.trim().startsWith("/")) {
+      await handleSlashCommand(input.trim());
+      return;
+    }
 
     // Capture current images before clearing
     const imagesToSend = [...attachedImages];
@@ -1287,24 +1409,116 @@ export default function ChatPage() {
   };
 
   // Handle feedback submission
+  const [feedbackGiven, setFeedbackGiven] = useState<Record<string, 'up' | 'down'>>({});
+
   const handleFeedback = async (messageId: string, isPositive: boolean) => {
     try {
-      // Call feedback API
-      const response = await fetch("/api/chat/feedback", {
+      // Call feedback API - backend expects query parameters
+      const rating = isPositive ? 5 : 1;
+      const params = new URLSearchParams({
+        message_id: messageId,
+        rating: rating.toString(),
+      });
+
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/chat/feedback?${params}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message_id: messageId,
-          rating: isPositive ? 5 : 1,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
       });
 
       if (response.ok) {
-        // Visual feedback - you could add a toast notification here
+        // Track which feedback was given for visual indication
+        setFeedbackGiven(prev => ({ ...prev, [messageId]: isPositive ? 'up' : 'down' }));
         console.log("Feedback submitted:", { messageId, isPositive });
       }
     } catch (error) {
       console.error("Failed to submit feedback:", error);
+    }
+  };
+
+  // Handle regenerate response (bypass cache and get fresh answer)
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
+
+  const handleRegenerate = async (message: Message) => {
+    if (!message.query || isLoading || regeneratingId) return;
+
+    const originalQuery = message.query;
+    setRegeneratingId(message.id);
+    setIsLoading(true);
+
+    try {
+      // Compute API mode from current state
+      const apiMode = message.isAgentResponse
+        ? "agent"
+        : message.isGeneralResponse
+          ? "general"
+          : "chat";
+
+      // Update message to show regenerating state
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === message.id
+            ? { ...m, content: "Regenerating response...", isStreaming: true }
+            : m
+        )
+      );
+
+      const response = await sendMessage.mutateAsync({
+        message: originalQuery,
+        session_id: currentSessionId || undefined,
+        mode: apiMode as 'agent' | 'chat' | 'general',
+        include_collection_context: includeCollectionContext,
+        collection_filters: selectedCollections.length > 0 ? selectedCollections : undefined,
+        folder_id: selectedFolderId || undefined,
+        include_subfolders: includeSubfolders,
+        top_k: topK || undefined,
+        language: outputLanguage,
+        skip_cache: true, // Force fresh response
+      });
+
+      // Transform sources
+      const sources: Source[] =
+        response.sources?.map((s) => ({
+          documentId: s.document_id,
+          filename: s.document_name || `Document ${s.document_id?.slice(0, 8) || 'unknown'}`,
+          pageNumber: s.page_number,
+          snippet: s.snippet,
+          fullContent: s.full_content,
+          similarity: s.similarity_score ?? s.relevance_score,
+          collection: s.collection,
+          fromKnowledgeGraph: s.source === "knowledge_graph" || s.from_knowledge_graph,
+          kgEntities: s.kg_entities || [],
+        })) || [];
+
+      // Update message with regenerated response
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === message.id
+            ? {
+                ...m,
+                content: response.content,
+                sources: sources,
+                isStreaming: false,
+                confidenceScore: response.confidence_score,
+                timestamp: new Date(),
+              }
+            : m
+        )
+      );
+    } catch (error) {
+      console.error("Failed to regenerate response:", error);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === message.id
+            ? { ...m, content: "Failed to regenerate response. Please try again.", isStreaming: false }
+            : m
+        )
+      );
+    } finally {
+      setIsLoading(false);
+      setRegeneratingId(null);
     }
   };
 
@@ -1856,8 +2070,8 @@ export default function ChatPage() {
 
         {/* History Dropdown */}
         {showHistory && sessions && sessions.sessions?.length > 0 && (
-          <Card className="absolute z-10 top-24 sm:top-32 right-2 sm:right-6 w-[min(calc(100vw-1rem),20rem)] p-2 shadow-lg max-h-[60vh] overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-2 py-1 mb-2">
+          <Card className="absolute z-10 top-24 sm:top-32 right-2 sm:right-6 w-[min(calc(100vw-1rem),20rem)] p-2 shadow-lg max-h-[60vh] flex flex-col">
+            <div className="flex items-center justify-between px-2 py-1 mb-2 shrink-0">
               <span className="text-sm font-medium text-muted-foreground">
                 Recent Conversations
               </span>
@@ -1887,7 +2101,7 @@ export default function ChatPage() {
             </div>
 
             {/* Search History */}
-            <div className="px-2 pb-2">
+            <div className="px-2 pb-2 shrink-0">
               <div className="relative">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                 <Input
@@ -1900,7 +2114,7 @@ export default function ChatPage() {
               </div>
             </div>
 
-            <ScrollArea className="flex-1 min-h-0">
+            <div className="flex-1 min-h-0 overflow-y-auto">
               {filteredSessions.length > 0 ? (
                 filteredSessions.map((session: { id: string; title: string; created_at: string }) => (
                   <div
@@ -1930,7 +2144,7 @@ export default function ChatPage() {
                   No conversations match "{historySearchQuery}"
                 </div>
               )}
-            </ScrollArea>
+            </div>
           </Card>
         )}
 
@@ -2057,23 +2271,38 @@ export default function ChatPage() {
                           )}
                         </Button>
                         <Button
-                          variant="ghost"
+                          variant={feedbackGiven[message.id] === 'up' ? "secondary" : "ghost"}
                           size="sm"
-                          className="h-7 px-2"
+                          className={cn("h-7 px-2", feedbackGiven[message.id] === 'up' && "text-green-600")}
                           onClick={() => handleFeedback(message.id, true)}
                           aria-label="Mark as helpful"
+                          disabled={!!feedbackGiven[message.id]}
                         >
-                          <ThumbsUp className="h-3 w-3" />
+                          <ThumbsUp className={cn("h-3 w-3", feedbackGiven[message.id] === 'up' && "fill-current")} />
                         </Button>
                         <Button
-                          variant="ghost"
+                          variant={feedbackGiven[message.id] === 'down' ? "secondary" : "ghost"}
                           size="sm"
-                          className="h-7 px-2"
+                          className={cn("h-7 px-2", feedbackGiven[message.id] === 'down' && "text-red-600")}
                           onClick={() => handleFeedback(message.id, false)}
                           aria-label="Mark as not helpful"
+                          disabled={!!feedbackGiven[message.id]}
                         >
-                          <ThumbsDown className="h-3 w-3" />
+                          <ThumbsDown className={cn("h-3 w-3", feedbackGiven[message.id] === 'down' && "fill-current")} />
                         </Button>
+                        {message.query && !message.isStreaming && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2"
+                            onClick={() => handleRegenerate(message)}
+                            disabled={isLoading || regeneratingId === message.id}
+                            aria-label="Regenerate response"
+                            title="Get a fresh answer (bypass cache)"
+                          >
+                            <RefreshCw className={cn("h-3 w-3", regeneratingId === message.id && "animate-spin")} />
+                          </Button>
+                        )}
                         {message.sources && message.sources.length > 0 && (
                           <Button
                             variant={selectedMessageId === message.id ? "secondary" : "ghost"}
@@ -2741,32 +2970,39 @@ export default function ChatPage() {
               </div>
             )}
 
-            <form onSubmit={handleSubmit} className="flex gap-2 max-w-3xl mx-auto" role="search">
-              <Input
-                ref={inputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder={
-                  attachedImages.length > 0
-                    ? "Describe what you want to know about the image..."
-                    : agentEnabled
-                    ? "Describe a task for the agents to complete..."
-                    : sourceMode === "general"
-                    ? "Ask anything..."
-                    : "Ask anything about your documents..."
-                }
-                disabled={isLoading || isAgentExecuting}
-                className="flex-1"
-                aria-label={
-                  attachedImages.length > 0
-                    ? "Ask about the attached image"
-                    : agentEnabled
-                    ? "Describe a task for AI agents"
-                    : sourceMode === "general"
-                    ? "Ask a general question"
-                    : "Ask about your documents"
-                }
-              />
+            <form onSubmit={handleSubmit} className="flex gap-2 max-w-3xl mx-auto relative" role="search">
+              <div className="flex-1 relative">
+                <Input
+                  ref={inputRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder={
+                    attachedImages.length > 0
+                      ? "Describe what you want to know about the image..."
+                      : agentEnabled
+                      ? "Describe a task for the agents to complete..."
+                      : sourceMode === "general"
+                      ? "Ask anything... (type / for commands)"
+                      : "Ask anything about your documents... (type / for commands)"
+                  }
+                  disabled={isLoading || isAgentExecuting}
+                  className="w-full"
+                  aria-label={
+                    attachedImages.length > 0
+                      ? "Ask about the attached image"
+                      : agentEnabled
+                      ? "Describe a task for AI agents"
+                      : sourceMode === "general"
+                      ? "Ask a general question"
+                      : "Ask about your documents"
+                  }
+                />
+                <SlashCommandAutocomplete
+                  value={input}
+                  onChange={setInput}
+                  inputRef={inputRef}
+                />
+              </div>
               <ImageUploadCompact
                 images={attachedImages}
                 onImagesChange={setAttachedImages}

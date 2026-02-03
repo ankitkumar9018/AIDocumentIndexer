@@ -1,0 +1,113 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AIDocIndexer",
+  "version": "1.0.0",
+  "identifier": "com.aidocindexer.desktop",
+  "build": {
+    "beforeDevCommand": "cd .. && npm run dev",
+    "devUrl": "http://localhost:3000",
+    "beforeBuildCommand": "cd .. && npm run build",
+    "frontendDist": "../out"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AIDocIndexer",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "decorations": true,
+        "transparent": false,
+        "visible": true
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true,
+      "menuOnLeftClick": false
+    },
+    "security": {
+      "csp": {
+        "default-src": "'self' https: http://localhost:* ws://localhost:*",
+        "img-src": "'self' asset: https: data:",
+        "script-src": "'self' 'unsafe-inline'",
+        "style-src": "'self' 'unsafe-inline'"
+      },
+      "dangerousDisableAssetCspModification": false
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "category": "Productivity",
+    "shortDescription": "AI-powered document indexer and search",
+    "longDescription": "AIDocumentIndexer is a powerful tool for indexing, searching, and chatting with your documents using AI. Supports LOCAL MODE (offline with Ollama) and SERVER MODE (connected to server).",
+    "macOS": {
+      "entitlements": null,
+      "minimumSystemVersion": "10.15",
+      "frameworks": [],
+      "providerShortName": null,
+      "signingIdentity": null
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": null
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      },
+      "deb": {
+        "depends": [],
+        "desktopTemplate": null,
+        "section": "utils"
+      }
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true,
+      "scope": []
+    },
+    "dialog": {
+      "open": true,
+      "save": true
+    },
+    "fs": {
+      "scope": {
+        "allow": ["$APPDATA/**", "$DOCUMENT/**", "$HOME/**"],
+        "deny": ["$HOME/.ssh/**"]
+      }
+    },
+    "http": {
+      "scope": {
+        "allow": [
+          { "url": "http://localhost:*/**" },
+          { "url": "https://**" }
+        ]
+      }
+    },
+    "notification": {
+      "all": true
+    },
+    "global-shortcut": {
+      "all": true
+    },
+    "store": {
+      "default": true
+    }
+  }
+}

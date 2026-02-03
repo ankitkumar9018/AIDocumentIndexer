@@ -81,8 +81,11 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,  # Re-queue if worker dies
     worker_prefetch_multiplier=1,  # One task at a time per worker
 
-    # Result backend
-    result_expires=60 * 60 * 24,  # Results expire after 24 hours
+    # Worker memory management - recycle workers after N tasks to prevent memory leaks
+    worker_max_tasks_per_child=100,  # Restart worker after 100 tasks to free memory
+
+    # Result backend - reduced from 24h to 4h to prevent memory bloat
+    result_expires=60 * 60 * 4,  # Results expire after 4 hours
 
     # Priority queue configuration
     task_default_queue="default",

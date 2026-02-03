@@ -184,12 +184,12 @@ class BinaryQuantizer:
             Hamming distances [N]
         """
         if self.config.pack_bits:
-            # XOR and count bits
+            # XOR and count bits - fully vectorized (no Python loop)
             xor = np.bitwise_xor(corpus_binary, query_binary)
-            # Count bits using lookup table (fast)
-            distances = np.zeros(len(corpus_binary), dtype=np.int32)
-            for i, x in enumerate(xor):
-                distances[i] = np.unpackbits(x).sum()
+            # Vectorized popcount: unpack all bytes at once and sum along axis
+            # Shape: (N, D//8) -> (N, D) -> (N,) via sum
+            unpacked = np.unpackbits(xor, axis=1)
+            distances = np.sum(unpacked, axis=1, dtype=np.int32)
         else:
             # Simple XOR sum for unpacked
             distances = np.sum(corpus_binary != query_binary, axis=1)

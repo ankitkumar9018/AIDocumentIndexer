@@ -55,6 +55,8 @@ class RerankerStage(str, Enum):
     """Reranking pipeline stages."""
     COLBERT = "colbert"       # Late interaction (fast)
     CROSS_ENCODER = "cross"   # Cross-encoder (accurate)
+    COHERE = "cohere"         # Cohere Rerank API (100+ languages)
+    VOYAGE = "voyage"         # Voyage AI Rerank API
     LLM = "llm"               # LLM-based (highest quality)
     SEMANTIC = "semantic"     # Semantic similarity (fallback)
 
@@ -84,8 +86,14 @@ class RerankerConfig:
     # Models
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
     colbert_model: str = "colbert-ir/colbertv2.0"
+    cohere_model: str = "rerank-v3.5"      # Cohere rerank model
+    voyage_model: str = "rerank-2"          # Voyage AI rerank model
     llm_model: str = "gpt-4o-mini"
     llm_provider: str = "openai"
+
+    # API reranker top_k
+    cohere_top_k: int = 15                 # Candidates after Cohere
+    voyage_top_k: int = 15                 # Candidates after Voyage
 
     # Adaptive settings
     enable_adaptive: bool = True
@@ -427,6 +435,290 @@ Only return the JSON array, no explanation."""
 
 
 # =============================================================================
+# Cohere Reranker Stage
+# =============================================================================
+
+class CohereRerankerStage(BaseRerankerStage):
+    """Cohere Rerank API reranking stage (100+ languages, high quality)."""
+
+    def __init__(self, model_name: str = "rerank-v3.5"):
+        self.model_name = model_name
+        self._client = None
+        self._initialized = False
+        self._api_key = None
+
+    async def initialize(self) -> bool:
+        if self._initialized:
+            return True
+
+        try:
+            import os
+            self._api_key = os.getenv("COHERE_API_KEY") or getattr(settings, "COHERE_API_KEY", None)
+            if self._api_key:
+                import cohere
+                self._client = cohere.AsyncClient(api_key=self._api_key)
+                logger.info("Cohere reranker initialized", model=self.model_name)
+            self._initialized = True
+            return True
+        except ImportError:
+            logger.warning("cohere package not installed")
+            self._initialized = True
+            return True
+        except Exception as e:
+            logger.warning("Failed to initialize Cohere reranker", error=str(e))
+            self._initialized = True
+            return True
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: int,
+    ) -> List[RerankResult]:
+        """Rerank using Cohere Rerank API."""
+        if not self._initialized:
+            await self.initialize()
+
+        results = []
+
+        if self._client:
+            try:
+                docs = [c.content for c in candidates]
+                response = await self._client.rerank(
+                    model=self.model_name,
+                    query=query,
+                    documents=docs,
+                    top_n=top_k,
+                    return_documents=False,
+                )
+
+                # Map results back to candidates
+                scored_indices = {r.index: r.relevance_score for r in response.results}
+
+                for i, candidate in enumerate(candidates):
+                    score = scored_indices.get(i, 0.0)
+                    results.append(RerankResult(
+                        candidate=candidate,
+                        score=score,
+                        stage=RerankerStage.CROSS_ENCODER,  # Use CROSS_ENCODER as proxy
+                        stage_scores={"cohere": score},
+                    ))
+
+            except Exception as e:
+                logger.warning("Cohere reranking failed", error=str(e))
+                for candidate in candidates:
+                    results.append(RerankResult(
+                        candidate=candidate,
+                        score=candidate.score,
+                        stage=RerankerStage.CROSS_ENCODER,
+                        stage_scores={"cohere": candidate.score},
+                    ))
+        else:
+            # Fallback
+            for candidate in candidates:
+                results.append(RerankResult(
+                    candidate=candidate,
+                    score=candidate.score,
+                    stage=RerankerStage.CROSS_ENCODER,
+                    stage_scores={"cohere": candidate.score},
+                ))
+
+        results.sort(key=lambda x: x.score, reverse=True)
+        return results[:top_k]
+
+
+# =============================================================================
+# Voyage AI Reranker Stage
+# =============================================================================
+
+class VoyageRerankerStage(BaseRerankerStage):
+    """Voyage AI Rerank API reranking stage."""
+
+    def __init__(self, model_name: str = "rerank-2"):
+        self.model_name = model_name
+        self._client = None
+        self._initialized = False
+        self._api_key = None
+
+    async def initialize(self) -> bool:
+        if self._initialized:
+            return True
+
+        try:
+            import os
+            self._api_key = os.getenv("VOYAGE_API_KEY") or getattr(settings, "VOYAGE_API_KEY", None)
+            if self._api_key:
+                import voyageai
+                self._client = voyageai.AsyncClient(api_key=self._api_key)
+                logger.info("Voyage reranker initialized", model=self.model_name)
+            self._initialized = True
+            return True
+        except ImportError:
+            logger.warning("voyageai package not installed")
+            self._initialized = True
+            return True
+        except Exception as e:
+            logger.warning("Failed to initialize Voyage reranker", error=str(e))
+            self._initialized = True
+            return True
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: int,
+    ) -> List[RerankResult]:
+        """Rerank using Voyage AI Rerank API."""
+        if not self._initialized:
+            await self.initialize()
+
+        results = []
+
+        if self._client:
+            try:
+                docs = [c.content for c in candidates]
+                response = await self._client.rerank(
+                    model=self.model_name,
+                    query=query,
+                    documents=docs,
+                    top_k=top_k,
+                )
+
+                # Map results back to candidates
+                scored_indices = {r.index: r.relevance_score for r in response.results}
+
+                for i, candidate in enumerate(candidates):
+                    score = scored_indices.get(i, 0.0)
+                    results.append(RerankResult(
+                        candidate=candidate,
+                        score=score,
+                        stage=RerankerStage.CROSS_ENCODER,
+                        stage_scores={"voyage": score},
+                    ))
+
+            except Exception as e:
+                logger.warning("Voyage reranking failed", error=str(e))
+                for candidate in candidates:
+                    results.append(RerankResult(
+                        candidate=candidate,
+                        score=candidate.score,
+                        stage=RerankerStage.CROSS_ENCODER,
+                        stage_scores={"voyage": candidate.score},
+                    ))
+        else:
+            # Fallback
+            for candidate in candidates:
+                results.append(RerankResult(
+                    candidate=candidate,
+                    score=candidate.score,
+                    stage=RerankerStage.CROSS_ENCODER,
+                    stage_scores={"voyage": candidate.score},
+                ))
+
+        results.sort(key=lambda x: x.score, reverse=True)
+        return results[:top_k]
+
+
+# =============================================================================
+# Semantic Similarity Reranker Stage (Fallback)
+# =============================================================================
+
+class SemanticRerankerStage(BaseRerankerStage):
+    """Semantic similarity reranking using embeddings (fallback stage)."""
+
+    def __init__(self):
+        self._embedding_service = None
+        self._initialized = False
+
+    async def initialize(self) -> bool:
+        if self._initialized:
+            return True
+
+        try:
+            from backend.services.embeddings import get_embedding_service
+            self._embedding_service = get_embedding_service()
+            self._initialized = True
+            return True
+        except Exception as e:
+            logger.warning("Failed to initialize semantic reranker", error=str(e))
+            self._initialized = True
+            return True
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: List[RerankCandidate],
+        top_k: int,
+    ) -> List[RerankResult]:
+        """Rerank using semantic similarity."""
+        if not self._initialized:
+            await self.initialize()
+
+        results = []
+
+        if self._embedding_service:
+            try:
+                # Get query embedding
+                query_embedding = await self._embedding_service.embed_text(query)
+
+                # Get candidate embeddings (batch)
+                texts = [c.content[:1000] for c in candidates]  # Limit text length
+                candidate_embeddings = await self._embedding_service.embed_texts(texts)
+
+                # Compute cosine similarity
+                import numpy as np
+
+                def cosine_similarity(a, b):
+                    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+                for candidate, emb in zip(candidates, candidate_embeddings):
+                    score = float(cosine_similarity(query_embedding, emb))
+                    results.append(RerankResult(
+                        candidate=candidate,
+                        score=score,
+                        stage=RerankerStage.SEMANTIC,
+                        stage_scores={"semantic": score},
+                    ))
+
+            except Exception as e:
+                logger.warning("Semantic reranking failed", error=str(e))
+                for candidate in candidates:
+                    results.append(RerankResult(
+                        candidate=candidate,
+                        score=candidate.score,
+                        stage=RerankerStage.SEMANTIC,
+                        stage_scores={"semantic": candidate.score},
+                    ))
+        else:
+            # Fallback: TF-IDF-like scoring
+            from collections import Counter
+            import math
+
+            query_terms = Counter(query.lower().split())
+
+            for candidate in candidates:
+                content_terms = Counter(candidate.content.lower().split())
+                # TF-IDF-like score
+                score = 0.0
+                for term, count in query_terms.items():
+                    if term in content_terms:
+                        tf = math.log(1 + content_terms[term])
+                        score += tf * count
+                # Normalize
+                score = score / (len(query.split()) + 1)
+
+                results.append(RerankResult(
+                    candidate=candidate,
+                    score=score,
+                    stage=RerankerStage.SEMANTIC,
+                    stage_scores={"semantic": score},
+                ))
+
+        results.sort(key=lambda x: x.score, reverse=True)
+        return results[:top_k]
+
+
+# =============================================================================
 # Query Complexity Analyzer
 # =============================================================================
 
@@ -486,7 +778,10 @@ class TieredReranker:
         self._stages: Dict[RerankerStage, BaseRerankerStage] = {
             RerankerStage.COLBERT: ColBERTRerankerStage(self.config.colbert_model),
             RerankerStage.CROSS_ENCODER: CrossEncoderRerankerStage(self.config.cross_encoder_model),
+            RerankerStage.COHERE: CohereRerankerStage(self.config.cohere_model),
+            RerankerStage.VOYAGE: VoyageRerankerStage(self.config.voyage_model),
             RerankerStage.LLM: LLMRerankerStage(self.config.llm_model, self.config.llm_provider),
+            RerankerStage.SEMANTIC: SemanticRerankerStage(),
         }
 
         self._complexity_analyzer = QueryComplexityAnalyzer()
@@ -586,8 +881,14 @@ class TieredReranker:
                 stage_top_k = self.config.colbert_top_k
             elif stage == RerankerStage.CROSS_ENCODER:
                 stage_top_k = self.config.cross_encoder_top_k
+            elif stage == RerankerStage.COHERE:
+                stage_top_k = self.config.cohere_top_k
+            elif stage == RerankerStage.VOYAGE:
+                stage_top_k = self.config.voyage_top_k
             elif stage == RerankerStage.LLM:
                 stage_top_k = self.config.llm_top_k
+            elif stage == RerankerStage.SEMANTIC:
+                stage_top_k = self.config.cross_encoder_top_k  # Same as cross-encoder
             else:
                 stage_top_k = len(current_results)
 

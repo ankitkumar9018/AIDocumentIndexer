@@ -149,6 +149,11 @@ class RAPTORResult:
     path: List[str] = field(default_factory=list)  # Node IDs from root to leaf
     context_summary: Optional[str] = None  # Summary from parent nodes
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Document metadata for proper citation
+    document_filename: Optional[str] = None
+    document_title: Optional[str] = None
+    page_number: Optional[int] = None
+    section_title: Optional[str] = None
 
 
 # =============================================================================
@@ -567,6 +572,8 @@ class RAPTORRetriever:
         tree: Optional[RAPTORTree] = None,
         document_id: Optional[str] = None,
         top_k: Optional[int] = None,
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[RAPTORResult]:
         """
         Retrieve relevant chunks using RAPTOR tree.

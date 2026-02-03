@@ -138,6 +138,9 @@ class HierarchicalRetriever:
         document_ids: Optional[List[str]] = None,
         vector_weight: Optional[float] = None,
         keyword_weight: Optional[float] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Perform hierarchical retrieval.
@@ -177,6 +180,9 @@ class HierarchicalRetriever:
             document_ids=document_ids,
             vector_weight=vector_weight,
             keyword_weight=keyword_weight,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         if not initial_results:
@@ -338,6 +344,9 @@ class TwoStageRetriever:
         document_ids: Optional[List[str]] = None,
         vector_weight: Optional[float] = None,
         keyword_weight: Optional[float] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Perform two-stage retrieval.
@@ -351,6 +360,9 @@ class TwoStageRetriever:
             document_ids: Optional document filter
             vector_weight: Vector weight for hybrid search
             keyword_weight: Keyword weight for hybrid search
+            organization_id: Organization ID for multi-tenant filtering
+            user_id: User ID for filtering
+            is_superadmin: Whether user is superadmin (bypasses org filter)
 
         Returns:
             List of SearchResult objects
@@ -380,6 +392,9 @@ class TwoStageRetriever:
             document_ids=document_ids,
             vector_weight=vector_weight,
             keyword_weight=keyword_weight,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         stage1_time = (time.time() - stage1_start) * 1000
@@ -611,6 +626,9 @@ class ThreeLevelRetriever:
         access_tier_level: int = 100,
         vector_weight: Optional[float] = None,
         keyword_weight: Optional[float] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[SearchResult]:
         """
         Perform 3-level hierarchical retrieval.
@@ -623,6 +641,9 @@ class ThreeLevelRetriever:
             access_tier_level: Access tier filter
             vector_weight: Dynamic vector weight
             keyword_weight: Dynamic keyword weight
+            organization_id: Organization ID for multi-tenant filtering
+            user_id: User ID for filtering
+            is_superadmin: Whether user is superadmin (bypasses org filter)
 
         Returns:
             List of SearchResult objects with diverse coverage
@@ -668,6 +689,9 @@ class ThreeLevelRetriever:
                 access_tier_level=access_tier_level,
                 vector_weight=vector_weight,
                 keyword_weight=keyword_weight,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
         logger.debug(
@@ -702,6 +726,9 @@ class ThreeLevelRetriever:
                 access_tier_level=access_tier_level,
                 vector_weight=vector_weight,
                 keyword_weight=keyword_weight,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             )
 
         logger.debug(
@@ -725,6 +752,9 @@ class ThreeLevelRetriever:
             document_ids=relevant_doc_ids,
             vector_weight=vector_weight,
             keyword_weight=keyword_weight,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
         level3_time = (time.time() - level3_start) * 1000

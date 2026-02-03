@@ -718,6 +718,16 @@ For detailed API documentation, see [API.md](./API.md).
 - `GET /api/v1/workflows` - List workflows
 - `POST /api/v1/workflows` - Create workflow
 - `POST /api/v1/workflows/{id}/execute` - Execute workflow
+- `POST /api/v1/workflows/{id}/deploy` - Publish workflow for external access
+- `POST /api/v1/workflows/{id}/share` - Create share link
+- `POST /api/v1/workflows/{id}/schedule` - Schedule recurring execution
+- `GET /api/v1/workflows/{id}/versions` - List version history
+
+**Skills:**
+- `GET /api/v1/skills/list` - List all skills
+- `POST /api/v1/skills` - Create custom skill
+- `POST /api/v1/skills/execute` - Execute a skill
+- `POST /api/v1/skills/{id}/publish` - Publish skill for external access
 
 **Audio:**
 - `GET /api/v1/audio/overviews` - List audio overviews
@@ -734,6 +744,362 @@ For detailed API documentation, see [API.md](./API.md).
 - `POST /api/v1/gateway/budgets` - Create budget
 - `GET /api/v1/gateway/keys` - List API keys
 - `POST /api/v1/gateway/keys` - Create API key
+
+---
+
+## Workflow Deployment & Sharing
+
+Workflows can be published for external access and shared with team members or external users through share links with granular permissions.
+
+### Workflow Deployment (Publishing)
+
+Deploy workflows to make them accessible via a public URL without authentication.
+
+**Features:**
+- **Public URL**: Each deployed workflow gets a unique public slug (e.g., `/w/my-workflow`)
+- **Automatic Form Generation**: Input fields are automatically rendered based on the workflow's input schema
+- **Execution Tracking**: All executions are logged with status and outputs
+- **Branding Support**: Optional company logo, primary color, and branding customization
+
+**Deploying a Workflow:**
+1. Navigate to **Dashboard > Workflows**
+2. Open the workflow you want to deploy
+3. Click **Deploy** in the workflow settings
+4. Configure the public slug and branding options
+5. Copy the public URL to share
+
+**Public Workflow Page:**
+- Displays workflow name and description
+- Shows all input fields with appropriate UI controls (text, number, select, checkbox, textarea)
+- Executes the workflow and displays results
+- Polls for status updates during execution
+
+**API Endpoints:**
+```bash
+# Deploy workflow
+POST /api/v1/workflows/{workflow_id}/deploy
+{
+  "public_slug": "my-workflow",
+  "branding": {
+    "logo": "https://...",
+    "primaryColor": "#8b5cf6",
+    "companyName": "My Company"
+  }
+}
+
+# Undeploy workflow
+POST /api/v1/workflows/{workflow_id}/undeploy
+
+# Get deploy status
+GET /api/v1/workflows/{workflow_id}/deploy-status
+```
+
+### Workflow Sharing (Share Links)
+
+Create secure share links with fine-grained permissions, password protection, and expiration.
+
+**Permission Levels:**
+
+| Level | Capabilities |
+|-------|-------------|
+| `viewer` | View workflow details and input schema only |
+| `executor` | View and execute the workflow |
+| `editor` | View, execute, and duplicate the workflow |
+
+**Security Options:**
+- **Password Protection**: Optional password required to access the share link
+- **Expiration**: Set an expiration date/time after which the link becomes invalid
+- **Max Uses**: Limit the number of times the share link can be used
+
+**Creating a Share Link:**
+```bash
+POST /api/v1/workflows/{workflow_id}/share
+{
+  "permission_level": "executor",
+  "password": "optional-password",
+  "expires_at": "2026-03-01T00:00:00Z",
+  "max_uses": 100
+}
+```
+
+**Response:**
+```json
+{
+  "share_id": "uuid",
+  "token": "abc123xyz",
+  "share_url": "https://app.example.com/shared/workflow/abc123xyz",
+  "permission_level": "executor",
+  "expires_at": "2026-03-01T00:00:00Z",
+  "max_uses": 100,
+  "use_count": 0
+}
+```
+
+**Managing Shares:**
+```bash
+# List all shares for a workflow
+GET /api/v1/workflows/{workflow_id}/shares
+
+# Revoke a share link
+DELETE /api/v1/workflows/{workflow_id}/shares/{share_id}
+```
+
+---
+
+## Workflow Scheduling
+
+Schedule workflows to run automatically on a recurring basis using cron expressions.
+
+### Features
+
+- **Cron-Based Scheduling**: Standard 5-field cron expressions (minute, hour, day, month, weekday)
+- **Timezone Support**: Schedule in any timezone
+- **Celery Beat Integration**: Reliable execution via Celery Beat
+- **Execution History**: Track all scheduled executions
+
+### Common Cron Patterns
+
+| Pattern | Description |
+|---------|-------------|
+| `0 9 * * *` | Daily at 9:00 AM |
+| `0 9 * * 1-5` | Weekdays at 9:00 AM |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 0 1 * *` | Monthly on the 1st at midnight |
+| `0 */6 * * *` | Every 6 hours |
+
+### Scheduling a Workflow
+
+**Via UI:**
+1. Open the workflow in the designer
+2. Click **Schedule** in the toolbar
+3. Enter a cron expression or use the preset options
+4. Select timezone
+5. Save the schedule
+
+**Via API:**
+```bash
+POST /api/v1/workflows/{workflow_id}/schedule
+{
+  "cron_expression": "0 9 * * *",
+  "timezone": "America/New_York",
+  "input_data": {
+    "param1": "default-value"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "schedule_id": "uuid",
+  "workflow_id": "workflow-uuid",
+  "cron_expression": "0 9 * * *",
+  "timezone": "America/New_York",
+  "next_run": "2026-02-03T09:00:00-05:00",
+  "is_active": true
+}
+```
+
+### Managing Schedules
+
+```bash
+# Get current schedule
+GET /api/v1/workflows/{workflow_id}/schedule
+
+# Delete schedule
+DELETE /api/v1/workflows/{workflow_id}/schedule
+
+# List upcoming scheduled executions (all workflows)
+GET /api/v1/workflows/schedules/upcoming?limit=10
+```
+
+---
+
+## Workflow Triggers
+
+Workflows can be triggered in multiple ways beyond manual execution.
+
+### Form Triggers
+
+Create a public form that triggers workflow execution when submitted.
+
+**Features:**
+- Auto-generated form based on workflow input schema
+- Custom form title and description
+- Submission confirmation message
+- Rate limiting options
+
+**Configuration:**
+```bash
+POST /api/v1/workflows/{workflow_id}/form-trigger
+{
+  "enabled": true,
+  "title": "Contact Request Form",
+  "description": "Submit your inquiry",
+  "success_message": "Thank you! We'll be in touch.",
+  "rate_limit_per_minute": 10
+}
+```
+
+**Form Submission:**
+```bash
+POST /api/v1/workflows/{workflow_id}/form-submit
+{
+  "name": "John Doe",
+  "email": "john@example.com",
+  "message": "I have a question..."
+}
+```
+
+### Event Triggers
+
+Trigger workflows based on system events from connectors or other integrations.
+
+**Supported Events:**
+| Event Type | Description |
+|------------|-------------|
+| `document.created` | New document indexed |
+| `document.updated` | Document content changed |
+| `connector.sync_completed` | Connector sync finished |
+| `chat.message_received` | New chat message received |
+
+**Configuration:**
+```bash
+POST /api/v1/workflows/{workflow_id}/event-trigger
+{
+  "event_type": "document.created",
+  "filter_conditions": {
+    "source": "notion",
+    "tags": ["important"]
+  }
+}
+```
+
+**Listing Event Triggers:**
+```bash
+GET /api/v1/workflows/event-triggers
+```
+
+### Webhook Triggers
+
+Trigger workflows via HTTP webhook from external systems.
+
+```bash
+POST /api/v1/workflows/webhook/{workflow_id}
+{
+  "custom_param": "value",
+  "data": { ... }
+}
+```
+
+---
+
+## Workflow Versioning
+
+Track changes to workflows with version history and rollback capability.
+
+### Features
+
+- **Automatic Versioning**: Each save creates a new version
+- **Version Comparison**: View changes between versions
+- **Rollback**: Restore any previous version
+- **Version Metadata**: Timestamps, author, and change notes
+
+### Viewing Version History
+
+```bash
+GET /api/v1/workflows/{workflow_id}/versions
+```
+
+**Response:**
+```json
+{
+  "versions": [
+    {
+      "version": 3,
+      "created_at": "2026-02-02T10:30:00Z",
+      "created_by": "user-uuid",
+      "node_count": 5,
+      "is_current": true
+    },
+    {
+      "version": 2,
+      "created_at": "2026-02-01T15:00:00Z",
+      "created_by": "user-uuid",
+      "node_count": 4,
+      "is_current": false
+    }
+  ]
+}
+```
+
+### Restoring a Version
+
+```bash
+POST /api/v1/workflows/{workflow_id}/versions/{version}/restore
+```
+
+This creates a new version with the restored content, preserving the full history.
+
+---
+
+## Skills Publishing
+
+Publish custom skills for external access, enabling third-party integrations and public APIs.
+
+### Publishing a Skill
+
+**Via UI:**
+1. Navigate to **Dashboard > Skills**
+2. Open the skill you want to publish
+3. Click **Publish** in the skill settings
+4. Configure the public slug
+5. Copy the public URL
+
+**Via API:**
+```bash
+POST /api/v1/skills/{skill_id}/publish
+{
+  "public_slug": "my-summarizer"
+}
+```
+
+**Response:**
+```json
+{
+  "skill_id": "uuid",
+  "public_slug": "my-summarizer",
+  "public_url": "https://app.example.com/api/v1/public/skills/my-summarizer",
+  "is_published": true
+}
+```
+
+### Public Skill Endpoints
+
+Once published, skills are accessible via public API:
+
+```bash
+# Get skill info (public)
+GET /api/v1/public/skills/{public_slug}
+
+# Execute skill (public)
+POST /api/v1/public/skills/{public_slug}/execute
+{
+  "inputs": {
+    "text": "Content to process..."
+  }
+}
+```
+
+### Managing Published Skills
+
+```bash
+# Get publish status
+GET /api/v1/skills/{skill_id}/publish-status
+
+# Unpublish skill
+POST /api/v1/skills/{skill_id}/unpublish
+```
 
 ---
 
@@ -1779,6 +2145,439 @@ Enhanced duplicate file detection that properly handles deleted documents.
 curl -X POST "/api/v1/upload/single" \
   -F "file=@document.pdf" \
   -F "detect_duplicates=true"  # Default: true
+```
+
+---
+
+## Performance Optimizations (February 2026)
+
+AIDocumentIndexer includes comprehensive performance optimizations that are automatically initialized at server startup. All optimizations have graceful fallbacks if dependencies are missing.
+
+### Overview
+
+| Optimization | Speedup | Fallback |
+|-------------|---------|----------|
+| Cython Extensions | 10-100x | NumPy-based pure Python |
+| GPU Acceleration | 5-20x | CPU-based NumPy |
+| MinHash Deduplication | O(n) vs O(n²) | Exact Jaccard similarity |
+| orjson Serialization | 2-3x | Standard json module |
+| GZip Compression | 60-70% size reduction | Uncompressed responses |
+
+### Cython Extensions
+
+High-performance similarity computations using Cython with runtime compilation.
+
+**Features:**
+- **Runtime Compilation**: Cython extensions are compiled automatically on first server start (if Cython is available)
+- **Thread-Safe Initialization**: Only one thread performs initialization
+- **Graceful Fallback**: If Cython/C compiler unavailable, falls back to NumPy implementations
+- **Zero Hard Dependencies**: Works without Cython installed (just slower)
+
+**Accelerated Functions:**
+| Function | Cython Speedup | Use Case |
+|----------|---------------|----------|
+| `cosine_similarity_batch` | 10-50x | Query-document similarity |
+| `cosine_similarity_matrix` | 20-100x | Document-document similarity |
+| `mmr_selection` | 10-50x | Maximal Marginal Relevance |
+| `hamming_distance_batch` | 5-50x | Binary quantization |
+| `weighted_mean_pooling` | 20-40x | Embedding pooling |
+
+**Checking Status:**
+```python
+from backend.services.cython_extensions import get_optimization_status, is_using_fallback
+
+status = get_optimization_status()
+print(f"Using Cython: {status['using_cython']}")
+print(f"Speedup: {status['speedup_factor']}")
+
+if is_using_fallback():
+    print("Using NumPy fallbacks (install Cython for 10-100x speedup)")
+```
+
+**Installing Cython for Maximum Performance:**
+```bash
+pip install cython numpy
+
+# Extensions compile automatically on next server start
+# Check logs for: "Cython extensions loaded successfully (10-100x faster)"
+```
+
+### GPU Acceleration
+
+PyTorch-based GPU acceleration for similarity computations with automatic CPU fallback.
+
+**Features:**
+- **Automatic Device Detection**: Detects CUDA (NVIDIA) or MPS (Apple Silicon)
+- **Mixed Precision**: FP16 operations for 2x throughput on supported GPUs
+- **OOM Handling**: Automatically falls back to CPU on out-of-memory errors
+- **Warmup Support**: Optional GPU warmup at startup for consistent latency
+
+**Supported Devices:**
+| Device | Detection | Notes |
+|--------|-----------|-------|
+| NVIDIA CUDA | `torch.cuda.is_available()` | Best performance |
+| Apple MPS | `torch.backends.mps.is_available()` | macOS M1/M2/M3 |
+| CPU | Always available | Fallback |
+
+**Configuration (Environment Variables):**
+```bash
+# Enable/disable GPU initialization (default: true)
+PERF_INIT_GPU=true
+
+# Prefer GPU over CPU when available (default: true)
+PERF_GPU_PREFER=true
+
+# Use FP16 mixed precision for 2x throughput (default: true)
+PERF_MIXED_PRECISION=true
+
+# Run GPU warmup at startup for consistent latency (default: false)
+PERF_WARMUP_GPU=false
+```
+
+**Checking GPU Status:**
+```python
+from backend.services.gpu_acceleration import check_gpu_availability, get_similarity_accelerator
+
+availability = check_gpu_availability()
+print(f"CUDA available: {availability['cuda_available']}")
+print(f"MPS available: {availability['mps_available']}")
+
+accelerator = get_similarity_accelerator()
+status = accelerator.get_status()
+print(f"Active device: {status['device']}")
+print(f"Mixed precision: {status['mixed_precision']}")
+```
+
+### MinHash LSH Deduplication
+
+O(n) approximate deduplication using MinHash signatures and Locality-Sensitive Hashing.
+
+**Features:**
+- **O(n) Complexity**: Instead of O(n²) pairwise comparison
+- **Configurable Accuracy**: Trade accuracy for speed with permutation count
+- **Memory Efficient**: Stores compact signatures instead of full documents
+- **Graceful Fallback**: Falls back to exact Jaccard if datasketch unavailable
+
+**Configuration (Environment Variables):**
+```bash
+# Enable MinHash initialization (default: true)
+PERF_INIT_MINHASH=true
+
+# Number of permutations - more = accurate, slower (default: 128)
+PERF_MINHASH_PERMS=128
+
+# Similarity threshold for duplicates (default: 0.8)
+PERF_MINHASH_THRESHOLD=0.8
+```
+
+**Usage:**
+```python
+from backend.services.minhash_dedup import get_minhash_deduplicator
+
+dedup = get_minhash_deduplicator()
+
+# Add documents
+dedup.add_document("doc1", "Document text content...")
+dedup.add_document("doc2", "Similar document content...")
+
+# Check for duplicates
+result = dedup.is_duplicate("New document to check", threshold=0.8)
+if result.is_duplicate:
+    print(f"Duplicate of: {result.similar_doc_id}")
+    print(f"Similarity: {result.similarity}")
+
+# Find all duplicate clusters
+clusters = dedup.find_all_duplicates()
+for cluster in clusters:
+    print(f"Duplicate group: {cluster.member_ids}")
+```
+
+**Statistics:**
+```python
+stats = dedup.get_stats()
+# {
+#   "num_documents": 1000,
+#   "using_minhash": true,
+#   "method": "minhash_lsh",
+#   "complexity": "O(n)",
+#   "num_permutations": 128
+# }
+```
+
+### Performance Initialization
+
+All performance optimizations are initialized automatically during FastAPI startup.
+
+**Startup Sequence:**
+1. **Cython Extensions**: Compile (if needed) and load optimized functions
+2. **GPU Acceleration**: Detect devices, initialize accelerator, optional warmup
+3. **MinHash Deduplicator**: Initialize LSH index with configured parameters
+
+**Environment Variables Summary:**
+```bash
+# Cython
+PERF_COMPILE_CYTHON=true    # Compile Cython extensions
+
+# GPU
+PERF_INIT_GPU=true          # Initialize GPU accelerator
+PERF_GPU_PREFER=true        # Prefer GPU over CPU
+PERF_MIXED_PRECISION=true   # Use FP16 for 2x throughput
+PERF_WARMUP_GPU=false       # Run warmup at startup
+
+# MinHash
+PERF_INIT_MINHASH=true      # Initialize MinHash deduplicator
+PERF_MINHASH_PERMS=128      # Permutation count
+PERF_MINHASH_THRESHOLD=0.8  # Similarity threshold
+```
+
+**Checking Overall Status:**
+```python
+from backend.services.performance_init import get_performance_status
+
+status = get_performance_status()
+# {
+#   "cython": {"using_cython": true, "speedup_factor": "10-100x"},
+#   "gpu": {"device": "cuda", "mixed_precision": true},
+#   "minhash": {"using_minhash": true, "complexity": "O(n)"}
+# }
+```
+
+---
+
+## Cloud & Kubernetes Features (February 2026)
+
+AIDocumentIndexer is designed for cloud-native deployments with built-in support for Kubernetes, AWS, and other cloud platforms.
+
+### Health Endpoints
+
+Three health endpoints for different monitoring scenarios:
+
+| Endpoint | Purpose | Use Case |
+|----------|---------|----------|
+| `/health` | Comprehensive health check | General monitoring |
+| `/health/live` | Kubernetes liveness probe | Pod restart decisions |
+| `/health/ready` | Kubernetes readiness probe | Traffic routing |
+
+**`/health` - Comprehensive Check:**
+```bash
+curl http://localhost:8000/health
+```
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-02-02T10:30:00Z",
+  "version": "1.0.0",
+  "checks": {
+    "database": "healthy",
+    "redis": "healthy",
+    "celery": "healthy",
+    "disk_space": "healthy"
+  },
+  "performance": {
+    "cython_enabled": true,
+    "gpu_enabled": true,
+    "minhash_enabled": true
+  }
+}
+```
+
+**`/health/live` - Liveness Probe:**
+```bash
+curl http://localhost:8000/health/live
+```
+```json
+{"status": "alive", "timestamp": "2026-02-02T10:30:00Z"}
+```
+
+**`/health/ready` - Readiness Probe:**
+```bash
+curl http://localhost:8000/health/ready
+```
+```json
+{
+  "status": "ready",
+  "timestamp": "2026-02-02T10:30:00Z",
+  "checks": {
+    "database": true,
+    "redis": true
+  }
+}
+```
+
+### Kubernetes Deployment
+
+**Deployment YAML Example:**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aidocindexer-api
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+      - name: api
+        image: aidocindexer:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        # Performance settings
+        - name: PERF_INIT_GPU
+          value: "true"
+        - name: PERF_COMPILE_CYTHON
+          value: "true"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+```
+
+### AWS Integration
+
+**ALB Health Check Configuration:**
+- **Path**: `/health/ready`
+- **Interval**: 30 seconds
+- **Timeout**: 5 seconds
+- **Healthy threshold**: 2
+- **Unhealthy threshold**: 3
+
+**ECS Task Definition (excerpt):**
+```json
+{
+  "healthCheck": {
+    "command": ["CMD-SHELL", "curl -f http://localhost:8000/health/ready || exit 1"],
+    "interval": 30,
+    "timeout": 5,
+    "retries": 3,
+    "startPeriod": 60
+  }
+}
+```
+
+### Graceful Shutdown
+
+The server handles SIGTERM and SIGINT signals for graceful shutdown, ensuring:
+- In-flight requests complete
+- Database connections are properly closed
+- Background tasks are given time to finish
+
+**Shutdown Sequence:**
+1. Receive SIGTERM/SIGINT signal
+2. Stop accepting new requests
+3. Wait for in-flight requests (up to 30 seconds)
+4. Close database connections
+5. Exit cleanly
+
+### Cloud Context Logging
+
+Structured JSON logs automatically include cloud context when available:
+
+```json
+{
+  "timestamp": "2026-02-02T10:30:00Z",
+  "level": "info",
+  "message": "Request processed",
+  "pod_name": "aidocindexer-api-7d5f8b9c4-abc12",
+  "namespace": "production",
+  "node_name": "ip-10-0-1-42.ec2.internal",
+  "container_name": "api",
+  "cluster_name": "prod-cluster",
+  "region": "us-west-2"
+}
+```
+
+**Environment Variables for Cloud Context:**
+```bash
+POD_NAME=aidocindexer-api-xyz      # Kubernetes pod name
+POD_NAMESPACE=production            # Kubernetes namespace
+NODE_NAME=node-1                    # Kubernetes node
+CONTAINER_NAME=api                  # Container name
+AWS_REGION=us-west-2               # AWS region
+CLUSTER_NAME=prod-cluster          # Cluster name
+```
+
+### Prometheus Metrics
+
+Performance metrics are exposed at `/metrics` in Prometheus format:
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+**Performance Metrics:**
+```prometheus
+# Cython optimization status
+aidoc_cython_enabled 1
+
+# GPU acceleration status
+aidoc_gpu_enabled 1
+
+# MinHash deduplication status
+aidoc_minhash_enabled 1
+
+# Memory usage
+aidoc_memory_rss_bytes 2147483648
+aidoc_memory_vms_bytes 4294967296
+
+# Request metrics
+aidoc_requests_total{method="GET",endpoint="/chat"} 1523
+aidoc_request_duration_seconds{method="GET",endpoint="/chat"} 0.245
+```
+
+### Response Compression
+
+GZip compression is automatically applied to responses larger than 500 bytes:
+
+- **Threshold**: 500 bytes minimum
+- **Compression Level**: Default (balanced speed/ratio)
+- **Content Types**: All JSON and text responses
+- **Size Reduction**: Typically 60-70%
+
+**Verifying Compression:**
+```bash
+curl -H "Accept-Encoding: gzip" http://localhost:8000/api/v1/documents -v
+# Response header: Content-Encoding: gzip
+```
+
+### Connection Pool Optimization
+
+Database connection pool is optimized for cloud environments:
+
+```python
+# Automatic configuration
+pool_recycle=3600    # Recycle connections after 1 hour (AWS RDS compatibility)
+pool_timeout=30      # Wait up to 30 seconds for connection
+pool_pre_ping=True   # Verify connections before use
 ```
 
 ---

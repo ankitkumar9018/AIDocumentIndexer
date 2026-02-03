@@ -159,7 +159,9 @@ def get_async_engine() -> AsyncEngine:
         if "sqlite" not in db_config.async_url:
             engine_kwargs["pool_size"] = db_config.pool_size
             engine_kwargs["max_overflow"] = db_config.max_overflow
-            engine_kwargs["pool_pre_ping"] = True  # Check connection health
+            engine_kwargs["pool_pre_ping"] = True  # Check connection health before use
+            engine_kwargs["pool_recycle"] = 3600  # Recycle connections after 1 hour (prevents stale connections)
+            engine_kwargs["pool_timeout"] = 30  # Wait up to 30s for a connection before error
 
         async_engine = create_async_engine(
             db_config.async_url,
@@ -189,7 +191,9 @@ def get_sync_engine():
         if "sqlite" not in db_config.sync_url:
             engine_kwargs["pool_size"] = db_config.pool_size
             engine_kwargs["max_overflow"] = db_config.max_overflow
-            engine_kwargs["pool_pre_ping"] = True
+            engine_kwargs["pool_pre_ping"] = True  # Check connection health before use
+            engine_kwargs["pool_recycle"] = 3600  # Recycle connections after 1 hour
+            engine_kwargs["pool_timeout"] = 30  # Wait up to 30s for a connection
 
         sync_engine = create_engine(
             db_config.sync_url,

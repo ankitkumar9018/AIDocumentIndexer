@@ -102,6 +102,8 @@ export default function SkillsPage() {
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
+  const [showPublishDialog, setShowPublishDialog] = useState(false);
+  const [skillToPublish, setSkillToPublish] = useState<Skill | null>(null);
 
   // Skills loaded from backend API
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -293,6 +295,10 @@ export default function SkillsPage() {
                   key={skill.id}
                   skill={skill}
                   onSelect={() => setSelectedSkill(skill)}
+                  onPublish={() => {
+                    setSkillToPublish(skill);
+                    setShowPublishDialog(true);
+                  }}
                 />
               ))}
             </div>
@@ -332,11 +338,22 @@ export default function SkillsPage() {
         onClose={() => setShowImportDialog(false)}
         onSuccess={fetchSkills}
       />
+
+      {/* Publish Skill Dialog */}
+      <PublishSkillDialog
+        skill={skillToPublish}
+        open={showPublishDialog}
+        onClose={() => {
+          setShowPublishDialog(false);
+          setSkillToPublish(null);
+        }}
+        onSuccess={fetchSkills}
+      />
     </div>
   );
 }
 
-function SkillCard({ skill, onSelect }: { skill: Skill; onSelect: () => void }) {
+function SkillCard({ skill, onSelect, onPublish }: { skill: Skill; onSelect: () => void; onPublish?: () => void }) {
   return (
     <Card className="group hover:shadow-md transition-shadow cursor-pointer" onClick={onSelect}>
       <CardHeader className="pb-3">
@@ -370,6 +387,10 @@ function SkillCard({ skill, onSelect }: { skill: Skill; onSelect: () => void }) 
               <DropdownMenuItem>
                 <Play className="h-4 w-4 mr-2" />
                 Run Skill
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onPublish?.(); }}>
+                <ExternalLink className="h-4 w-4 mr-2" />
+                Publish
               </DropdownMenuItem>
               <DropdownMenuItem>
                 <Settings className="h-4 w-4 mr-2" />
@@ -1517,6 +1538,214 @@ function ImportSkillDialog({
               </>
             )}
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Publish Skill Dialog
+function PublishSkillDialog({
+  skill,
+  open,
+  onClose,
+  onSuccess,
+}: {
+  skill: Skill | null;
+  open: boolean;
+  onClose: () => void;
+  onSuccess?: () => void;
+}) {
+  const [customSlug, setCustomSlug] = useState("");
+  const [rateLimit, setRateLimit] = useState(100);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [publishResult, setPublishResult] = useState<{
+    public_url: string;
+    embed_code: string;
+    public_slug: string;
+  } | null>(null);
+  const [copied, setCopied] = useState<"url" | "embed" | null>(null);
+
+  if (!skill) return null;
+
+  const handlePublish = async () => {
+    setIsPublishing(true);
+    setError(null);
+
+    try {
+      const response = await api.post(`/skills/${skill.id}/publish`, {
+        custom_slug: customSlug || undefined,
+        rate_limit: rateLimit,
+        allowed_domains: ["*"],
+        require_api_key: false,
+      });
+
+      setPublishResult({
+        public_url: response.data.public_url,
+        embed_code: response.data.embed_code,
+        public_slug: response.data.public_slug,
+      });
+      onSuccess?.();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message || "Failed to publish skill");
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
+  const handleUnpublish = async () => {
+    setIsPublishing(true);
+    setError(null);
+
+    try {
+      await api.post(`/skills/${skill.id}/unpublish`);
+      setPublishResult(null);
+      onSuccess?.();
+      onClose();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message || "Failed to unpublish skill");
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
+  const copyToClipboard = async (type: "url" | "embed") => {
+    if (!publishResult) return;
+    const text = type === "url" ? publishResult.public_url : publishResult.embed_code;
+    await navigator.clipboard.writeText(text);
+    setCopied(type);
+    setTimeout(() => setCopied(null), 2000);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ExternalLink className="h-5 w-5" />
+            Publish Skill
+          </DialogTitle>
+          <DialogDescription>
+            Make "{skill.name}" accessible via a public URL without authentication
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 py-4">
+          {error && (
+            <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
+              <p className="text-sm text-destructive">{error}</p>
+            </div>
+          )}
+
+          {publishResult ? (
+            // Show publish result
+            <div className="space-y-4">
+              <div className="p-4 bg-green-500/10 border border-green-500/20 rounded-lg">
+                <div className="flex items-center gap-2 text-green-600 mb-2">
+                  <CheckCircle className="h-5 w-5" />
+                  <span className="font-medium">Skill Published!</span>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Your skill is now accessible at the public URL below.
+                </p>
+              </div>
+
+              {/* Public URL */}
+              <div className="space-y-2">
+                <Label>Public URL</Label>
+                <div className="flex gap-2">
+                  <Input value={publishResult.public_url} readOnly className="font-mono text-sm" />
+                  <Button variant="outline" size="icon" onClick={() => copyToClipboard("url")}>
+                    {copied === "url" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  </Button>
+                </div>
+              </div>
+
+              {/* Embed Code */}
+              <div className="space-y-2">
+                <Label>Embed Code</Label>
+                <div className="flex gap-2">
+                  <Textarea
+                    value={publishResult.embed_code}
+                    readOnly
+                    className="font-mono text-xs"
+                    rows={4}
+                  />
+                </div>
+                <Button variant="outline" size="sm" onClick={() => copyToClipboard("embed")}>
+                  {copied === "embed" ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
+                  Copy Embed Code
+                </Button>
+              </div>
+
+              <Separator />
+
+              <Button variant="destructive" onClick={handleUnpublish} disabled={isPublishing}>
+                {isPublishing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+                Unpublish Skill
+              </Button>
+            </div>
+          ) : (
+            // Show publish form
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="custom-slug">Custom URL Slug (optional)</Label>
+                <Input
+                  id="custom-slug"
+                  placeholder="e.g., my-summarizer"
+                  value={customSlug}
+                  onChange={(e) => setCustomSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave empty for auto-generated slug. Use lowercase letters, numbers, and hyphens.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="rate-limit">Rate Limit (requests/minute)</Label>
+                <Input
+                  id="rate-limit"
+                  type="number"
+                  value={rateLimit}
+                  onChange={(e) => setRateLimit(parseInt(e.target.value) || 100)}
+                  min={1}
+                  max={1000}
+                />
+              </div>
+
+              <div className="p-3 bg-muted rounded-lg text-sm">
+                <p className="font-medium mb-1">What happens when you publish:</p>
+                <ul className="list-disc list-inside text-muted-foreground space-y-1">
+                  <li>A public URL will be generated for this skill</li>
+                  <li>Anyone with the URL can use the skill</li>
+                  <li>Usage will be rate-limited to prevent abuse</li>
+                  <li>You can unpublish at any time</li>
+                </ul>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            {publishResult ? "Close" : "Cancel"}
+          </Button>
+          {!publishResult && (
+            <Button onClick={handlePublish} disabled={isPublishing}>
+              {isPublishing ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Publishing...
+                </>
+              ) : (
+                <>
+                  <ExternalLink className="h-4 w-4 mr-2" />
+                  Publish Skill
+                </>
+              )}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

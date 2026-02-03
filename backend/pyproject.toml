@@ -117,11 +117,13 @@ dependencies = [
     "elevenlabs>=2.31.0",
     "colpali-engine>=0.3.13",
     "rank-bm25>=0.2.2",
+    "rapidfuzz>=3.0.0", # Fast fuzzy string matching for entity resolution
     "fastembed>=0.7.4",
     "pdf2image>=1.17.0",
     # Note: surya-ocr removed due to dependency conflict with fastembed
     # VisionDocumentProcessor uses tesseract or claude for OCR instead
     "langchain-ollama>=0.3.10",
+    "cython>=3.2.4",
 ]
 
 [project.optional-dependencies]
@@ -149,6 +151,17 @@ connectors = [
     "pygithub>=2.1.0",
     "dropbox>=11.36.0",
     "boxsdk>=3.9.0",
+]
+# Performance optimizations (Phase 2-4)
+# - numba: JIT compilation for numerical hot loops (5-100x speedup)
+# - datasketch: MinHash/LSH for O(n) approximate deduplication
+# - scipy: Additional vectorized operations (cdist, etc.)
+# - cython: Compiled extensions for 10-100x speedup (compiles at server start)
+performance = [
+    "numba>=0.58.0",
+    "datasketch>=1.6.0",
+    "scipy>=1.11.0",
+    "cython>=3.0.0",
 ]
 
 [build-system]

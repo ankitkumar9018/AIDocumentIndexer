@@ -62,9 +62,9 @@ class SessionMemoryManager:
 
     def __init__(
         self,
-        max_sessions: int = 1000,
+        max_sessions: int = 200,  # Reduced from 1000 to prevent memory bloat
         memory_window_k: int = 10,
-        cleanup_stale_after_hours: Optional[float] = None,
+        cleanup_stale_after_hours: Optional[float] = 4.0,  # Auto-cleanup stale sessions
     ):
         """
         Initialize the session memory manager.

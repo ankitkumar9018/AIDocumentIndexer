@@ -31,7 +31,6 @@ Features:
    - Not used for AI memory/training
 """
 
-import json
 import io
 import csv
 import zipfile
@@ -42,6 +41,14 @@ from uuid import UUID, uuid4
 from enum import Enum
 
 import structlog
+
+# Use orjson for faster JSON serialization (2-3x faster)
+try:
+    import orjson
+    HAS_ORJSON = True
+except ImportError:
+    import json
+    HAS_ORJSON = False
 from sqlalchemy import select, delete, update, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -507,7 +514,11 @@ class ChatPrivacyService:
 
         # Format output
         if export_format == ExportFormat.JSON:
-            return json.dumps(export_data, indent=2, default=str).encode('utf-8')
+            # Use orjson for faster serialization (2-3x faster)
+            if HAS_ORJSON:
+                return orjson.dumps(export_data, option=orjson.OPT_INDENT_2, default=str)
+            else:
+                return json.dumps(export_data, indent=2, default=str).encode('utf-8')
 
         elif export_format == ExportFormat.CSV:
             output = io.StringIO()
@@ -529,11 +540,13 @@ class ChatPrivacyService:
         elif export_format == ExportFormat.ZIP:
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                # Add JSON data
-                zf.writestr(
-                    'data.json',
-                    json.dumps(export_data, indent=2, default=str)
+                # Add JSON data (orjson returns bytes, json.dumps returns str)
+                json_data = (
+                    orjson.dumps(export_data, option=orjson.OPT_INDENT_2, default=str)
+                    if HAS_ORJSON
+                    else json.dumps(export_data, indent=2, default=str)
                 )
+                zf.writestr('data.json', json_data)
                 # Add README
                 zf.writestr(
                     'README.txt',

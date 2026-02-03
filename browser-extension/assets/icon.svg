@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3B82F6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8B5CF6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="url(#grad1)"/>
+  <path d="M44 28h28l16 16v56c0 2.2-1.8 4-4 4H44c-2.2 0-4-1.8-4-4V32c0-2.2 1.8-4 4-4z" fill="white" fill-opacity="0.95"/>
+  <path d="M72 28v16h16" fill="none" stroke="white" stroke-width="2" stroke-opacity="0.95"/>
+  <circle cx="54" cy="58" r="4" fill="#3B82F6"/>
+  <circle cx="74" cy="58" r="4" fill="#3B82F6"/>
+  <circle cx="64" cy="74" r="4" fill="#3B82F6"/>
+  <circle cx="54" cy="90" r="3" fill="#8B5CF6"/>
+  <circle cx="74" cy="90" r="3" fill="#8B5CF6"/>
+  <line x1="54" y1="58" x2="74" y2="58" stroke="#3B82F6" stroke-width="2"/>
+  <line x1="54" y1="58" x2="64" y2="74" stroke="#3B82F6" stroke-width="2"/>
+  <line x1="74" y1="58" x2="64" y2="74" stroke="#3B82F6" stroke-width="2"/>
+  <line x1="64" y1="74" x2="54" y2="90" stroke="#8B5CF6" stroke-width="2"/>
+  <line x1="64" y1="74" x2="74" y2="90" stroke="#8B5CF6" stroke-width="2"/>
+</svg>

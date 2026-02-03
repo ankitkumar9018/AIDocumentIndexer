@@ -16,10 +16,10 @@ from datetime import datetime, timedelta
 import asyncio
 import hashlib
 import io
-import json
 import os
 import traceback
 import structlog
+import numpy as np
 
 # Token counting
 try:
@@ -458,9 +458,21 @@ class SearchResultCache:
         self._max_size = max_size
         self._cache: Dict[str, Tuple[List[Any], datetime]] = {}
 
-    def _make_key(self, query: str, collection: Optional[str], access_tier: int, top_k: int) -> str:
-        """Create cache key from query parameters (SHA-256 for collision resistance)."""
-        key_data = f"{query}|{collection or ''}|{access_tier}|{top_k}"
+    def _make_key(
+        self,
+        query: str,
+        collection: Optional[str],
+        access_tier: int,
+        top_k: int,
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
+    ) -> str:
+        """Create cache key from query parameters (SHA-256 for collision resistance).
+
+        IMPORTANT: Includes organization_id and is_superadmin for multi-tenant isolation.
+        Different organizations must not share cached search results.
+        """
+        key_data = f"{query}|{collection or ''}|{access_tier}|{top_k}|{organization_id or ''}|{is_superadmin}"
         return hashlib.sha256(key_data.encode()).hexdigest()
 
     def get(
@@ -469,9 +481,11 @@ class SearchResultCache:
         collection: Optional[str],
         access_tier: int,
         top_k: int,
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> Optional[List[Any]]:
         """Get cached results if available and not expired."""
-        key = self._make_key(query, collection, access_tier, top_k)
+        key = self._make_key(query, collection, access_tier, top_k, organization_id, is_superadmin)
 
         if key in self._cache:
             results, cached_at = self._cache[key]
@@ -491,6 +505,8 @@ class SearchResultCache:
         access_tier: int,
         top_k: int,
         results: List[Any],
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> None:
         """Cache search results."""
         # Don't cache empty results - they might be due to temporary issues
@@ -504,7 +520,7 @@ class SearchResultCache:
             oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][1])
             del self._cache[oldest_key]
 
-        key = self._make_key(query, collection, access_tier, top_k)
+        key = self._make_key(query, collection, access_tier, top_k, organization_id, is_superadmin)
         self._cache[key] = (results, datetime.now())
         logger.debug("Search cache set", query_hash=key[:8], result_count=len(results))
 
@@ -592,9 +608,9 @@ class RAGService:
 
         # Use centralized session memory manager with LRU eviction (prevents memory leaks)
         self._session_memory = get_session_memory_manager(
-            max_sessions=1000,
+            max_sessions=200,  # Reduced from 1000 to prevent memory bloat
             memory_window_k=self.config.memory_window,
-            cleanup_stale_after_hours=24.0,
+            cleanup_stale_after_hours=4.0,  # Reduced from 24h to prevent stale sessions
         )
 
         # Cache for session-specific LLM instances (TTL + max size to prevent unbounded growth)
@@ -1708,6 +1724,7 @@ class RAGService:
 
         # Verify retrieved documents if enabled
         verification_result = None
+        docs_before_verification = len(retrieved_docs)
         if self.verifier is not None:
             try:
                 verification_result = await self.verifier.verify(
@@ -1718,15 +1735,19 @@ class RAGService:
                 retrieved_docs = self.verifier.filter_by_relevance(
                     retrieved_docs, verification_result
                 )
-                logger.debug(
-                    "Verification complete",
+                logger.info(
+                    "Verification complete - document filtering applied",
                     confidence=verification_result.confidence_score,
                     relevant=verification_result.num_relevant,
                     filtered=verification_result.num_filtered,
+                    docs_before=docs_before_verification,
+                    docs_after=len(retrieved_docs),
                 )
             except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
                 logger.warning("Verification failed, continuing without filtering", error=str(e), error_type=type(e).__name__)
                 verification_result = None
+        else:
+            logger.debug("Verification skipped (verifier not enabled)", docs_count=len(retrieved_docs))
 
         # Phase 95K: Compute freshness config for _format_context (async settings lookup)
         freshness_config = None
@@ -1744,7 +1765,12 @@ class RAGService:
 
         # Format context from retrieved documents
         context, sources = self._format_context(retrieved_docs, include_collection_context, freshness_config=freshness_config)
-        logger.debug("Formatted context", context_length=len(context), sources_count=len(sources))
+        logger.info(
+            "RAG context formatted",
+            context_length=len(context),
+            sources_count=len(sources),
+            source_docs=[s.document_name[:30] if hasattr(s, 'document_name') else 'unknown' for s in sources[:3]] if sources else [],
+        )
 
         # Phase 79: Graph-O1 enhanced reasoning (beam search over knowledge graph)
         from backend.core.config import settings as _go1_settings
@@ -3437,7 +3463,11 @@ class RAGService:
         top_k = top_k or self.config.top_k
 
         # Check cache first (for identical queries)
-        cached_results = self._search_cache.get(query, collection_filter, access_tier, top_k)
+        # PHASE 12 FIX: Include organization_id and is_superadmin in cache key for multi-tenant isolation
+        cached_results = self._search_cache.get(
+            query, collection_filter, access_tier, top_k,
+            organization_id=organization_id, is_superadmin=is_superadmin
+        )
         if cached_results is not None:
             logger.debug(
                 "Using cached retrieval results",
@@ -3511,8 +3541,11 @@ class RAGService:
                     )),
                 )
 
-                # Cache results
-                self._search_cache.set(query, collection_filter, access_tier, top_k, results)
+                # Cache results (include org context for multi-tenant isolation)
+                self._search_cache.set(
+                    query, collection_filter, access_tier, top_k, results,
+                    organization_id=organization_id, is_superadmin=is_superadmin
+                )
                 return results
 
             except Exception as e:
@@ -3750,8 +3783,11 @@ class RAGService:
 
         final_results = all_results[:top_k]
 
-        # Cache the results for future identical queries
-        self._search_cache.set(query, collection_filter, access_tier, top_k, final_results)
+        # Cache the results for future identical queries (include org context for multi-tenant isolation)
+        self._search_cache.set(
+            query, collection_filter, access_tier, top_k, final_results,
+            organization_id=organization_id, is_superadmin=is_superadmin
+        )
 
         return final_results
 
@@ -3985,18 +4021,24 @@ class RAGService:
                         access_tier_level=access_tier,
                         vector_weight=vector_weight,
                         keyword_weight=keyword_weight,
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        is_superadmin=is_superadmin,
                     )
 
                     # Convert HybridResult to SearchResult format
                     from backend.services.vectorstore import SearchResult
                     results = []
                     for hr in hybrid_results:
+                        # Get original vector similarity from dense source (0-1 range)
+                        # Fall back to rerank_score or RRF score if dense not available
+                        original_similarity = hr.source_scores.get("dense", hr.rerank_score or hr.score)
                         results.append(SearchResult(
                             chunk_id=hr.chunk_id,
                             document_id=hr.document_id,
                             content=hr.content,
                             score=hr.score,
-                            similarity_score=hr.rerank_score or hr.score,
+                            similarity_score=original_similarity,
                             document_title=hr.document_title,
                             document_filename=hr.document_filename,
                             page_number=hr.page_number,
@@ -4035,6 +4077,9 @@ class RAGService:
                         document_ids=document_ids,
                         vector_weight=vector_weight,
                         keyword_weight=keyword_weight,
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        is_superadmin=is_superadmin,
                     )
                 else:
                     # Fallback to standard
@@ -4062,6 +4107,9 @@ class RAGService:
                     document_ids=document_ids,
                     vector_weight=vector_weight,
                     keyword_weight=keyword_weight,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
             elif self._hierarchical_retriever is not None:
                 # Use hierarchical retrieval for better document diversity
@@ -4074,6 +4122,9 @@ class RAGService:
                     document_ids=document_ids,
                     vector_weight=vector_weight,
                     keyword_weight=keyword_weight,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    is_superadmin=is_superadmin,
                 )
             else:
                 # Standard retrieval
@@ -4235,72 +4286,83 @@ class RAGService:
         if not results or len(results) <= top_k:
             return results
 
-        def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-            """Calculate cosine similarity between two vectors."""
-            if not vec1 or not vec2 or len(vec1) != len(vec2):
-                return 0.0
-            dot_product = sum(a * b for a, b in zip(vec1, vec2))
-            norm1 = sum(a * a for a in vec1) ** 0.5
-            norm2 = sum(b * b for b in vec2) ** 0.5
-            if norm1 == 0 or norm2 == 0:
-                return 0.0
-            return dot_product / (norm1 * norm2)
-
         # Try to get embeddings from document metadata
-        doc_embeddings = []
+        doc_embeddings_raw = []
+        valid_embedding_mask = []
         for doc, score in results:
             emb = doc.metadata.get("embedding")
-            doc_embeddings.append(emb)
+            doc_embeddings_raw.append(emb)
+            valid_embedding_mask.append(emb is not None)
 
         # If no embeddings available, fall back to simple truncation
-        if all(e is None for e in doc_embeddings):
+        if not any(valid_embedding_mask):
             logger.debug("No embeddings in results for MMR, using original order")
             return results[:top_k]
 
-        # Calculate relevance scores (similarity to query)
-        relevance_scores = []
+        # Convert to numpy arrays for vectorized operations (10-100x faster)
+        n_docs = len(results)
+        dim = len(query_embedding) if query_embedding else 0
+
+        # Stack embeddings into matrix, use zeros for missing
+        doc_matrix = np.zeros((n_docs, dim), dtype=np.float32)
+        for i, emb in enumerate(doc_embeddings_raw):
+            if emb is not None:
+                doc_matrix[i] = emb
+
+        # Normalize all vectors at once for cosine similarity
+        query_vec = np.array(query_embedding, dtype=np.float32)
+        query_norm = np.linalg.norm(query_vec)
+        if query_norm > 0:
+            query_vec = query_vec / query_norm
+
+        doc_norms = np.linalg.norm(doc_matrix, axis=1, keepdims=True)
+        doc_norms = np.where(doc_norms == 0, 1, doc_norms)  # Avoid division by zero
+        doc_matrix_normalized = doc_matrix / doc_norms
+
+        # Vectorized relevance scores: all at once with single matrix-vector multiply
+        relevance_scores = np.dot(doc_matrix_normalized, query_vec)
+
+        # Use original scores as fallback for docs without embeddings
         for i, (doc, score) in enumerate(results):
-            if doc_embeddings[i] is not None:
-                rel = cosine_similarity(query_embedding, doc_embeddings[i])
-            else:
-                # Use the original score as fallback
-                rel = score
-            relevance_scores.append(rel)
+            if not valid_embedding_mask[i]:
+                relevance_scores[i] = score
 
-        # MMR selection
+        # Precompute full similarity matrix for diversity (O(n²) but vectorized = fast)
+        # This replaces nested Python loops with a single matrix multiply
+        similarity_matrix = np.dot(doc_matrix_normalized, doc_matrix_normalized.T)
+
+        # MMR selection with vectorized max-similarity lookups
         selected_indices = []
-        remaining_indices = list(range(len(results)))
+        selected_mask = np.zeros(n_docs, dtype=bool)
+        remaining_mask = np.ones(n_docs, dtype=bool)
 
-        while len(selected_indices) < top_k and remaining_indices:
-            best_idx = None
-            best_mmr = float("-inf")
-
-            for idx in remaining_indices:
-                # Relevance term
-                relevance = relevance_scores[idx]
-
-                # Diversity term: max similarity to already selected docs
-                if selected_indices and doc_embeddings[idx] is not None:
-                    max_sim = 0.0
-                    for sel_idx in selected_indices:
-                        if doc_embeddings[sel_idx] is not None:
-                            sim = cosine_similarity(doc_embeddings[idx], doc_embeddings[sel_idx])
-                            max_sim = max(max_sim, sim)
-                else:
-                    max_sim = 0.0
-
-                # MMR score
-                mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
-
-                if mmr_score > best_mmr:
-                    best_mmr = mmr_score
-                    best_idx = idx
-
-            if best_idx is not None:
-                selected_indices.append(best_idx)
-                remaining_indices.remove(best_idx)
-            else:
+        for _ in range(min(top_k, n_docs)):
+            if not remaining_mask.any():
                 break
+
+            # Compute MMR scores for all remaining docs at once
+            if len(selected_indices) == 0:
+                # First iteration: no diversity penalty
+                max_sim_to_selected = np.zeros(n_docs)
+            else:
+                # Vectorized: max similarity to any selected doc
+                selected_sims = similarity_matrix[:, selected_indices]
+                max_sim_to_selected = np.max(selected_sims, axis=1)
+
+            # MMR score = lambda * relevance - (1 - lambda) * max_sim_to_selected
+            mmr_scores = lambda_param * relevance_scores - (1 - lambda_param) * max_sim_to_selected
+
+            # Mask out already selected docs
+            mmr_scores[selected_mask] = float('-inf')
+
+            # Select best remaining doc
+            best_idx = int(np.argmax(mmr_scores))
+            if mmr_scores[best_idx] == float('-inf'):
+                break
+
+            selected_indices.append(best_idx)
+            selected_mask[best_idx] = True
+            remaining_mask[best_idx] = False
 
         # Return selected results in MMR order
         return [results[i] for i in selected_indices]

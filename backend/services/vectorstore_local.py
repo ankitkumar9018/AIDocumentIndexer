@@ -32,6 +32,13 @@ def _get_backend_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _get_project_root() -> Path:
+    """Get the project root directory (where data/ lives)."""
+    # This file is at backend/services/vectorstore_local.py
+    # So project root is 3 levels up (backend/services -> backend -> project_root)
+    return Path(__file__).resolve().parents[2]
+
+
 def fix_chromadb_pickle() -> bool:
     """
     Fix ChromaDB index_metadata.pickle corruption.
@@ -46,7 +53,7 @@ def fix_chromadb_pickle() -> bool:
     """
     from chromadb.segment.impl.vector.local_persistent_hnsw import PersistentData
 
-    # Resolve path relative to project root
+    # Resolve path relative to backend directory
     default_dir = _get_backend_root() / "data" / "chroma"
     chroma_dir = Path(os.getenv("CHROMA_PERSIST_DIRECTORY", str(default_dir)))
     if not chroma_dir.exists():
@@ -132,7 +139,8 @@ class ChromaConfig:
     distance_function: str = "cosine"  # cosine, l2, ip
 
     def __post_init__(self):
-        # Resolve path relative to project root, not current working directory
+        # Resolve path relative to backend directory
+        # Data should be stored at backend/data/chroma
         if not self.persist_directory:
             self.persist_directory = str(_get_backend_root() / "data" / "chroma")
 
@@ -253,9 +261,16 @@ class ChromaVectorStore:
             chunk_ids.append(chunk_id)
 
             ids.append(chunk_id)
-            # Get embedding and check if it has actual values (not just empty list)
+            # Get embedding and check if it has actual values (not just empty list or all zeros)
             embedding = chunk_data.get("embedding")
-            has_valid_embedding = bool(embedding and len(embedding) > 0)
+            metadata = chunk_data.get("metadata", {})
+            # Check for valid embedding: not empty, not all zeros, and not marked as failed
+            has_valid_embedding = bool(
+                embedding
+                and len(embedding) > 0
+                and any(v != 0.0 for v in embedding)  # Not all zeros (failed embeddings)
+                and not metadata.get("embedding_failed", False)  # Not marked as failed
+            )
             embeddings.append(embedding if has_valid_embedding else [])
             documents.append(chunk_data["content"])
 
@@ -295,10 +310,20 @@ class ChromaVectorStore:
             # Set organization_id if provided (column may exist from migration)
             if organization_id and hasattr(chunk_record, 'organization_id'):
                 chunk_record.organization_id = uuid.UUID(organization_id)
+            # Save embedding metadata for tracking (provider, model, dimension)
+            if hasattr(chunk_record, 'embedding_provider'):
+                chunk_record.embedding_provider = chunk_data.get("embedding_provider") or metadata.get("embedding_provider")
+            if hasattr(chunk_record, 'embedding_model'):
+                chunk_record.embedding_model = chunk_data.get("embedding_model") or metadata.get("embedding_model")
+            if hasattr(chunk_record, 'embedding_dimension'):
+                chunk_record.embedding_dimension = len(embedding) if embedding and has_valid_embedding else None
             db_chunks.append(chunk_record)
 
-        # Check how many chunks have valid embeddings
-        valid_embedding_count = sum(1 for e in embeddings if e and len(e) > 0)
+        # Check how many chunks have valid embeddings (non-empty and non-zero)
+        valid_embedding_count = sum(
+            1 for e in embeddings
+            if e and len(e) > 0 and any(v != 0.0 for v in e)
+        )
         has_any_embeddings = valid_embedding_count > 0
 
         # Log warning if no embeddings - documents won't be searchable!

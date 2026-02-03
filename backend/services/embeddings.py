@@ -14,6 +14,7 @@ Performance optimizations:
 
 from typing import List, Dict, Any, Optional, Union
 from dataclasses import dataclass
+from collections import OrderedDict
 import asyncio
 import hashlib
 import os
@@ -1659,12 +1660,67 @@ class StellaEmbeddings(Embeddings):
         return embeddings[0] if embeddings else [0.0] * self._dimensions
 
 
-# Embedding cache for deduplication (content hash -> embedding)
-_embedding_cache: Dict[str, List[float]] = {}
-# Increased default cache size from 10k to 100k for better hit rate at scale
-# At 1536 dimensions * 4 bytes * 100k = ~600MB memory usage
-# For production with millions of docs, use Redis-backed cache instead
-_CACHE_MAX_SIZE = int(os.getenv("EMBEDDING_CACHE_SIZE", "100000"))
+# LRU Embedding cache for deduplication (content hash -> embedding)
+# Reduced from 100k to 10k to prevent memory bloat (~60MB vs ~600MB)
+# Uses OrderedDict for proper LRU eviction instead of unbounded growth
+_CACHE_MAX_SIZE = int(os.getenv("EMBEDDING_CACHE_SIZE", "10000"))
+
+
+class LRUEmbeddingCache:
+    """Thread-safe LRU cache for embeddings with proper eviction.
+
+    Uses threading.RLock for thread safety with 1000+ concurrent users.
+    RLock allows same thread to acquire lock multiple times (reentrant).
+    """
+
+    def __init__(self, max_size: int = 10000):
+        import threading
+        self._cache: OrderedDict[str, List[float]] = OrderedDict()
+        self._max_size = max_size
+        self._lock = threading.RLock()  # Thread-safe reentrant lock
+
+    def get_sync(self, key: str) -> Optional[List[float]]:
+        """Thread-safe get - moves accessed item to end (most recent)."""
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+            return None
+
+    def set_sync(self, key: str, value: List[float]) -> None:
+        """Thread-safe set - evicts oldest if at capacity."""
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            else:
+                if len(self._cache) >= self._max_size:
+                    # Remove oldest (first) item
+                    self._cache.popitem(last=False)
+            self._cache[key] = value
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._cache)
+
+    def __contains__(self, key: str) -> bool:
+        with self._lock:
+            return key in self._cache
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+
+    def items(self):
+        with self._lock:
+            return list(self._cache.items())  # Return copy to avoid iteration issues
+
+    def __iter__(self):
+        with self._lock:
+            return iter(list(self._cache.keys()))  # Return copy of keys
+
+
+# Global LRU cache instance
+_embedding_cache = LRUEmbeddingCache(max_size=_CACHE_MAX_SIZE)
 
 # Phase 71.5: TTL-based Qwen3 settings cache (auto-invalidates after 5 minutes)
 import time as _time_module
@@ -2419,8 +2475,9 @@ class EmbeddingService:
 
             if use_cache:
                 content_hash = self._get_content_hash(text)
-                if content_hash in _embedding_cache:
-                    result[i] = _embedding_cache[content_hash]
+                cached = _embedding_cache.get_sync(content_hash)
+                if cached is not None:
+                    result[i] = cached
                     continue
 
             texts_to_embed.append(text)
@@ -2440,13 +2497,13 @@ class EmbeddingService:
             try:
                 embeddings = self.embeddings.embed_documents(texts_to_embed)
 
-                # Store in results and cache
+                # Store in results and cache (LRU cache auto-evicts oldest)
                 for idx, text, embedding in zip(indices_to_embed, texts_to_embed, embeddings):
                     result[idx] = embedding
 
-                    if use_cache and len(_embedding_cache) < _CACHE_MAX_SIZE:
+                    if use_cache:
                         content_hash = self._get_content_hash(text)
-                        _embedding_cache[content_hash] = embedding
+                        _embedding_cache.set_sync(content_hash, embedding)
 
             except Exception as e:
                 logger.error(
@@ -2554,21 +2611,17 @@ class EmbeddingService:
 
             except Exception as e:
                 logger.error(
-                    "Batch embedding failed",
+                    "Batch embedding failed - re-raising to prevent corrupted zero vectors",
                     batch_num=i // batch_size + 1,
                     error=str(e),
+                    batch_size=len(batch_chunks),
                 )
-                # Create placeholder results for failed batch
-                for chunk in batch_chunks:
-                    result = EmbeddingResult(
-                        chunk_id=f"{chunk.document_id}_{chunk.chunk_index}" if chunk.document_id else str(chunk.chunk_index),
-                        chunk_hash=chunk.chunk_hash,
-                        embedding=[0.0] * self.dimensions,  # Zero vector for failures
-                        model=self.model,
-                        dimensions=self.dimensions,
-                        metadata={**chunk.metadata, "embedding_failed": True},
-                    )
-                    results.append(result)
+                # Re-raise the exception instead of creating zero vectors
+                # Zero vectors bypass search (0% similarity) and corrupt the index
+                raise RuntimeError(
+                    f"Embedding failed for batch {i // batch_size + 1}: {str(e)}. "
+                    f"Check if embedding service (Ollama/OpenAI) is running."
+                ) from e
 
         elapsed = time.time() - start_time
         logger.info(
@@ -2901,19 +2954,30 @@ class RayEmbeddingService:
 # =============================================================================
 
 def get_embedding_service(
-    provider: str = "openai",
+    provider: Optional[str] = None,
     use_ray: bool = True,
 ) -> Union[EmbeddingService, RayEmbeddingService]:
     """
     Get appropriate embedding service based on configuration.
 
     Args:
-        provider: Embedding provider
+        provider: Embedding provider. If None, reads from settings/environment:
+                  1. settings.get_default_value("embedding.provider")
+                  2. EMBEDDING_PROVIDER env var
+                  3. Falls back to "ollama"
         use_ray: Whether to use Ray for parallel processing
 
     Returns:
         Embedding service instance
     """
+    # Read provider from settings/env if not explicitly provided
+    if provider is None:
+        from backend.services.settings import get_settings_service
+        settings = get_settings_service()
+        provider = settings.get_default_value("embedding.provider")
+        if provider is None:
+            provider = os.getenv("EMBEDDING_PROVIDER", "ollama")
+
     if use_ray:
         return RayEmbeddingService(provider=provider)
     return EmbeddingService(provider=provider)
@@ -2926,6 +2990,8 @@ def compute_similarity(
     """
     Compute cosine similarity between two embeddings.
 
+    Uses NumPy for 10-100x faster computation than Python loops.
+
     Args:
         embedding1: First embedding vector
         embedding2: Second embedding vector
@@ -2936,14 +3002,18 @@ def compute_similarity(
     if len(embedding1) != len(embedding2):
         raise ValueError("Embeddings must have same dimensions")
 
-    dot_product = sum(a * b for a, b in zip(embedding1, embedding2))
-    norm1 = sum(a * a for a in embedding1) ** 0.5
-    norm2 = sum(b * b for b in embedding2) ** 0.5
+    # NumPy vectorized computation (10-100x faster than Python loops)
+    import numpy as np
+    vec1 = np.array(embedding1, dtype=np.float32)
+    vec2 = np.array(embedding2, dtype=np.float32)
+
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
 
     if norm1 == 0 or norm2 == 0:
         return 0.0
 
-    return dot_product / (norm1 * norm2)
+    return float(np.dot(vec1, vec2) / (norm1 * norm2))
 
 
 def clear_embedding_cache():
@@ -3206,7 +3276,7 @@ class EmbeddingCachePersistence:
                         # Extract hash from key
                         content_hash = key.replace(f"{self.prefix}:", "")
                         embedding = json.loads(value)
-                        _embedding_cache[content_hash] = embedding
+                        _embedding_cache.set_sync(content_hash, embedding)
                         loaded += 1
                 except Exception:
                     continue

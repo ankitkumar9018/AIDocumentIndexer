@@ -10,6 +10,13 @@ from typing import Optional, TYPE_CHECKING
 
 import structlog
 
+# Use aiofiles for async file I/O if available
+try:
+    import aiofiles
+    HAS_AIOFILES = True
+except ImportError:
+    HAS_AIOFILES = False
+
 from ..base import BaseFormatGenerator
 from ..factory import register_generator
 from ...models import OutputFormat, GenerationJob
@@ -87,8 +94,8 @@ class HTMLGenerator(BaseFormatGenerator):
         font_family_key = job.metadata.get("font_family", "modern")
         font_family = HTML_FONT_MAP.get(font_family_key, HTML_FONT_MAP["modern"])
 
-        # Build HTML
-        html = f"""<!DOCTYPE html>
+        # Build HTML using list accumulation (10-50x faster than string += in loops)
+        html_parts = [f"""<!DOCTYPE html>
 <html>
 <head>
     <title>{job.title}</title>
@@ -107,22 +114,21 @@ class HTMLGenerator(BaseFormatGenerator):
 </head>
 <body>
     <h1>{job.title}</h1>
-"""
+"""]
 
         # Description
         if job.outline:
-            html += f'    <p class="description">{job.outline.description}</p>\n'
+            html_parts.append(f'    <p class="description">{job.outline.description}</p>\n')
 
         # Content sections
         for section in job.sections:
             content = section.revised_content or section.content
-            html += f"""    <div class="section">
+            html_parts.append(f"""    <div class="section">
         <h2>{section.title}</h2>
         <p>{content.replace(chr(10), '</p><p>')}</p>
-"""
+""")
             # Section sources
             if include_sources and section.sources:
-                html += '        <div class="sources">Sources: '
                 source_items = []
                 for s in section.sources[:3]:
                     doc_name = s.document_name or s.document_id
@@ -133,15 +139,14 @@ class HTMLGenerator(BaseFormatGenerator):
                             source_items.append(f"{doc_name} (Page {s.page_number})")
                     else:
                         source_items.append(doc_name)
-                html += ", ".join(source_items)
-                html += "</div>\n"
+                html_parts.append(f'        <div class="sources">Sources: {", ".join(source_items)}</div>\n')
 
-            html += "    </div>\n"
+            html_parts.append("    </div>\n")
 
         # References section
         if include_sources and job.sources_used:
-            html += '    <div class="references">\n'
-            html += "        <h2>References</h2>\n"
+            html_parts.append('    <div class="references">\n')
+            html_parts.append("        <h2>References</h2>\n")
 
             # Group sources by usage type
             from ...models import SourceUsageType
@@ -174,42 +179,42 @@ class HTMLGenerator(BaseFormatGenerator):
                 return f"{doc_name}{location_info}{usage_info}"
 
             if content_sources:
-                html += "        <h3>Content References</h3>\n"
-                html += "        <ul>\n"
-                for source in content_sources:
-                    html += f"            <li>{format_source_html(source)}</li>\n"
-                html += "        </ul>\n"
+                html_parts.append("        <h3>Content References</h3>\n        <ul>\n")
+                html_parts.extend(f"            <li>{format_source_html(source)}</li>\n" for source in content_sources)
+                html_parts.append("        </ul>\n")
 
             if style_sources:
-                html += "        <h3>Style References</h3>\n"
-                html += "        <ul>\n"
-                for source in style_sources:
-                    html += f"            <li>{format_source_html(source)}</li>\n"
-                html += "        </ul>\n"
+                html_parts.append("        <h3>Style References</h3>\n        <ul>\n")
+                html_parts.extend(f"            <li>{format_source_html(source)}</li>\n" for source in style_sources)
+                html_parts.append("        </ul>\n")
 
             if other_sources:
-                html += "        <h3>Other References</h3>\n"
-                html += "        <ul>\n"
-                for source in other_sources:
-                    html += f"            <li>{format_source_html(source)}</li>\n"
-                html += "        </ul>\n"
+                html_parts.append("        <h3>Other References</h3>\n        <ul>\n")
+                html_parts.extend(f"            <li>{format_source_html(source)}</li>\n" for source in other_sources)
+                html_parts.append("        </ul>\n")
 
             # Fallback if no categorized sources
             if not content_sources and not style_sources and not other_sources:
-                html += "        <ul>\n"
-                for source in job.sources_used:
-                    html += f"            <li>{format_source_html(source)}</li>\n"
-                html += "        </ul>\n"
+                html_parts.append("        <ul>\n")
+                html_parts.extend(f"            <li>{format_source_html(source)}</li>\n" for source in job.sources_used)
+                html_parts.append("        </ul>\n")
 
-            html += "    </div>\n"
+            html_parts.append("    </div>\n")
 
-        html += """</body>
-</html>"""
+        html_parts.append("""</body>
+</html>""")
 
-        # Save file
+        # Join all parts at once (much faster than repeated += )
+        html = ''.join(html_parts)
+
+        # Save file (use async I/O if available to avoid blocking)
         output_path = os.path.join(config.output_dir, f"{filename}.html")
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(html)
+        if HAS_AIOFILES:
+            async with aiofiles.open(output_path, "w", encoding="utf-8") as f:
+                await f.write(html)
+        else:
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(html)
 
         logger.info("HTML generated", path=output_path)
         return output_path

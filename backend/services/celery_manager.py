@@ -112,8 +112,18 @@ async def start_celery_worker_auto() -> bool:
 
 
 async def _start_worker() -> bool:
-    """Internal: Start the Celery worker process."""
+    """Internal: Start the Celery worker process with settings from DB."""
     global _celery_process, _celery_pid
+
+    # Read concurrency from database settings (dynamic, not hardcoded)
+    try:
+        from backend.services.settings import get_settings_service
+        settings = get_settings_service()
+        concurrency = await settings.get_setting("queue.max_workers") or 4
+        concurrency = int(concurrency)
+    except Exception as e:
+        logger.warning("Could not read queue.max_workers from settings, using default", error=str(e))
+        concurrency = 4
 
     project_root = get_project_root()
 
@@ -121,14 +131,19 @@ async def _start_worker() -> bool:
     # The Celery app is defined in backend.services.task_queue:celery_app
     # Use --pool=threads to avoid macOS fork crashes (CoreFoundation/NSUnarchiver)
     # See: https://github.com/celery/celery/discussions/9893
+    # Note: --max-memory-per-child not supported with threads pool, but
+    # worker_max_tasks_per_child=100 in task_queue.py recycles workers to prevent memory leaks
     celery_cmd = [
         sys.executable, "-m", "celery",
         "-A", "backend.services.task_queue:celery_app",
         "worker",
         "--loglevel=info",
         "--pool=threads",
-        "--concurrency=4",
+        f"--concurrency={concurrency}",
+        "--max-tasks-per-child=100",  # Recycle workers after 100 tasks to free memory
     ]
+
+    logger.info("Starting Celery worker with concurrency from settings", concurrency=concurrency)
 
     # Create logs directory
     log_dir = project_root / "logs"
@@ -230,18 +245,29 @@ async def restart_celery_worker() -> bool:
     return await start_celery_worker_auto()
 
 
-def get_worker_status() -> dict:
+async def get_worker_status() -> dict:
     """
     Get the current Celery worker status.
 
     Returns:
-        Dict with running status, pid, etc.
+        Dict with running status, pid, concurrency, etc.
     """
     running = is_worker_running()
+
+    # Get configured concurrency from settings
+    try:
+        from backend.services.settings import get_settings_service
+        settings = get_settings_service()
+        concurrency = await settings.get_setting("queue.max_workers") or 4
+        concurrency = int(concurrency)
+    except Exception:
+        concurrency = 4
+
     return {
         "running": running,
         "pid": _celery_pid if running else None,
         "managed": True,  # This is a managed (auto-started) worker
+        "concurrency": concurrency,
     }
 
 

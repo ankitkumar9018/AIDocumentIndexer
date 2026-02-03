@@ -1,11 +1,22 @@
 # AIDocumentIndexer
 
-> **Intelligent Document Archive with RAG** - Transform 25+ years of presentations, documents, and knowledge into a searchable, AI-powered assistant.
+> **Enterprise-Grade RAG Platform with Multi-Platform Support** - Transform 25+ years of presentations, documents, and knowledge into a searchable, AI-powered assistant across Web, Desktop, and Browser.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Next.js 15](https://img.shields.io/badge/Next.js-15-black.svg)](https://nextjs.org/)
+[![Tauri 2.0](https://img.shields.io/badge/Tauri-2.0-blue.svg)](https://tauri.app/)
 [![LangChain](https://img.shields.io/badge/LangChain-0.3+-green.svg)](https://langchain.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+---
+
+## Three Platforms, One Knowledge Base
+
+| Platform | Description | Status |
+|----------|-------------|--------|
+| **Web App** | Enterprise-ready with 1000+ concurrent users | Production |
+| **Desktop App** | Local-first with offline mode (Tauri) | Production |
+| **Browser Extension** | Capture web pages, search from any tab | Production |
 
 ---
 
@@ -48,6 +59,42 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 | **User Preferences** | Persistent theme, view mode, default collection settings |
 | **Beautiful UI** | Modern, responsive interface built with Next.js 15 and shadcn/ui |
 
+### Multi-Platform Support
+
+#### Desktop App (Tauri)
+
+| Feature | Description |
+|---------|-------------|
+| **LOCAL MODE** | Complete offline operation with Ollama |
+| **SERVER MODE** | Connect to any AIDocumentIndexer backend |
+| **Cross-Platform** | Windows, macOS, Linux (2-3MB bundle) |
+| **System Tray** | Quick access and global shortcuts |
+| **File Watching** | Auto-sync watched folders |
+| **Native Performance** | Rust backend, minimal resource usage |
+
+#### Browser Extension (Chrome/Firefox)
+
+| Feature | Description |
+|---------|-------------|
+| **Page Capture** | Save any webpage to your knowledge base |
+| **Quick Search** | Search popup with keyboard shortcut |
+| **Side Panel Chat** | Full RAG chat in browser sidebar |
+| **Selection Search** | Highlight text to search instantly |
+| **Context Menu** | Right-click to save or search |
+| **Cross-Browser** | Chrome (MV3) and Firefox (MV2) |
+
+### Integration Connectors
+
+| Connector | Features |
+|-----------|----------|
+| **Notion** | Pages, databases, blocks with incremental sync |
+| **GitHub** | Repos, issues, PRs, code search |
+| **Slack** | Channels, threads, files, incremental sync |
+| **Google Drive** | Files, Google Docs export, change detection |
+| **Email/Gmail** | IMAP and Gmail API support, attachments |
+| **Confluence** | Spaces, pages, attachments, CQL search |
+| **Jira** | Issues, comments, attachments, JQL queries |
+
 ### Advanced Features (2025-2026)
 
 | Feature | Description |
@@ -83,6 +130,22 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 | **Adaptive RAG Router** | Query-complexity-based strategy selection |
 | **LazyGraphRAG** | 99% cost reduction for knowledge graph retrieval |
 
+### Performance & Cloud (February 2026)
+
+| Feature | Description |
+|---------|-------------|
+| **Cython Extensions** | 10-100x faster similarity computations with runtime compilation |
+| **GPU Acceleration** | PyTorch CUDA/MPS with automatic CPU fallback on OOM |
+| **MinHash Deduplication** | O(n) approximate deduplication vs O(n²) exact |
+| **GZip Compression** | 60-70% response size reduction |
+| **K8s Health Probes** | `/health/live` and `/health/ready` endpoints |
+| **Prometheus Metrics** | Performance metrics at `/metrics` endpoint |
+| **Graceful Shutdown** | SIGTERM/SIGINT signal handling for clean shutdown |
+| **Cloud Context Logging** | Auto-includes pod_name, namespace, region in logs |
+| **Connection Pool Optimization** | Automatic recycling for AWS RDS compatibility |
+
+See [PERFORMANCE_OPTIMIZATION.md](docs/PERFORMANCE_OPTIMIZATION.md) for deep technical details on NumPy vectorization, Cython compilation, and GPU acceleration.
+
 ---
 
 ## Quick Start
@@ -93,10 +156,10 @@ AIDocumentIndexer is an enterprise-grade RAG (Retrieval-Augmented Generation) sy
 - **OpenAI API Key** (or Ollama for local LLM)
 - **8GB+ RAM** (16GB recommended for local LLM)
 
-### One-Command Setup
+### Option A: Web App (Docker)
 
 ```bash
-# Clone the repository (replace with your fork URL)
+# Clone the repository
 git clone <your-repository-url>
 cd AIDocumentIndexer
 
@@ -113,7 +176,42 @@ docker-compose up -d
 open http://localhost:3000
 ```
 
-### Default Admin Login
+### Option B: Desktop App (Offline Mode)
+
+```bash
+# Install Ollama for local LLM
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3.2
+ollama pull nomic-embed-text
+
+# Build and run desktop app
+cd desktop-tauri
+npm install
+npm run tauri:dev
+
+# Choose LOCAL MODE on first launch for offline operation
+```
+
+### Option C: Browser Extension
+
+```bash
+# Build the extension
+cd browser-extension
+npm install
+npm run build
+
+# Load in Chrome:
+# 1. Go to chrome://extensions/
+# 2. Enable "Developer mode"
+# 3. Click "Load unpacked"
+# 4. Select browser-extension/dist/
+
+# For Firefox:
+npm run build:firefox
+# Load dist-firefox/ in about:debugging
+```
+
+### Default Admin Login (Web App)
 
 ```
 Email: admin@example.com
@@ -128,11 +226,19 @@ Password: changeme123
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    FRONTEND (Next.js 15 + shadcn/ui)                    │
-│  Dashboard │ Chat Interface │ Upload Portal │ Document Creator │ Admin │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
+│                          USER INTERFACES                                 │
+│  ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────────────┐ │
+│  │     Web App      │ │   Desktop App    │ │   Browser Extension      │ │
+│  │  (Next.js 15)    │ │   (Tauri 2.0)    │ │   (Chrome/Firefox)       │ │
+│  │  - Dashboard     │ │  - LOCAL MODE    │ │  - Page Capture          │ │
+│  │  - Chat          │ │  - SERVER MODE   │ │  - Side Panel Chat       │ │
+│  │  - Upload        │ │  - File Watcher  │ │  - Quick Search          │ │
+│  │  - Admin         │ │  - Offline LLM   │ │  - Context Menu          │ │
+│  └────────┬─────────┘ └────────┬─────────┘ └────────────┬─────────────┘ │
+└───────────┼────────────────────┼────────────────────────┼───────────────┘
+            │                    │                        │
+            └────────────────────┼────────────────────────┘
+                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         BACKEND (FastAPI + Python)                       │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
@@ -144,6 +250,12 @@ Password: changeme123
 │  │   Document  │  │  Embedding  │  │     OCR     │  │     Ray     │    │
 │  │  Processors │  │  Generation │  │  (PaddleOCR)│  │   Cluster   │    │
 │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘    │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                       CONNECTORS                                 │    │
+│  │  Notion │ GitHub │ Slack │ Google Drive │ Gmail │ Confluence │  │    │
+│  │  Jira │ Web Scraper │ File Watcher                              │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -151,6 +263,12 @@ Password: changeme123
 │                           STORAGE LAYER                                  │
 │  PostgreSQL + pgvector │ S3/Local Files │ Redis Cache                   │
 │  Row-Level Security (RLS) for Permission Enforcement                    │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          LLM PROVIDERS                                   │
+│  OpenAI │ Anthropic │ Ollama (Local) │ Azure │ Google │ 100+ via LiteLLM│
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -166,7 +284,10 @@ Password: changeme123
 | Vector Database | PostgreSQL + pgvector | Embeddings with RLS security |
 | OCR | PaddleOCR | Best-in-class text extraction from images |
 | Document Parsing | Unstructured.io | Universal document parser |
+| Performance | Cython, PyTorch (GPU), MinHash LSH | 10-100x similarity speedup |
+| Serialization | orjson | 2-3x faster JSON encoding |
 | Containerization | Docker, Docker Compose | Easy deployment anywhere |
+| Cloud | Kubernetes, AWS ECS/ALB | Health probes, graceful shutdown |
 
 ---
 
@@ -451,12 +572,42 @@ npm test
 
 ```
 AIDocumentIndexer/
-├── frontend/           # Next.js 15 application
-├── backend/            # FastAPI + LangChain + Ray
-├── docker/             # Docker configurations
-├── db/                 # Database migrations
-├── docs/               # Documentation
-└── tests/              # Test suites
+├── frontend/                   # Next.js 15 web application
+│   ├── app/                    # App router pages
+│   ├── components/             # React components
+│   └── lib/                    # Utilities and hooks
+│
+├── backend/                    # FastAPI + LangChain + Ray
+│   ├── api/                    # REST API routes
+│   ├── connectors/             # Integration connectors
+│   │   ├── notion.py           # Notion pages & databases
+│   │   ├── github.py           # GitHub repos & issues
+│   │   ├── slack.py            # Slack channels & messages
+│   │   ├── google_drive.py     # Google Drive files
+│   │   ├── email.py            # Gmail & IMAP
+│   │   ├── confluence.py       # Confluence spaces & pages
+│   │   └── jira.py             # Jira issues & comments
+│   ├── services/               # Business logic
+│   └── db/                     # Database models
+│
+├── desktop-tauri/              # Tauri 2.0 desktop application
+│   ├── src/                    # React frontend
+│   ├── src-tauri/              # Rust backend
+│   └── package.json            # Dependencies
+│
+├── browser-extension/          # Chrome/Firefox extension
+│   ├── src/
+│   │   ├── background/         # Service worker
+│   │   ├── content/            # Content scripts
+│   │   ├── popup/              # Quick search popup
+│   │   ├── sidepanel/          # Full chat sidebar
+│   │   └── options/            # Settings page
+│   ├── manifest.json           # Chrome (MV3)
+│   └── manifest.firefox.json   # Firefox (MV2)
+│
+├── docs/                       # Documentation
+├── scripts/                    # Setup & utility scripts
+└── docker-compose.yml          # Docker deployment
 ```
 
 **New developers**: Start with [DEVELOPER_ONBOARDING.md](docs/DEVELOPER_ONBOARDING.md) for a comprehensive guide to the codebase architecture, key classes, and project flow.
@@ -557,6 +708,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Support
 
 - **Documentation**: [docs/](docs/)
+  - [API Reference](docs/API.md)
+  - [Installation Guide](docs/INSTALLATION.md)
+  - [Configuration Options](docs/CONFIGURATION.md)
+  - [Performance Optimization Deep Dive](docs/PERFORMANCE_OPTIMIZATION.md)
+  - [Features Overview](docs/FEATURES.md)
 - **Issues**: Open an issue in the repository
 - **Discussions**: Use the repository's Discussions tab
 

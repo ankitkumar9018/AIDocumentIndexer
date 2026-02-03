@@ -504,6 +504,105 @@ Self-verification filters irrelevant documents before generating responses.
 
 ---
 
+## Performance Optimizations
+
+Performance optimizations are automatically initialized at server startup. All optimizations have graceful fallbacks if dependencies are missing.
+
+### Cython Extensions
+
+High-performance similarity computations with 10-100x speedup over pure Python.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PERF_COMPILE_CYTHON` | Compile Cython extensions at startup | `true` |
+
+**Features:**
+- Runtime compilation on first server start (if Cython available)
+- Thread-safe initialization
+- Automatic fallback to NumPy if compilation fails
+- No hard dependency on Cython
+
+**Accelerated Functions:**
+- `cosine_similarity_batch` (10-50x)
+- `cosine_similarity_matrix` (20-100x)
+- `mmr_selection` (10-50x)
+- `hamming_distance_batch` (5-50x)
+- `weighted_mean_pooling` (20-40x)
+
+**Installation for Maximum Performance:**
+```bash
+pip install cython numpy
+# Extensions compile automatically on next server start
+```
+
+### GPU Acceleration
+
+PyTorch-based GPU acceleration for similarity computations with automatic CPU fallback.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PERF_INIT_GPU` | Initialize GPU accelerator | `true` |
+| `PERF_GPU_PREFER` | Prefer GPU over CPU when available | `true` |
+| `PERF_MIXED_PRECISION` | Use FP16 for 2x throughput | `true` |
+| `PERF_WARMUP_GPU` | Run GPU warmup at startup | `false` |
+
+**Supported Devices:**
+- NVIDIA CUDA (best performance)
+- Apple MPS (M1/M2/M3)
+- CPU (automatic fallback)
+
+**Features:**
+- Automatic OOM handling (falls back to CPU)
+- Mixed precision for 2x throughput on supported GPUs
+- Optional warmup for consistent latency
+
+### MinHash Deduplication
+
+O(n) approximate deduplication using MinHash signatures and LSH.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PERF_INIT_MINHASH` | Initialize MinHash deduplicator | `true` |
+| `PERF_MINHASH_PERMS` | Number of permutations (accuracy vs speed) | `128` |
+| `PERF_MINHASH_THRESHOLD` | Similarity threshold for duplicates | `0.8` |
+
+**Features:**
+- O(n) complexity instead of O(n²)
+- Configurable accuracy/speed trade-off
+- Automatic fallback to exact Jaccard if datasketch unavailable
+
+### Cloud Deployment Variables
+
+Additional variables for Kubernetes and cloud deployments:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `POD_NAME` | Kubernetes pod name (for logging) | Auto-detected |
+| `POD_NAMESPACE` | Kubernetes namespace | Auto-detected |
+| `NODE_NAME` | Kubernetes node name | Auto-detected |
+| `CONTAINER_NAME` | Container name | Auto-detected |
+| `AWS_REGION` | AWS region | Auto-detected |
+| `CLUSTER_NAME` | Cluster name | None |
+
+These variables are automatically included in structured logs when set.
+
+### Performance Status Endpoint
+
+Check optimization status via API:
+```bash
+curl http://localhost:8000/health
+# Returns performance status in response:
+# {
+#   "performance": {
+#     "cython_enabled": true,
+#     "gpu_enabled": true,
+#     "minhash_enabled": true
+#   }
+# }
+```
+
+---
+
 ## Web Scraper
 
 | Variable | Description | Default |

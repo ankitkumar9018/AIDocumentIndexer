@@ -416,6 +416,9 @@ class HybridRetriever:
         access_tier_level: int = 100,
         vector_weight: Optional[float] = None,
         keyword_weight: Optional[float] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> Tuple[List[HybridResult], RetrievalMetrics]:
         """
         Perform hybrid retrieval across all enabled sources.
@@ -428,6 +431,9 @@ class HybridRetriever:
             access_tier_level: Access tier filter
             vector_weight: Override dense weight
             keyword_weight: Override sparse weight
+            organization_id: Organization ID for multi-tenant isolation
+            user_id: User ID for private document access
+            is_superadmin: Whether user is superadmin (bypasses org filter)
 
         Returns:
             Tuple of (results, metrics)
@@ -455,6 +461,9 @@ class HybridRetriever:
                 query, query_embedding,
                 self.config.candidates_per_source,
                 document_ids, access_tier_level,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             ))
             task_sources.append(RetrievalSource.DENSE)
 
@@ -464,6 +473,9 @@ class HybridRetriever:
                 query,
                 self.config.candidates_per_source,
                 document_ids, access_tier_level,
+                organization_id=organization_id,
+                user_id=user_id,
+                is_superadmin=is_superadmin,
             ))
             task_sources.append(RetrievalSource.SPARSE)
 
@@ -509,6 +521,8 @@ class HybridRetriever:
                 query,
                 self.config.candidates_per_source,
                 document_ids,
+                organization_id,
+                is_superadmin,
             ))
             task_sources.append(RetrievalSource.LIGHTRAG)
 
@@ -518,6 +532,8 @@ class HybridRetriever:
                 query,
                 self.config.candidates_per_source,
                 document_ids,
+                organization_id,
+                is_superadmin,
             ))
             task_sources.append(RetrievalSource.RAPTOR)
 
@@ -601,8 +617,11 @@ class HybridRetriever:
         top_k: int,
         document_ids: Optional[List[str]],
         access_tier_level: int,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[Any]:
-        """Dense vector search."""
+        """Dense vector search with multi-tenant filtering."""
         from backend.services.vectorstore import SearchType
 
         return await self.vectorstore.search(
@@ -612,6 +631,9 @@ class HybridRetriever:
             top_k=top_k,
             document_ids=document_ids,
             access_tier_level=access_tier_level,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
     async def _sparse_search(
@@ -620,8 +642,11 @@ class HybridRetriever:
         top_k: int,
         document_ids: Optional[List[str]],
         access_tier_level: int,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[Any]:
-        """Sparse BM25/keyword search."""
+        """Sparse BM25/keyword search with multi-tenant filtering."""
         from backend.services.vectorstore import SearchType
 
         return await self.vectorstore.search(
@@ -630,6 +655,9 @@ class HybridRetriever:
             top_k=top_k,
             document_ids=document_ids,
             access_tier_level=access_tier_level,
+            organization_id=organization_id,
+            user_id=user_id,
+            is_superadmin=is_superadmin,
         )
 
     async def _colbert_search(
@@ -773,6 +801,8 @@ class HybridRetriever:
         query: str,
         top_k: int,
         document_ids: Optional[List[str]],
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[Any]:
         """
         LightRAG dual-level retrieval (Phase 58).
@@ -791,6 +821,8 @@ class HybridRetriever:
                 query=query,
                 top_k=top_k,
                 document_ids=document_ids,
+                organization_id=organization_id,
+                is_superadmin=is_superadmin,
             )
             return results
         except Exception as e:
@@ -815,6 +847,8 @@ class HybridRetriever:
         query: str,
         top_k: int,
         document_ids: Optional[List[str]],
+        organization_id: Optional[str] = None,
+        is_superadmin: bool = False,
     ) -> List[Any]:
         """
         RAPTOR tree-organized retrieval (Phase 58).
@@ -833,6 +867,8 @@ class HybridRetriever:
                 query=query,
                 top_k=top_k,
                 document_id=document_ids[0] if document_ids else None,
+                organization_id=organization_id,
+                is_superadmin=is_superadmin,
             )
             return results
         except Exception as e:

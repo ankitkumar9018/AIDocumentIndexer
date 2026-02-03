@@ -2303,19 +2303,73 @@ class NodeExecutor:
             output_format: audio, text_and_audio
             use_rag: Enable document search
             use_streaming: Enable streaming TTS (for real-time)
+
+            # Knowledge Sources (comprehensive knowledge integration)
+            knowledge_bases: Array of knowledge base/collection IDs to use
+            folder_sources: Array of folder IDs to search
+            url_sources: Array of URLs to scrape and use as context
+            file_sources: Array of file paths/configs to process
+            text_sources: Array of raw text blocks as knowledge
+            database_sources: Array of database query configs
+            api_sources: Array of API endpoint configs
+            use_knowledge_graph: Enable KG-enhanced retrieval
         """
         config = node.config or {}
 
-        # First, execute the agent to get text response
-        agent_result = await self._execute_agent(node, context)
+        # Check if we have knowledge sources - if so, use chat agent logic first
+        has_knowledge_sources = (
+            config.get("knowledge_bases") or
+            config.get("folder_sources") or
+            config.get("url_sources") or
+            config.get("file_sources") or
+            config.get("text_sources") or
+            config.get("database_sources") or
+            config.get("api_sources") or
+            config.get("use_rag")
+        )
 
-        if agent_result.get("output", {}).get("status") == "error":
-            return agent_result
+        agent_result = None
+        text_response = ""
+        knowledge_metadata = {}
 
-        # Extract text response
-        text_response = agent_result.get("output", {}).get("response", "")
-        if not text_response:
-            text_response = agent_result.get("output", {}).get("answer", "")
+        if has_knowledge_sources:
+            # Create a temporary chat agent node config for knowledge processing
+            chat_config = {
+                **config,
+                "use_memory": False,  # Voice agent doesn't need memory
+                "enable_citations": False,  # No citations in voice
+            }
+            temp_node = WorkflowNode(
+                id=node.id,
+                config=chat_config,
+                node_type="chat_agent",
+            )
+
+            # Execute as chat agent to get knowledge-grounded response
+            chat_result = await self._execute_chat_agent(temp_node, context)
+
+            if chat_result.get("status") == "success":
+                text_response = chat_result.get("response", "")
+                knowledge_metadata = chat_result.get("knowledge_metadata", {})
+            else:
+                # Fall back to regular agent
+                agent_result = await self._execute_agent(node, context)
+                if agent_result.get("output", {}).get("status") == "error":
+                    return agent_result
+                text_response = agent_result.get("output", {}).get("response", "")
+                if not text_response:
+                    text_response = agent_result.get("output", {}).get("answer", "")
+        else:
+            # No knowledge sources - use regular agent
+            agent_result = await self._execute_agent(node, context)
+
+            if agent_result.get("output", {}).get("status") == "error":
+                return agent_result
+
+            # Extract text response
+            text_response = agent_result.get("output", {}).get("response", "")
+            if not text_response:
+                text_response = agent_result.get("output", {}).get("answer", "")
 
         # TTS configuration
         tts_provider = config.get("tts_provider", "openai")
@@ -2374,8 +2428,8 @@ class NodeExecutor:
             self.logger.error("Voice agent TTS failed", error=str(e))
             # Continue without audio - return text at minimum
 
-        return {
-            **agent_result,
+        result = {
+            "status": "success",
             "node_type": "voice_agent",
             "audio": audio_data,
             "audio_url": audio_url,
@@ -2384,9 +2438,19 @@ class NodeExecutor:
             "voice_id": voice_id,
         }
 
+        # Include agent result if available
+        if agent_result:
+            result["agent_output"] = agent_result.get("output", {})
+
+        # Include knowledge metadata if available
+        if knowledge_metadata:
+            result["knowledge_metadata"] = knowledge_metadata
+
+        return result
+
     async def _execute_chat_agent(self, node: WorkflowNode, context: ExecutionContext) -> Dict:
         """
-        Chat Agent node - executes a conversational AI agent with knowledge base access.
+        Chat Agent node - executes a conversational AI agent with comprehensive knowledge access.
 
         Config:
             agent_id: ID of the agent to use (optional)
@@ -2395,22 +2459,42 @@ class NodeExecutor:
             model: LLM model to use
             temperature: Model temperature (0-2)
             max_tokens: Maximum response tokens
+
+            # Knowledge Sources (NEW - comprehensive knowledge integration)
             knowledge_bases: Array of knowledge base/collection IDs to use
+            folder_sources: Array of folder IDs to search
+            url_sources: Array of URLs to scrape and use as context
+            file_sources: Array of file paths/configs to process
+            text_sources: Array of raw text blocks as knowledge
+            database_sources: Array of database query configs
+            api_sources: Array of API endpoint configs
+
+            # Chat Settings
             conversation_id: ID to maintain conversation history
             use_memory: Enable conversation memory
             memory_window: Number of turns to remember
             enable_citations: Include source citations in response
             response_style: formal, casual, technical, friendly
+            use_knowledge_graph: Enable KG-enhanced retrieval
+            max_context_length: Maximum context size (words)
         """
         config = node.config or {}
 
         # Extract chat-specific config
         knowledge_bases = config.get("knowledge_bases", [])
+        folder_sources = config.get("folder_sources", [])
+        url_sources = config.get("url_sources", [])
+        file_sources = config.get("file_sources", [])
+        text_sources = config.get("text_sources", [])
+        database_sources = config.get("database_sources", [])
+        api_sources = config.get("api_sources", [])
+
         conversation_id = config.get("conversation_id") or str(context.execution_id)
         use_memory = config.get("use_memory", True)
         memory_window = config.get("memory_window", 10)
         enable_citations = config.get("enable_citations", True)
         response_style = config.get("response_style", "friendly")
+        max_context_length = config.get("max_context_length", 8000)
 
         # Build prompt with style instruction
         style_instructions = {
@@ -2441,19 +2525,137 @@ class NodeExecutor:
             except Exception as e:
                 self.logger.warning("Failed to load conversation history", error=str(e))
 
-        # Determine if we should use RAG
-        use_rag = bool(knowledge_bases) or config.get("use_rag", False)
+        # Process additional knowledge sources using WorkflowKnowledgeService
+        additional_context = ""
+        additional_sources = []
+        knowledge_metadata = {}
 
-        if use_rag:
+        has_additional_sources = (
+            url_sources or file_sources or text_sources or
+            database_sources or api_sources
+        )
+
+        if has_additional_sources:
+            try:
+                from backend.services.workflow_knowledge_service import (
+                    WorkflowKnowledgeService,
+                    KnowledgeSourceConfig,
+                    KnowledgeSourceType,
+                )
+
+                knowledge_service = WorkflowKnowledgeService(session=context.session)
+
+                # Build list of knowledge source configs
+                source_configs = []
+
+                # URL sources
+                for url in url_sources:
+                    if isinstance(url, str):
+                        source_configs.append(KnowledgeSourceConfig(
+                            source_type=KnowledgeSourceType.URL,
+                            value=url,
+                            options={"max_length": 5000},
+                        ))
+                    elif isinstance(url, dict):
+                        source_configs.append(KnowledgeSourceConfig(
+                            source_type=KnowledgeSourceType.URL,
+                            value=url.get("url"),
+                            options=url.get("options", {}),
+                        ))
+
+                # File sources
+                for file_config in file_sources:
+                    if isinstance(file_config, str):
+                        source_configs.append(KnowledgeSourceConfig(
+                            source_type=KnowledgeSourceType.FILE,
+                            value=file_config,
+                        ))
+                    elif isinstance(file_config, dict):
+                        source_configs.append(KnowledgeSourceConfig(
+                            source_type=KnowledgeSourceType.FILE,
+                            value=file_config.get("path") or file_config.get("file_path"),
+                            options=file_config.get("options", {}),
+                        ))
+
+                # Text sources
+                for text_config in text_sources:
+                    if isinstance(text_config, str):
+                        source_configs.append(KnowledgeSourceConfig(
+                            source_type=KnowledgeSourceType.TEXT,
+                            value=text_config,
+                        ))
+                    elif isinstance(text_config, dict):
+                        source_configs.append(KnowledgeSourceConfig(
+                            source_type=KnowledgeSourceType.TEXT,
+                            value=text_config.get("content") or text_config.get("text"),
+                            options={"title": text_config.get("title", "Inline Text")},
+                        ))
+
+                # Database sources
+                for db_config in database_sources:
+                    source_configs.append(KnowledgeSourceConfig(
+                        source_type=KnowledgeSourceType.DATABASE,
+                        value=db_config,
+                    ))
+
+                # API sources
+                for api_config in api_sources:
+                    source_configs.append(KnowledgeSourceConfig(
+                        source_type=KnowledgeSourceType.API,
+                        value=api_config,
+                    ))
+
+                # Process all sources
+                if source_configs:
+                    org_id = str(context.organization_id) if context.organization_id else None
+                    additional_context, additional_sources, knowledge_metadata = await knowledge_service.process_knowledge_sources(
+                        sources=source_configs,
+                        organization_id=org_id,
+                        max_context_length=max_context_length // 2,  # Reserve half for RAG
+                    )
+
+                    self.logger.info(
+                        "Processed additional knowledge sources",
+                        source_count=len(source_configs),
+                        context_words=knowledge_metadata.get("total_words", 0),
+                    )
+
+                await knowledge_service.close()
+
+            except Exception as e:
+                self.logger.warning(
+                    "Failed to process additional knowledge sources",
+                    error=str(e),
+                )
+
+        # Determine if we should use RAG
+        use_rag = bool(knowledge_bases) or bool(folder_sources) or config.get("use_rag", False)
+
+        if use_rag or additional_context:
             # Use RAG service for knowledge-grounded response
             try:
                 from backend.services.rag import RAGService
                 rag = RAGService()
 
+                # Build query with additional context if available
+                enhanced_query = prompt
+                if additional_context:
+                    enhanced_query = f"""Additional Context (from URLs, files, text):
+{additional_context}
+
+---
+
+User Question: {prompt}"""
+
+                # Combine collection and folder filters
+                collection_filter = knowledge_bases if knowledge_bases else None
+                folder_filter = folder_sources[0] if folder_sources else None  # RAG supports single folder
+
                 rag_result = await rag.query(
-                    query=prompt,
+                    query=enhanced_query,
                     organization_id=str(context.organization_id) if context.organization_id else None,
-                    collection_filter=knowledge_bases if knowledge_bases else None,
+                    collection_filter=collection_filter,
+                    folder_filter=folder_filter,
                     enable_knowledge_graph=config.get("use_knowledge_graph", True),
                     conversation_history=conversation_history,
                     system_prompt=system_prompt,
@@ -2461,6 +2663,10 @@ class NodeExecutor:
 
                 response_text = rag_result.get("answer", "")
                 sources = rag_result.get("sources", []) if enable_citations else []
+
+                # Add additional sources to citations
+                if enable_citations and additional_sources:
+                    sources.extend(additional_sources)
 
                 # Save to conversation memory
                 if use_memory:
@@ -2487,6 +2693,9 @@ class NodeExecutor:
                     "sources": sources,
                     "conversation_id": conversation_id,
                     "knowledge_bases_used": knowledge_bases,
+                    "folder_sources_used": folder_sources,
+                    "additional_sources_used": len(additional_sources),
+                    "knowledge_metadata": knowledge_metadata,
                     "model": config.get("model", "default"),
                     "response_style": response_style,
                 }

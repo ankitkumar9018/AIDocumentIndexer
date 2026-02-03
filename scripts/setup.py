@@ -272,6 +272,31 @@ def kill_process_on_port(port: int) -> bool:
     return killed
 
 
+def clear_python_cache():
+    """Clear Python bytecode cache (__pycache__ and .pyc files).
+
+    This ensures fresh code is loaded after code changes, especially
+    when restarting services. Useful when Python bytecode may be stale.
+    """
+    # Get project root from script location
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent
+    backend_dir = project_root / 'backend'
+    try:
+        # Remove __pycache__ directories
+        for pycache_dir in backend_dir.rglob('__pycache__'):
+            if pycache_dir.is_dir():
+                shutil.rmtree(pycache_dir, ignore_errors=True)
+
+        # Remove .pyc files (in case any exist outside __pycache__)
+        for pyc_file in backend_dir.rglob('*.pyc'):
+            pyc_file.unlink(missing_ok=True)
+
+        logger.info("Cleared Python bytecode cache")
+    except Exception as e:
+        logger.warning(f"Could not fully clear Python cache: {e}")
+
+
 def is_service_running(port: int) -> bool:
     """Check if a service is running on a port."""
     system = get_platform()
@@ -1081,8 +1106,15 @@ def start_services(project_root: Path, deps: Dict) -> bool:
     # Skip slow import check - the backend health check will detect issues
     # Ray initialization can take 30+ seconds which causes timeouts
 
-    # The command now includes --host 0.0.0.0
+    # Get number of workers from environment (default 1 for dev, increase for production)
+    # Set UVICORN_WORKERS=4 for higher concurrency (supports ~200 concurrent users)
+    uvicorn_workers = int(os.environ.get('UVICORN_WORKERS', '1'))
+
+    # The command now includes --host 0.0.0.0 and optional workers
     uvicorn_cmd = ['uv', 'run', '--project', 'backend', 'uvicorn', 'backend.api.main:app', '--host', '0.0.0.0', '--port', '8000']
+    if uvicorn_workers > 1:
+        uvicorn_cmd.extend(['--workers', str(uvicorn_workers)])
+        logger.info(f"Starting backend with {uvicorn_workers} workers for higher concurrency")
 
     try:
         if system == 'windows':
@@ -1500,6 +1532,8 @@ def main():
     if args.command == 'restart':
         logger.info("Restarting all services...")
         stop_all_services(deps)
+        # Clear Python bytecode cache to ensure fresh code is loaded
+        clear_python_cache()
         logger.info("Services stopped, now starting fresh...")
 
     # 1. Check system dependencies

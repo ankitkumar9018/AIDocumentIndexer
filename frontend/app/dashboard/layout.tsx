@@ -38,6 +38,10 @@ import {
   Microscope,
   Eye,
   UserCog,
+  FileType,
+  Brain,
+  MenuIcon,
+  HelpCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -59,6 +63,7 @@ import {
 import { useUser, logout } from "@/lib/auth";
 import { ErrorBoundary } from "@/components/ui/error-recovery";
 import { reportError } from "@/lib/errors";
+import { DocumentViewerProvider } from "@/components/document-viewer";
 
 const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
@@ -66,6 +71,7 @@ const navigation = [
   { name: "Upload", href: "/dashboard/upload", icon: Upload },
   { name: "Documents", href: "/dashboard/documents", icon: FolderOpen },
   { name: "Create", href: "/dashboard/create", icon: PenTool },
+  { name: "Intelligence", href: "/dashboard/intelligence", icon: Brain },
   { name: "Reports", href: "/dashboard/reports", icon: FileSpreadsheet },
   { name: "Research", href: "/dashboard/research", icon: Microscope },
   { name: "Skills", href: "/dashboard/skills", icon: Zap },
@@ -78,6 +84,7 @@ const navigation = [
   { name: "Knowledge Graph", href: "/dashboard/knowledge-graph", icon: Network },
   { name: "Web Scraper", href: "/dashboard/scraper", icon: Globe },
   { name: "File Watcher", href: "/dashboard/watcher", icon: Eye },
+  { name: "PDF Tools", href: "/dashboard/tools/pdf", icon: FileType },
   { name: "Costs", href: "/dashboard/costs", icon: DollarSign },
   { name: "LLM Gateway", href: "/dashboard/gateway", icon: Key },
   { name: "Privacy", href: "/dashboard/privacy", icon: Lock },
@@ -89,6 +96,7 @@ const adminNavigation = [
   { name: "Users", href: "/dashboard/admin/users", icon: Users },
   { name: "Agents", href: "/dashboard/admin/agents", icon: Bot },
   { name: "Audit Logs", href: "/dashboard/admin/audit-logs", icon: Shield },
+  { name: "Menu Config", href: "/dashboard/admin/menu", icon: MenuIcon },
   { name: "Settings", href: "/dashboard/admin/settings", icon: Settings },
 ];
 
@@ -98,6 +106,7 @@ const pageTitles: Record<string, string> = {
   "/dashboard/upload": "Upload",
   "/dashboard/documents": "Documents",
   "/dashboard/create": "Create",
+  "/dashboard/intelligence": "Intelligence Hub",
   "/dashboard/reports": "Sparkpages",
   "/dashboard/research": "Deep Research",
   "/dashboard/skills": "Skills Marketplace",
@@ -109,12 +118,14 @@ const pageTitles: Record<string, string> = {
   "/dashboard/knowledge-graph": "Knowledge Graph",
   "/dashboard/scraper": "Web Scraper",
   "/dashboard/watcher": "File Watcher",
+  "/dashboard/tools/pdf": "PDF Tools",
   "/dashboard/costs": "Costs",
   "/dashboard/gateway": "LLM Gateway",
   "/dashboard/privacy": "Privacy & Data",
   "/dashboard/admin/users": "Users",
   "/dashboard/admin/agents": "Agent Management",
   "/dashboard/admin/audit-logs": "Audit Logs",
+  "/dashboard/admin/menu": "Menu Configuration",
   "/dashboard/admin/settings": "Settings",
   "/dashboard/admin/organizations": "Organizations",
   "/dashboard/sync": "Sync Clients",
@@ -142,6 +153,7 @@ export default function DashboardLayout({
   const isAdmin = user.role === "admin";
 
   return (
+    <DocumentViewerProvider>
     <div className="min-h-screen bg-background">
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
@@ -334,5 +346,6 @@ export default function DashboardLayout({
       {/* Global Keyboard Shortcuts Dialog */}
       <KeyboardShortcutsDialog />
     </div>
+    </DocumentViewerProvider>
   );
 }

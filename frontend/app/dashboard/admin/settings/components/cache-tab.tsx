@@ -55,9 +55,26 @@ interface CacheStats {
   total_memory_mb?: number;
 }
 
+interface CacheMemoryStats {
+  name: string;
+  entries: number;
+  max_entries: number;
+  utilization_percent: number;
+  estimated_memory_mb: number;
+  has_lru: boolean;
+}
+
+interface AllCachesMemoryStats {
+  total_memory_mb: number;
+  process_memory_mb: number;
+  caches: CacheMemoryStats[];
+  warnings: string[];
+}
+
 export function CacheTab() {
   const { data: session } = useSession();
   const [stats, setStats] = useState<CacheStats | null>(null);
+  const [memoryStats, setMemoryStats] = useState<AllCachesMemoryStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [clearing, setClearing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -109,11 +126,32 @@ export function CacheTab() {
     }
   }, [accessToken]);
 
+  const fetchMemoryStats = useCallback(async () => {
+    if (!accessToken) return;
+    try {
+      const response = await fetch(`${API_BASE}/cache/memory/stats`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setMemoryStats(data);
+      }
+    } catch (e) {
+      console.error("Failed to fetch memory stats:", e);
+    }
+  }, [accessToken]);
+
   useEffect(() => {
     fetchStats();
-    const interval = setInterval(fetchStats, 30000); // Auto-refresh every 30s
+    fetchMemoryStats();
+    const interval = setInterval(() => {
+      fetchStats();
+      fetchMemoryStats();
+    }, 30000); // Auto-refresh every 30s
     return () => clearInterval(interval);
-  }, [fetchStats]);
+  }, [fetchStats, fetchMemoryStats]);
 
   const clearCache = async (cacheType?: string) => {
     if (!accessToken) return;
@@ -136,11 +174,39 @@ export function CacheTab() {
       if (response.ok) {
         setSuccess(`${target} cache cleared successfully`);
         await fetchStats();
+        await fetchMemoryStats();
       } else {
         setError(`Failed to clear ${target} cache`);
       }
     } catch {
       setError(`Failed to clear ${target} cache`);
+    } finally {
+      setClearing(null);
+    }
+  };
+
+  const clearAllCaches = async () => {
+    if (!accessToken) return;
+    setClearing("memory-all");
+    setError(null);
+    setSuccess(null);
+    try {
+      const response = await fetch(`${API_BASE}/cache/memory/clear-all`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setSuccess(`Cleared ${data.total_entries_cleared} entries. Memory: ${data.memory_after_mb}MB`);
+        await fetchStats();
+        await fetchMemoryStats();
+      } else {
+        setError("Failed to clear all caches");
+      }
+    } catch {
+      setError("Failed to clear all caches");
     } finally {
       setClearing(null);
     }
@@ -247,6 +313,116 @@ export function CacheTab() {
           <CheckCircle className="h-4 w-4" />
           <AlertDescription>{success}</AlertDescription>
         </Alert>
+      )}
+
+      {/* Memory Monitor Card */}
+      {memoryStats && (
+        <Card className="border-2 border-primary/20">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <Activity className="h-5 w-5 text-primary" />
+                  Memory Monitor
+                </CardTitle>
+                <CardDescription>
+                  Real-time memory usage across all caches. Clear caches if memory usage is high.
+                </CardDescription>
+              </div>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="destructive" size="sm">
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Clear ALL Caches
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Clear ALL Memory Caches?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This will clear ALL caches: embeddings, sessions, queries, and generative cache.
+                      This frees memory but queries will be slower until caches rebuild.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={clearAllCaches}>
+                      {clearing === "memory-all" ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                      Clear All & Free Memory
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Memory Summary */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="p-3 bg-muted rounded-lg">
+                <p className="text-xs text-muted-foreground">Process Memory</p>
+                <p className={`text-xl font-bold ${memoryStats.process_memory_mb > 4000 ? "text-red-600" : memoryStats.process_memory_mb > 2000 ? "text-yellow-600" : "text-green-600"}`}>
+                  {memoryStats.process_memory_mb.toFixed(0)} MB
+                </p>
+              </div>
+              <div className="p-3 bg-muted rounded-lg">
+                <p className="text-xs text-muted-foreground">Cache Memory</p>
+                <p className="text-xl font-bold">{memoryStats.total_memory_mb.toFixed(0)} MB</p>
+              </div>
+              <div className="p-3 bg-muted rounded-lg">
+                <p className="text-xs text-muted-foreground">Active Caches</p>
+                <p className="text-xl font-bold">{memoryStats.caches.length}</p>
+              </div>
+              <div className="p-3 bg-muted rounded-lg">
+                <p className="text-xs text-muted-foreground">Status</p>
+                <p className={`text-xl font-bold ${memoryStats.warnings.length > 0 ? "text-yellow-600" : "text-green-600"}`}>
+                  {memoryStats.warnings.length > 0 ? "⚠️ Warnings" : "✓ Healthy"}
+                </p>
+              </div>
+            </div>
+
+            {/* Warnings */}
+            {memoryStats.warnings.length > 0 && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>
+                  <ul className="list-disc list-inside">
+                    {memoryStats.warnings.map((warning, i) => (
+                      <li key={i}>{warning}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {/* Individual Cache Stats */}
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Cache Utilization</p>
+              {memoryStats.caches.map((cache) => (
+                <div key={cache.name} className="flex items-center gap-3">
+                  <span className="text-sm w-36 truncate">{cache.name}</span>
+                  <div className="flex-1 h-3 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${
+                        cache.utilization_percent > 90
+                          ? "bg-red-500"
+                          : cache.utilization_percent > 70
+                          ? "bg-yellow-500"
+                          : "bg-green-500"
+                      }`}
+                      style={{ width: `${Math.min(cache.utilization_percent, 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-xs text-muted-foreground w-24 text-right">
+                    {cache.entries.toLocaleString()} / {cache.max_entries.toLocaleString()}
+                  </span>
+                  <span className="text-xs w-16 text-right">
+                    {cache.estimated_memory_mb.toFixed(1)} MB
+                  </span>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Cache Tier Cards */}

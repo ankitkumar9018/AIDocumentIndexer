@@ -505,6 +505,9 @@ class User(Base, UUIDMixin, TimestampMixin):
     organization_memberships: Mapped[List["OrganizationMember"]] = relationship(
         "OrganizationMember", back_populates="user", cascade="all, delete-orphan"
     )
+    link_groups: Mapped[List["LinkGroup"]] = relationship(
+        "LinkGroup", back_populates="user", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<User(email='{self.email}', tier='{self.access_tier.name if self.access_tier else None}')>"
@@ -1764,6 +1767,12 @@ class Skill(Base, UUIDMixin, TimestampMixin):
     avg_execution_time_ms: Mapped[Optional[int]] = mapped_column(Integer)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
+    # Publishing for external access
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False)
+    public_slug: Mapped[Optional[str]] = mapped_column(String(100), unique=True, index=True)
+    publish_config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Config: {"rate_limit": 100, "allowed_domains": ["*"], "require_api_key": false, "branding": {...}}
+
     # Relationships
     user: Mapped[Optional["User"]] = relationship("User")
     organization: Mapped[Optional["Organization"]] = relationship("Organization")
@@ -1778,6 +1787,8 @@ class Skill(Base, UUIDMixin, TimestampMixin):
         Index("idx_skills_category", "category"),
         Index("idx_skills_public", "is_public"),
         Index("idx_skills_builtin", "is_builtin"),
+        Index("idx_skills_published", "is_published"),
+        Index("idx_skills_public_slug", "public_slug"),
     )
 
     def __repr__(self) -> str:
@@ -3397,6 +3408,12 @@ class Workflow(Base, UUIDMixin, TimestampMixin):
     config: Mapped[Optional[dict]] = mapped_column(JSONType())
     # Stores: timeout, retry_policy, notifications, etc.
 
+    # Publishing for external access
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False)
+    public_slug: Mapped[Optional[str]] = mapped_column(String(100), unique=True, index=True)
+    publish_config: Mapped[Optional[dict]] = mapped_column(JSONType())
+    # Config: {"rate_limit": 100, "allowed_domains": ["*"], "require_api_key": false, "input_schema": [...]}
+
     # Ownership
     created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID(),
@@ -3426,6 +3443,8 @@ class Workflow(Base, UUIDMixin, TimestampMixin):
         Index("idx_workflows_active", "is_active"),
         Index("idx_workflows_trigger", "trigger_type"),
         Index("idx_workflows_created_by", "created_by_id"),
+        Index("idx_workflows_published", "is_published"),
+        Index("idx_workflows_public_slug", "public_slug"),
     )
 
     def __repr__(self) -> str:
@@ -4750,6 +4769,167 @@ class AnalyzedImage(Base, UUIDMixin, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<AnalyzedImage(hash={self.image_hash[:16]}..., type={self.element_type}, uses={self.usage_count})>"
+
+
+# =============================================================================
+# Link Groups (for web scraping whitelist management)
+# =============================================================================
+
+class LinkGroup(Base, UUIDMixin, TimestampMixin):
+    """
+    Link groups for organizing saved URLs by category.
+
+    Groups like "Marketing", "Finance", "Research" help users organize
+    their whitelisted links and use them with web scraping features.
+    """
+    __tablename__ = "link_groups"
+
+    # Group info
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    color: Mapped[Optional[str]] = mapped_column(String(20))  # hex color for UI
+    icon: Mapped[Optional[str]] = mapped_column(String(50))  # icon name
+
+    # Organization/User scope
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # Settings
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False)  # shared with org
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="link_groups")
+    organization: Mapped[Optional["Organization"]] = relationship("Organization")
+    links: Mapped[List["SavedLink"]] = relationship(
+        "SavedLink",
+        back_populates="group",
+        cascade="all, delete-orphan",
+    )
+
+    # Unique constraint: name per user
+    __table_args__ = (
+        Index("idx_link_groups_user_name", "user_id", "name", unique=True),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LinkGroup(name='{self.name}', links={len(self.links) if self.links else 0})>"
+
+
+class SavedLink(Base, UUIDMixin, TimestampMixin):
+    """
+    Saved/whitelisted links for web scraping.
+
+    Links can belong to a group and track scraping history.
+    """
+    __tablename__ = "saved_links"
+
+    # Link info
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String(500))
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    favicon_url: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Group association
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("link_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Owner
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Scraping state
+    last_scraped_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_scrape_status: Mapped[Optional[str]] = mapped_column(String(50))  # success, failed, pending
+    scrape_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_content_hash: Mapped[Optional[str]] = mapped_column(String(64))  # SHA-256
+
+    # Content snapshot (optional cached data)
+    cached_title: Mapped[Optional[str]] = mapped_column(String(500))
+    cached_word_count: Mapped[Optional[int]] = mapped_column(Integer)
+    cached_content_preview: Mapped[Optional[str]] = mapped_column(Text)  # first 500 chars
+
+    # Settings
+    auto_scrape: Mapped[bool] = mapped_column(Boolean, default=False)  # include in scheduled scrapes
+    scrape_frequency: Mapped[Optional[str]] = mapped_column(String(50))  # daily, weekly, monthly
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    tags: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+
+    # Relationships
+    group: Mapped["LinkGroup"] = relationship("LinkGroup", back_populates="links")
+    user: Mapped["User"] = relationship("User")
+
+    def __repr__(self) -> str:
+        return f"<SavedLink(url='{self.url[:50]}...', group={self.group_id})>"
+
+
+class ScrapedContentHistory(Base, UUIDMixin, TimestampMixin):
+    """
+    History of scraped content for tracking changes over time.
+
+    When a link is scraped multiple times, this tracks each version
+    to detect content changes.
+    """
+    __tablename__ = "scraped_content_history"
+
+    # Link reference
+    saved_link_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(),
+        ForeignKey("saved_links.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Scrape info
+    scraped_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
+    status: Mapped[str] = mapped_column(String(50), nullable=False)  # success, failed
+
+    # Content
+    title: Mapped[Optional[str]] = mapped_column(String(500))
+    content: Mapped[Optional[str]] = mapped_column(Text)  # full content
+    word_count: Mapped[int] = mapped_column(Integer, default=0)
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64))
+
+    # Extracted data
+    links_found: Mapped[int] = mapped_column(Integer, default=0)
+    images_found: Mapped[int] = mapped_column(Integer, default=0)
+    page_metadata: Mapped[Optional[dict]] = mapped_column(JSONType())  # page meta tags
+
+    # Error info (if failed)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Processing
+    indexed_to_rag: Mapped[bool] = mapped_column(Boolean, default=False)
+    entities_extracted: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Relationship
+    saved_link: Mapped["SavedLink"] = relationship("SavedLink")
+
+    def __repr__(self) -> str:
+        return f"<ScrapedContentHistory(link={self.saved_link_id}, status={self.status}, at={self.scraped_at})>"
+
+
+# Add relationship to User model (append to existing User class)
+# Note: This needs to be added via the relationship() call after User is defined
+# We'll add a backref pattern instead
 
 
 # =============================================================================

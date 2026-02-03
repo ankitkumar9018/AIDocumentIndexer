@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIDocumentIndexer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <img src="../../assets/icons/icon-32.png" alt="Logo" class="logo">
+      <h1>AIDocumentIndexer</h1>
+    </header>
+
+    <div class="search-container">
+      <input
+        type="text"
+        id="search-input"
+        placeholder="Search your knowledge base..."
+        autocomplete="off"
+      >
+      <button id="search-btn" class="icon-btn" title="Search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+      </button>
+    </div>
+
+    <div id="search-results" class="search-results hidden"></div>
+
+    <div class="actions">
+      <button id="capture-btn" class="action-btn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+          <polyline points="17 21 17 13 7 13 7 21"></polyline>
+          <polyline points="7 3 7 8 15 8"></polyline>
+        </svg>
+        Save This Page
+      </button>
+
+      <button id="chat-btn" class="action-btn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+        </svg>
+        Open Chat
+      </button>
+    </div>
+
+    <div id="status" class="status">
+      <span id="connection-status" class="status-dot disconnected"></span>
+      <span id="connection-text">Connecting...</span>
+    </div>
+
+    <footer class="footer">
+      <a href="#" id="settings-link">Settings</a>
+      <span class="separator">|</span>
+      <a href="#" id="history-link">History</a>
+    </footer>
+  </div>
+
+  <script src="index.js" type="module"></script>
+</body>
+</html>
