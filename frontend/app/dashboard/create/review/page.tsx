@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -9,7 +9,7 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { ContentReviewPanel } from '@/components/generation';
 
-export default function ContentReviewPage() {
+function ContentReviewPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -108,5 +108,22 @@ export default function ContentReviewPage() {
         onCancel={handleCancel}
       />
     </div>
+  );
+}
+
+export default function ContentReviewPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center min-h-[60vh]">
+          <div className="text-center">
+            <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4 text-muted-foreground" />
+            <p className="text-muted-foreground">Loading review session...</p>
+          </div>
+        </div>
+      }
+    >
+      <ContentReviewPageContent />
+    </Suspense>
   );
 }

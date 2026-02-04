@@ -33,6 +33,7 @@ import {
   Square,
   Power,
 } from "lucide-react";
+import { api } from "@/lib/api/client";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
@@ -87,6 +88,14 @@ export function RayTab() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [hwInfo, setHwInfo] = useState<{
+    cpu_count: number;
+    total_memory_gb: number;
+    gpu_type: string;
+    has_cuda: boolean;
+    has_mps: boolean;
+  } | null>(null);
 
   const accessToken = (session as any)?.accessToken as string | undefined;
 
@@ -233,6 +242,34 @@ export function RayTab() {
 
   const updateSetting = (key: keyof RaySettings, value: any) => {
     setSettings((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const detectHardware = async () => {
+    setDetecting(true);
+    setError(null);
+    try {
+      const { data } = await api.get<{ hardware: any; recommended: Record<string, number> }>("/diagnostics/hardware/recommended-settings");
+      setHwInfo(data.hardware);
+      // Fill Ray-specific sliders with recommended values
+      const rec = data.recommended;
+      if (rec["processing.ray_num_cpus"] !== undefined) {
+        updateSetting("processing.ray_num_cpus", rec["processing.ray_num_cpus"]);
+      }
+      if (rec["processing.ray_num_gpus"] !== undefined) {
+        updateSetting("processing.ray_num_gpus", rec["processing.ray_num_gpus"]);
+      }
+      if (rec["processing.ray_memory_limit_gb"] !== undefined) {
+        updateSetting("processing.ray_memory_limit_gb", rec["processing.ray_memory_limit_gb"]);
+      }
+      if (rec["processing.ray_num_workers"] !== undefined) {
+        updateSetting("processing.ray_num_workers", rec["processing.ray_num_workers"]);
+      }
+      setSuccess(`Detected: ${data.hardware.cpu_count} CPUs, ${data.hardware.total_memory_gb} GB RAM, ${data.hardware.gpu_type === "cpu" ? "No GPU" : data.hardware.gpu_type.toUpperCase() + " GPU"}`);
+    } catch {
+      setError("Failed to detect hardware");
+    } finally {
+      setDetecting(false);
+    }
   };
 
   const getStatusColor = () => {
@@ -450,8 +487,32 @@ export function RayTab() {
         {/* Resource Limits */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Resource Limits</CardTitle>
-            <CardDescription>Control resource allocation</CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-base">Resource Limits</CardTitle>
+                <CardDescription>Control resource allocation</CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={detectHardware}
+                disabled={detecting}
+              >
+                {detecting ? (
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <Cpu className="h-4 w-4 mr-1" />
+                )}
+                Auto-detect
+              </Button>
+            </div>
+            {hwInfo && (
+              <div className="flex gap-3 mt-2 text-xs text-muted-foreground">
+                <span>{hwInfo.cpu_count} CPUs</span>
+                <span>{hwInfo.total_memory_gb} GB RAM</span>
+                <span>{hwInfo.gpu_type === "cpu" ? "No GPU" : hwInfo.gpu_type.toUpperCase()}</span>
+              </div>
+            )}
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="space-y-3">

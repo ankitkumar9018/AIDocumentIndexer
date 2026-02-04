@@ -22,6 +22,7 @@ interface DocumentInfo {
   name: string;
   type: string;
   initialPage?: number;
+  documentData?: any; // Full document object for metadata sidebar
 }
 
 interface DocumentViewerContextType {
@@ -66,6 +67,7 @@ export function DocumentViewerProvider({ children }: DocumentViewerProviderProps
           documentName={document.name}
           documentType={document.type}
           initialPage={document.initialPage}
+          documentData={document.documentData}
           onClose={closeDocument}
         />
       )}

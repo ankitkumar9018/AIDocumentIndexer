@@ -76,7 +76,7 @@ export default function ReportsPage() {
     try {
       setLoading(true);
       setError(null);
-      const response = await api.get("/api/v1/reports/list");
+      const response = await api.get<{ reports: any[] }>("/api/v1/reports/list");
 
       if (response.data?.reports) {
         // Transform API response to frontend Report type
@@ -120,7 +120,7 @@ export default function ReportsPage() {
 
   const toggleStar = async (id: string) => {
     try {
-      const response = await api.patch(`/api/v1/reports/${id}/star`);
+      const response = await api.patch<{ is_starred: boolean }>(`/api/v1/reports/${id}/star`);
       if (response.data) {
         setReports((prev) =>
           prev.map((r) => (r.id === id ? { ...r, starred: response.data.is_starred } : r))

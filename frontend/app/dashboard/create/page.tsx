@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import {
@@ -119,7 +119,7 @@ interface OutlineSection {
   approved: boolean;
 }
 
-export default function CreatePage() {
+function CreatePageContent() {
   const { status } = useSession();
   const isAuthenticated = status === "authenticated";
   const searchParams = useSearchParams();
@@ -365,7 +365,7 @@ export default function CreatePage() {
         style_notes: moodBoardStyleNotes || undefined,
       });
 
-      const data = response.data;
+      const data = response.data as any;
 
       setGeneratedMoodBoard({
         id: data.id,
@@ -3005,5 +3005,19 @@ export default function CreatePage() {
         />
       )}
     </div>
+  );
+}
+
+export default function CreatePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center min-h-[60vh]">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        </div>
+      }
+    >
+      <CreatePageContent />
+    </Suspense>
   );
 }

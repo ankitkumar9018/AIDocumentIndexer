@@ -259,6 +259,74 @@ def generate_secret_key() -> str:
     return secrets.token_urlsafe(64)
 
 
+def clear_python_cache(project_root: Optional[Path] = None):
+    """Clear Python bytecode cache (__pycache__ and .pyc files).
+
+    Ensures fresh code is loaded after deployments or code changes.
+    """
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
+    backend_dir = project_root / 'backend'
+    try:
+        for pycache_dir in backend_dir.rglob('__pycache__'):
+            if pycache_dir.is_dir():
+                shutil.rmtree(pycache_dir, ignore_errors=True)
+        for pyc_file in backend_dir.rglob('*.pyc'):
+            pyc_file.unlink(missing_ok=True)
+        logger.info("Cleared Python bytecode cache")
+    except Exception as e:
+        logger.warning(f"Could not fully clear Python cache: {e}")
+
+
+def start_background_process(
+    cmd: List[str],
+    log_file: Optional[Path] = None,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> Optional[subprocess.Popen]:
+    """Start a process in the background (cross-platform).
+
+    If log_file is provided, stdout/stderr are written there.
+    Otherwise, stdout/stderr go to DEVNULL.
+
+    Returns the Popen object, or None on failure.
+    """
+    system = get_platform()
+    try:
+        if system == 'windows':
+            return subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                env=env,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+        else:
+            if log_file:
+                f = open(log_file, 'w')
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                f.close()  # Child process has its own fd after fork
+                return proc
+            else:
+                return subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+    except Exception as e:
+        logger.error(f"Failed to start process {cmd[0]}: {e}")
+        return None
+
+
 # ============================================================================
 # SECURITY CHECKS
 # ============================================================================
@@ -654,35 +722,25 @@ def start_gunicorn(
     prod_env['DEV_MODE'] = 'false'
     prod_env['DEBUG'] = 'false'
 
-    try:
-        subprocess.Popen(
-            cmd,
-            cwd=str(project_root),
-            env=prod_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
-
-        # Wait and verify with retry (backend can take 30-60s with Ray)
-        host_str, port_str = bind.rsplit(':', 1)
-        port_num = int(port_str)
-        max_retries = 12  # 12 * 5s = 60s max wait
-        for i in range(max_retries):
-            time.sleep(5)
-            if is_service_running(port_num, host_str if host_str != '0.0.0.0' else 'localhost'):
-                logger.info(f"Gunicorn started successfully on {bind}")
-                logger.info(f"Logs: {log_dir}/gunicorn-*.log")
-                return True
-            if i < max_retries - 1:
-                logger.debug(f"Waiting for Gunicorn... ({i+1}/{max_retries})")
-
-        logger.warning("Gunicorn started but may not be responding yet - check logs")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to start Gunicorn: {e}")
+    proc = start_background_process(cmd, cwd=str(project_root), env=prod_env)
+    if proc is None:
         return False
+
+    # Wait and verify with retry (backend can take 30-60s with Ray)
+    host_str, port_str = bind.rsplit(':', 1)
+    port_num = int(port_str)
+    max_retries = 12  # 12 * 5s = 60s max wait
+    for i in range(max_retries):
+        time.sleep(5)
+        if is_service_running(port_num, host_str if host_str != '0.0.0.0' else 'localhost'):
+            logger.info(f"Gunicorn started successfully on {bind}")
+            logger.info(f"Logs: {log_dir}/gunicorn-*.log")
+            return True
+        if i < max_retries - 1:
+            logger.debug(f"Waiting for Gunicorn... ({i+1}/{max_retries})")
+
+    logger.warning("Gunicorn started but may not be responding yet - check logs")
+    return True
 
 
 def start_frontend_prod(project_root: Path) -> bool:
@@ -692,65 +750,50 @@ def start_frontend_prod(project_root: Path) -> bool:
     log_dir.mkdir(exist_ok=True)
 
     logger.info("Starting frontend in production mode...")
+    frontend_log = log_dir / 'frontend.log'
 
-    try:
-        with open(log_dir / 'frontend.log', 'w') as log_file:
-            subprocess.Popen(
-                ['npm', 'run', 'start'],
-                cwd=str(frontend_dir),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True
-            )
-
-        # Wait with retry for frontend to start
-        max_retries = 6  # 6 * 5s = 30s max wait
-        for i in range(max_retries):
-            time.sleep(5)
-            if is_service_running(3000):
-                logger.info("Frontend started on http://localhost:3000")
-                logger.info(f"Logs: {log_dir}/frontend.log")
-                return True
-            if i < max_retries - 1:
-                logger.debug(f"Waiting for frontend... ({i+1}/{max_retries})")
-
-        logger.warning("Frontend started but may not be responding yet - check logs")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to start frontend: {e}")
+    proc = start_background_process(['npm', 'run', 'start'], log_file=frontend_log, cwd=str(frontend_dir))
+    if proc is None:
         return False
+
+    # Wait with retry for frontend to start
+    max_retries = 6  # 6 * 5s = 30s max wait
+    for i in range(max_retries):
+        time.sleep(5)
+        if is_service_running(3000):
+            logger.info("Frontend started on http://localhost:3000")
+            logger.info(f"Logs: {frontend_log}")
+            return True
+        if i < max_retries - 1:
+            logger.debug(f"Waiting for frontend... ({i+1}/{max_retries})")
+
+    logger.warning("Frontend started but may not be responding yet - check logs")
+    return True
 
 
 def start_celery_worker(project_root: Path) -> bool:
     """Start Celery worker for background tasks."""
     log_dir = project_root / 'logs'
     log_dir.mkdir(exist_ok=True)
+    celery_log = log_dir / 'celery.log'
 
     logger.info("Starting Celery worker...")
 
     celery_env = os.environ.copy()
     celery_env['PYTHONPATH'] = str(project_root)
 
-    try:
-        with open(log_dir / 'celery.log', 'w') as log_file:
-            subprocess.Popen(
-                ['uv', 'run', 'celery', '-A', 'backend.services.task_queue',
-                 'worker', '--loglevel=info', '--concurrency=4'],
-                cwd=str(project_root),
-                env=celery_env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=True
-            )
-
-        logger.info("Celery worker started")
-        logger.info(f"Logs: {log_dir}/celery.log")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to start Celery: {e}")
+    proc = start_background_process(
+        ['uv', 'run', 'celery', '-A', 'backend.services.task_queue',
+         'worker', '--loglevel=info', '--concurrency=4'],
+        log_file=celery_log,
+        cwd=str(project_root),
+        env=celery_env,
+    )
+    if proc is None:
         return False
+
+    logger.info(f"Celery worker started (logs: {celery_log})")
+    return True
 
 
 # ============================================================================
@@ -1037,11 +1080,14 @@ def main():
         print("\n\033[0;32mAll production services stopped.\033[0m\n")
         sys.exit(0)
 
-    # Handle restart command (stop then continue with start)
+    # Handle restart command (log message before proceeding with start flow)
     if args.command == 'restart':
         logger.info("Restarting all production services...")
-        stop_all_services()
-        logger.info("Services stopped, now starting fresh...")
+
+    # Stop existing services (ports, Celery, Gunicorn, Ray) and clear Python cache
+    logger.info("Stopping existing services...")
+    stop_all_services()
+    clear_python_cache(project_root)
 
     # Load environment
     env_path = project_root / 'backend' / '.env'

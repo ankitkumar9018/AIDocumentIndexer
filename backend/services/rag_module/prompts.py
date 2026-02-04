@@ -285,13 +285,16 @@ CONFIDENCE: [high/medium/low]"""
 
 LLAMA_SMALL_SYSTEM_PROMPT = """You are a helpful document assistant.
 
-CRITICAL RULES:
-1. Answer ONLY from the provided context
+CRITICAL RULES (you MUST follow these):
+1. Answer ONLY from the provided context - do NOT use your training knowledge
 2. If you don't know the answer, say "I don't have this information in the documents"
-3. NEVER make up or guess information - this is very important
-4. Always cite the document name for each fact
-5. Be concise - prefer short, direct answers
-6. Think step-by-step before answering complex questions
+3. NEVER make up, guess, or infer information that is not explicitly stated in the context
+4. When the context states a specific number, name, date, or fact, use EXACTLY that value - do not substitute with different values from your training data
+5. Always cite the document name for each fact
+6. Be concise - prefer short, direct answers
+7. Think step-by-step before answering complex questions
+
+IMPORTANT: Your training data may contain different information than the documents. ALWAYS trust the document context over your training knowledge. If the documents say "nine" but you remember "seven", use "nine" because the documents are the authoritative source.
 
 OUTPUT FORMAT:
 - Start with your direct answer
@@ -1255,6 +1258,55 @@ def enhance_agent_system_prompt(
 
 
 # =============================================================================
+# Intelligence Level Grounding Instructions
+# =============================================================================
+
+INTELLIGENCE_GROUNDING = {
+    "maximum": """
+MAXIMUM INTELLIGENCE MODE - STRICT DOCUMENT GROUNDING:
+- Your answer MUST be based EXCLUSIVELY on the document excerpts provided below
+- Do NOT use ANY prior knowledge or training data to fill in details
+- If the documents state a specific number, name, date, or fact, use EXACTLY that value
+- If information is not in the provided context, say "This information is not in the documents"
+- Double-check every claim against the actual text before including it
+- When listing items, count them directly from the context - do not rely on memory
+- Quote exact phrases from the documents when stating key facts
+""",
+    "enhanced": """
+ENHANCED INTELLIGENCE MODE:
+- Base your answer primarily on the provided document context
+- Do not substitute facts from your training data when the documents provide specific information
+- Cite specific documents for each claim
+- If the documents state a number or fact, use exactly that value
+""",
+    "standard": "",
+    "basic": "",
+}
+
+
+def get_intelligence_grounding(level: Optional[str] = None) -> str:
+    """Get grounding instruction addendum for the given intelligence level."""
+    if not level:
+        return ""
+    return INTELLIGENCE_GROUNDING.get(level, "")
+
+
+INTELLIGENCE_TOP_K = {
+    "basic": 5,
+    "standard": 8,
+    "enhanced": 15,
+    "maximum": 20,
+}
+
+
+def get_intelligence_top_k(level: Optional[str] = None) -> Optional[int]:
+    """Get recommended top_k for the given intelligence level. Returns None to use default."""
+    if not level:
+        return None
+    return INTELLIGENCE_TOP_K.get(level)
+
+
+# =============================================================================
 # Language Support
 # =============================================================================
 
@@ -1274,6 +1326,7 @@ LANGUAGE_NAMES = {
     "ko": "Korean",
     "ar": "Arabic",
     "hi": "Hindi",
+    "hi-latn": "Hinglish",
 }
 
 
@@ -1295,25 +1348,28 @@ def get_language_instruction(language: str, auto_detect: bool = False) -> str:
     """
     if language == "en" and auto_detect:
         # Auto-detect mode: respond in the same language as the question
-        # Make it VERY explicit for smaller models that don't follow instructions well
         return """
-CRITICAL LANGUAGE AND SCRIPT REQUIREMENT (MUST FOLLOW):
-1. FIRST, identify the language AND SCRIPT of the USER'S QUESTION (not the documents!)
-2. THEN, respond ONLY in that SAME language AND SAME SCRIPT as the user's question
-3. IMPORTANT about Indian languages:
-   - Hinglish = Hindi written in LATIN/ROMAN script (like "kya hai", "accha hai") - respond in Latin script
-   - If user writes in Devanagari (Hindi script like क्या), respond in Devanagari
-   - NEVER respond in Gujarati, Bengali, Tamil, or other scripts unless user used them!
-4. If the user asks in English, respond in English
-5. If the user asks in German, respond in German
-6. IGNORE the language of source documents - they may be in any language
-7. TRANSLATE all information FROM documents INTO the user's question language AND script
-
-Example: "kya marketing ke baare mea hai?" - Hinglish (Latin script), respond like: "Haan, marketing ke baare mein..."
+CRITICAL LANGUAGE REQUIREMENT:
+You MUST respond in the EXACT SAME language as the user's question.
+- Detect the language of the user's question FIRST
+- Your ENTIRE response must be in that detected language — no exceptions
+- The source documents may be in any language — always TRANSLATE information into the question's language
+- Do NOT mix languages. If the question is in English, every word of your response must be in English.
+- If the question mixes languages (e.g. code-switching), you may mirror that style
 """
 
     if language == "en":
         return ""
+
+    if language == "hi-latn":
+        return """
+LANGUAGE REQUIREMENT:
+- Your response must be in Hinglish — Hindi written in Latin/Roman script (NOT Devanagari)
+- Example: "Yeh document quarterly revenue growth ke baare mein hai"
+- Mix Hindi words with English technical terms naturally
+- The source documents may be in ANY language — translate information into Hinglish
+- Do NOT use Devanagari script — use only Latin/Roman characters
+"""
 
     language_name = LANGUAGE_NAMES.get(language, "English")
     return f"""

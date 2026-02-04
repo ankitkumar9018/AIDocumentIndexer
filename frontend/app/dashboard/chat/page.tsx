@@ -199,6 +199,7 @@ const CHAT_LANGUAGES = [
   { code: "ko", name: "Korean" },
   { code: "ar", name: "Arabic" },
   { code: "hi", name: "Hindi" },
+  { code: "hi-latn", name: "Hinglish" },
 ];
 
 // Temp document interface matching backend response
@@ -2672,7 +2673,7 @@ export default function ChatPage() {
                                   <SelectItem value="same">Same as RAG model</SelectItem>
                                   {providersData.providers
                                     .filter((p: { is_active: boolean }) => p.is_active)
-                                    .map((provider: { id: string; name: string; default_chat_model?: string }) => (
+                                    .map((provider: { id: string; name: string; default_chat_model?: string | null }) => (
                                       <SelectItem key={provider.id} value={provider.id}>
                                         {provider.name} ({provider.default_chat_model || "default"})
                                       </SelectItem>

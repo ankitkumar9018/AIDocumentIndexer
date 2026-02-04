@@ -215,28 +215,26 @@ class SlackEventHandler:
                 with open(temp_path, "wb") as f:
                     f.write(file_content)
 
-                # Process through document upload service
-                from backend.services.document_processor import get_document_processor
+                # Process through document pipeline
+                from backend.services.pipeline import DocumentPipeline
 
-                processor = get_document_processor()
+                pipeline = DocumentPipeline()
 
                 # Create a unique collection for Slack uploads if user context available
                 collection_name = f"slack_uploads_{user}" if user else "slack_uploads"
 
                 # Process the document
-                async with async_session_context() as db:
-                    result = await processor.process_file(
-                        file_path=temp_path,
-                        filename=filename,
-                        collection_name=collection_name,
-                        db=db,
-                        metadata={
-                            "source": "slack",
-                            "channel_id": channel,
-                            "user_id": user,
-                            "file_id": file_id,
-                        },
-                    )
+                result = await pipeline.process_document(
+                    file_path=temp_path,
+                    metadata={
+                        "original_filename": filename,
+                        "source": "slack",
+                        "channel_id": channel,
+                        "user_id": user,
+                        "file_id": file_id,
+                    },
+                    collection=collection_name,
+                )
 
                 # Cleanup temp file
                 try:

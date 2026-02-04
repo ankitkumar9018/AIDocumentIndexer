@@ -637,6 +637,14 @@ async def get_entity(
     )
 
 
+class EntityCreate(BaseModel):
+    """Request model for creating an entity."""
+    name: str = Field(..., min_length=1, max_length=500)
+    entity_type: str = Field(..., description="Entity type (e.g., PERSON, ORGANIZATION)")
+    description: Optional[str] = None
+    aliases: Optional[List[str]] = None
+
+
 class EntityUpdate(BaseModel):
     """Request model for updating an entity."""
     name: Optional[str] = None
@@ -645,10 +653,75 @@ class EntityUpdate(BaseModel):
     entity_type: Optional[str] = None
 
 
+class RelationCreate(BaseModel):
+    """Request model for creating a relation."""
+    source_entity_id: str
+    target_entity_id: str
+    relation_type: str = Field(..., description="Relation type (e.g., RELATED_TO, WORKS_FOR)")
+    relation_label: Optional[str] = None
+    description: Optional[str] = None
+    weight: float = 1.0
+
+
+class RelationUpdate(BaseModel):
+    """Request model for updating a relation."""
+    relation_type: Optional[str] = None
+    relation_label: Optional[str] = None
+    description: Optional[str] = None
+    weight: Optional[float] = None
+
+
 class DeleteResponse(BaseModel):
     """Response for delete operations."""
     success: bool
     message: str
+
+
+@router.post("/entities", response_model=EntityResponse, status_code=status.HTTP_201_CREATED)
+async def create_entity(
+    entity_data: EntityCreate,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Manually create a new entity in the knowledge graph.
+    """
+    # Validate entity type
+    try:
+        entity_type_enum = EntityType(entity_data.entity_type.lower())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid entity type: {entity_data.entity_type}. Valid types: {[e.value for e in EntityType]}"
+        )
+
+    org_id = get_org_filter(user)
+
+    entity = Entity(
+        name=entity_data.name,
+        name_normalized=entity_data.name.lower().strip(),
+        entity_type=entity_type_enum,
+        description=entity_data.description,
+        aliases=entity_data.aliases or [],
+        organization_id=org_id,
+        extraction_method="user_defined",
+        confidence=1.0,
+    )
+    db.add(entity)
+    await db.commit()
+    await db.refresh(entity)
+
+    logger.info("Entity created manually", entity_id=str(entity.id), name=entity.name)
+
+    return EntityResponse(
+        id=str(entity.id),
+        name=entity.name,
+        entity_type=entity.entity_type.value,
+        description=entity.description,
+        aliases=entity.aliases or [],
+        mention_count=0,
+        created_at=entity.created_at.isoformat() if entity.created_at else "",
+    )
 
 
 @router.patch("/entities/{entity_id}", response_model=EntityResponse)
@@ -828,6 +901,167 @@ async def delete_entity(
         message=f"Entity '{entity_name}' deleted successfully" +
                 (f" along with {relation_count} relations" if cascade and relation_count > 0 else "")
     )
+
+
+# =============================================================================
+# Relation CRUD Endpoints
+# =============================================================================
+
+@router.post("/relations", response_model=RelationResponse, status_code=status.HTTP_201_CREATED)
+async def create_relation(
+    relation_data: RelationCreate,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Manually create a new relation between two entities.
+    """
+    # Validate relation type
+    try:
+        relation_type_enum = RelationType(relation_data.relation_type.lower())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid relation type: {relation_data.relation_type}. Valid types: {[r.value for r in RelationType]}"
+        )
+
+    # Validate entity IDs
+    try:
+        source_uuid = uuid.UUID(relation_data.source_entity_id)
+        target_uuid = uuid.UUID(relation_data.target_entity_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid entity ID format"
+        )
+
+    # Verify both entities exist
+    source = await db.get(Entity, source_uuid)
+    target = await db.get(Entity, target_uuid)
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source entity not found")
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target entity not found")
+
+    org_id = get_org_filter(user)
+
+    relation = EntityRelation(
+        source_entity_id=source_uuid,
+        target_entity_id=target_uuid,
+        relation_type=relation_type_enum,
+        relation_label=relation_data.relation_label,
+        description=relation_data.description,
+        weight=relation_data.weight,
+        organization_id=org_id,
+        confidence=1.0,
+    )
+    db.add(relation)
+    await db.commit()
+    await db.refresh(relation)
+
+    logger.info("Relation created manually", relation_id=str(relation.id),
+                source=source.name, target=target.name)
+
+    return RelationResponse(
+        id=str(relation.id),
+        source_entity_id=str(source_uuid),
+        source_entity_name=source.name,
+        target_entity_id=str(target_uuid),
+        target_entity_name=target.name,
+        relation_type=relation.relation_type.value,
+        relation_label=relation.relation_label,
+        weight=relation.weight,
+    )
+
+
+@router.patch("/relations/{relation_id}", response_model=RelationResponse)
+async def update_relation(
+    relation_id: str,
+    update: RelationUpdate,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update an existing relation in the knowledge graph.
+    """
+    try:
+        relation_uuid = uuid.UUID(relation_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid relation ID format"
+        )
+
+    result = await db.execute(
+        select(EntityRelation)
+        .options(selectinload(EntityRelation.source_entity), selectinload(EntityRelation.target_entity))
+        .where(EntityRelation.id == relation_uuid)
+    )
+    relation = result.scalar_one_or_none()
+
+    if not relation:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Relation not found")
+
+    if update.relation_type is not None:
+        try:
+            relation.relation_type = RelationType(update.relation_type.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid relation type: {update.relation_type}. Valid types: {[r.value for r in RelationType]}"
+            )
+
+    if update.relation_label is not None:
+        relation.relation_label = update.relation_label
+    if update.description is not None:
+        relation.description = update.description
+    if update.weight is not None:
+        relation.weight = update.weight
+
+    await db.commit()
+    await db.refresh(relation)
+
+    logger.info("Relation updated", relation_id=relation_id, updates=update.model_dump(exclude_none=True))
+
+    return RelationResponse(
+        id=str(relation.id),
+        source_entity_id=str(relation.source_entity_id),
+        source_entity_name=relation.source_entity.name,
+        target_entity_id=str(relation.target_entity_id),
+        target_entity_name=relation.target_entity.name,
+        relation_type=relation.relation_type.value,
+        relation_label=relation.relation_label,
+        weight=relation.weight,
+    )
+
+
+@router.delete("/relations/{relation_id}", response_model=DeleteResponse)
+async def delete_relation(
+    relation_id: str,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Delete a relation from the knowledge graph.
+    """
+    try:
+        relation_uuid = uuid.UUID(relation_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid relation ID format"
+        )
+
+    relation = await db.get(EntityRelation, relation_uuid)
+    if not relation:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Relation not found")
+
+    await db.delete(relation)
+    await db.commit()
+
+    logger.info("Relation deleted", relation_id=relation_id)
+
+    return DeleteResponse(success=True, message="Relation deleted successfully")
 
 
 @router.get("/entities/{entity_id}/neighborhood", response_model=EntityNeighborhoodResponse)
@@ -1066,7 +1300,7 @@ async def get_document_entities(
 
     return DocumentEntitiesResponse(
         document_id=document_id,
-        document_name=document.name,
+        document_name=document.filename or document.original_filename,
         entities=entity_responses,
         relations=relation_responses,
     )
@@ -1441,6 +1675,23 @@ class ExtractionJobSummaryResponse(BaseModel):
     completed_at: Optional[str] = None
 
 
+class ExtractionJobDocumentDetail(BaseModel):
+    """Per-document detail within an extraction job."""
+    document_id: str
+    filename: str
+    status: str  # pending, processing, completed, failed
+    chunk_count: int = 0
+    chunks_processed: Optional[int] = None
+    kg_entity_count: int = 0
+    kg_relation_count: int = 0
+
+
+class ExtractionJobDocumentsResponse(BaseModel):
+    """Response containing per-document details for an extraction job."""
+    job_id: str
+    documents: List[ExtractionJobDocumentDetail]
+
+
 class PendingExtractionResponse(BaseModel):
     """Response for pending extraction count."""
     pending_count: int
@@ -1610,6 +1861,40 @@ async def get_extraction_job_progress(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get job progress: {str(e)}",
+        )
+
+
+@router.get("/extraction-jobs/{job_id}/documents", response_model=ExtractionJobDocumentsResponse)
+async def get_extraction_job_documents(
+    job_id: str,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get per-document detail for an extraction job, including chunk progress and entity counts."""
+    from backend.services.kg_extraction_job import KGExtractionJobService
+
+    try:
+        service = KGExtractionJobService(db)
+        details = await service.get_job_documents_detail(uuid.UUID(job_id))
+
+        if details is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Extraction job not found",
+            )
+
+        return ExtractionJobDocumentsResponse(
+            job_id=job_id,
+            documents=[ExtractionJobDocumentDetail(**d) for d in details],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get extraction job documents", job_id=job_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get job documents: {str(e)}",
         )
 
 

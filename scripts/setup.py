@@ -272,15 +272,14 @@ def kill_process_on_port(port: int) -> bool:
     return killed
 
 
-def clear_python_cache():
+def clear_python_cache(project_root: Optional[Path] = None):
     """Clear Python bytecode cache (__pycache__ and .pyc files).
 
     This ensures fresh code is loaded after code changes, especially
     when restarting services. Useful when Python bytecode may be stale.
     """
-    # Get project root from script location
-    script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
     backend_dir = project_root / 'backend'
     try:
         # Remove __pycache__ directories
@@ -310,6 +309,100 @@ def is_service_running(port: int) -> bool:
     else:
         code, _, _ = run_command(['lsof', '-ti', f':{port}'], check=False)
         return code == 0
+
+
+def start_background_process(
+    cmd: List[str],
+    log_file: Optional[Path] = None,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> Optional[subprocess.Popen]:
+    """Start a process in the background (cross-platform).
+
+    If log_file is provided, stdout/stderr are written there.
+    Otherwise, stdout/stderr go to DEVNULL.
+
+    Returns the Popen object, or None on failure.
+    """
+    system = get_platform()
+    try:
+        if system == 'windows':
+            return subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                env=env,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+        else:
+            if log_file:
+                f = open(log_file, 'w')
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                f.close()  # Child process has its own fd after fork
+                return proc
+            else:
+                return subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+    except Exception as e:
+        logger.error(f"Failed to start process {cmd[0]}: {e}")
+        return None
+
+
+def get_dev_environment(project_root: Path, load_env_file: bool = False) -> Dict[str, str]:
+    """Build environment dict for local dev services (backend, Celery).
+
+    Sets PYTHONPATH, DEV_MODE, LOCAL_MODE, model source checks, and
+    forces the SQLite database path for local mode.
+
+    If load_env_file is True, also loads variables from backend/.env
+    (needed for Celery workers to pick up LLM/API key settings).
+    """
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(project_root)
+
+    # Load .env file first so dev mode overrides below take precedence
+    if load_env_file:
+        env_file = project_root / 'backend' / '.env'
+        if env_file.exists():
+            try:
+                with open(env_file) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            key, _, value = line.partition('=')
+                            key = key.strip()
+                            value = value.strip()
+                            # Don't override dev mode settings set below
+                            if key not in ('DEV_MODE', 'LOCAL_MODE', 'DATABASE_URL'):
+                                env[key] = value
+                logger.debug("Loaded .env file for service environment")
+            except Exception as e:
+                logger.warning(f"Could not load .env file: {e}")
+
+    # Force dev mode settings
+    env['DEV_MODE'] = 'true'
+    env['LOCAL_MODE'] = 'true'
+    env['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
+    env['FASTEMBED_DISABLE_MODEL_SOURCE_CHECK'] = '1'
+
+    # Force SQLite database path for local mode
+    db_dir = project_root / 'backend' / 'data'
+    db_dir.mkdir(parents=True, exist_ok=True)
+    env['DATABASE_URL'] = f'sqlite:///{db_dir / "aidocindexer.db"}'
+
+    return env
 
 
 # ============================================================================
@@ -656,40 +749,22 @@ def start_ollama_service() -> bool:
 
     logger.info("Starting Ollama service...")
 
-    try:
-        if system == 'windows':
-            # Windows: Start as background process
-            subprocess.Popen(
-                ['ollama', 'serve'],
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-        else:
-            # macOS/Linux: Start in background
-            subprocess.Popen(
-                ['ollama', 'serve'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
-            )
-
-        # Wait for service to start
-        logger.debug("Waiting for Ollama service to start...")
-        for i in range(10):
-            time.sleep(1)
-            code, _, _ = run_command(['ollama', 'list'], check=False, timeout=5)
-            if code == 0:
-                logger.info("Ollama service started successfully")
-                return True
-            logger.debug(f"Waiting... ({i+1}/10)")
-
-        logger.error("Ollama service failed to start within timeout")
+    proc = start_background_process(['ollama', 'serve'])
+    if proc is None:
         return False
 
-    except Exception as e:
-        logger.error(f"Failed to start Ollama service: {e}")
-        return False
+    # Wait for service to start
+    logger.debug("Waiting for Ollama service to start...")
+    for i in range(10):
+        time.sleep(1)
+        code, _, _ = run_command(['ollama', 'list'], check=False, timeout=5)
+        if code == 0:
+            logger.info("Ollama service started successfully")
+            return True
+        logger.debug(f"Waiting... ({i+1}/10)")
+
+    logger.error("Ollama service failed to start within timeout")
+    return False
 
 
 def get_installed_ollama_models() -> List[str]:
@@ -1073,7 +1148,6 @@ def run_migrations(project_root: Path) -> bool:
 
 def start_services(project_root: Path, deps: Dict) -> bool:
     """Start backend and frontend services, forcing 0.0.0.0 host binding."""
-    system = get_platform()
     services_config = deps.get('services', {})
 
     frontend_dir = project_root / 'frontend'
@@ -1086,83 +1160,30 @@ def start_services(project_root: Path, deps: Dict) -> bool:
     # Force --host 0.0.0.0 to prevent address resolution issues
     logger.info("Starting backend service on 0.0.0.0:8000...")
     backend_log = log_dir / 'backend.log'
-
-    # Set up environment with PYTHONPATH and dev mode settings
-    backend_env = os.environ.copy()
-    backend_env['PYTHONPATH'] = str(project_root)
-
-    # Dev mode settings for local development
-    backend_env['DEV_MODE'] = 'true'
-    backend_env['LOCAL_MODE'] = 'true'
-    backend_env['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
-    backend_env['FASTEMBED_DISABLE_MODEL_SOURCE_CHECK'] = '1'
-
-    # Force SQLite database path for local mode (overrides .env)
-    db_dir = project_root / 'backend' / 'data'
-    db_dir.mkdir(parents=True, exist_ok=True)
-    db_path = db_dir / 'aidocindexer.db'
-    backend_env['DATABASE_URL'] = f'sqlite:///{db_path}'
-
-    # Skip slow import check - the backend health check will detect issues
-    # Ray initialization can take 30+ seconds which causes timeouts
+    backend_env = get_dev_environment(project_root)
 
     # Get number of workers from environment (default 1 for dev, increase for production)
     # Set UVICORN_WORKERS=4 for higher concurrency (supports ~200 concurrent users)
     uvicorn_workers = int(os.environ.get('UVICORN_WORKERS', '1'))
 
-    # The command now includes --host 0.0.0.0 and optional workers
     uvicorn_cmd = ['uv', 'run', '--project', 'backend', 'uvicorn', 'backend.api.main:app', '--host', '0.0.0.0', '--port', '8000']
     if uvicorn_workers > 1:
         uvicorn_cmd.extend(['--workers', str(uvicorn_workers)])
         logger.info(f"Starting backend with {uvicorn_workers} workers for higher concurrency")
 
-    try:
-        if system == 'windows':
-            subprocess.Popen(
-                uvicorn_cmd,
-                cwd=str(project_root),
-                env=backend_env,
-                creationflags=subprocess.CREATE_NEW_CONSOLE
-            )
-        else:
-            with open(backend_log, 'w') as log_file:
-                subprocess.Popen(
-                    uvicorn_cmd,
-                    cwd=str(project_root),
-                    env=backend_env,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True
-                )
-        logger.info(f"Backend started (logs: {backend_log})")
-    except Exception as e:
-        logger.error(f"Failed to start backend: {e}")
+    proc = start_background_process(uvicorn_cmd, log_file=backend_log, cwd=str(project_root), env=backend_env)
+    if proc is None:
         return False
+    logger.info(f"Backend started (logs: {backend_log})")
 
     # Start frontend
     logger.info("Starting frontend service...")
     frontend_log = log_dir / 'frontend.log'
 
-    try:
-        if system == 'windows':
-            subprocess.Popen(
-                ['npm', 'run', 'dev'],
-                cwd=str(frontend_dir),
-                creationflags=subprocess.CREATE_NEW_CONSOLE
-            )
-        else:
-            with open(frontend_log, 'w') as log_file:
-                subprocess.Popen(
-                    ['npm', 'run', 'dev'],
-                    cwd=str(frontend_dir),
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True
-                )
-        logger.info(f"Frontend started (logs: {frontend_log})")
-    except Exception as e:
-        logger.error(f"Failed to start frontend: {e}")
+    proc = start_background_process(['npm', 'run', 'dev'], log_file=frontend_log, cwd=str(frontend_dir))
+    if proc is None:
         return False
+    logger.info(f"Frontend started (logs: {frontend_log})")
 
     # Wait for services to start (backend may take longer due to Ray initialization)
     logger.info("Waiting for services to initialize...")
@@ -1216,67 +1237,24 @@ def start_redis(project_root: Path) -> bool:
         return True
 
     logger.info("Starting Redis server...")
-    system = get_platform()
     log_dir = project_root / 'logs'
     log_dir.mkdir(exist_ok=True)
     redis_log = log_dir / 'redis.log'
 
-    try:
-        if system == 'windows':
-            subprocess.Popen(
-                ['redis-server'],
-                creationflags=subprocess.CREATE_NEW_CONSOLE
-            )
-        else:
-            with open(redis_log, 'w') as log_file:
-                subprocess.Popen(
-                    ['redis-server'],
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True
-                )
-
-        # Wait for Redis to start
-        for i in range(10):
-            time.sleep(0.5)
-            if is_redis_running():
-                logger.info(f"Redis started successfully (logs: {redis_log})")
-                return True
-            logger.debug(f"Waiting for Redis... ({i+1}/10)")
-
-        logger.error("Redis failed to start within timeout")
+    proc = start_background_process(['redis-server'], log_file=redis_log)
+    if proc is None:
         return False
 
-    except Exception as e:
-        logger.error(f"Failed to start Redis: {e}")
-        return False
+    # Wait for Redis to start
+    for i in range(10):
+        time.sleep(0.5)
+        if is_redis_running():
+            logger.info(f"Redis started successfully (logs: {redis_log})")
+            return True
+        logger.debug(f"Waiting for Redis... ({i+1}/10)")
 
-
-def clear_python_bytecode_cache(project_root: Path) -> None:
-    """Clear Python bytecode cache to ensure fresh code is loaded."""
-    backend_dir = project_root / 'backend'
-    logger.debug("Clearing Python bytecode cache...")
-
-    # Remove .pyc files
-    pyc_count = 0
-    for pyc_file in backend_dir.rglob('*.pyc'):
-        try:
-            pyc_file.unlink()
-            pyc_count += 1
-        except Exception:
-            pass
-
-    # Remove __pycache__ directories
-    cache_count = 0
-    for cache_dir in backend_dir.rglob('__pycache__'):
-        try:
-            shutil.rmtree(cache_dir)
-            cache_count += 1
-        except Exception:
-            pass
-
-    if pyc_count > 0 or cache_count > 0:
-        logger.debug(f"Cleared {pyc_count} .pyc files and {cache_count} __pycache__ directories")
+    logger.error("Redis failed to start within timeout")
+    return False
 
 
 def start_celery(project_root: Path, deps: Dict) -> bool:
@@ -1290,10 +1268,9 @@ def start_celery(project_root: Path, deps: Dict) -> bool:
         return False
 
     # Clear bytecode cache to ensure fresh code is loaded
-    clear_python_bytecode_cache(project_root)
+    clear_python_cache(project_root)
 
     logger.info("Starting Celery worker...")
-    system = get_platform()
     log_dir = project_root / 'logs'
     log_dir.mkdir(exist_ok=True)
     celery_log = log_dir / 'celery.log'
@@ -1303,67 +1280,15 @@ def start_celery(project_root: Path, deps: Dict) -> bool:
     start_cmd = celery_config.get('start_command', 'uv run celery -A backend.services.task_queue worker --loglevel=info')
     cmd_parts = start_cmd.split()
 
-    # Set up environment with PYTHONPATH and local dev settings
-    # Must match backend environment to use same SQLite database
-    celery_env = os.environ.copy()
-    celery_env['PYTHONPATH'] = str(project_root)
+    # Build environment with .env file loaded (Celery needs LLM/API key settings)
+    celery_env = get_dev_environment(project_root, load_env_file=True)
 
-    # Load .env file and pass all variables to Celery worker
-    # This ensures Ollama, OpenAI, and other settings are available
-    env_file = project_root / 'backend' / '.env'
-    if env_file.exists():
-        try:
-            with open(env_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith('#') and '=' in line:
-                        key, _, value = line.partition('=')
-                        key = key.strip()
-                        value = value.strip()
-                        # Don't override explicitly set vars below
-                        if key not in ['DEV_MODE', 'LOCAL_MODE', 'DATABASE_URL']:
-                            celery_env[key] = value
-            logger.debug("Loaded .env file for Celery worker")
-        except Exception as e:
-            logger.warning(f"Could not load .env file: {e}")
-
-    # Dev mode settings for local development (same as backend)
-    celery_env['DEV_MODE'] = 'true'
-    celery_env['LOCAL_MODE'] = 'true'
-    celery_env['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
-    celery_env['FASTEMBED_DISABLE_MODEL_SOURCE_CHECK'] = '1'
-
-    # Force SQLite database path for local mode (must match backend)
-    db_dir = project_root / 'backend' / 'data'
-    db_dir.mkdir(parents=True, exist_ok=True)
-    db_path = db_dir / 'aidocindexer.db'
-    celery_env['DATABASE_URL'] = f'sqlite:///{db_path}'
-
-    try:
-        if system == 'windows':
-            subprocess.Popen(
-                cmd_parts,
-                cwd=str(project_root),
-                env=celery_env,
-                creationflags=subprocess.CREATE_NEW_CONSOLE
-            )
-        else:
-            with open(celery_log, 'w') as log_file:
-                subprocess.Popen(
-                    cmd_parts,
-                    cwd=str(project_root),
-                    env=celery_env,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True
-                )
-
-        logger.info(f"Celery worker started (logs: {celery_log})")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to start Celery: {e}")
+    proc = start_background_process(cmd_parts, log_file=celery_log, cwd=str(project_root), env=celery_env)
+    if proc is None:
         return False
+
+    logger.info(f"Celery worker started (logs: {celery_log})")
+    return True
 
 
 # ============================================================================
@@ -1528,13 +1453,9 @@ def main():
         print("\n\033[0;32mAll services stopped.\033[0m\n")
         sys.exit(0)
 
-    # Handle restart command (stop then continue with start)
+    # Handle restart command (log message before proceeding with start flow)
     if args.command == 'restart':
         logger.info("Restarting all services...")
-        stop_all_services(deps)
-        # Clear Python bytecode cache to ensure fresh code is loaded
-        clear_python_cache()
-        logger.info("Services stopped, now starting fresh...")
 
     # 1. Check system dependencies
     deps_ok, missing = check_system_dependencies(deps)
@@ -1555,14 +1476,10 @@ def main():
             failed = [k for k, v in optional_results.items() if not v]
             logger.warning(f"Some optional dependencies failed to install: {', '.join(failed)}")
 
-    # 2. Kill existing services
+    # 2. Stop existing services (ports, Celery, Ray) and clear Python cache
     logger.info("Stopping existing services...")
-    services_config = deps.get('services', {})
-    for service_name, config in services_config.items():
-        port = config.get('port')
-        if port:
-            if kill_process_on_port(port):
-                logger.debug(f"Stopped {service_name} on port {port}")
+    stop_all_services(deps)
+    clear_python_cache(project_root)
     results['Stop existing services'] = True
 
     # 3. Setup Python environment

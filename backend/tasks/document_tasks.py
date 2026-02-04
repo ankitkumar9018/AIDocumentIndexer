@@ -184,6 +184,30 @@ def process_document_task(
                 logger.error(f"Auto-tagging failed for {original_filename}: {str(e)}")
                 # Don't fail the task if auto-tagging fails
 
+        # Auto-enhance document if enabled (per-upload override or global setting)
+        if document_id:
+            try:
+                async def _auto_enhance():
+                    # Check per-upload override first, then fall back to global setting
+                    per_upload_enhance = metadata.get("auto_enhance", None) if metadata else None
+                    if per_upload_enhance is not None:
+                        should_enhance = per_upload_enhance
+                    else:
+                        from backend.services.settings import get_settings_service
+                        settings = get_settings_service()
+                        should_enhance = await settings.get_setting("upload.auto_enhance")
+                    if should_enhance:
+                        logger.info(f"Auto-enhancing document: {original_filename}")
+                        from backend.services.document_enhancer import get_document_enhancer
+                        enhancer = get_document_enhancer()
+                        await enhancer.enhance_document(document_id)
+                        logger.info(f"Auto-enhancement complete: {original_filename}")
+
+                run_async(_auto_enhance())
+            except Exception as e:
+                logger.error(f"Auto-enhancement failed for {original_filename}: {str(e)}")
+                # Don't fail the upload - enhancement is optional
+
         logger.info(f"Document processed successfully: {original_filename}")
         return {
             "status": "success",
@@ -771,6 +795,30 @@ def process_document_with_progress(
                 logger.error(f"Auto-tagging failed for {original_filename}: {str(e)}")
                 # Don't fail the task if auto-tagging fails
 
+        # Auto-enhance document if enabled (per-upload override or global setting)
+        if document_id:
+            try:
+                async def _auto_enhance_with_progress():
+                    # Check per-upload override first, then fall back to global setting
+                    per_upload_enhance = metadata.get("auto_enhance", None) if metadata else None
+                    if per_upload_enhance is not None:
+                        should_enhance = per_upload_enhance
+                    else:
+                        from backend.services.settings import get_settings_service
+                        settings = get_settings_service()
+                        should_enhance = await settings.get_setting("upload.auto_enhance")
+                    if should_enhance:
+                        logger.info(f"Auto-enhancing document: {original_filename}")
+                        from backend.services.document_enhancer import get_document_enhancer
+                        enhancer = get_document_enhancer()
+                        await enhancer.enhance_document(document_id)
+                        logger.info(f"Auto-enhancement complete: {original_filename}")
+
+                run_async(_auto_enhance_with_progress())
+            except Exception as e:
+                logger.error(f"Auto-enhancement failed for {original_filename}: {str(e)}")
+                # Don't fail the upload - enhancement is optional
+
         logger.info(f"Document processed: {original_filename}, chunks={chunk_count}")
         return {
             "status": "success",
@@ -898,6 +946,8 @@ def run_kg_extraction_job(
 
                 if use_ray and ray_available:
                     # Use Ray for distributed parallel processing (fastest)
+                    # run_with_ray() will auto-fallback to run_parallel()
+                    # if Ray can't initialize (e.g. in Celery workers)
                     logger.info(f"Using Ray for KG extraction: job_id={job_id}")
                     await runner.run_with_ray()
                 else:
@@ -944,6 +994,70 @@ def run_kg_extraction_job(
             run_async(_mark_failed())
         except Exception as cleanup_error:
             logger.error(f"Failed to update job status after failure: {cleanup_error}")
+
+        return {
+            "status": "failed",
+            "job_id": job_id,
+            "error": str(e),
+        }
+
+
+@shared_task(bind=True, name="backend.tasks.document_tasks.run_reindex_all_job")
+def run_reindex_all_job(
+    self,
+    job_id: str,
+    processing_mode: str = "linear",
+    parallel_count: int = 2,
+    batch_size: int = 5,
+    delay_seconds: int = 15,
+    force_reembed: bool = True,
+) -> Dict[str, Any]:
+    """
+    Run a batch reindex job in Celery worker.
+
+    Offloads the CPU/memory-intensive embedding work from the main backend
+    process so the API stays responsive during reindexing.
+    """
+    logger.info(
+        f"Starting reindex job in Celery: job_id={job_id}, "
+        f"mode={processing_mode}, parallel={parallel_count}"
+    )
+
+    try:
+        async def _run_reindex():
+            from backend.api.routes.embeddings import _run_batch_reindex
+            await _run_batch_reindex(
+                job_id=job_id,
+                processing_mode=processing_mode,
+                parallel_count=parallel_count,
+                batch_size=batch_size,
+                delay_seconds=delay_seconds,
+                force_reembed=force_reembed,
+            )
+
+        run_async(_run_reindex())
+
+        logger.info(f"Reindex job completed: job_id={job_id}")
+        return {
+            "status": "success",
+            "job_id": job_id,
+        }
+
+    except Exception as e:
+        logger.error(f"Reindex job failed: job_id={job_id} - {str(e)}")
+
+        # Update job status to failed via Redis tracker
+        try:
+            from backend.api.routes.embeddings import _job_tracker
+            from datetime import datetime
+            _job_tracker.update_job(
+                job_id,
+                status="failed",
+                completed_at=datetime.utcnow().isoformat(),
+                error=str(e),
+            )
+        except Exception as cleanup_error:
+            logger.error(f"Failed to update job status: {cleanup_error}")
 
         return {
             "status": "failed",

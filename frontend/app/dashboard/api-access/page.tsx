@@ -44,7 +44,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { useToast } from "@/components/ui/use-toast";
+import { toast } from "sonner";
 import {
   Key,
   Plus,
@@ -91,7 +91,6 @@ interface PublishedEndpoint {
 }
 
 export default function APIAccessPage() {
-  const { toast } = useToast();
   const [apiKeys, setApiKeys] = useState<APIKey[]>([]);
   const [endpoints, setEndpoints] = useState<PublishedEndpoint[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -147,8 +146,7 @@ export default function APIAccessPage() {
       if (res.ok) {
         const data = await res.json();
         setNewApiKey(data.api_key);
-        toast({
-          title: "API Key Created",
+        toast.success("API Key Created", {
           description: "Copy your API key now - it won't be shown again!",
         });
         fetchData();
@@ -156,11 +154,7 @@ export default function APIAccessPage() {
         throw new Error("Failed to create API key");
       }
     } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to create API key",
-        variant: "destructive",
-      });
+      toast.error("Failed to create API key");
     }
   };
 
@@ -172,21 +166,17 @@ export default function APIAccessPage() {
       });
 
       if (res.ok) {
-        toast({ title: "API Key Revoked" });
+        toast.success("API Key Revoked");
         fetchData();
       }
     } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to revoke API key",
-        variant: "destructive",
-      });
+      toast.error("Failed to revoke API key");
     }
   };
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    toast({ title: "Copied to clipboard" });
+    toast.success("Copied to clipboard");
   };
 
   const getBaseUrl = () => {

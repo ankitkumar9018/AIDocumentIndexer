@@ -34,6 +34,11 @@ import {
   AlertCircle,
   AlertTriangle,
   ChevronDown,
+  Plus,
+  Pencil,
+  List,
+  ArrowRight,
+  Save,
 } from "lucide-react";
 
 // Dynamically import WebGL graph to avoid SSR issues
@@ -79,6 +84,11 @@ import {
   useCancelExtractionJob,
   usePauseExtractionJob,
   useResumeExtractionJob,
+  useCreateEntity,
+  useUpdateEntity,
+  useDeleteEntity,
+  useCreateRelation,
+  useDeleteRelation,
   useLLMProviders,
   knowledgeGraphQueryKeys,
   api,
@@ -90,6 +100,26 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useQueryClient } from "@tanstack/react-query";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 // Entity type colors and icons
 const entityTypeConfig: Record<string, { color: string; icon: React.ElementType; bgColor: string }> = {
@@ -382,13 +412,175 @@ function GraphVisualization({
   );
 }
 
+// Table View Component
+function TableView({
+  nodes,
+  edges,
+  onNodeClick,
+  selectedNodeId,
+  onDeleteRelation,
+}: {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  onNodeClick: (nodeId: string) => void;
+  selectedNodeId: string | null;
+  onDeleteRelation?: (relationId: string) => void;
+}) {
+  const [activeTab, setActiveTab] = useState<"entities" | "relations">("entities");
+  const [sortBy, setSortBy] = useState<"name" | "type">("name");
+
+  const sortedNodes = [...nodes].sort((a, b) => {
+    if (sortBy === "name") return a.label.localeCompare(b.label);
+    return a.type.localeCompare(b.type) || a.label.localeCompare(b.label);
+  });
+
+  return (
+    <div className="h-full flex flex-col">
+      <div className="flex items-center gap-2 p-3 border-b">
+        <Button
+          variant={activeTab === "entities" ? "secondary" : "ghost"}
+          size="sm"
+          onClick={() => setActiveTab("entities")}
+        >
+          Entities ({nodes.length})
+        </Button>
+        <Button
+          variant={activeTab === "relations" ? "secondary" : "ghost"}
+          size="sm"
+          onClick={() => setActiveTab("relations")}
+        >
+          Relations ({edges.length})
+        </Button>
+        {activeTab === "entities" && (
+          <Select value={sortBy} onValueChange={(v) => setSortBy(v as "name" | "type")}>
+            <SelectTrigger className="w-[120px] h-8 ml-auto">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="name">Sort: Name</SelectItem>
+              <SelectItem value="type">Sort: Type</SelectItem>
+            </SelectContent>
+          </Select>
+        )}
+      </div>
+      <div className="flex-1 overflow-auto">
+        {activeTab === "entities" ? (
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-background border-b">
+              <tr>
+                <th className="text-left p-2 font-medium text-muted-foreground">Name</th>
+                <th className="text-left p-2 font-medium text-muted-foreground">Type</th>
+                <th className="text-left p-2 font-medium text-muted-foreground hidden md:table-cell">Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedNodes.map((node) => {
+                const config = getEntityConfig(node.type);
+                return (
+                  <tr
+                    key={node.id}
+                    className={`border-b cursor-pointer hover:bg-muted/50 ${
+                      node.id === selectedNodeId ? "bg-primary/10" : ""
+                    }`}
+                    onClick={() => onNodeClick(node.id)}
+                  >
+                    <td className="p-2">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                          style={{ backgroundColor: config.color }}
+                        />
+                        <span className="font-medium">{node.label}</span>
+                      </div>
+                    </td>
+                    <td className="p-2">
+                      <Badge variant="outline" className="text-xs" style={{ borderColor: config.color, color: config.color }}>
+                        {node.type}
+                      </Badge>
+                    </td>
+                    <td className="p-2 text-muted-foreground truncate max-w-[300px] hidden md:table-cell">
+                      {(node as GraphNode & { description?: string }).description || "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-background border-b">
+              <tr>
+                <th className="text-left p-2 font-medium text-muted-foreground">Source</th>
+                <th className="text-center p-2 font-medium text-muted-foreground">Relation</th>
+                <th className="text-left p-2 font-medium text-muted-foreground">Target</th>
+                {onDeleteRelation && (
+                  <th className="text-right p-2 font-medium text-muted-foreground w-10"></th>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {edges.map((edge, i) => {
+                const sourceNode = nodes.find((n) => n.id === edge.from);
+                const targetNode = nodes.find((n) => n.id === edge.to);
+                return (
+                  <tr key={`${edge.from}-${edge.to}-${i}`} className="border-b hover:bg-muted/50">
+                    <td className="p-2">
+                      <span
+                        className="cursor-pointer hover:underline font-medium"
+                        onClick={() => onNodeClick(edge.from)}
+                      >
+                        {sourceNode?.label || edge.from.slice(0, 8)}
+                      </span>
+                    </td>
+                    <td className="p-2 text-center">
+                      <div className="flex items-center justify-center gap-1 text-muted-foreground">
+                        <ArrowRight className="h-3 w-3" />
+                        <span className="text-xs text-primary">{edge.label || "related_to"}</span>
+                        <ArrowRight className="h-3 w-3" />
+                      </div>
+                    </td>
+                    <td className="p-2">
+                      <span
+                        className="cursor-pointer hover:underline font-medium"
+                        onClick={() => onNodeClick(edge.to)}
+                      >
+                        {targetNode?.label || edge.to.slice(0, 8)}
+                      </span>
+                    </td>
+                    {onDeleteRelation && (edge as GraphEdge & { id?: string }).id && (
+                      <td className="p-2 text-right">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                          onClick={() => onDeleteRelation((edge as GraphEdge & { id?: string }).id!)}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Entity Details Panel
 function EntityDetailsPanel({
   entityId,
   onClose,
+  onEdit,
+  onDelete,
 }: {
   entityId: string;
   onClose: () => void;
+  onEdit?: (entity: EntityResponse) => void;
+  onDelete?: (entityId: string) => void;
 }) {
   const { data: neighborhood, isLoading } = useEntityNeighborhood(entityId, {
     max_hops: 1,
@@ -433,9 +625,22 @@ function EntityDetailsPanel({
               </CardDescription>
             </div>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose}>
-            <X className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-1">
+            {onEdit && (
+              <Button variant="ghost" size="icon" onClick={() => onEdit(entity)} title="Edit entity">
+                <Pencil className="h-4 w-4" />
+              </Button>
+            )}
+            {onDelete && (
+              <Button variant="ghost" size="icon" onClick={() => onDelete(entityId)} title="Delete entity"
+                className="text-muted-foreground hover:text-destructive">
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            )}
+            <Button variant="ghost" size="icon" onClick={onClose}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -745,9 +950,18 @@ export default function KnowledgeGraphPage() {
   const [nodeLimit, setNodeLimit] = useState(100);
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [isCleaning, setIsCleaning] = useState(false);
-  const [use3DView, setUse3DView] = useState(false);
+  const [viewMode, setViewMode] = useState<"2d" | "3d" | "table">("2d");
   const [onlyNewDocs, setOnlyNewDocs] = useState(true);
   const [selectedProvider, setSelectedProvider] = useState<string>("default");
+
+  // Entity/Relation editing state
+  const [showEntityDialog, setShowEntityDialog] = useState(false);
+  const [showRelationDialog, setShowRelationDialog] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [editingEntity, setEditingEntity] = useState<EntityResponse | null>(null);
+  const [deleteEntityId, setDeleteEntityId] = useState<string | null>(null);
+  const [entityForm, setEntityForm] = useState({ name: "", entity_type: "CONCEPT", description: "", aliases: "" });
+  const [relationForm, setRelationForm] = useState({ source_entity_id: "", target_entity_id: "", relation_type: "related_to", relation_label: "" });
 
   // Knowledge Graph Queries
   const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useKnowledgeGraphStats({
@@ -796,6 +1010,13 @@ export default function KnowledgeGraphPage() {
   const cancelExtractionMutation = useCancelExtractionJob();
   const pauseExtractionMutation = usePauseExtractionJob();
   const resumeExtractionMutation = useResumeExtractionJob();
+
+  // Entity/Relation CRUD Mutations
+  const createEntityMutation = useCreateEntity();
+  const updateEntityMutation = useUpdateEntity();
+  const deleteEntityMutation = useDeleteEntity();
+  const createRelationMutation = useCreateRelation();
+  const deleteRelationMutation = useDeleteRelation();
 
   // Refresh stats when job completes
   useEffect(() => {
@@ -866,6 +1087,107 @@ export default function KnowledgeGraphPage() {
     } catch (error) {
       console.error("Failed to resume extraction:", error);
       toast.error(error instanceof Error ? error.message : "Failed to resume extraction");
+    }
+  };
+
+  // Entity CRUD handlers
+  const openAddEntityDialog = () => {
+    setEditingEntity(null);
+    setEntityForm({ name: "", entity_type: "CONCEPT", description: "", aliases: "" });
+    setShowEntityDialog(true);
+  };
+
+  const openEditEntityDialog = (entity: EntityResponse) => {
+    setEditingEntity(entity);
+    setEntityForm({
+      name: entity.name,
+      entity_type: entity.entity_type,
+      description: entity.description || "",
+      aliases: entity.aliases?.join(", ") || "",
+    });
+    setShowEntityDialog(true);
+  };
+
+  const handleSaveEntity = async () => {
+    const data = {
+      name: entityForm.name.trim(),
+      entity_type: entityForm.entity_type,
+      description: entityForm.description.trim() || undefined,
+      aliases: entityForm.aliases.trim() ? entityForm.aliases.split(",").map((a) => a.trim()).filter(Boolean) : undefined,
+    };
+
+    try {
+      if (editingEntity) {
+        await updateEntityMutation.mutateAsync({ entityId: editingEntity.id, data });
+        toast.success(`Entity "${data.name}" updated`);
+      } else {
+        await createEntityMutation.mutateAsync(data);
+        toast.success(`Entity "${data.name}" created`);
+      }
+      setShowEntityDialog(false);
+      refetchGraph();
+      refetchStats();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save entity");
+    }
+  };
+
+  const handleConfirmDeleteEntity = async () => {
+    if (!deleteEntityId) return;
+    try {
+      await deleteEntityMutation.mutateAsync({ entityId: deleteEntityId, cascade: true });
+      toast.success("Entity deleted");
+      setSelectedEntityId(null);
+      setShowDeleteConfirm(false);
+      setDeleteEntityId(null);
+      refetchGraph();
+      refetchStats();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete entity");
+    }
+  };
+
+  const handleDeleteEntityPrompt = (entityId: string) => {
+    setDeleteEntityId(entityId);
+    setShowDeleteConfirm(true);
+  };
+
+  // Relation CRUD handlers
+  const openAddRelationDialog = () => {
+    setRelationForm({
+      source_entity_id: selectedEntityId || "",
+      target_entity_id: "",
+      relation_type: "related_to",
+      relation_label: "",
+    });
+    setShowRelationDialog(true);
+  };
+
+  const handleSaveRelation = async () => {
+    try {
+      await createRelationMutation.mutateAsync({
+        source_entity_id: relationForm.source_entity_id,
+        target_entity_id: relationForm.target_entity_id,
+        relation_type: relationForm.relation_type,
+        relation_label: relationForm.relation_label.trim() || undefined,
+      });
+      toast.success("Relation created");
+      setShowRelationDialog(false);
+      refetchGraph();
+      refetchStats();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to create relation");
+    }
+  };
+
+  const handleDeleteRelation = async (relationId: string) => {
+    try {
+      await deleteRelationMutation.mutateAsync(relationId);
+      toast.success("Relation deleted");
+      refetchGraph();
+      refetchStats();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete relation");
     }
   };
 
@@ -1247,47 +1569,91 @@ export default function KnowledgeGraphPage() {
                   )}
                 </CardTitle>
                 <div className="flex items-center gap-4">
-                  {/* 2D/3D Toggle */}
-                  <div className="flex items-center gap-1 border rounded-lg p-0.5">
+                  {/* Add Entity/Relation buttons */}
+                  <div className="flex items-center gap-1">
                     <Button
-                      variant={!use3DView ? "secondary" : "ghost"}
+                      variant="outline"
                       size="sm"
                       className="h-7 px-2 gap-1"
-                      onClick={() => setUse3DView(false)}
+                      onClick={openAddEntityDialog}
+                    >
+                      <Plus className="h-3 w-3" />
+                      <span className="text-xs">Entity</span>
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 gap-1"
+                      onClick={openAddRelationDialog}
+                      disabled={!graphData || graphData.nodes.length < 2}
+                    >
+                      <Plus className="h-3 w-3" />
+                      <span className="text-xs">Relation</span>
+                    </Button>
+                  </div>
+                  {/* 2D/3D/Table Toggle */}
+                  <div className="flex items-center gap-1 border rounded-lg p-0.5">
+                    <Button
+                      variant={viewMode === "2d" ? "secondary" : "ghost"}
+                      size="sm"
+                      className="h-7 px-2 gap-1"
+                      onClick={() => setViewMode("2d")}
                     >
                       <Square className="h-3 w-3" />
                       <span className="text-xs">2D</span>
                     </Button>
                     <Button
-                      variant={use3DView ? "secondary" : "ghost"}
+                      variant={viewMode === "3d" ? "secondary" : "ghost"}
                       size="sm"
                       className="h-7 px-2 gap-1"
-                      onClick={() => setUse3DView(true)}
+                      onClick={() => setViewMode("3d")}
                     >
                       <Box className="h-3 w-3" />
                       <span className="text-xs">3D</span>
                     </Button>
+                    <Button
+                      variant={viewMode === "table" ? "secondary" : "ghost"}
+                      size="sm"
+                      className="h-7 px-2 gap-1"
+                      onClick={() => setViewMode("table")}
+                    >
+                      <List className="h-3 w-3" />
+                      <span className="text-xs">Table</span>
+                    </Button>
                   </div>
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <div className="hidden lg:flex items-center gap-2 text-xs text-muted-foreground">
                     <Info className="h-3 w-3" />
-                    <span>{use3DView ? "Drag to rotate. Scroll to zoom." : "Click nodes to view details. Drag to pan."}</span>
+                    <span>
+                      {viewMode === "3d"
+                        ? "Drag to rotate. Scroll to zoom."
+                        : viewMode === "table"
+                        ? "Click rows to view details."
+                        : "Click nodes to view details. Drag to pan."}
+                    </span>
                   </div>
                 </div>
               </div>
             </CardHeader>
-            <CardContent className="p-0 h-[500px]">
+            <CardContent className="p-0 h-[calc(100vh-320px)] min-h-[500px]">
               {graphLoading ? (
                 <div className="flex items-center justify-center h-full">
                   <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
                 </div>
               ) : graphData && graphData.nodes.length > 0 ? (
-                use3DView ? (
+                viewMode === "3d" ? (
                   <WebGLGraph
                     nodes={graphData.nodes}
                     edges={graphData.edges}
                     onNodeClick={handleNodeClick}
                     selectedNodeId={selectedEntityId}
-                    height={500}
+                  />
+                ) : viewMode === "table" ? (
+                  <TableView
+                    nodes={graphData.nodes}
+                    edges={graphData.edges}
+                    onNodeClick={handleNodeClick}
+                    selectedNodeId={selectedEntityId}
+                    onDeleteRelation={handleDeleteRelation}
                   />
                 ) : (
                   <GraphVisualization
@@ -1302,18 +1668,24 @@ export default function KnowledgeGraphPage() {
                   <Network className="h-12 w-12 mb-4 opacity-50" />
                   <p className="font-medium">No entities found in the knowledge graph</p>
                   <p className="text-sm mb-4">Extract entities from your uploaded documents to populate the graph</p>
-                  <Button
-                    onClick={handleStartExtraction}
-                    disabled={startExtractionMutation.isPending || hasActiveJob}
-                    className="gap-2"
-                  >
-                    {startExtractionMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Sparkles className="h-4 w-4" />
-                    )}
-                    {startExtractionMutation.isPending ? "Starting..." : "Extract Entities from Documents"}
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={handleStartExtraction}
+                      disabled={startExtractionMutation.isPending || hasActiveJob}
+                      className="gap-2"
+                    >
+                      {startExtractionMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-4 w-4" />
+                      )}
+                      {startExtractionMutation.isPending ? "Starting..." : "Extract from Documents"}
+                    </Button>
+                    <Button variant="outline" onClick={openAddEntityDialog} className="gap-2">
+                      <Plus className="h-4 w-4" />
+                      Add Entity Manually
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>
@@ -1324,10 +1696,197 @@ export default function KnowledgeGraphPage() {
             <EntityDetailsPanel
               entityId={selectedEntityId}
               onClose={() => setSelectedEntityId(null)}
+              onEdit={openEditEntityDialog}
+              onDelete={handleDeleteEntityPrompt}
             />
           )}
         </div>
       </div>
+
+      {/* Create/Edit Entity Dialog */}
+      <Dialog open={showEntityDialog} onOpenChange={setShowEntityDialog}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>{editingEntity ? "Edit Entity" : "Add Entity"}</DialogTitle>
+            <DialogDescription>
+              {editingEntity ? "Update the entity details." : "Manually add a new entity to the knowledge graph."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="entity-name">Name</Label>
+              <Input
+                id="entity-name"
+                value={entityForm.name}
+                onChange={(e) => setEntityForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="Entity name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="entity-type">Type</Label>
+              <Select
+                value={entityForm.entity_type}
+                onValueChange={(v) => setEntityForm((f) => ({ ...f, entity_type: v }))}
+              >
+                <SelectTrigger id="entity-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.keys(entityTypeConfig).map((type) => (
+                    <SelectItem key={type} value={type}>{type}</SelectItem>
+                  ))}
+                  <SelectItem value="OTHER">OTHER</SelectItem>
+                  <SelectItem value="METRIC">METRIC</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="entity-desc">Description</Label>
+              <Textarea
+                id="entity-desc"
+                value={entityForm.description}
+                onChange={(e) => setEntityForm((f) => ({ ...f, description: e.target.value }))}
+                placeholder="Optional description"
+                rows={3}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="entity-aliases">Aliases (comma-separated)</Label>
+              <Input
+                id="entity-aliases"
+                value={entityForm.aliases}
+                onChange={(e) => setEntityForm((f) => ({ ...f, aliases: e.target.value }))}
+                placeholder="alias1, alias2, alias3"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowEntityDialog(false)}>Cancel</Button>
+            <Button
+              onClick={handleSaveEntity}
+              disabled={!entityForm.name.trim() || createEntityMutation.isPending || updateEntityMutation.isPending}
+            >
+              {(createEntityMutation.isPending || updateEntityMutation.isPending) && (
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+              )}
+              <Save className="h-4 w-4 mr-2" />
+              {editingEntity ? "Update" : "Create"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Create Relation Dialog */}
+      <Dialog open={showRelationDialog} onOpenChange={setShowRelationDialog}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>Add Relation</DialogTitle>
+            <DialogDescription>
+              Create a relationship between two entities.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>Source Entity</Label>
+              <Select
+                value={relationForm.source_entity_id}
+                onValueChange={(v) => setRelationForm((f) => ({ ...f, source_entity_id: v }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select source entity" />
+                </SelectTrigger>
+                <SelectContent className="max-h-[200px]">
+                  {graphData?.nodes.map((node) => (
+                    <SelectItem key={node.id} value={node.id}>
+                      {node.label} ({node.type})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Relation Type</Label>
+              <Select
+                value={relationForm.relation_type}
+                onValueChange={(v) => setRelationForm((f) => ({ ...f, relation_type: v }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {["related_to", "works_for", "located_in", "part_of", "created_by",
+                    "uses", "mentions", "before", "after", "causes", "contains", "similar_to", "other"
+                  ].map((type) => (
+                    <SelectItem key={type} value={type}>{type.replace(/_/g, " ")}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Target Entity</Label>
+              <Select
+                value={relationForm.target_entity_id}
+                onValueChange={(v) => setRelationForm((f) => ({ ...f, target_entity_id: v }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select target entity" />
+                </SelectTrigger>
+                <SelectContent className="max-h-[200px]">
+                  {graphData?.nodes
+                    .filter((n) => n.id !== relationForm.source_entity_id)
+                    .map((node) => (
+                      <SelectItem key={node.id} value={node.id}>
+                        {node.label} ({node.type})
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="relation-label">Label (optional)</Label>
+              <Input
+                id="relation-label"
+                value={relationForm.relation_label}
+                onChange={(e) => setRelationForm((f) => ({ ...f, relation_label: e.target.value }))}
+                placeholder="Custom label for this relation"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowRelationDialog(false)}>Cancel</Button>
+            <Button
+              onClick={handleSaveRelation}
+              disabled={!relationForm.source_entity_id || !relationForm.target_entity_id || createRelationMutation.isPending}
+            >
+              {createRelationMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              <Save className="h-4 w-4 mr-2" />
+              Create
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Entity Confirmation */}
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Entity</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete this entity and all its relations. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDeleteEntity}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleteEntityMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

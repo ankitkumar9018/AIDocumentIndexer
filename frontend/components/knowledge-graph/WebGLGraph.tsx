@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useCallback, useMemo } from "react";
+import { useRef, useEffect, useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import type { ForceGraphMethods, NodeObject, LinkObject } from "react-force-graph-3d";
 
@@ -81,9 +81,37 @@ export default function WebGLGraph({
   edges,
   onNodeClick,
   selectedNodeId,
-  height = 500,
+  height: propHeight,
 }: WebGLGraphProps) {
   const fgRef = useRef<ForceGraphMethods | undefined>();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [dimensions, setDimensions] = useState({ width: 800, height: propHeight || 600 });
+
+  // Auto-detect container dimensions
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const updateDimensions = () => {
+      const parent = el.parentElement;
+      const w = el.clientWidth || parent?.clientWidth || 800;
+      const h = propHeight || parent?.clientHeight || 600;
+      if (w > 100 && h > 100) {
+        setDimensions({ width: w, height: h });
+      }
+    };
+
+    // Initial + delayed measurement (after layout)
+    updateDimensions();
+    const timer = setTimeout(updateDimensions, 100);
+
+    const observer = new ResizeObserver(updateDimensions);
+    observer.observe(el.parentElement || el);
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [propHeight]);
 
   // Transform data for force-graph format
   const graphData = useMemo(() => {
@@ -201,10 +229,12 @@ export default function WebGLGraph({
   const linkWidth = useCallback(() => 1, []);
 
   return (
-    <div className="relative w-full" style={{ height }}>
+    <div ref={containerRef} className="relative w-full h-full">
       <ForceGraph3D
         ref={fgRef}
         graphData={graphData}
+        width={dimensions.width}
+        height={dimensions.height}
         nodeId="id"
         nodeLabel={(node) => {
           const fgNode = node as FGNode;

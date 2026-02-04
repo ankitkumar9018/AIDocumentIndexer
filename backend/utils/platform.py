@@ -236,6 +236,60 @@ def get_recommended_workers() -> int:
     return max(1, workers)
 
 
+def get_recommended_settings() -> dict:
+    """
+    Compute recommended settings based on detected hardware.
+
+    Analyzes CPU count, memory, and GPU availability to determine
+    optimal values for Ray, KG extraction, and queue settings.
+
+    Returns:
+        Dict with 'hardware' info and 'recommended' setting values.
+    """
+    config = get_platform_config()
+
+    cpu = config.cpu_count
+    mem = config.total_memory_gb
+    has_gpu = config.preferred_device != "cpu"
+
+    # Reserve memory for OS + app server
+    reserved_gb = max(2.0, mem * 0.15)
+    usable_mem = mem - reserved_gb
+
+    # Ray resources
+    ray_cpus = max(1, cpu - 2)  # leave 2 cores for OS/server
+    ray_gpus = 1 if has_gpu else 0
+    ray_memory = max(2, int(usable_mem * 0.85))
+    mem_workers = max(1, int(usable_mem / 2))  # ~2GB per worker
+    ray_workers = min(ray_cpus, mem_workers, 16)
+
+    # KG extraction concurrency
+    kg_concurrency = min(16, max(1, ray_workers))
+
+    # Queue workers
+    queue_workers = min(8, max(1, ray_workers))
+
+    return {
+        "hardware": {
+            "cpu_count": cpu,
+            "total_memory_gb": round(mem, 1),
+            "usable_memory_gb": round(usable_mem, 1),
+            "platform": config.system,
+            "gpu_type": config.preferred_device,
+            "has_cuda": config.has_cuda,
+            "has_mps": config.has_mps,
+        },
+        "recommended": {
+            "processing.ray_num_cpus": ray_cpus,
+            "processing.ray_num_gpus": ray_gpus,
+            "processing.ray_memory_limit_gb": ray_memory,
+            "processing.ray_num_workers": ray_workers,
+            "kg.extraction_concurrency": kg_concurrency,
+            "queue.max_workers": queue_workers,
+        },
+    }
+
+
 def get_temp_dir() -> Path:
     """
     Get the platform-appropriate temporary directory.

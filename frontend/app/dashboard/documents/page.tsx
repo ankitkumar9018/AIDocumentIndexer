@@ -54,7 +54,6 @@ import {
   GripVertical,
   Database,
   AlertCircle,
-  Maximize2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -88,11 +87,14 @@ import {
   useSetLLMOperationConfig,
   useVisionStatus,
   useReprocessDocument,
+  useStartExtractionJob,
+  useReanalyzeDocumentImages,
   Document,
   api,
 } from "@/lib/api";
 import { ReanalyzeImagesModal } from "@/components/documents/reanalyze-images-modal";
-import { Wand2, Zap, Settings, Info, Bot, Tag, FolderInput, ImageOff, Images } from "lucide-react";
+import { DocumentDetailPanel } from "@/components/documents/document-detail-panel";
+import { Wand2, Zap, Settings, Info, Bot, Tag, FolderInput, ImageOff, Images, Network, Loader2 } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -126,9 +128,6 @@ import { FolderTree } from "@/components/folder-tree";
 import { FolderSelector } from "@/components/folder-selector";
 import { SavedSearchesPanel, type SearchFilters } from "@/components/saved-searches-panel";
 import { SmartFolders, DocumentInsights } from "@/components/documents/smart-folders";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { UploadedDocumentPreview } from "@/components/preview/UploadedDocumentPreview";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useDocumentViewer } from "@/components/document-viewer";
 
 type ViewMode = "grid" | "list";
@@ -349,9 +348,25 @@ export default function DocumentsPage() {
   // Mutations
   const deleteDocument = useDeleteDocument();
   const reprocessDocument = useReprocessDocument();
+  const startExtractionJob = useStartExtractionJob();
+  const reanalyzeImages = useReanalyzeDocumentImages();
 
   // Use real documents from API (no mock fallback)
   const documents: Document[] = documentsData?.documents ?? [];
+
+  // Auto-refresh when documents have processing in progress
+  useEffect(() => {
+    const hasProcessingDocs = documents.some(
+      (doc) => doc.kg_extraction_status === 'processing' || doc.image_analysis_status === 'processing'
+    );
+    if (!hasProcessingDocs) return;
+
+    const interval = setInterval(() => {
+      refetch();
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [documents, refetch]);
 
   // DnD sensors - require minimum distance before starting drag to allow clicking
   const sensors = useSensors(
@@ -462,8 +477,8 @@ export default function DocumentsPage() {
 
       // Images pending filter
       const matchesImagesPending = !showImagesPending || (
-        (doc as any).images_extracted_count > 0 &&
-        (doc as any).image_analysis_status !== 'completed'
+        doc.images_extracted_count > 0 &&
+        doc.image_analysis_status !== 'completed'
       );
 
       return matchesSearch && matchesFileType && matchesSize && matchesDate && matchesFavorites && matchesImagesPending;
@@ -642,6 +657,7 @@ export default function DocumentsPage() {
         url: documentUrl,
         name: doc.name || doc.title || 'Document',
         type: ext,
+        documentData: doc,
       });
     }
   };
@@ -650,7 +666,7 @@ export default function DocumentsPage() {
   const handleGenerateEmbeddings = async (docId: string) => {
     try {
       toast.info("Starting embedding generation...");
-      const response = await api.post(`/embeddings/generate/${docId}`);
+      const response = await api.post<{ job_id?: string }>(`/embeddings/generate/${docId}`);
       if (response.data.job_id) {
         toast.success("Embedding generation started", {
           description: "You can check the status in the embeddings dashboard.",
@@ -670,6 +686,8 @@ export default function DocumentsPage() {
   const [isAutoTagging, setIsAutoTagging] = useState(false);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isExtractingKG, setIsExtractingKG] = useState(false);
+  const [isAnalyzingImages, setIsAnalyzingImages] = useState(false);
 
   // Edit tags dialog state
   const [editTagsDialogOpen, setEditTagsDialogOpen] = useState(false);
@@ -789,6 +807,107 @@ export default function DocumentsPage() {
       });
     } finally {
       setIsEnhancing(false);
+    }
+  };
+
+  const handleExtractKG = async (docId: string, docName: string) => {
+    try {
+      setIsExtractingKG(true);
+      const result = await startExtractionJob.mutateAsync({
+        document_ids: [docId],
+        only_new_documents: false,
+      });
+      if (result.status === "already_running") {
+        toast.info("Extraction already in progress", {
+          description: result.message,
+        });
+      } else {
+        toast.success("KG extraction started", {
+          description: `Extracting entities from "${docName}". This may take a few minutes.`,
+        });
+      }
+      setTimeout(() => refetch(), 5000);
+    } catch (error) {
+      console.error("KG extraction failed:", error);
+      toast.error("Failed to start KG extraction", {
+        description: getErrorMessage(error, "An error occurred"),
+      });
+    } finally {
+      setIsExtractingKG(false);
+    }
+  };
+
+  const handleBulkExtractKG = async () => {
+    if (selectedDocuments.size === 0) return;
+    try {
+      setIsExtractingKG(true);
+      const result = await startExtractionJob.mutateAsync({
+        document_ids: Array.from(selectedDocuments),
+        only_new_documents: false,
+      });
+      if (result.status === "already_running") {
+        toast.info("Extraction already in progress", {
+          description: result.message,
+        });
+      } else {
+        toast.success("KG extraction started", {
+          description: `Extracting entities from ${selectedDocuments.size} documents.`,
+        });
+        setSelectedDocuments(new Set());
+      }
+      setTimeout(() => refetch(), 5000);
+    } catch (error) {
+      console.error("Bulk KG extraction failed:", error);
+      toast.error("Failed to start KG extraction", {
+        description: getErrorMessage(error, "An error occurred"),
+      });
+    } finally {
+      setIsExtractingKG(false);
+    }
+  };
+
+  const handleBulkAnalyzeImages = async () => {
+    if (selectedDocuments.size === 0) return;
+    const docIds = Array.from(selectedDocuments);
+    const docsWithImages = documents.filter(
+      (d) => docIds.includes(d.id) && d.images_extracted_count > 0
+    );
+    if (docsWithImages.length === 0) {
+      toast.info("No images to analyze", {
+        description: "Selected documents don't contain any extracted images.",
+      });
+      return;
+    }
+    try {
+      setIsAnalyzingImages(true);
+      let successCount = 0;
+      let failCount = 0;
+      for (const doc of docsWithImages) {
+        try {
+          await reanalyzeImages.mutateAsync({
+            documentId: doc.id,
+            options: { force_reanalyze: false, skip_duplicates: true },
+          });
+          successCount++;
+        } catch {
+          failCount++;
+        }
+      }
+      if (successCount > 0) {
+        toast.success("Image analysis completed", {
+          description: `Analyzed images in ${successCount} document${successCount > 1 ? "s" : ""}${failCount > 0 ? `, ${failCount} failed` : ""}.`,
+        });
+      } else {
+        toast.error("Image analysis failed for all documents");
+      }
+      setSelectedDocuments(new Set());
+      refetch();
+    } catch (error) {
+      toast.error("Failed to analyze images", {
+        description: getErrorMessage(error, "An error occurred"),
+      });
+    } finally {
+      setIsAnalyzingImages(false);
     }
   };
 
@@ -1295,6 +1414,24 @@ export default function DocumentsPage() {
             <Button
               variant="outline"
               size="sm"
+              onClick={handleBulkExtractKG}
+              disabled={isExtractingKG}
+            >
+              <Network className="h-4 w-4 mr-1.5" />
+              {isExtractingKG ? "Extracting..." : "Extract KG"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleBulkAnalyzeImages}
+              disabled={isAnalyzingImages}
+            >
+              <Images className="h-4 w-4 mr-1.5" />
+              {isAnalyzingImages ? "Analyzing..." : "Analyze Images"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={handleBulkDownload}
               disabled={isDownloading}
             >
@@ -1498,16 +1635,20 @@ export default function DocumentsPage() {
                                   </TooltipProvider>
                                 )}
                                 {/* Image Analysis Status Badge */}
-                                {(doc as any).images_extracted_count > 0 && (
+                                {doc.images_extracted_count > 0 && (
                                   <TooltipProvider>
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Badge
                                           variant="outline"
                                           className={`text-[10px] px-1.5 py-0 h-4 cursor-pointer ${
-                                            (doc as any).image_analysis_status === 'completed'
-                                              ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-300 dark:border-blue-800'
-                                              : 'bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800'
+                                            doc.image_analysis_status === 'processing'
+                                              ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-300 dark:border-blue-800 animate-pulse'
+                                              : doc.image_analysis_status === 'completed'
+                                                ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-300 dark:border-blue-800'
+                                                : doc.image_analysis_status === 'failed'
+                                                  ? 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-800'
+                                                  : 'bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800'
                                           }`}
                                           onClick={(e) => {
                                             e.stopPropagation();
@@ -1515,18 +1656,74 @@ export default function DocumentsPage() {
                                             setIsImageAnalysisOpen(true);
                                           }}
                                         >
-                                          <Images className="h-2.5 w-2.5 mr-0.5" />
-                                          {(doc as any).images_analyzed_count || 0}/{(doc as any).images_extracted_count}
+                                          {doc.image_analysis_status === 'processing' ? (
+                                            <Loader2 className="h-2.5 w-2.5 mr-0.5 animate-spin" />
+                                          ) : (
+                                            <Images className="h-2.5 w-2.5 mr-0.5" />
+                                          )}
+                                          {doc.image_analysis_status === 'processing'
+                                            ? 'Analyzing...'
+                                            : `${doc.images_analyzed_count || 0}/${doc.images_extracted_count}`}
                                         </Badge>
                                       </TooltipTrigger>
                                       <TooltipContent side="right">
                                         <p className="font-medium text-sm mb-1">Image Analysis</p>
                                         <p className="text-xs text-muted-foreground">
-                                          {(doc as any).image_analysis_status === 'completed'
-                                            ? `${(doc as any).images_analyzed_count} images analyzed`
-                                            : `${(doc as any).images_extracted_count - ((doc as any).images_analyzed_count || 0)} images pending`}
+                                          {doc.image_analysis_status === 'completed'
+                                            ? `${doc.images_analyzed_count} images analyzed`
+                                            : doc.image_analysis_status === 'processing'
+                                              ? 'Analysis in progress...'
+                                              : doc.image_analysis_status === 'failed'
+                                                ? `Analysis failed${doc.image_analysis_error ? `: ${doc.image_analysis_error}` : ''}`
+                                                : `${doc.images_extracted_count - (doc.images_analyzed_count || 0)} images pending`}
                                         </p>
                                         <p className="text-[10px] text-muted-foreground mt-1">Click to analyze</p>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                )}
+                                {/* KG Extraction Status Badge */}
+                                {doc.kg_extraction_status === 'completed' && (
+                                  <TooltipProvider>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-300 dark:border-purple-800">
+                                          <Network className="h-2.5 w-2.5 mr-0.5" />
+                                          KG {doc.kg_entity_count}
+                                        </Badge>
+                                      </TooltipTrigger>
+                                      <TooltipContent side="right" className="max-w-sm">
+                                        <p className="font-medium text-sm mb-1">Knowledge Graph</p>
+                                        <p className="text-xs text-muted-foreground">
+                                          {doc.kg_entity_count} entities, {doc.kg_relation_count} relations
+                                        </p>
+                                        {doc.kg_extracted_at && (
+                                          <p className="text-[10px] text-muted-foreground mt-1">
+                                            Extracted: {new Date(doc.kg_extracted_at).toLocaleDateString()}
+                                          </p>
+                                        )}
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                )}
+                                {doc.kg_extraction_status === 'processing' && (
+                                  <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-300 dark:border-purple-800 animate-pulse">
+                                    <Loader2 className="h-2.5 w-2.5 mr-0.5 animate-spin" />
+                                    Extracting...
+                                  </Badge>
+                                )}
+                                {doc.kg_extraction_status === 'failed' && (
+                                  <TooltipProvider>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-800 cursor-pointer"
+                                          onClick={(e) => { e.stopPropagation(); handleExtractKG(doc.id, doc.name); }}>
+                                          <AlertCircle className="h-2.5 w-2.5 mr-0.5" />
+                                          KG Failed
+                                        </Badge>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        <p className="text-xs">KG extraction failed. Click to retry.</p>
                                       </TooltipContent>
                                     </Tooltip>
                                   </TooltipProvider>
@@ -1641,7 +1838,7 @@ export default function DocumentsPage() {
                                 <Edit className="h-4 w-4 mr-2" />
                                 Edit Tags
                               </DropdownMenuItem>
-                              {(doc as any).images_extracted_count > 0 && (
+                              {doc.images_extracted_count > 0 && (
                                 <DropdownMenuItem
                                   onClick={() => {
                                     setImageAnalysisDocument(doc);
@@ -1649,7 +1846,7 @@ export default function DocumentsPage() {
                                   }}
                                 >
                                   <Images className="h-4 w-4 mr-2" />
-                                  Analyze Images
+                                  {doc.image_analysis_status === 'completed' ? 'Re-analyze Images' : 'Analyze Images'}
                                 </DropdownMenuItem>
                               )}
                               {!doc.has_all_embeddings && doc.chunk_count > 0 && (
@@ -1660,6 +1857,13 @@ export default function DocumentsPage() {
                                   Generate Embeddings
                                 </DropdownMenuItem>
                               )}
+                              <DropdownMenuItem
+                                onClick={() => handleExtractKG(doc.id, doc.name)}
+                                disabled={isExtractingKG || doc.kg_extraction_status === 'processing'}
+                              >
+                                <Network className="h-4 w-4 mr-2" />
+                                {doc.kg_extraction_status === 'completed' ? 'Re-extract KG' : 'Extract KG'}
+                              </DropdownMenuItem>
                               <DropdownMenuItem
                                 onClick={() => handleReprocessDocument(doc.id, doc.name)}
                                 disabled={reprocessDocument.isPending}
@@ -1743,7 +1947,7 @@ export default function DocumentsPage() {
                           <Edit className="h-4 w-4 mr-2" />
                           Edit Tags
                         </DropdownMenuItem>
-                        {(doc as any).images_extracted_count > 0 && (
+                        {doc.images_extracted_count > 0 && (
                           <DropdownMenuItem
                             onClick={(e) => {
                               e.stopPropagation();
@@ -1752,9 +1956,16 @@ export default function DocumentsPage() {
                             }}
                           >
                             <Images className="h-4 w-4 mr-2" />
-                            Analyze Images
+                            {doc.image_analysis_status === 'completed' ? 'Re-analyze Images' : 'Analyze Images'}
                           </DropdownMenuItem>
                         )}
+                        <DropdownMenuItem
+                          onClick={(e) => { e.stopPropagation(); handleExtractKG(doc.id, doc.name); }}
+                          disabled={isExtractingKG || doc.kg_extraction_status === 'processing'}
+                        >
+                          <Network className="h-4 w-4 mr-2" />
+                          {doc.kg_extraction_status === 'completed' ? 'Re-extract KG' : 'Extract KG'}
+                        </DropdownMenuItem>
                         <DropdownMenuItem
                           onClick={(e) => { e.stopPropagation(); handleReprocessDocument(doc.id, doc.name); }}
                           disabled={reprocessDocument.isPending}
@@ -1795,16 +2006,20 @@ export default function DocumentsPage() {
                           </Tooltip>
                         </TooltipProvider>
                       )}
-                      {(doc as any).images_extracted_count > 0 && (
+                      {doc.images_extracted_count > 0 && (
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Badge
                                 variant="outline"
                                 className={`text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer ${
-                                  (doc as any).image_analysis_status === 'completed'
-                                    ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-300 dark:border-blue-800'
-                                    : 'bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800'
+                                  doc.image_analysis_status === 'processing'
+                                    ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-300 dark:border-blue-800 animate-pulse'
+                                    : doc.image_analysis_status === 'completed'
+                                      ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-300 dark:border-blue-800'
+                                      : doc.image_analysis_status === 'failed'
+                                        ? 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-800'
+                                        : 'bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800'
                                 }`}
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -1812,16 +2027,41 @@ export default function DocumentsPage() {
                                   setIsImageAnalysisOpen(true);
                                 }}
                               >
-                                <Images className="h-2.5 w-2.5" />
+                                {doc.image_analysis_status === 'processing' ? (
+                                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                                ) : (
+                                  <Images className="h-2.5 w-2.5" />
+                                )}
                               </Badge>
                             </TooltipTrigger>
                             <TooltipContent side="top">
                               <p className="text-xs">
-                                {(doc as any).images_analyzed_count || 0}/{(doc as any).images_extracted_count} images
+                                {doc.image_analysis_status === 'processing'
+                                  ? 'Analyzing images...'
+                                  : `${doc.images_analyzed_count || 0}/${doc.images_extracted_count} images`}
                               </p>
                             </TooltipContent>
                           </Tooltip>
                         </TooltipProvider>
+                      )}
+                      {doc.kg_extraction_status === 'completed' && (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-300 dark:border-purple-800 shrink-0">
+                                <Network className="h-2.5 w-2.5" />
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                              <p className="text-xs">{doc.kg_entity_count} entities, {doc.kg_relation_count} relations</p>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
+                      {doc.kg_extraction_status === 'processing' && (
+                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/30 dark:text-purple-300 dark:border-purple-800 shrink-0 animate-pulse">
+                          <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                        </Badge>
                       )}
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">
@@ -2135,147 +2375,34 @@ export default function DocumentsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Document Preview Panel */}
-      <Sheet open={isPreviewOpen} onOpenChange={setIsPreviewOpen}>
-        <SheetContent side="right" className="w-[480px] sm:w-[540px] sm:max-w-[50vw] p-0">
-          {previewDocument && (
-            <div className="flex flex-col h-full">
-              <SheetHeader className="px-6 py-4 border-b">
-                <div className="flex items-center justify-between">
-                  <SheetTitle className="text-base truncate pr-4">
-                    {previewDocument.name || previewDocument.title}
-                  </SheetTitle>
-                </div>
-                <div className="flex items-center gap-2 mt-2">
-                  <Button
-                    size="sm"
-                    variant="default"
-                    onClick={() => handleOpenFullView(previewDocument.id)}
-                  >
-                    <Maximize2 className="h-3 w-3 mr-1" />
-                    Full Screen
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => handleDownloadDocument(previewDocument.id, previewDocument.name)}
-                  >
-                    <Download className="h-3 w-3 mr-1" />
-                    Download
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      setEditingDocument(previewDocument);
-                      setEditingTags(previewDocument.tags || []);
-                      setEditTagsDialogOpen(true);
-                    }}
-                  >
-                    <Edit className="h-3 w-3 mr-1" />
-                    Tags
-                  </Button>
-                </div>
-              </SheetHeader>
-              <Tabs defaultValue="preview" className="flex-1 flex flex-col min-h-0">
-                <TabsList className="mx-6 mt-3 w-fit">
-                  <TabsTrigger value="preview">Preview</TabsTrigger>
-                  <TabsTrigger value="metadata">Metadata</TabsTrigger>
-                </TabsList>
-                <TabsContent value="preview" className="flex-1 min-h-0 px-6 py-3">
-                  <ScrollArea className="h-full">
-                    <UploadedDocumentPreview
-                      documentId={previewDocument.id}
-                      fileName={previewDocument.name || previewDocument.original_filename}
-                      fileType={previewDocument.file_type || previewDocument.name?.split('.').pop() || 'txt'}
-                      className="min-h-[300px]"
-                    />
-                  </ScrollArea>
-                </TabsContent>
-                <TabsContent value="metadata" className="flex-1 min-h-0 px-6 py-3">
-                  <ScrollArea className="h-full">
-                    <div className="space-y-4 text-sm">
-                      <div>
-                        <p className="font-medium text-muted-foreground">Filename</p>
-                        <p>{previewDocument.name}</p>
-                      </div>
-                      <div>
-                        <p className="font-medium text-muted-foreground">Type</p>
-                        <p>{previewDocument.file_type || 'Unknown'}</p>
-                      </div>
-                      {previewDocument.file_size && (
-                        <div>
-                          <p className="font-medium text-muted-foreground">Size</p>
-                          <p>{(previewDocument.file_size / 1024).toFixed(1)} KB</p>
-                        </div>
-                      )}
-                      {previewDocument.collection && (
-                        <div>
-                          <p className="font-medium text-muted-foreground">Collection</p>
-                          <p>{previewDocument.collection}</p>
-                        </div>
-                      )}
-                      {previewDocument.tags && previewDocument.tags.length > 0 && (
-                        <div>
-                          <p className="font-medium text-muted-foreground">Tags</p>
-                          <div className="flex flex-wrap gap-1 mt-1">
-                            {previewDocument.tags.map((tag: string) => (
-                              <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      {previewDocument.created_at && (
-                        <div>
-                          <p className="font-medium text-muted-foreground">Created</p>
-                          <p>{new Date(previewDocument.created_at).toLocaleString()}</p>
-                        </div>
-                      )}
-                      {previewDocument.chunk_count !== undefined && (
-                        <div>
-                          <p className="font-medium text-muted-foreground">Chunks</p>
-                          <p>{previewDocument.chunk_count}</p>
-                        </div>
-                      )}
-                      {previewDocument.chunk_count > 0 && (
-                        <div>
-                          <p className="font-medium text-muted-foreground">Embedding Status</p>
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`flex items-center gap-1 ${
-                                previewDocument.has_all_embeddings
-                                  ? "text-green-600 dark:text-green-400"
-                                  : "text-amber-600 dark:text-amber-400"
-                              }`}
-                            >
-                              {previewDocument.has_all_embeddings ? (
-                                <Database className="h-4 w-4" />
-                              ) : (
-                                <AlertCircle className="h-4 w-4" />
-                              )}
-                              {previewDocument.embedding_coverage?.toFixed(0) || 0}% ({previewDocument.embedding_count}/{previewDocument.chunk_count})
-                            </span>
-                            {!previewDocument.has_all_embeddings && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => handleGenerateEmbeddings(previewDocument.id)}
-                                className="h-6 text-xs"
-                              >
-                                Generate
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </ScrollArea>
-                </TabsContent>
-              </Tabs>
-            </div>
-          )}
-        </SheetContent>
-      </Sheet>
+      {/* Document Detail Panel */}
+      <DocumentDetailPanel
+        document={previewDocument}
+        isOpen={isPreviewOpen}
+        onOpenChange={setIsPreviewOpen}
+        onOpenFullView={handleOpenFullView}
+        onDownload={handleDownloadDocument}
+        onEditTags={(doc) => {
+          setEditingDocument(doc);
+          setEditingTags(doc.tags || []);
+          setEditTagsDialogOpen(true);
+        }}
+        onGenerateEmbeddings={handleGenerateEmbeddings}
+        onRefetch={refetch}
+        onToggleFavorite={toggleFavorite}
+        isFavorite={previewDocument ? favorites.has(previewDocument.id) : false}
+        onAutoTag={handleAutoTagDocument}
+        isAutoTagging={isAutoTagging}
+        onReanalyzeImages={(doc) => {
+          setImageAnalysisDocument(doc);
+          setIsImageAnalysisOpen(true);
+        }}
+        onExtractKG={handleExtractKG}
+        isExtractingKG={isExtractingKG}
+        onReprocess={handleReprocessDocument}
+        isReprocessing={reprocessDocument.isPending}
+        onDelete={handleDeleteDocument}
+      />
 
       {/* Image Analysis Modal */}
       {imageAnalysisDocument && (

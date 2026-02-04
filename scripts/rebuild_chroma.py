@@ -26,7 +26,7 @@ async def rebuild_chroma():
     from backend.services.llm import get_embeddings
 
     # First, completely remove old ChromaDB data
-    chroma_dir = Path("./data/chroma")
+    chroma_dir = Path("./backend/data/chroma")
     if chroma_dir.exists():
         print(f"Removing old ChromaDB data at {chroma_dir}...")
         shutil.rmtree(chroma_dir)

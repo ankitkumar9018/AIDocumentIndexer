@@ -183,6 +183,84 @@ class VoyageAIEmbeddings(Embeddings):
             raise
 
 # =============================================================================
+# Phase 89: Nomic Ollama Embeddings with Task Instruction Prefixes
+# =============================================================================
+
+class NomicOllamaEmbeddings(Embeddings):
+    """
+    Wrapper for Ollama embeddings that adds nomic-embed-text task instruction prefixes.
+
+    nomic-embed-text REQUIRES different prefixes for documents vs queries:
+    - Documents: "search_document: <text>"
+    - Queries: "search_query: <text>"
+
+    Without these prefixes, semantic similarity is significantly degraded because
+    the model was trained to differentiate between document and query embeddings.
+
+    Reference: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5
+    """
+
+    # Task prefixes for nomic-embed-text
+    DOCUMENT_PREFIX = "search_document: "
+    QUERY_PREFIX = "search_query: "
+
+    def __init__(
+        self,
+        model: str = "nomic-embed-text",
+        base_url: str = "http://localhost:11434",
+    ):
+        """
+        Initialize Nomic Ollama embeddings.
+
+        Args:
+            model: Ollama model name (should be nomic-embed-text)
+            base_url: Ollama server URL
+        """
+        self.model = model
+        self.base_url = base_url
+        self._ollama = OllamaEmbeddings(model=model, base_url=base_url)
+
+        logger.info(
+            "Initialized NomicOllamaEmbeddings with task instruction prefixes",
+            model=model,
+            base_url=base_url,
+        )
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """
+        Embed documents with search_document: prefix.
+
+        Args:
+            texts: List of document texts to embed
+
+        Returns:
+            List of embedding vectors
+        """
+        # Add document prefix to each text
+        prefixed_texts = [
+            f"{self.DOCUMENT_PREFIX}{text}" if text and text.strip() else text
+            for text in texts
+        ]
+        return self._ollama.embed_documents(prefixed_texts)
+
+    def embed_query(self, text: str) -> List[float]:
+        """
+        Embed a query with search_query: prefix.
+
+        Args:
+            text: Query text to embed
+
+        Returns:
+            Embedding vector
+        """
+        if not text or not text.strip():
+            return [0.0] * 768  # nomic-embed-text dimension
+
+        prefixed_text = f"{self.QUERY_PREFIX}{text}"
+        return self._ollama.embed_query(prefixed_text)
+
+
+# =============================================================================
 # Phase 68: Qwen3 Embeddings (70.58 MTEB - Top Performer)
 # =============================================================================
 
@@ -2326,6 +2404,17 @@ class EmbeddingService:
                 openai_api_key=self.config.openai_api_key,
             )
         elif self.provider == "ollama":
+            # Phase 89: Use NomicOllamaEmbeddings for nomic-embed-text to add required
+            # task instruction prefixes (search_document: / search_query:)
+            if "nomic" in self.model.lower():
+                logger.info(
+                    "Using NomicOllamaEmbeddings with task instruction prefixes",
+                    model=self.model,
+                )
+                return NomicOllamaEmbeddings(
+                    model=self.model,
+                    base_url=self.config.ollama_base_url,
+                )
             return OllamaEmbeddings(
                 model=self.model,
                 base_url=self.config.ollama_base_url,

@@ -8,6 +8,7 @@ and hypothetical questions for better semantic retrieval.
 """
 
 import asyncio
+import hashlib
 import re
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Callable
@@ -15,7 +16,7 @@ from uuid import UUID
 
 import structlog
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import Document, Chunk, ProcessingStatus
@@ -40,7 +41,7 @@ class EnhancedMetadata(BaseModel):
     )
     hypothetical_questions: List[str] = Field(
         default_factory=list,
-        description="3-5 questions this document answers"
+        description="Hypothetical questions this document answers (3-10, scaled by document size)"
     )
     language: str = Field(default="en", description="Detected language")
     document_type: str = Field(default="unknown", description="Document type classification")
@@ -85,7 +86,9 @@ class EnhancementJobStatus(BaseModel):
 # Enhancement Prompts
 # =============================================================================
 
-ENHANCEMENT_SYSTEM_PROMPT = """You are a document analysis assistant. Analyze the provided document content and extract structured metadata to improve search and retrieval.
+def _build_enhancement_prompt(num_questions: int = 5) -> str:
+    """Build the enhancement system prompt with dynamic question count."""
+    return f"""You are a document analysis assistant. Analyze the provided document content and extract structured metadata to improve search and retrieval.
 
 Your task is to:
 1. Create a short summary (1-2 sentences) capturing the main point
@@ -93,26 +96,48 @@ Your task is to:
 3. Extract 5-10 important keywords/terms
 4. Identify 2-5 main topics covered
 5. Extract named entities (people, organizations, dates, locations)
-6. Generate 3-5 questions this document could answer
+6. Generate exactly {num_questions} diverse hypothetical questions this document could answer. You MUST generate exactly {num_questions} questions - no more, no less. Cover different sections, aspects, facts, and details from the document. Each question should be specific and answerable from the document content.
 7. Classify the document type (report, article, manual, email, presentation, etc.)
 8. Detect the primary language
 
 Respond ONLY with valid JSON matching this schema:
-{
+{{
     "summary_short": "string",
     "summary_detailed": "string",
     "keywords": ["string"],
     "topics": ["string"],
-    "entities": {
+    "entities": {{
         "people": ["string"],
         "organizations": ["string"],
         "dates": ["string"],
         "locations": ["string"]
-    },
+    }},
     "hypothetical_questions": ["string"],
     "language": "string (ISO code)",
     "document_type": "string"
-}"""
+}}"""
+
+
+def _calculate_num_questions(chunk_count: int) -> int:
+    """Calculate number of hypothetical questions based on document size.
+
+    Scaling:
+      - Small docs (1-5 chunks) → 5 questions
+      - Medium docs (6-12 chunks) → 7-9 questions
+      - Large docs (13-30 chunks) → 10-14 questions
+      - Very large docs (31-60 chunks) → 15-19 questions
+      - Huge docs (61+ chunks) → 20-30 questions
+    """
+    if chunk_count <= 5:
+        return 5
+    elif chunk_count <= 12:
+        return 7 + (chunk_count - 6) // 3  # 7-9
+    elif chunk_count <= 30:
+        return 10 + (chunk_count - 13) // 4  # 10-14
+    elif chunk_count <= 60:
+        return 15 + (chunk_count - 31) // 6  # 15-19
+    else:
+        return min(30, 20 + (chunk_count - 61) // 10)  # 20-30
 
 
 # =============================================================================
@@ -192,12 +217,12 @@ class DocumentEnhancer:
         self,
         db: AsyncSession,
         document_id: str,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, int]:
         """
         Get document content from chunks.
 
         Returns:
-            Tuple of (content_text, approximate_token_count)
+            Tuple of (content_text, approximate_token_count, total_chunk_count)
         """
         # Get chunks for this document, ordered by chunk index
         result = await db.execute(
@@ -208,7 +233,9 @@ class DocumentEnhancer:
         chunks = result.scalars().all()
 
         if not chunks:
-            return "", 0
+            return "", 0, 0
+
+        total_chunk_count = len(chunks)
 
         # Combine chunk content, respecting token limit
         content_parts = []
@@ -229,7 +256,7 @@ class DocumentEnhancer:
         content = "\n\n".join(content_parts)
         approx_tokens = len(content) // 4
 
-        return content, approx_tokens
+        return content, approx_tokens, total_chunk_count
 
     def _extract_json_from_response(self, response_text: str) -> str:
         """
@@ -270,9 +297,15 @@ class DocumentEnhancer:
         self,
         content: str,
         document_name: str,
+        num_questions: int = 5,
     ) -> tuple[EnhancedMetadata, int]:
         """
         Extract metadata from content using LLM.
+
+        Args:
+            content: Document text content
+            document_name: Name of the document
+            num_questions: Number of hypothetical questions to generate (scales with doc size)
 
         Returns:
             Tuple of (metadata, tokens_used)
@@ -293,7 +326,7 @@ Analyze this document and provide structured metadata as JSON."""
         from langchain_core.messages import SystemMessage, HumanMessage
 
         messages = [
-            SystemMessage(content=ENHANCEMENT_SYSTEM_PROMPT),
+            SystemMessage(content=_build_enhancement_prompt(num_questions)),
             HumanMessage(content=user_prompt),
         ]
 
@@ -360,8 +393,52 @@ Analyze this document and provide structured metadata as JSON."""
                 model_used=self.model,
             )
 
+            # If LLM returned fewer questions than requested, make a follow-up call
+            actual_q = len(metadata.hypothetical_questions)
+            if actual_q < num_questions:
+                logger.info(
+                    "LLM returned fewer questions than requested, generating more",
+                    document=document_name,
+                    got=actual_q,
+                    requested=num_questions,
+                )
+                try:
+                    needed = num_questions - actual_q
+                    existing_qs = "\n".join(f"- {q}" for q in metadata.hypothetical_questions)
+                    followup_prompt = f"""Based on this document content, generate exactly {needed} MORE diverse hypothetical questions that this document could answer.
+These questions must be DIFFERENT from the ones already generated:
+{existing_qs}
+
+Document: {document_name}
+
+Content:
+{content[:3000]}
+
+Respond with ONLY a JSON array of strings, e.g. ["question 1?", "question 2?"]"""
+                    followup_response = await llm.ainvoke([
+                        HumanMessage(content=followup_prompt),
+                    ])
+                    if followup_response.content and followup_response.content.strip():
+                        followup_text = self._extract_json_from_response(followup_response.content.strip())
+                        extra_questions = json.loads(followup_text)
+                        if isinstance(extra_questions, list):
+                            metadata.hypothetical_questions.extend(
+                                q for q in extra_questions if isinstance(q, str) and q.strip()
+                            )
+                            logger.info(
+                                "Added extra questions",
+                                document=document_name,
+                                total=len(metadata.hypothetical_questions),
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to generate additional questions",
+                        document=document_name,
+                        error=str(e),
+                    )
+
             # Estimate tokens used
-            input_tokens = len(ENHANCEMENT_SYSTEM_PROMPT + user_prompt) // 4
+            input_tokens = len(user_prompt) // 4 + 200  # ~200 tokens for system prompt
             output_tokens = len(response_text) // 4
             tokens_used = input_tokens + output_tokens
 
@@ -375,6 +452,264 @@ Analyze this document and provide structured metadata as JSON."""
                 response_preview=response_text[:500] if response_text else "",
             )
             raise ValueError(f"Invalid JSON response from LLM: {e}")
+
+    async def _create_hypothetical_chunks(
+        self,
+        db: AsyncSession,
+        document: "Document",
+        hypothetical_questions: List[str],
+    ) -> int:
+        """
+        Create synthetic chunks from hypothetical questions for vector search.
+
+        These chunks use chunk_level=2 and is_summary=True to distinguish them
+        from regular document chunks. They enable question-based retrieval by
+        embedding the hypothetical questions alongside document content.
+
+        Creates DB records, generates embeddings, and indexes in the vector
+        store (ChromaDB) so they are searchable via vector similarity.
+
+        Args:
+            db: Database session
+            document: The document to create chunks for
+            hypothetical_questions: List of questions to create chunks from
+
+        Returns:
+            Number of synthetic chunks created
+        """
+        # Get existing synthetic chunk IDs for ChromaDB cleanup
+        existing_result = await db.execute(
+            select(Chunk.id).where(
+                Chunk.document_id == document.id,
+                Chunk.is_summary == True,
+                Chunk.chunk_level == 2,
+            )
+        )
+        existing_ids = [str(cid) for cid in existing_result.scalars().all()]
+
+        # Delete from DB
+        await db.execute(
+            delete(Chunk).where(
+                Chunk.document_id == document.id,
+                Chunk.is_summary == True,
+                Chunk.chunk_level == 2,
+            )
+        )
+
+        # Delete old entries from vector store (ChromaDB)
+        if existing_ids:
+            try:
+                from backend.services.vectorstore import get_vector_store
+                vectorstore = get_vector_store()
+                vectorstore._collection.delete(ids=existing_ids)
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete old synthetic chunks from vector store",
+                    document_id=str(document.id),
+                    error=str(e),
+                )
+
+        # Create new DB chunks
+        doc_name = document.title or document.original_filename
+        created_chunks = []
+        for i, question in enumerate(hypothetical_questions):
+            chunk = Chunk(
+                content=question,
+                content_hash=hashlib.sha256(question.encode()).hexdigest(),
+                document_id=document.id,
+                chunk_index=-(100 + i),
+                is_summary=True,
+                chunk_level=2,
+                access_tier_id=document.access_tier_id,
+                organization_id=getattr(document, "organization_id", None),
+                chunk_metadata={
+                    "chunk_type": "hypothetical_question",
+                    "question_index": i,
+                    "document_name": doc_name,
+                },
+            )
+            db.add(chunk)
+            created_chunks.append(chunk)
+
+        await db.flush()
+
+        # Generate embeddings and index in vector store
+        if created_chunks:
+            try:
+                from backend.processors.chunker import Chunk as ChunkerChunk
+                from backend.services.embeddings import get_embedding_service
+                from backend.services.vectorstore import get_vector_store
+
+                # Create chunker Chunk dataclass objects for the embedding service
+                chunker_chunks = [
+                    ChunkerChunk(
+                        content=q,
+                        chunk_index=-(100 + i),
+                        document_id=str(document.id),
+                        metadata={"chunk_type": "hypothetical_question"},
+                        chunk_level=2,
+                        is_summary=True,
+                    )
+                    for i, q in enumerate(hypothetical_questions)
+                ]
+
+                # Generate embeddings (async to avoid blocking event loop)
+                embedding_service = get_embedding_service(use_ray=False)
+                embedding_results = await embedding_service.embed_chunks_async(
+                    chunker_chunks
+                )
+
+                # Upsert into ChromaDB with embeddings
+                vectorstore = get_vector_store()
+                for chunk_model, emb_result in zip(created_chunks, embedding_results):
+                    await vectorstore.update_chunk_embedding(
+                        chunk_id=str(chunk_model.id),
+                        embedding=emb_result.embedding,
+                        document_content=chunk_model.content,
+                        metadata={
+                            "document_id": str(document.id),
+                            "access_tier_id": str(document.access_tier_id) if document.access_tier_id else "",
+                            "document_filename": doc_name or "",
+                            "chunk_index": chunk_model.chunk_index,
+                            "page_number": 0,
+                            "section_title": "",
+                            "token_count": len(chunk_model.content) // 4,
+                            "char_count": len(chunk_model.content),
+                            "content_hash": chunk_model.content_hash,
+                            "organization_id": str(getattr(document, "organization_id", "")) if getattr(document, "organization_id", None) else "",
+                            "uploaded_by_id": "",
+                            "is_private": False,
+                            "chunk_type": "hypothetical_question",
+                        },
+                    )
+
+                # Mark chunks as having embeddings
+                for chunk_model in created_chunks:
+                    chunk_model.has_embedding = True
+
+                logger.info(
+                    "Embedded synthetic question chunks in vector store",
+                    document_id=str(document.id),
+                    count=len(embedding_results),
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to embed synthetic chunks - chunks saved to DB but not yet searchable via vector search",
+                    document_id=str(document.id),
+                    error=str(e),
+                )
+                # Don't fail the enhancement - chunks are in DB for context enrichment
+
+        return len(hypothetical_questions)
+
+    async def generate_additional_questions(
+        self,
+        document_id: str,
+        count: int = 5,
+    ) -> List[str]:
+        """
+        Generate additional hypothetical questions for a document using LLM.
+
+        Takes existing questions into account so the new ones are diverse and
+        non-duplicative. Merges them into the document's enhanced_metadata and
+        re-creates synthetic chunks with embeddings.
+
+        Args:
+            document_id: UUID of the document
+            count: Number of additional questions to generate
+
+        Returns:
+            List of newly generated questions
+        """
+        import json
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        async with async_session_context() as db:
+            result = await db.execute(
+                select(Document).where(Document.id == document_id)
+            )
+            document = result.scalar_one_or_none()
+            if not document:
+                raise ValueError(f"Document {document_id} not found")
+
+            # Get existing questions
+            metadata = document.enhanced_metadata or {}
+            existing_questions = metadata.get("hypothetical_questions", [])
+
+            # Get document content for context
+            content, _, _ = await self._get_document_content(db, document_id)
+            if not content:
+                raise ValueError("No content found in document chunks")
+
+            doc_name = document.filename or document.original_filename
+
+            # Build prompt that excludes existing questions
+            existing_list = "\n".join(f"- {q}" for q in existing_questions) if existing_questions else "(none)"
+
+            system_prompt = f"""You are a document analysis assistant. Generate exactly {count} NEW hypothetical questions that this document could answer.
+
+The questions should:
+- Be diverse, covering different sections and aspects of the document
+- NOT duplicate or closely resemble any existing questions listed below
+- Be specific enough to be useful for search retrieval
+- Cover factual details, relationships, implications, and comparisons
+
+EXISTING QUESTIONS (do NOT generate similar ones):
+{existing_list}
+
+Respond ONLY with valid JSON: {{"questions": ["question1", "question2", ...]}}"""
+
+            user_prompt = f"Document: {doc_name}\n\nContent:\n{content}\n\nGenerate {count} new diverse questions."
+
+            # Call LLM
+            llm = await self._get_llm()
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt),
+            ]
+
+            response = await llm.ainvoke(messages)
+            response_text = (response.content or "").strip()
+
+            if not response_text:
+                raise ValueError("LLM returned empty response")
+
+            # Parse response
+            json_text = self._extract_json_from_response(response_text)
+            data = json.loads(json_text)
+            new_questions = data.get("questions", [])
+
+            if not new_questions:
+                raise ValueError("LLM did not return any questions")
+
+            # Filter out duplicates (case-insensitive)
+            existing_lower = {q.lower().strip() for q in existing_questions}
+            new_questions = [
+                q for q in new_questions
+                if q.strip() and q.lower().strip() not in existing_lower
+            ]
+
+            if not new_questions:
+                raise ValueError("All generated questions were duplicates of existing ones")
+
+            # Merge and save
+            all_questions = existing_questions + new_questions
+            metadata["hypothetical_questions"] = all_questions
+            document.enhanced_metadata = metadata
+            await db.commit()
+
+            # Re-create synthetic chunks with ALL questions (existing + new)
+            await self._create_hypothetical_chunks(db, document, all_questions)
+            await db.commit()
+
+            logger.info(
+                "Generated additional hypothetical questions",
+                document_id=document_id,
+                new_count=len(new_questions),
+                total_count=len(all_questions),
+            )
+
+            return new_questions
 
     async def enhance_document(
         self,
@@ -418,7 +753,7 @@ Analyze this document and provide structured metadata as JSON."""
                     )
 
                 # Get document content
-                content, input_tokens = await self._get_document_content(db, document_id)
+                content, input_tokens, chunk_count = await self._get_document_content(db, document_id)
 
                 if not content:
                     return EnhancementResult(
@@ -427,15 +762,39 @@ Analyze this document and provide structured metadata as JSON."""
                         error="No content found in document chunks",
                     )
 
+                # Scale hypothetical questions with document size
+                num_questions = _calculate_num_questions(chunk_count)
+                logger.info(
+                    "Scaling hypothetical questions",
+                    document_id=document_id,
+                    chunk_count=chunk_count,
+                    num_questions=num_questions,
+                )
+
                 # Extract metadata
                 metadata, tokens_used = await self._extract_metadata(
                     content,
                     document.filename or document.original_filename,
+                    num_questions=num_questions,
                 )
 
                 # Save to document (use mode="json" for JSON-serializable output)
                 document.enhanced_metadata = metadata.model_dump(mode="json")
                 await db.commit()
+
+                # Create synthetic chunks from hypothetical questions for vector search
+                # These get embedded and indexed in the vector store for retrieval
+                hypothetical_questions = metadata.hypothetical_questions
+                if hypothetical_questions:
+                    synthetic_count = await self._create_hypothetical_chunks(
+                        db, document, hypothetical_questions
+                    )
+                    await db.commit()
+                    logger.info(
+                        "Created and embedded synthetic question chunks",
+                        document_id=document_id,
+                        count=synthetic_count,
+                    )
 
                 logger.info(
                     "Document enhanced successfully",
@@ -625,6 +984,97 @@ Analyze this document and provide structured metadata as JSON."""
             "model": self.model,
             "avg_tokens_per_doc": tokens_per_doc,
         }
+
+    async def backfill_hypothetical_chunks(
+        self,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Backfill synthetic chunks from hypothetical questions for documents
+        that have enhanced_metadata but are missing synthetic question chunks.
+
+        This is useful for documents that were enhanced before the synthetic
+        chunk creation feature was added.
+
+        Args:
+            limit: Maximum number of documents to process (None for all)
+
+        Returns:
+            Dict with processing statistics
+        """
+        logger.info("Starting hypothetical chunk backfill", limit=limit)
+
+        processed = 0
+        skipped = 0
+        failed = 0
+        total_chunks_created = 0
+
+        async with async_session_context() as db:
+            # Find documents with enhanced_metadata
+            query = select(Document).where(
+                Document.enhanced_metadata.isnot(None),
+                Document.processing_status == ProcessingStatus.COMPLETED,
+            )
+            if limit:
+                query = query.limit(limit)
+
+            result = await db.execute(query)
+            documents = result.scalars().all()
+
+            for document in documents:
+                try:
+                    # Check if synthetic chunks already exist for this document
+                    existing = await db.execute(
+                        select(func.count(Chunk.id)).where(
+                            Chunk.document_id == document.id,
+                            Chunk.is_summary == True,
+                            Chunk.chunk_level == 2,
+                        )
+                    )
+                    existing_count = existing.scalar() or 0
+
+                    if existing_count > 0:
+                        skipped += 1
+                        continue
+
+                    # Extract hypothetical questions from enhanced metadata
+                    enhanced = document.enhanced_metadata
+                    if not isinstance(enhanced, dict):
+                        skipped += 1
+                        continue
+
+                    questions = enhanced.get("hypothetical_questions", [])
+                    if not questions:
+                        skipped += 1
+                        continue
+
+                    # Create synthetic chunks
+                    count = await self._create_hypothetical_chunks(
+                        db, document, questions
+                    )
+                    total_chunks_created += count
+                    processed += 1
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to backfill hypothetical chunks",
+                        document_id=str(document.id),
+                        error=str(e),
+                    )
+                    failed += 1
+
+            await db.commit()
+
+        result_stats = {
+            "documents_processed": processed,
+            "documents_skipped": skipped,
+            "documents_failed": failed,
+            "total_documents_checked": processed + skipped + failed,
+            "total_chunks_created": total_chunks_created,
+        }
+
+        logger.info("Hypothetical chunk backfill complete", **result_stats)
+        return result_stats
 
 
 # =============================================================================

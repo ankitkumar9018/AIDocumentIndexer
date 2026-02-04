@@ -239,13 +239,18 @@ class ChatRequest(BaseModel):
     folder_id: Optional[str] = Field(default=None, description="Folder ID to scope query to. Only documents in this folder (and subfolders) will be searched.")
     include_subfolders: bool = Field(default=True, description="When folder_id is set, include documents in subfolders")
     # Language for responses
-    language: Optional[str] = Field(default="auto", description="Language code for response. Use 'auto' to respond in the same language as the question, or specify: en, de, es, fr, it, pt, nl, pl, ru, zh, ja, ko, ar, hi")
+    language: Optional[str] = Field(default="auto", description="Language code for response. Use 'auto' to respond in the same language as the question, or specify: en, de, es, fr, it, pt, nl, pl, ru, zh, ja, ko, ar, hi, hi-latn (Hinglish)")
     # Query enhancement toggle
     enhance_query: Optional[bool] = Field(default=None, description="Enable query enhancement (expansion + HyDE). None = use admin default setting.")
     # Restrict to documents only - when enabled in general mode, LLM won't use pre-trained knowledge
     restrict_to_documents: bool = Field(default=False, description="When enabled in general mode, the assistant will not use pre-trained knowledge and will suggest switching to document mode.")
     # Cache bypass - force fresh response instead of using cached
     skip_cache: bool = Field(default=False, description="Skip the query cache and generate a fresh response. Use this to get a new answer if the previous one was unsatisfactory.")
+    # Intelligence level - controls retrieval depth, reasoning, and answer quality
+    intelligence_level: Optional[str] = Field(default=None, pattern="^(basic|standard|enhanced|maximum)$", description="Intelligence level: basic (fast), standard, enhanced (deeper retrieval), maximum (most thorough, stronger grounding)")
+    # Chain of thought / verification
+    enable_cot: bool = Field(default=False, description="Enable chain-of-thought reasoning")
+    enable_verification: bool = Field(default=False, description="Enable self-verification of answers")
 
     @property
     def effective_collection_filters(self) -> Optional[List[str]]:
@@ -860,6 +865,8 @@ async def create_chat_completion(
                 enhance_query=request.enhance_query,  # Per-query enhancement override
                 organization_id=user.organization_id,  # Organization for multi-tenant isolation
                 is_superadmin=user.is_superadmin,  # Superadmin can access all private docs
+                skip_cache=request.skip_cache,  # Skip all caches for regenerate/refresh
+                intelligence_level=request.intelligence_level,  # Intelligence level for grounding
             )
 
             # Convert sources to API format
@@ -1265,6 +1272,7 @@ async def create_streaming_completion(
                 enhance_query=request.enhance_query,  # Per-query enhancement override
                 organization_id=user.organization_id,  # Organization for multi-tenant isolation
                 is_superadmin=user.is_superadmin,  # Superadmin can access all private docs
+                intelligence_level=request.intelligence_level,  # Intelligence level for grounding
             ):
                 if chunk.type == "content":
                     accumulated_content.append(chunk.data)

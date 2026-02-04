@@ -134,6 +134,7 @@ export default function UploadPage() {
     smart_chunking: true,
     detect_duplicates: true,
     auto_generate_tags: false,
+    auto_enhance: false,
     is_private: false,
     processing_mode: "full" as "full" | "ocr" | "basic",
     access_tier: undefined as number | undefined,
@@ -711,6 +712,24 @@ export default function UploadPage() {
                       checked={processingOptions.enable_image_analysis}
                       onCheckedChange={(checked) =>
                         setProcessingOptions((prev) => ({ ...prev, enable_image_analysis: checked }))
+                      }
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-muted/50 border border-purple-200 dark:border-purple-800">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-purple-500" />
+                      <div>
+                        <Label className="text-sm">AI Enhancement</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Auto-generate summaries, keywords &amp; questions
+                        </p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={processingOptions.auto_enhance}
+                      onCheckedChange={(checked) =>
+                        setProcessingOptions((prev) => ({ ...prev, auto_enhance: checked }))
                       }
                     />
                   </div>

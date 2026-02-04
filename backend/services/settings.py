@@ -2185,6 +2185,20 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         value_type=ValueType.STRING,
         description="spaCy model for dependency parsing (en_core_web_sm, en_core_web_md, en_core_web_lg)"
     ),
+    SettingDefinition(
+        key="kg.extraction_concurrency",
+        category=SettingCategory.INGESTION,
+        default_value=4,
+        value_type=ValueType.NUMBER,
+        description="Number of concurrent documents to process during KG extraction (1-16)"
+    ),
+    SettingDefinition(
+        key="kg.ray_task_timeout",
+        category=SettingCategory.INGESTION,
+        default_value=1800,
+        value_type=ValueType.NUMBER,
+        description="Timeout in seconds for each document during Ray KG extraction (300-7200)"
+    ),
 
     # ==========================================================================
     # Phase 66: TTS Provider Configuration
@@ -2956,6 +2970,28 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Enable adaptive chunking with progressive fallback for oversized chunks"
+    ),
+
+    # ==========================================================================
+    # Enhanced Metadata in RAG Context
+    # ==========================================================================
+    SettingDefinition(
+        key="rag.include_enhanced_metadata",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Include document summaries, keywords, and topics in RAG context for richer LLM responses"
+    ),
+
+    # ==========================================================================
+    # Auto-Enhancement on Upload
+    # ==========================================================================
+    SettingDefinition(
+        key="upload.auto_enhance",
+        category=SettingCategory.INGESTION,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Automatically enhance documents after upload (generates summaries, keywords, and hypothetical questions)"
     ),
 
     # ==========================================================================

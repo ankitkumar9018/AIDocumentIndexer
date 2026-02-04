@@ -32,7 +32,7 @@ except ImportError:
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple, Set, Callable
 
 import structlog
 from sqlalchemy import select, func, and_, or_, case, String
@@ -939,8 +939,15 @@ class KnowledgeGraphService:
                         entity_type_str = entity_data.get("type", "OTHER").upper()
                         entity_type = getattr(EntityType, entity_type_str, EntityType.OTHER)
 
+                        # Coerce name to string (LLM may return a list)
+                        raw_name = entity_data.get("name", "")
+                        if isinstance(raw_name, list):
+                            raw_name = " ".join(str(item) for item in raw_name)
+                        elif not isinstance(raw_name, str):
+                            raw_name = str(raw_name)
+
                         entities.append(ExtractedEntity(
-                            name=entity_data.get("name", ""),
+                            name=raw_name,
                             entity_type=entity_type,
                             description=entity_data.get("description"),
                             confidence=entity_data.get("confidence", 0.9),
@@ -1105,6 +1112,25 @@ class KnowledgeGraphService:
         except Exception as e:
             logger.error("Entity extraction failed", error=str(e))
             return [], []
+
+    async def extract_entities(
+        self,
+        query: str,
+        db: Optional[Any] = None,  # Not used, for API compatibility with LightRAG
+    ) -> List[ExtractedEntity]:
+        """
+        Simple wrapper for extracting entities from a query text.
+        Used by LightRAG for query entity extraction.
+
+        Args:
+            query: The query text to extract entities from
+            db: Database session (not used, for API compatibility)
+
+        Returns:
+            List of extracted entities
+        """
+        entities, _ = await self.extract_entities_from_text(query)
+        return entities
 
     async def extract_entities_with_llm_graph_transformer(
         self,
@@ -1302,6 +1328,7 @@ class KnowledgeGraphService:
         document_id: Optional[uuid.UUID] = None,
         document_language: str = "en",
         batch_size: Optional[int] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Tuple[List[ExtractedEntity], List[ExtractedRelation]]:
         """
         Extract entities from multiple text chunks in batches for better performance with adaptive batch sizing.
@@ -1320,6 +1347,7 @@ class KnowledgeGraphService:
             document_id: Source document ID
             document_language: Language code of the source document
             batch_size: Optional batch size override (if None, calculates optimal size)
+            progress_callback: Optional callback(chunks_done, total_chunks) for progress tracking
 
         Returns:
             Tuple of (all_entities, all_relations) from all chunks
@@ -1434,16 +1462,23 @@ Only include entities and relations clearly supported by the text."""
                     except ValueError:
                         entity_type = EntityType.OTHER
 
-                    canonical_name = e.get("canonical_name") or e.get("name", "")
+                    # Coerce name to string (LLM may return a list)
+                    raw_name = e.get("name", "")
+                    if isinstance(raw_name, list):
+                        raw_name = " ".join(str(item) for item in raw_name)
+                    elif not isinstance(raw_name, str):
+                        raw_name = str(raw_name)
+
+                    canonical_name = e.get("canonical_name") or raw_name
 
                     all_entities.append(ExtractedEntity(
-                        name=e.get("name", ""),
+                        name=raw_name,
                         entity_type=entity_type,
                         description=e.get("description"),
                         aliases=e.get("aliases", []),
                         language=document_language,
                         canonical_name=canonical_name,
-                        language_variants={document_language: e.get("name", "")} if document_language else {},
+                        language_variants={document_language: raw_name} if document_language else {},
                     ))
 
                 # Parse relations
@@ -1466,6 +1501,10 @@ Only include entities and relations clearly supported by the text."""
                     chunks_in_batch=len(batch),
                     entities_found=len(data.get("entities", [])),
                 )
+
+                # Report chunk-level progress
+                if progress_callback:
+                    progress_callback(min(i + batch_size, len(chunks)), len(chunks))
 
             except Exception as e:
                 logger.error(
@@ -1490,6 +1529,7 @@ Only include entities and relations clearly supported by the text."""
         document_id: uuid.UUID,
         chunks: Optional[List[Chunk]] = None,
         use_batch_extraction: bool = True,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Dict[str, int]:
         """
         Process a document to extract entities and build graph with language context.
@@ -1502,6 +1542,7 @@ Only include entities and relations clearly supported by the text."""
             document_id: Document to process
             chunks: Optional pre-loaded chunks
             use_batch_extraction: Use batch extraction for better performance (default True)
+            progress_callback: Optional callback(chunks_done, total_chunks) for progress tracking
 
         Returns:
             Stats dict with counts
@@ -1551,6 +1592,7 @@ Only include entities and relations clearly supported by the text."""
                 document_id=document_id,
                 document_language=document_language,
                 batch_size=3,  # Process 3 chunks per LLM call
+                progress_callback=progress_callback,
             )
 
             # Merge entities (by normalized name)
@@ -1645,6 +1687,10 @@ Only include entities and relations clearly supported by the text."""
         """
         if not name:
             return ""
+
+        # Coerce to string if LLM returned a list or other type
+        if not isinstance(name, str):
+            name = " ".join(str(item) for item in name) if isinstance(name, list) else str(name)
 
         # Step 1: Unicode NFC normalization (composed form)
         normalized = unicodedata.normalize('NFC', name)
@@ -2461,9 +2507,19 @@ Only include entities and relations clearly supported by the text."""
         embeddings_list = []
 
         for entity in entities:
-            if entity.embedding:
+            # Check if embedding exists - handle numpy arrays, lists, and strings
+            entity_emb = entity.embedding
+            has_embedding = (
+                entity_emb is not None
+                and (
+                    isinstance(entity_emb, str)  # JSON string
+                    or (isinstance(entity_emb, (list, tuple)) and len(entity_emb) > 0)  # List/tuple
+                    or (hasattr(entity_emb, '__len__') and len(entity_emb) > 0)  # Numpy array
+                )
+            )
+            if has_embedding:
                 # Handle both list and string (JSON) storage formats
-                entity_embedding = entity.embedding
+                entity_embedding = entity_emb
                 if isinstance(entity_embedding, str):
                     entity_embedding = orjson.loads(entity_embedding)
                 valid_entities.append(entity)

@@ -202,9 +202,9 @@ class ContextSufficiencyChecker:
             )
 
         # Determine confidence level
-        if coverage_score >= 0.7 and not has_conflicts:
+        if coverage_score >= 0.65 and not has_conflicts:
             confidence_level = "high"
-        elif coverage_score >= 0.4 or (coverage_score >= 0.3 and keyword_coverage >= 0.5):
+        elif coverage_score >= 0.35 or (coverage_score >= 0.25 and keyword_coverage >= 0.5):
             confidence_level = "medium"
         else:
             confidence_level = "low"
@@ -245,8 +245,12 @@ class ContextSufficiencyChecker:
         """
         Calculate how well contexts cover the query.
 
+        Uses keyword coverage and semantic similarity, with a scaling adjustment
+        because embedding similarity between a question and its answer text
+        typically maxes out at 0.5-0.7 even when the content is perfectly relevant.
+
         Returns:
-            Tuple of (semantic_coverage, keyword_coverage)
+            Tuple of (combined_coverage, keyword_coverage)
         """
         # 1. Keyword-based coverage (fast baseline)
         query_keywords = self._extract_keywords(query)
@@ -273,11 +277,26 @@ class ContextSufficiencyChecker:
                 similarities.append(similarity)
 
             # Use max similarity as coverage (at least one context should be highly relevant)
-            semantic_coverage = max(similarities) if similarities else 0.0
+            raw_semantic = max(similarities) if similarities else 0.0
+
+            # Scale semantic similarity: question-to-answer similarity typically
+            # peaks at 0.5-0.7 even for perfect matches. Rescale so that 0.4+ maps
+            # to a more meaningful range: 0.4 → 0.6, 0.55 → 0.8, 0.7+ → 1.0
+            if raw_semantic >= 0.4:
+                semantic_coverage = min(1.0, 0.6 + (raw_semantic - 0.4) * (0.4 / 0.3))
+            else:
+                semantic_coverage = raw_semantic * 1.5  # Below 0.4 stays low
+
+            # Also boost if multiple contexts are relevant (breadth signal)
+            if len(similarities) >= 3:
+                avg_sim = sum(similarities) / len(similarities)
+                if avg_sim > 0.3:
+                    # Multiple relevant contexts = higher confidence
+                    breadth_bonus = min(0.1, (avg_sim - 0.3) * 0.5)
+                    semantic_coverage = min(1.0, semantic_coverage + breadth_bonus)
 
             # Combine semantic and keyword coverage
-            # Weight semantic more as it captures meaning better
-            combined_coverage = 0.7 * semantic_coverage + 0.3 * keyword_coverage
+            combined_coverage = 0.6 * semantic_coverage + 0.4 * keyword_coverage
 
         except Exception as e:
             logger.warning("Semantic coverage calculation failed, using keyword only", error=str(e))

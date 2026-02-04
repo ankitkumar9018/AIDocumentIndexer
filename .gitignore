@@ -185,9 +185,14 @@ data/generated_images/
 backend/storage/audio/*.mp3
 backend/storage/audio/*.wav
 
-# ChromaDB vector store
-data/chroma/
+# ChromaDB vector store data (all locations)
+data/chroma/*
+!data/chroma/.gitkeep
 data/chroma_backup*/
+data/chroma_corrupted_backup/
+backend/data/chroma/*
+!backend/data/chroma/.gitkeep
+backend/data/chroma_backup*/
 
 # Ray temporary files
 .ray_temp/
@@ -256,4 +261,3 @@ checkpoints/
 # Stray database files
 backend/data/*.db
 data/*.db
-!data/chroma/

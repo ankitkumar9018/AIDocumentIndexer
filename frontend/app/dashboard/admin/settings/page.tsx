@@ -49,6 +49,7 @@ import {
   Volume2,
   Mic,
   GitBranch,
+  Cpu,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -73,6 +74,7 @@ import { ScraperTab } from "./components/scraper-tab";
 import { IngestionTab } from "./components/ingestion-tab";
 import { InstructionsTab } from "./components/instructions-tab";
 import { RayTab } from "./components/ray-tab";
+import { MaintenanceTab } from "./components/maintenance-tab";
 import {
   Card,
   CardContent,
@@ -144,6 +146,7 @@ import {
   useSettingsPresets,
   useApplySettingsPreset,
 } from "@/lib/api/hooks";
+import { api } from "@/lib/api/client";
 import type { LLMProvider, LLMProviderType, DatabaseConnectionType } from "@/lib/api/client";
 import { useUser } from "@/lib/auth";
 import { Badge } from "@/components/ui/badge";
@@ -236,6 +239,9 @@ export default function AdminSettingsPage() {
   const [selectedDeletedDocs, setSelectedDeletedDocs] = useState<Set<string>>(new Set());
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [isBulkRestoring, setIsBulkRestoring] = useState(false);
+
+  // Hardware auto-detect state
+  const [detectingQueue, setDetectingQueue] = useState(false);
 
   // Real API calls - only fetch when authenticated
   const { data: settingsData, isLoading: settingsLoading, error: settingsError, refetch: refetchSettings } = useSettings({ enabled: isAuthenticated });
@@ -483,6 +489,21 @@ export default function AdminSettingsPage() {
   const handleSettingChange = (key: string, value: unknown) => {
     setLocalSettings((prev) => ({ ...prev, [key]: value }));
     setHasChanges(true);
+  };
+
+  const detectQueueWorkers = async () => {
+    setDetectingQueue(true);
+    try {
+      const { data } = await api.get<{ recommended: Record<string, number> }>("/diagnostics/hardware/recommended-settings");
+      const recommended = data.recommended?.["queue.max_workers"];
+      if (recommended !== undefined) {
+        handleSettingChange("queue.max_workers", recommended);
+      }
+    } catch {
+      // Silently fail
+    } finally {
+      setDetectingQueue(false);
+    }
   };
 
   const handleSave = async () => {
@@ -933,6 +954,10 @@ export default function AdminSettingsPage() {
                   <HardDrive className="h-4 w-4" />
                   Cache
                 </TabsTrigger>
+                <TabsTrigger value="maintenance" className="w-full justify-start gap-2 px-3">
+                  <RefreshCw className="h-4 w-4" />
+                  Maintenance
+                </TabsTrigger>
               </TabsList>
             </div>
             {/* AI & MODELS */}
@@ -1281,6 +1306,9 @@ export default function AdminSettingsPage() {
 
         {/* Cache Management Tab (Phase 90) */}
         <CacheTab />
+
+        {/* Maintenance Tab - Reindex & KG Extraction (Phase 89) */}
+        <MaintenanceTab />
 
         {/* Evaluation Dashboard Tab (Phase 90) */}
         <EvaluationTab />
@@ -2113,6 +2141,22 @@ function JobQueueSettings({
   const invalidateCache = useInvalidateRedisCache();
   const startCelery = useStartCeleryWorker();
   const stopCelery = useStopCeleryWorker();
+  const [detectingQueue, setDetectingQueue] = useState(false);
+
+  const detectQueueWorkers = async () => {
+    setDetectingQueue(true);
+    try {
+      const { data } = await api.get<{ recommended: Record<string, number> }>("/diagnostics/hardware/recommended-settings");
+      const recommended = data.recommended?.["queue.max_workers"];
+      if (recommended !== undefined) {
+        handleSettingChange("queue.max_workers", recommended);
+      }
+    } catch {
+      // Silently fail
+    } finally {
+      setDetectingQueue(false);
+    }
+  };
 
   return (
     <>
@@ -2304,7 +2348,22 @@ function JobQueueSettings({
           {/* Max Workers */}
           {Boolean(localSettings["queue.celery_enabled"]) && (
             <div className="space-y-2">
-              <Label htmlFor="max-workers">Max Celery Workers</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="max-workers">Max Celery Workers</Label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={detectQueueWorkers}
+                  disabled={detectingQueue}
+                >
+                  {detectingQueue ? (
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                  ) : (
+                    <Cpu className="h-3 w-3 mr-1" />
+                  )}
+                  Auto-detect
+                </Button>
+              </div>
               <Input
                 id="max-workers"
                 type="number"

@@ -66,7 +66,7 @@ export function ContextSufficiencyIndicator({
       };
     }
 
-    if (confidence_level === "high" || coverage_score >= 0.7) {
+    if (confidence_level === "high" || coverage_score >= 0.65) {
       return {
         color: "bg-green-500",
         textColor: "text-green-600 dark:text-green-400",
@@ -76,7 +76,7 @@ export function ContextSufficiencyIndicator({
       };
     }
 
-    if (confidence_level === "medium" || coverage_score >= 0.4) {
+    if (confidence_level === "medium" || coverage_score >= 0.35) {
       return {
         color: "bg-yellow-500",
         textColor: "text-yellow-600 dark:text-yellow-400",

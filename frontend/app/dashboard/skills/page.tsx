@@ -118,7 +118,7 @@ export default function SkillsPage() {
     setSkillsError(null);
 
     try {
-      const response = await api.get("/skills/list");
+      const response = await api.get<{ skills: any[] }>("/skills/list");
       const backendSkills = response.data.skills || [];
 
       // Transform backend skills to frontend Skill format
@@ -190,7 +190,7 @@ export default function SkillsPage() {
     }
 
     // Return only active providers
-    return providersData.providers.filter((p: any) => p.is_active);
+    return providersData.providers.filter((p: any) => p.is_active) as ConfiguredProvider[];
   }, [providersData]);
 
   // Get default provider for initial selection
@@ -505,7 +505,7 @@ function SkillDetailDialog({
   const [activeTab, setActiveTab] = useState<"info" | "run">("run");
   const [inputValues, setInputValues] = useState<Record<string, any>>({});
   const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<{ output: any; error?: string } | null>(null);
+  const [result, setResult] = useState<{ output: any; error?: string; executionTime?: number; model?: string } | null>(null);
   const [copied, setCopied] = useState(false);
   // Default to default provider from settings
   const [selectedProviderId, setSelectedProviderId] = useState(defaultProvider?.id || "");
@@ -575,7 +575,7 @@ function SkillDetailDialog({
 
     try {
       // Call the skills execution API
-      const response = await api.post("/skills/execute", {
+      const response = await api.post<{ output: any; execution_time_ms: number; model_used: string }>("/skills/execute", {
         skill_id: skill.id,
         inputs: inputValues,
         provider_id: selectedProviderId,
@@ -1574,7 +1574,7 @@ function PublishSkillDialog({
     setError(null);
 
     try {
-      const response = await api.post(`/skills/${skill.id}/publish`, {
+      const response = await api.post<{ public_url: string; embed_code: string; public_slug: string }>(`/skills/${skill.id}/publish`, {
         custom_slug: customSlug || undefined,
         rate_limit: rateLimit,
         allowed_domains: ["*"],

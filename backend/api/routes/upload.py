@@ -487,6 +487,7 @@ class UploadOptions(BaseModel):
     smart_chunking: bool = True
     detect_duplicates: bool = True
     auto_generate_tags: bool = False  # Use LLM to auto-generate tags if no collection set
+    auto_enhance: bool = False  # Auto-enhance with LLM after processing (summaries, keywords, hypothetical questions)
     chunking_strategy: str = Field(
         default="semantic",
         description="Chunking strategy: 'simple', 'semantic', or 'hierarchical'"
@@ -934,6 +935,7 @@ async def process_document_background(
     file_id: UUID,
     file_path: str,
     options: UploadOptions,
+    original_filename: Optional[str] = None,
 ):
     """
     Background task for document processing.
@@ -943,9 +945,12 @@ async def process_document_background(
     """
     file_id_str = str(file_id)
 
-    # Get filename from cache or database
-    job_info = await get_upload_job(file_id_str)
-    filename = job_info.get("filename", "unknown") if job_info else "unknown"
+    # Get filename from parameter (reprocess), cache, or database
+    if original_filename:
+        filename = original_filename
+    else:
+        job_info = await get_upload_job(file_id_str)
+        filename = job_info.get("filename", "unknown") if job_info else "unknown"
 
     logger.info(
         "Starting background processing",
@@ -1116,6 +1121,7 @@ async def upload_single_file(
     smart_chunking: bool = Form(True),
     detect_duplicates: bool = Form(True),
     auto_generate_tags: bool = Form(False),
+    auto_enhance: bool = Form(False, description="Auto-enhance with AI after processing (summaries, keywords, questions)"),
     is_private: bool = Form(False, description="Make document private (only visible to uploader)"),
     user: Optional["UserContext"] = Depends(get_user_context_optional),
 ):
@@ -1195,6 +1201,7 @@ async def upload_single_file(
         smart_chunking=smart_chunking,
         detect_duplicates=detect_duplicates,
         auto_generate_tags=auto_generate_tags,
+        auto_enhance=auto_enhance,
         # Multi-tenant fields from authenticated user
         organization_id=user.organization_id if user else None,
         uploaded_by_id=user.user_id if user else None,
@@ -1232,6 +1239,7 @@ async def upload_single_file(
                 "enable_ocr": options.enable_ocr,
                 "enable_image_analysis": options.enable_image_analysis,
                 "auto_generate_tags": options.auto_generate_tags,
+                "auto_enhance": options.auto_enhance,
                 "folder_id": options.folder_id,
                 "organization_id": options.organization_id,
                 "is_private": options.is_private,
@@ -1269,6 +1277,7 @@ async def upload_batch(
     enable_ocr: bool = Form(True),
     enable_image_analysis: bool = Form(True, description="Enable image analysis and captioning"),
     auto_generate_tags: bool = Form(False, description="Auto-generate tags using LLM"),
+    auto_enhance: bool = Form(False, description="Auto-enhance with AI after processing"),
     is_private: bool = Form(False, description="Make documents private (only visible to uploader)"),
     user: Optional[UserContext] = Depends(get_user_context_optional),
 ):
@@ -1355,6 +1364,7 @@ async def upload_batch(
                 enable_ocr=enable_ocr,
                 enable_image_analysis=enable_image_analysis,
                 auto_generate_tags=auto_generate_tags,
+                auto_enhance=auto_enhance,
                 # Multi-tenant fields from authenticated user
                 organization_id=user.organization_id if user else None,
                 uploaded_by_id=user.user_id if user else None,
@@ -1376,6 +1386,7 @@ async def upload_batch(
                         "enable_ocr": options.enable_ocr,
                         "enable_image_analysis": options.enable_image_analysis,
                         "auto_generate_tags": options.auto_generate_tags,
+                        "auto_enhance": options.auto_enhance,
                         "folder_id": options.folder_id,
                         "organization_id": options.organization_id,
                         "is_private": options.is_private,

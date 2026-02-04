@@ -109,6 +109,17 @@ class DocumentResponse(BaseModel):
     embedding_count: int = 0
     embedding_coverage: float = 0.0  # Percentage of chunks with embeddings
     has_all_embeddings: bool = False
+    # Knowledge Graph status
+    kg_extraction_status: Optional[str] = None
+    kg_entity_count: int = 0
+    kg_relation_count: int = 0
+    kg_extracted_at: Optional[datetime] = None
+    # Image analysis status
+    image_analysis_status: Optional[str] = None
+    images_extracted_count: int = 0
+    images_analyzed_count: int = 0
+    image_analysis_completed_at: Optional[datetime] = None
+    image_analysis_error: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -267,6 +278,15 @@ def document_to_response(
         embedding_count=embedding_count,
         embedding_coverage=round(embedding_coverage, 1),
         has_all_embeddings=has_all_embeddings,
+        kg_extraction_status=doc.kg_extraction_status,
+        kg_entity_count=doc.kg_entity_count or 0,
+        kg_relation_count=doc.kg_relation_count or 0,
+        kg_extracted_at=doc.kg_extracted_at,
+        image_analysis_status=doc.image_analysis_status,
+        images_extracted_count=doc.images_extracted_count or 0,
+        images_analyzed_count=doc.images_analyzed_count or 0,
+        image_analysis_completed_at=doc.image_analysis_completed_at,
+        image_analysis_error=doc.image_analysis_error,
     )
 
 
@@ -695,6 +715,126 @@ async def update_document(
     return document_to_response(document, chunk_count, embedding_count)
 
 
+class HypotheticalQuestionsUpdate(BaseModel):
+    """Request to update hypothetical questions for a document."""
+    questions: List[str] = Field(..., min_length=1, max_length=20)
+
+
+@router.patch("/{document_id}/hypothetical-questions", response_model=DocumentResponse)
+async def update_hypothetical_questions(
+    document_id: UUID,
+    update: HypotheticalQuestionsUpdate,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update hypothetical questions for a document.
+
+    Updates the questions in enhanced_metadata and re-creates synthetic chunks
+    with new embeddings for vector search.
+    """
+    # Get document
+    query = select(Document).where(Document.id == document_id)
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),
+            )
+        )
+    result = await db.execute(query)
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    # Update enhanced_metadata
+    metadata = document.enhanced_metadata or {}
+    metadata["hypothetical_questions"] = update.questions
+    document.enhanced_metadata = metadata
+    await db.commit()
+
+    # Re-create synthetic chunks with new questions
+    try:
+        from backend.services.document_enhancer import get_document_enhancer
+        enhancer = get_document_enhancer()
+        await enhancer._create_hypothetical_chunks(db, document, update.questions)
+        await db.commit()
+        logger.info(
+            "Updated hypothetical questions and re-created synthetic chunks",
+            document_id=str(document_id),
+            question_count=len(update.questions),
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to re-create synthetic chunks after question update",
+            document_id=str(document_id),
+            error=str(e),
+        )
+        # Don't fail - the metadata is saved, chunks can be rebuilt later
+
+    await db.refresh(document)
+
+    # Get counts
+    chunk_result = await db.execute(
+        select(func.count(Chunk.id)).where(Chunk.document_id == document_id)
+    )
+    chunk_count = chunk_result.scalar() or 0
+    embedding_result = await db.execute(
+        select(func.count(Chunk.id)).where(
+            Chunk.document_id == document_id, Chunk.has_embedding == True
+        )
+    )
+    embedding_count = embedding_result.scalar() or 0
+
+    return document_to_response(document, chunk_count, embedding_count)
+
+
+@router.post("/{document_id}/generate-questions")
+async def generate_more_questions(
+    document_id: UUID,
+    user: AuthenticatedUser,
+    count: int = Query(default=5, ge=1, le=10, description="Number of additional questions to generate"),
+):
+    """
+    Generate additional hypothetical questions for a document using LLM.
+
+    Generates new questions that are diverse and non-duplicative of existing ones.
+    The new questions are merged into the document's metadata and embedded for search.
+    """
+    try:
+        from backend.services.document_enhancer import get_document_enhancer
+        enhancer = get_document_enhancer()
+        new_questions = await enhancer.generate_additional_questions(
+            document_id=str(document_id),
+            count=count,
+        )
+        return {
+            "document_id": str(document_id),
+            "new_questions": new_questions,
+            "count": len(new_questions),
+        }
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to generate additional questions",
+            document_id=str(document_id),
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate questions: {str(e)}",
+        )
+
+
 @router.delete("/{document_id}")
 async def delete_document(
     document_id: UUID,
@@ -798,7 +938,48 @@ async def delete_document(
                 error=str(e),
             )
 
-        # Permanently delete document and chunks from database (cascade)
+        # Explicitly delete all chunks from SQL database
+        # (Don't rely on SQLAlchemy cascade which may not work with async/SQLite)
+        chunk_delete_result = await db.execute(
+            delete(Chunk).where(Chunk.document_id == document_id)
+        )
+        chunks_deleted = chunk_delete_result.rowcount
+        logger.info(
+            "Deleted chunks from SQL database",
+            document_id=str(document_id),
+            chunks_deleted=chunks_deleted,
+        )
+
+        # Clean up related records from other tables (SET NULL FKs)
+        # Note: analyzed_images is excluded — images are shared across documents,
+        # first_document_id is just which doc triggered analysis first (SET NULL is fine)
+        from sqlalchemy import text
+        cleanup_tables = {
+            "upload_jobs": "document_id",
+            "ocr_metrics": "document_id",
+            "synced_resources": "document_id",
+            "file_watcher_events": "document_id",
+        }
+        for table_name, fk_column in cleanup_tables.items():
+            try:
+                result = await db.execute(
+                    text(f"DELETE FROM {table_name} WHERE {fk_column} = :doc_id"),
+                    {"doc_id": str(document_id)},
+                )
+                if result.rowcount > 0:
+                    logger.info(
+                        f"Cleaned up {table_name}",
+                        document_id=str(document_id),
+                        deleted=result.rowcount,
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to clean up {table_name} (table may not exist)",
+                    document_id=str(document_id),
+                    error=str(e),
+                )
+
+        # Permanently delete document from database
         await db.delete(document)
         await db.commit()
 
@@ -1196,6 +1377,7 @@ async def reprocess_document(
     # Extract needed values before committing (avoid lazy loading in background task)
     doc_tags = list(document.tags) if document.tags else []
     doc_access_tier = document.access_tier.level if document.access_tier else 1
+    doc_original_filename = document.original_filename
 
     # Reset processing status
     document.processing_status = ProcessingStatus.PENDING
@@ -1215,6 +1397,7 @@ async def reprocess_document(
         file_id=document_id,
         file_path=file_path,
         options=options,
+        original_filename=doc_original_filename,
     )
 
     logger.info(
@@ -2772,7 +2955,25 @@ async def bulk_delete_documents(
             await db.execute(
                 delete(Chunk).where(Chunk.document_id == doc.id)
             )
-            # 4. Delete document from SQLite
+
+            # 4. Clean up related records (SET NULL FK tables)
+            # Note: analyzed_images excluded — shared across docs, SET NULL is correct
+            from sqlalchemy import text as sa_text
+            for table_name, fk_column in [
+                ("upload_jobs", "document_id"),
+                ("ocr_metrics", "document_id"),
+                ("synced_resources", "document_id"),
+                ("file_watcher_events", "document_id"),
+            ]:
+                try:
+                    await db.execute(
+                        sa_text(f"DELETE FROM {table_name} WHERE {fk_column} = :doc_id"),
+                        {"doc_id": str(doc.id)},
+                    )
+                except Exception:
+                    pass  # Table may not exist
+
+            # 5. Delete document from SQLite
             await db.delete(doc)
         else:
             # Soft delete

@@ -211,6 +211,8 @@ from backend.services.rag_module.prompts import (
     GEMMA_SMALL_TEMPLATE,
     DEEPSEEK_SMALL_SYSTEM_PROMPT,
     DEEPSEEK_SMALL_TEMPLATE,
+    get_intelligence_grounding as _get_intelligence_grounding,
+    get_intelligence_top_k as _get_intelligence_top_k,
 )
 
 # Phase 70: Resilience patterns for LLM calls
@@ -1070,6 +1072,8 @@ class RAGService:
         organization_id: Optional[str] = None,  # Organization ID for multi-tenant isolation
         is_superadmin: bool = False,  # Whether user is a superadmin
         use_multilingual_search: bool = False,  # Phase 59: Enable cross-lingual search
+        skip_cache: bool = False,  # Skip all in-memory caches (Phase 65, SearchResultCache)
+        intelligence_level: Optional[str] = None,  # Intelligence level: basic/standard/enhanced/maximum
     ) -> RAGResponse:
         """
         Query the RAG system.
@@ -1090,6 +1094,10 @@ class RAGService:
                            None = use admin default, True = enable, False = disable.
             organization_id: Organization ID for multi-tenant isolation.
             is_superadmin: Whether user is a superadmin (can access all private docs).
+            skip_cache: Skip all in-memory caches (Phase 65 semantic cache, SearchResultCache).
+                        Use this for regenerate/refresh to get fresh results.
+            intelligence_level: Intelligence level from frontend (basic/standard/enhanced/maximum).
+                               Adjusts top_k and adds grounding instructions for higher levels.
 
         Returns:
             RAGResponse with answer and sources
@@ -1100,7 +1108,12 @@ class RAGService:
         # Load runtime settings from database
         runtime_settings = await self.get_runtime_settings()
         if top_k is None:
-            top_k = runtime_settings.get("top_k", self.config.top_k)
+            # Intelligence level can override default top_k
+            intelligence_top_k = _get_intelligence_top_k(intelligence_level)
+            if intelligence_top_k is not None:
+                top_k = intelligence_top_k
+            else:
+                top_k = runtime_settings.get("top_k", self.config.top_k)
 
         # Batch-load all RAG settings in a single DB query to avoid 30+ individual lookups
         from backend.services.settings import get_settings_service
@@ -1146,7 +1159,11 @@ class RAGService:
         phase65_cache_hit = None
         query_embedding_for_cache = None
 
-        if self._phase65_enabled and self._phase65_pipeline:
+        # Skip cache if user requested fresh results (regenerate/refresh)
+        if skip_cache:
+            logger.info("Skipping Phase 65 semantic cache per user request")
+
+        if self._phase65_enabled and self._phase65_pipeline and not skip_cache:
             try:
                 # Initialize pipeline if not already done (lazy async init)
                 if not self._phase65_pipeline._initialized:
@@ -1623,6 +1640,7 @@ class RAGService:
                 query_classification=query_classification,
                 use_multilingual_search=use_multilingual_search,
                 target_language=language,
+                skip_cache=skip_cache,  # Pass through for regenerate/refresh
             )
             # PHASE 12: Enhanced logging for RAG search troubleshooting
             if not retrieved_docs:
@@ -1763,8 +1781,22 @@ class RAGService:
         except Exception as e:
             logger.debug("Freshness config lookup failed", error=str(e))
 
+        # Load enhanced metadata (summaries, keywords, topics) for document-level context
+        enhanced_metadata_map = None
+        if _s("rag.include_enhanced_metadata"):
+            try:
+                doc_ids = list({
+                    doc.metadata.get("document_id")
+                    for doc, _ in retrieved_docs
+                    if doc.metadata and doc.metadata.get("document_id")
+                })
+                if doc_ids:
+                    enhanced_metadata_map = await self._load_enhanced_metadata_for_docs(doc_ids)
+            except Exception as e:
+                logger.debug("Enhanced metadata loading failed", error=str(e))
+
         # Format context from retrieved documents
-        context, sources = self._format_context(retrieved_docs, include_collection_context, freshness_config=freshness_config)
+        context, sources = self._format_context(retrieved_docs, include_collection_context, freshness_config=freshness_config, enhanced_metadata_map=enhanced_metadata_map)
         logger.info(
             "RAG context formatted",
             context_length=len(context),
@@ -2022,6 +2054,17 @@ class RAGService:
         # Select system prompt based on model size (tiny/small models need more explicit instructions)
         model_name = llm_config.model if llm_config else None
         system_prompt = _get_system_prompt_for_model(model_name)
+
+        # Add intelligence-level grounding instructions (enhanced/maximum add stricter context grounding)
+        intelligence_grounding = _get_intelligence_grounding(intelligence_level)
+        if intelligence_grounding:
+            system_prompt = f"{system_prompt}\n{intelligence_grounding}"
+            logger.info(
+                "Intelligence grounding applied",
+                level=intelligence_level,
+                model=model_name,
+            )
+
         is_tiny = _is_tiny_model(model_name) if model_name else False
         is_llama = _is_llama_model(model_name) if model_name else False
         is_llama_sm = _is_llama_small(model_name) if model_name else False
@@ -2069,6 +2112,14 @@ class RAGService:
                 model=model_name,
                 intent=query_intent,
             )
+
+        # Intelligence-level temperature override: maximum/enhanced use lower temps for accuracy
+        if intelligence_level == "maximum" and sampling_config.get("temperature", 0.7) > 0.2:
+            sampling_config["temperature"] = 0.1
+            logger.info("Maximum intelligence: forced low temperature for accuracy", temp=0.1)
+        elif intelligence_level == "enhanced" and sampling_config.get("temperature", 0.7) > 0.4:
+            sampling_config["temperature"] = 0.3
+            logger.info("Enhanced intelligence: reduced temperature for accuracy", temp=0.3)
 
         # For tiny models (<3B), always use the structured template
         # This provides ultra-explicit format that reduces hallucination
@@ -2781,6 +2832,7 @@ class RAGService:
         enhance_query: Optional[bool] = None,  # Per-query override for query enhancement (expansion + HyDE)
         organization_id: Optional[str] = None,  # Organization ID for multi-tenant isolation
         is_superadmin: bool = False,  # Whether user is a superadmin
+        intelligence_level: Optional[str] = None,  # Intelligence level: basic/standard/enhanced/maximum
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Query RAG with streaming response.
@@ -2800,6 +2852,7 @@ class RAGService:
                            None = use config default, True = enable, False = disable.
             organization_id: Organization ID for multi-tenant isolation.
             is_superadmin: Whether user is a superadmin (can access all private docs).
+            intelligence_level: Intelligence level from frontend (basic/standard/enhanced/maximum).
 
         Yields:
             StreamChunk objects with response parts
@@ -2809,8 +2862,12 @@ class RAGService:
 
         # Load runtime settings from database if top_k not specified
         if top_k is None:
-            runtime_settings = await self.get_runtime_settings()
-            top_k = runtime_settings.get("top_k", self.config.top_k)
+            intelligence_top_k = _get_intelligence_top_k(intelligence_level)
+            if intelligence_top_k is not None:
+                top_k = intelligence_top_k
+            else:
+                runtime_settings = await self.get_runtime_settings()
+                top_k = runtime_settings.get("top_k", self.config.top_k)
 
         logger.info(
             "Processing streaming RAG query",
@@ -2871,6 +2928,12 @@ class RAGService:
         # PHASE 15: Apply model-specific prompts and sampling for streaming too
         model_name = llm_config.model if llm_config else None
         system_prompt = _get_system_prompt_for_model(model_name)
+
+        # Add intelligence-level grounding instructions
+        intelligence_grounding = _get_intelligence_grounding(intelligence_level)
+        if intelligence_grounding:
+            system_prompt = f"{system_prompt}\n{intelligence_grounding}"
+
         if language_instruction:
             system_prompt = f"{system_prompt}\n{language_instruction}"
 
@@ -3439,6 +3502,7 @@ class RAGService:
         query_classification: Optional[QueryClassification] = None,
         use_multilingual_search: bool = False,
         target_language: Optional[str] = None,
+        skip_cache: bool = False,  # Skip SearchResultCache for fresh results
     ) -> List[Tuple[Document, float]]:
         """
         Retrieve relevant documents for query.
@@ -3462,19 +3526,22 @@ class RAGService:
         """
         top_k = top_k or self.config.top_k
 
-        # Check cache first (for identical queries)
+        # Check cache first (for identical queries) - skip if user requested fresh results
         # PHASE 12 FIX: Include organization_id and is_superadmin in cache key for multi-tenant isolation
-        cached_results = self._search_cache.get(
-            query, collection_filter, access_tier, top_k,
-            organization_id=organization_id, is_superadmin=is_superadmin
-        )
-        if cached_results is not None:
-            logger.debug(
-                "Using cached retrieval results",
-                query_length=len(query),
-                result_count=len(cached_results),
+        if not skip_cache:
+            cached_results = self._search_cache.get(
+                query, collection_filter, access_tier, top_k,
+                organization_id=organization_id, is_superadmin=is_superadmin
             )
-            return cached_results
+            if cached_results is not None:
+                logger.debug(
+                    "Using cached retrieval results",
+                    query_length=len(query),
+                    result_count=len(cached_results),
+                )
+                return cached_results
+        else:
+            logger.info("Skipping SearchResultCache per user request")
 
         # Phase 59: Multilingual cross-lingual search
         # Enables search across language barriers using multilingual embeddings
@@ -5018,11 +5085,45 @@ class RAGService:
             logger.warning("Confidence scoring failed", error=str(e))
             return 0.5
 
+    async def _load_enhanced_metadata_for_docs(
+        self, document_ids: List[str]
+    ) -> Dict[str, dict]:
+        """
+        Batch-load enhanced_metadata for a list of document IDs.
+
+        Returns:
+            Dict mapping document_id -> enhanced_metadata dict.
+            Returns empty dict on failure or if no metadata found.
+        """
+        if not document_ids:
+            return {}
+        try:
+            async with async_session_context() as db:
+                result = await db.execute(
+                    select(DBDocument.id, DBDocument.enhanced_metadata).where(
+                        DBDocument.id.in_(document_ids)
+                    )
+                )
+                rows = result.all()
+                return {
+                    str(row.id): row.enhanced_metadata
+                    for row in rows
+                    if row.enhanced_metadata
+                }
+        except Exception as e:
+            logger.warning(
+                "Failed to load enhanced metadata for documents",
+                error=str(e),
+                doc_count=len(document_ids),
+            )
+            return {}
+
     def _format_context(
         self,
         retrieved_docs: List[Tuple[Document, float]],
         include_collection_context: bool = True,
         freshness_config: Optional[dict] = None,
+        enhanced_metadata_map: Optional[Dict[str, dict]] = None,
     ) -> Tuple[str, List[Source]]:
         """
         Format retrieved documents into context string and sources list.
@@ -5032,6 +5133,8 @@ class RAGService:
             include_collection_context: Whether to include collection tags in LLM context
             freshness_config: Optional dict with freshness scoring settings
                 (keys: enabled, decay_days, boost_factor, penalty_factor)
+            enhanced_metadata_map: Optional dict mapping document_id -> enhanced_metadata
+                for injecting document-level summaries, keywords, and topics
 
         Returns:
             Tuple of (context_string, sources_list)
@@ -5067,9 +5170,17 @@ class RAGService:
 
         context_parts = []
         sources = []
+        seen_doc_ids: set = set()
+        source_num = 0  # Track actual source number (excluding skipped chunks)
 
-        for i, (doc, score) in enumerate(retrieved_docs, 1):
+        for doc, score in retrieved_docs:
             metadata = doc.metadata or {}
+
+            # Skip hypothetical question chunks - synthetic text should not appear in context
+            if metadata.get("chunk_type") == "hypothetical_question":
+                continue
+
+            source_num += 1
 
             # Build context entry - check document_name first (set by custom vectorstore)
             doc_name = metadata.get("document_name") or metadata.get("document_filename") or f"Document {metadata.get('document_id', 'unknown')[:8]}"
@@ -5086,17 +5197,34 @@ class RAGService:
             elif metadata.get("slide_number"):
                 page_info = f" (Slide {metadata['slide_number']})"
 
+            # Inject document-level enhanced metadata for the first chunk of each document
+            doc_id = metadata.get("document_id")
+            doc_context_prefix = ""
+            if enhanced_metadata_map and doc_id and doc_id not in seen_doc_ids:
+                seen_doc_ids.add(doc_id)
+                em = enhanced_metadata_map.get(doc_id)
+                if em:
+                    parts = []
+                    if em.get("summary_short"):
+                        parts.append(f"[Document Summary: {em['summary_short']}]")
+                    if em.get("keywords"):
+                        parts.append(f"[Keywords: {', '.join(em['keywords'])}]")
+                    if em.get("topics"):
+                        parts.append(f"[Topics: {', '.join(em['topics'])}]")
+                    if parts:
+                        doc_context_prefix = "\n".join(parts) + "\n"
+
             context_parts.append(
-                f"[Source {i}: {doc_name}{collection_info}{page_info}]\n{doc.page_content}\n"
+                f"{doc_context_prefix}[Source {source_num}: {doc_name}{collection_info}{page_info}]\n{doc.page_content}\n"
             )
 
             # Build source citation (always include collection for UI display)
             # Get original similarity score from metadata (0-1), fallback to score
             similarity = metadata.get("similarity_score", score)
             source = Source(
-                document_id=metadata.get("document_id", f"doc-{i}"),
+                document_id=metadata.get("document_id", f"doc-{source_num}"),
                 document_name=doc_name,
-                chunk_id=metadata.get("chunk_id", f"chunk-{i}"),
+                chunk_id=metadata.get("chunk_id", f"chunk-{source_num}"),
                 collection=collection,
                 page_number=metadata.get("page_number"),
                 slide_number=metadata.get("slide_number"),

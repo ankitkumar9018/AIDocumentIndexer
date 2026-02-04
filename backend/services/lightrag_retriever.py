@@ -689,10 +689,12 @@ class LightRAGRetriever:
             async with async_session_context() as db:
                 for concept in concepts[:5]:  # Limit to top 5 concepts
                     # Search in document keywords and topics
+                    # Join with AccessTier to filter by level
+                    from backend.db.models import AccessTier
                     stmt = (
                         select(DBDocument)
-                        .where(DBDocument.is_soft_deleted == False)
-                        .where(DBDocument.access_tier <= access_tier_level)
+                        .join(AccessTier, DBDocument.access_tier_id == AccessTier.id)
+                        .where(AccessTier.level <= access_tier_level)
                         .where(
                             or_(
                                 DBDocument.title.ilike(f"%{concept}%"),

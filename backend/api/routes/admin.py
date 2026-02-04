@@ -5146,6 +5146,45 @@ async def enhance_single_document(
     }
 
 
+@router.post("/backfill-hypothetical-chunks")
+async def backfill_hypothetical_chunks(
+    admin: AdminUser,
+    limit: Optional[int] = Query(None, description="Max documents to process"),
+):
+    """
+    Backfill synthetic chunks from hypothetical questions.
+
+    Creates synthetic question chunks (chunk_level=2, is_summary=True) for
+    documents that have enhanced_metadata but are missing these chunks.
+    This improves vector search by enabling question-based retrieval.
+
+    Admin only.
+    """
+    from backend.services.document_enhancer import get_document_enhancer
+
+    logger.info("Starting hypothetical chunk backfill", limit=limit)
+
+    try:
+        enhancer = get_document_enhancer()
+        result = await enhancer.backfill_hypothetical_chunks(limit=limit)
+
+        return {
+            "success": True,
+            "message": (
+                f"Backfill complete: {result['documents_processed']} documents processed, "
+                f"{result['total_chunks_created']} chunks created, "
+                f"{result['documents_skipped']} skipped"
+            ),
+            **result,
+        }
+    except Exception as e:
+        logger.error("Hypothetical chunk backfill failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Backfill failed: {str(e)}",
+        )
+
+
 # =============================================================================
 # Provider Health Check Endpoints
 # =============================================================================

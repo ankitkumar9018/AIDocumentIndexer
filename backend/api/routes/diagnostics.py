@@ -852,3 +852,53 @@ async def get_cpu_usage(
         "cpu_count": psutil.cpu_count(),
         "load_average": list(os.getloadavg()) if hasattr(os, 'getloadavg') else None,
     }
+
+
+# =============================================================================
+# Hardware Auto-Detection
+# =============================================================================
+
+
+class HardwareInfo(BaseModel):
+    """Detected hardware information."""
+    cpu_count: int
+    total_memory_gb: float
+    usable_memory_gb: float
+    platform: str
+    gpu_type: str
+    has_cuda: bool
+    has_mps: bool
+
+
+class RecommendedSettingsResponse(BaseModel):
+    """Hardware-based recommended settings."""
+    hardware: HardwareInfo
+    recommended: Dict[str, Any]
+    current: Dict[str, Any]
+
+
+@router.get("/hardware/recommended-settings")
+async def get_hardware_recommended_settings(
+    _user: AdminUser,
+) -> RecommendedSettingsResponse:
+    """
+    Detect system hardware and return recommended settings.
+
+    Analyzes CPU, memory, and GPU capabilities to compute optimal values
+    for Ray, parallel processing, and server configuration settings.
+    """
+    from backend.utils.platform import get_recommended_settings
+    from backend.services.settings import get_settings_service
+
+    result = get_recommended_settings()
+
+    # Fetch current values for comparison
+    settings_service = get_settings_service()
+    current_keys = list(result["recommended"].keys())
+    current_values = await settings_service.get_settings_batch(current_keys)
+
+    return RecommendedSettingsResponse(
+        hardware=HardwareInfo(**result["hardware"]),
+        recommended=result["recommended"],
+        current=current_values,
+    )

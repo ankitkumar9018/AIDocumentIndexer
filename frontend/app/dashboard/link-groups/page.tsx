@@ -196,7 +196,7 @@ export default function LinkGroupsPage() {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
   // Auth header
-  const getAuthHeader = () => {
+  const getAuthHeader = (): Record<string, string> => {
     const token = (session as any)?.accessToken;
     return token ? { Authorization: `Bearer ${token}` } : {};
   };

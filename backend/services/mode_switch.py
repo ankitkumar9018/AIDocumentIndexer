@@ -171,8 +171,8 @@ async def get_mode_info() -> ModeInfo:
 
 
 def switch_to_local_mode(
-    database_path: str = "./data/aidocindexer.db",
-    chroma_path: str = "./data/chroma",
+    database_path: str = "./backend/data/aidocindexer.db",
+    chroma_path: str = "./backend/data/chroma",
 ) -> Dict[str, str]:
     """
     Configure environment for local mode (SQLite + ChromaDB).

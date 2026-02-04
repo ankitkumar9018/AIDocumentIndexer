@@ -134,7 +134,7 @@ def fix_chromadb_pickle() -> bool:
 @dataclass
 class ChromaConfig:
     """Configuration for ChromaDB local vector store."""
-    persist_directory: str = ""  # Will be set to project_root/data/chroma
+    persist_directory: str = ""  # Will be set to backend/data/chroma
     collection_name: str = "documents"
     distance_function: str = "cosine"  # cosine, l2, ip
 
@@ -439,26 +439,40 @@ class ChromaVectorStore:
         chunk_id: str,
         embedding: List[float],
         session: Optional[Any] = None,
+        document_content: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
-        Update embedding for a specific chunk.
+        Update or insert embedding for a specific chunk.
+
+        Uses upsert to handle both new and existing chunks.
+        When metadata and document_content are provided, new entries
+        will be fully searchable (not just have embeddings).
 
         Args:
             chunk_id: Chunk ID
             embedding: New embedding vector
             session: Ignored (kept for interface compatibility)
+            document_content: Chunk text content (needed for new entries)
+            metadata: ChromaDB metadata dict (document_id, access_tier_id, etc.)
 
         Returns:
             True if updated successfully
         """
         try:
-            self._collection.update(
-                ids=[chunk_id],
-                embeddings=[embedding],
-            )
+            upsert_kwargs: Dict[str, Any] = {
+                "ids": [chunk_id],
+                "embeddings": [embedding],
+            }
+            if document_content is not None:
+                upsert_kwargs["documents"] = [document_content]
+            if metadata is not None:
+                upsert_kwargs["metadatas"] = [metadata]
+
+            self._collection.upsert(**upsert_kwargs)
             return True
         except Exception as e:
-            logger.error("Failed to update chunk embedding", chunk_id=chunk_id, error=str(e))
+            logger.error("Failed to upsert chunk embedding", chunk_id=chunk_id, error=str(e))
             return False
 
     # =========================================================================
@@ -718,6 +732,7 @@ class ChromaVectorStore:
                     metadata={
                         "chunk_index": metadata.get("chunk_index", 0),
                         "token_count": metadata.get("token_count", 0),
+                        **({"chunk_type": metadata["chunk_type"]} if "chunk_type" in metadata else {}),
                     },
                     page_number=metadata.get("page_number"),
                     section_title=metadata.get("section_title"),
@@ -800,6 +815,7 @@ class ChromaVectorStore:
                         metadata={
                             "chunk_index": metadata.get("chunk_index", 0),
                             "search_type": "keyword",
+                            **({"chunk_type": metadata["chunk_type"]} if "chunk_type" in metadata else {}),
                         },
                         page_number=metadata.get("page_number"),
                         section_title=metadata.get("section_title"),

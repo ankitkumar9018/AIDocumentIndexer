@@ -57,7 +57,7 @@ export default function ResearchPage() {
     try {
       setLoading(true);
       setError(null);
-      const response = await api.get("/api/v1/research/history");
+      const response = await api.get<{ research_history: any[] }>("/api/v1/research/history");
 
       if (response.data?.research_history) {
         setResearchHistory(response.data.research_history);
@@ -78,7 +78,7 @@ export default function ResearchPage() {
   const toggleStar = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      const response = await api.patch(`/api/v1/research/${id}/star`);
+      const response = await api.patch<{ is_starred: boolean }>(`/api/v1/research/${id}/star`);
       if (response.data) {
         setResearchHistory((prev) =>
           prev.map((r) => (r.id === id ? { ...r, is_starred: response.data.is_starred } : r))

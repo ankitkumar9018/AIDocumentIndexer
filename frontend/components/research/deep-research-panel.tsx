@@ -94,18 +94,24 @@ interface ResearchResult {
 }
 
 interface DeepResearchPanelProps {
+  query?: string;
+  isOpen?: boolean;
+  onClose?: () => void;
   onResearchComplete?: (result: ResearchResult) => void;
   className?: string;
 }
 
 export function DeepResearchPanel({
+  query: initialQuery,
+  isOpen,
+  onClose,
   onResearchComplete,
   className,
 }: DeepResearchPanelProps) {
   const { status } = useSession();
   const isAuthenticated = status === "authenticated";
 
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery || "");
   const [isResearching, setIsResearching] = useState(false);
   const [result, setResult] = useState<ResearchResult | null>(null);
   const [currentStep, setCurrentStep] = useState<number>(0);
@@ -125,7 +131,7 @@ export function DeepResearchPanel({
     if (!providersData?.providers?.length) {
       return [];
     }
-    return providersData.providers.filter((p: any) => p.is_active);
+    return providersData.providers.filter((p: any) => p.is_active) as ConfiguredProvider[];
   }, [providersData]);
 
   // Provider Selection - initialize with all active providers for multi-LLM verification
@@ -200,7 +206,7 @@ export function DeepResearchPanel({
         include_sources: true,
       });
 
-      const data = response.data;
+      const data = response.data as any;
 
       // Map API response to our VerificationStep format
       const steps: VerificationStep[] = data.verification_steps.map((step: any) => ({

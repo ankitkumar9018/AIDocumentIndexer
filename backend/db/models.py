@@ -715,6 +715,7 @@ class Chunk(Base, UUIDMixin):
     # Metadata
     token_count: Mapped[Optional[int]] = mapped_column(Integer)
     char_count: Mapped[Optional[int]] = mapped_column(Integer)
+    chunk_metadata: Mapped[Optional[dict]] = mapped_column(JSONType(), nullable=True)
 
     # Hierarchical chunking support (for large document optimization)
     is_summary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

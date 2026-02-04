@@ -36,7 +36,19 @@ import {
   FileText,
   Image as ImageIcon,
   File,
+  PanelRightOpen,
+  PanelRightClose,
+  Sparkles,
+  Network,
+  Globe,
+  ArrowRight,
+  Database,
+  AlertCircle,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useDocumentEntities } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -57,9 +69,10 @@ interface DocumentViewerProps {
   initialPage?: number;
   annotations?: Annotation[];
   onAnnotationAdd?: (annotation: Annotation) => void;
+  documentData?: any; // Full document object for metadata sidebar
 }
 
-interface Annotation {
+export interface Annotation {
   id: string;
   page: number;
   x: number;
@@ -98,6 +111,7 @@ export function FullScreenViewer({
   initialPage = 1,
   annotations = [],
   onAnnotationAdd,
+  documentData,
 }: DocumentViewerProps) {
   // State
   const [state, setState] = useState<ViewerState>({
@@ -117,6 +131,21 @@ export function FullScreenViewer({
   const [pdfDocument, setPdfDocument] = useState<any>(null);
   const [textContent, setTextContent] = useState<string>("");
   const [imageUrl, setImageUrl] = useState<string>("");
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState("overview");
+
+  // Sidebar metadata
+  const enhanced = documentData?.enhanced_metadata;
+  const hasEnhanced = !!enhanced && !!enhanced.summary_short;
+  const hasKg = (documentData?.kg_entity_count || 0) > 0;
+
+  // Lazy-load KG entities only when sidebar KG tab is active
+  const {
+    data: kgData,
+    isLoading: kgLoading,
+  } = useDocumentEntities(documentId, {
+    enabled: isSidebarOpen && sidebarTab === "knowledge-graph" && !!documentData,
+  });
 
   // Refs
   const containerRef = useRef<HTMLDivElement>(null);
@@ -449,7 +478,7 @@ export function FullScreenViewer({
     const prev =
       (state.currentSearchResult - 1 + state.searchResults.length) %
       state.searchResults.length;
-    setState((prev) => ({ ...prev, currentSearchResult: prev }));
+    setState((prevState) => ({ ...prevState, currentSearchResult: prev }));
     if (viewerType === "pdf") {
       goToPage(state.searchResults[prev]);
     }
@@ -634,6 +663,33 @@ export function FullScreenViewer({
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
+
+          {/* Details sidebar toggle */}
+          {documentData && (
+            <>
+              <div className="w-px h-6 bg-border mx-1" />
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant={isSidebarOpen ? "secondary" : "ghost"}
+                      size="icon"
+                      onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                    >
+                      {isSidebarOpen ? (
+                        <PanelRightClose className="h-4 w-4" />
+                      ) : (
+                        <PanelRightOpen className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {isSidebarOpen ? "Hide Details" : "Show Details"}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </>
+          )}
         </div>
       </div>
 
@@ -693,77 +749,368 @@ export function FullScreenViewer({
         </div>
       )}
 
-      {/* Document content */}
-      <div
-        ref={viewerRef}
-        className="flex-1 overflow-auto bg-muted/20 flex items-center justify-center p-4"
-      >
-        {isLoading && (
-          <div className="flex flex-col items-center gap-4">
-            <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-            <span className="text-muted-foreground">Loading document...</span>
+      {/* Main content area with optional sidebar */}
+      <div className="flex-1 flex min-h-0">
+        {/* Document content */}
+        <div
+          ref={viewerRef}
+          className="flex-1 overflow-auto bg-muted/20 flex items-center justify-center p-4"
+        >
+          {isLoading && (
+            <div className="flex flex-col items-center gap-4">
+              <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+              <span className="text-muted-foreground">Loading document...</span>
+            </div>
+          )}
+
+          {error && (
+            <div className="flex flex-col items-center gap-4 text-destructive">
+              <FileText className="h-12 w-12" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {!isLoading && !error && viewerType === "pdf" && (
+            <div
+              className="bg-white shadow-lg"
+              style={{
+                transform: `rotate(${state.rotation}deg)`,
+                transition: "transform 0.3s",
+              }}
+            >
+              <canvas ref={canvasRef} />
+            </div>
+          )}
+
+          {!isLoading && !error && viewerType === "image" && (
+            <img
+              src={imageUrl}
+              alt={documentName}
+              className="max-w-full max-h-full object-contain shadow-lg"
+              style={{
+                transform: `scale(${state.zoom}) rotate(${state.rotation}deg)`,
+                transition: "transform 0.2s",
+              }}
+            />
+          )}
+
+          {!isLoading && !error && viewerType === "text" && (
+            <div
+              className="w-full max-w-4xl bg-white dark:bg-gray-900 p-8 shadow-lg rounded-lg overflow-auto"
+              style={{ transform: `scale(${state.zoom})` }}
+            >
+              <pre className="whitespace-pre-wrap font-mono text-sm">
+                {state.searchQuery
+                  ? textContent.split(new RegExp(`(${state.searchQuery})`, "gi")).map(
+                      (part, i) =>
+                        part.toLowerCase() === state.searchQuery.toLowerCase() ? (
+                          <mark key={i} className="bg-yellow-300 dark:bg-yellow-700">
+                            {part}
+                          </mark>
+                        ) : (
+                          part
+                        )
+                    )
+                  : textContent}
+              </pre>
+            </div>
+          )}
+
+          {!isLoading && !error && viewerType === "office" && textContent && (
+            <div
+              className="w-full max-w-4xl bg-white dark:bg-gray-900 p-8 shadow-lg rounded-lg overflow-auto"
+              style={{ transform: `scale(${state.zoom})` }}
+              dangerouslySetInnerHTML={{ __html: textContent }}
+            />
+          )}
+        </div>
+
+        {/* Metadata Sidebar */}
+        {isSidebarOpen && documentData && (
+          <div className="w-[380px] border-l bg-background flex flex-col">
+            <Tabs value={sidebarTab} onValueChange={setSidebarTab} className="flex-1 flex flex-col min-h-0">
+              <TabsList className="mx-3 mt-3 w-fit">
+                <TabsTrigger value="overview">Overview</TabsTrigger>
+                <TabsTrigger value="insights">
+                  Insights
+                  {hasEnhanced && <Sparkles className="h-3 w-3 ml-1 text-amber-500" />}
+                </TabsTrigger>
+                <TabsTrigger value="knowledge-graph">
+                  KG
+                  {hasKg && <Network className="h-3 w-3 ml-1 text-blue-500" />}
+                </TabsTrigger>
+              </TabsList>
+
+              {/* Overview Tab */}
+              <TabsContent value="overview" className="flex-1 min-h-0 px-4 py-3">
+                <ScrollArea className="h-full">
+                  <div className="space-y-4 text-sm">
+                    {enhanced?.summary_short && (
+                      <div className="p-3 bg-muted/50 rounded-lg">
+                        <p className="font-medium text-muted-foreground mb-1">Summary</p>
+                        <p>{enhanced.summary_short}</p>
+                        {enhanced.summary_detailed && enhanced.summary_detailed !== enhanced.summary_short && (
+                          <details className="mt-2">
+                            <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+                              Show detailed summary
+                            </summary>
+                            <p className="mt-2 text-muted-foreground">{enhanced.summary_detailed}</p>
+                          </details>
+                        )}
+                      </div>
+                    )}
+                    <div>
+                      <p className="font-medium text-muted-foreground">Filename</p>
+                      <p>{documentData.name}</p>
+                    </div>
+                    <div className="flex gap-6">
+                      <div>
+                        <p className="font-medium text-muted-foreground">Type</p>
+                        <p>{documentData.file_type || "Unknown"}</p>
+                      </div>
+                      {documentData.file_size > 0 && (
+                        <div>
+                          <p className="font-medium text-muted-foreground">Size</p>
+                          <p>
+                            {documentData.file_size > 1048576
+                              ? `${(documentData.file_size / 1048576).toFixed(1)} MB`
+                              : `${(documentData.file_size / 1024).toFixed(1)} KB`}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                    {(enhanced?.language || enhanced?.document_type) && (
+                      <div className="flex items-center gap-2">
+                        {enhanced.language && (
+                          <Badge variant="outline" className="gap-1">
+                            <Globe className="h-3 w-3" />
+                            {enhanced.language}
+                          </Badge>
+                        )}
+                        {enhanced.document_type && (
+                          <Badge variant="outline" className="gap-1">
+                            <FileText className="h-3 w-3" />
+                            {enhanced.document_type}
+                          </Badge>
+                        )}
+                      </div>
+                    )}
+                    {documentData.collection && (
+                      <div>
+                        <p className="font-medium text-muted-foreground">Collection</p>
+                        <p>{documentData.collection}</p>
+                      </div>
+                    )}
+                    {documentData.tags && documentData.tags.length > 0 && (
+                      <div>
+                        <p className="font-medium text-muted-foreground">Tags</p>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {documentData.tags.map((tag: string) => (
+                            <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {documentData.created_at && (
+                      <div>
+                        <p className="font-medium text-muted-foreground">Created</p>
+                        <p>{new Date(documentData.created_at).toLocaleString()}</p>
+                      </div>
+                    )}
+                    <div className="space-y-2 pt-2 border-t">
+                      <p className="font-medium text-muted-foreground">Status</p>
+                      {documentData.chunk_count > 0 && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className={`flex items-center gap-1 ${documentData.has_all_embeddings ? "text-green-600 dark:text-green-400" : "text-amber-600 dark:text-amber-400"}`}>
+                            {documentData.has_all_embeddings ? (
+                              <Database className="h-3.5 w-3.5" />
+                            ) : (
+                              <AlertCircle className="h-3.5 w-3.5" />
+                            )}
+                            Embeddings: {documentData.embedding_coverage?.toFixed(0) || 0}% ({documentData.embedding_count}/{documentData.chunk_count})
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 text-xs">
+                        <Network className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span>
+                          Knowledge Graph:{" "}
+                          {documentData.kg_extraction_status === "completed" ? (
+                            <span className="text-green-600 dark:text-green-400">{documentData.kg_entity_count} entities, {documentData.kg_relation_count} relations</span>
+                          ) : documentData.kg_extraction_status === "processing" ? (
+                            <span className="text-blue-600">Processing...</span>
+                          ) : (
+                            <span className="text-muted-foreground">Not extracted</span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs">
+                        <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span>
+                          Enhancement:{" "}
+                          {hasEnhanced ? (
+                            <span className="text-green-600 dark:text-green-400">
+                              Enhanced
+                              {enhanced?.enhanced_at && (
+                                <span className="text-muted-foreground ml-1">
+                                  ({new Date(enhanced.enhanced_at).toLocaleDateString()})
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">Not enhanced</span>
+                          )}
+                        </span>
+                      </div>
+                      {documentData.images_extracted_count > 0 && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <Database className="h-3.5 w-3.5 text-muted-foreground" />
+                          <span>
+                            Images:{" "}
+                            {documentData.image_analysis_status === "completed" ? (
+                              <span className="text-green-600 dark:text-green-400">
+                                {documentData.images_analyzed_count}/{documentData.images_extracted_count} analyzed
+                              </span>
+                            ) : documentData.image_analysis_status === "processing" ? (
+                              <span className="text-blue-600">Analyzing...</span>
+                            ) : (
+                              <span className="text-muted-foreground">
+                                {documentData.images_extracted_count} found, not analyzed
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </ScrollArea>
+              </TabsContent>
+
+              {/* Insights Tab */}
+              <TabsContent value="insights" className="flex-1 min-h-0 px-4 py-3">
+                <ScrollArea className="h-full">
+                  {hasEnhanced ? (
+                    <div className="space-y-5 text-sm">
+                      {enhanced?.keywords && enhanced.keywords.length > 0 && (
+                        <div>
+                          <p className="font-medium text-muted-foreground mb-2">Keywords</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {enhanced.keywords.map((kw: string) => (
+                              <Badge key={kw} variant="secondary" className="text-xs">{kw}</Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {enhanced?.topics && enhanced.topics.length > 0 && (
+                        <div>
+                          <p className="font-medium text-muted-foreground mb-2">Topics</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {enhanced.topics.map((topic: string) => (
+                              <Badge key={topic} variant="outline" className="text-xs bg-blue-50 dark:bg-blue-950/30">{topic}</Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {enhanced?.entities && Object.keys(enhanced.entities).length > 0 && (
+                        <div>
+                          <p className="font-medium text-muted-foreground mb-2">Entities</p>
+                          <div className="space-y-2">
+                            {Object.entries(enhanced.entities).map(([type, items]) => (
+                              <div key={type}>
+                                <p className="text-xs font-medium text-muted-foreground capitalize mb-1">{type}</p>
+                                <div className="flex flex-wrap gap-1">
+                                  {(items as string[]).map((item: string) => (
+                                    <Badge key={item} variant="outline" className="text-xs">{item}</Badge>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {enhanced?.hypothetical_questions && enhanced.hypothetical_questions.length > 0 && (
+                        <div>
+                          <p className="font-medium text-muted-foreground mb-2">Hypothetical Questions</p>
+                          <ol className="list-decimal list-inside space-y-1.5 text-sm text-muted-foreground">
+                            {enhanced.hypothetical_questions.map((q: string, i: number) => (
+                              <li key={i}>{q}</li>
+                            ))}
+                          </ol>
+                        </div>
+                      )}
+                      {enhanced?.model_used && (
+                        <div className="pt-2 border-t text-xs text-muted-foreground">
+                          Enhanced with {enhanced.model_used}
+                          {enhanced.enhanced_at && <> on {new Date(enhanced.enhanced_at).toLocaleString()}</>}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-12 text-center text-muted-foreground">
+                      <Sparkles className="h-10 w-10 mb-3 opacity-30" />
+                      <p className="font-medium">Not yet enhanced</p>
+                      <p className="text-sm mt-1">Enhance this document to see insights.</p>
+                    </div>
+                  )}
+                </ScrollArea>
+              </TabsContent>
+
+              {/* Knowledge Graph Tab */}
+              <TabsContent value="knowledge-graph" className="flex-1 min-h-0 px-4 py-3">
+                <ScrollArea className="h-full">
+                  {kgLoading ? (
+                    <div className="flex items-center justify-center py-12">
+                      <div className="animate-spin h-6 w-6 border-2 border-primary border-t-transparent rounded-full" />
+                    </div>
+                  ) : kgData?.entities && kgData.entities.length > 0 ? (
+                    <div className="space-y-5 text-sm">
+                      <div>
+                        <p className="font-medium text-muted-foreground mb-2">Entities ({kgData.entities.length})</p>
+                        <div className="space-y-2">
+                          {kgData.entities.map((entity: any) => (
+                            <div key={entity.id} className="p-2 rounded border bg-muted/30">
+                              <div className="flex items-center justify-between">
+                                <span className="font-medium">{entity.name}</span>
+                                <Badge variant="outline" className="text-xs capitalize">{entity.entity_type}</Badge>
+                              </div>
+                              {entity.description && (
+                                <p className="text-xs text-muted-foreground mt-1">{entity.description}</p>
+                              )}
+                              <p className="text-xs text-muted-foreground mt-1">
+                                {entity.mention_count} mention{entity.mention_count !== 1 ? "s" : ""}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      {kgData.relations && kgData.relations.length > 0 && (
+                        <div>
+                          <p className="font-medium text-muted-foreground mb-2">Relations ({kgData.relations.length})</p>
+                          <div className="space-y-1.5">
+                            {kgData.relations.map((rel: any) => (
+                              <div key={rel.id} className="flex items-center gap-2 p-2 rounded border bg-muted/30 text-xs">
+                                <span className="font-medium">{rel.source_entity_name}</span>
+                                <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                                <Badge variant="outline" className="text-xs flex-shrink-0">{rel.relation_type}</Badge>
+                                <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                                <span className="font-medium">{rel.target_entity_name}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-12 text-center text-muted-foreground">
+                      <Network className="h-10 w-10 mb-3 opacity-30" />
+                      <p className="font-medium">No knowledge graph data</p>
+                      <p className="text-sm mt-1">Extract knowledge graph to see entities and relationships.</p>
+                    </div>
+                  )}
+                </ScrollArea>
+              </TabsContent>
+            </Tabs>
           </div>
-        )}
-
-        {error && (
-          <div className="flex flex-col items-center gap-4 text-destructive">
-            <FileText className="h-12 w-12" />
-            <span>{error}</span>
-          </div>
-        )}
-
-        {!isLoading && !error && viewerType === "pdf" && (
-          <div
-            className="bg-white shadow-lg"
-            style={{
-              transform: `rotate(${state.rotation}deg)`,
-              transition: "transform 0.3s",
-            }}
-          >
-            <canvas ref={canvasRef} />
-          </div>
-        )}
-
-        {!isLoading && !error && viewerType === "image" && (
-          <img
-            src={imageUrl}
-            alt={documentName}
-            className="max-w-full max-h-full object-contain shadow-lg"
-            style={{
-              transform: `scale(${state.zoom}) rotate(${state.rotation}deg)`,
-              transition: "transform 0.2s",
-            }}
-          />
-        )}
-
-        {!isLoading && !error && viewerType === "text" && (
-          <div
-            className="w-full max-w-4xl bg-white dark:bg-gray-900 p-8 shadow-lg rounded-lg overflow-auto"
-            style={{ transform: `scale(${state.zoom})` }}
-          >
-            <pre className="whitespace-pre-wrap font-mono text-sm">
-              {state.searchQuery
-                ? textContent.split(new RegExp(`(${state.searchQuery})`, "gi")).map(
-                    (part, i) =>
-                      part.toLowerCase() === state.searchQuery.toLowerCase() ? (
-                        <mark key={i} className="bg-yellow-300 dark:bg-yellow-700">
-                          {part}
-                        </mark>
-                      ) : (
-                        part
-                      )
-                  )
-                : textContent}
-            </pre>
-          </div>
-        )}
-
-        {!isLoading && !error && viewerType === "office" && textContent && (
-          <div
-            className="w-full max-w-4xl bg-white dark:bg-gray-900 p-8 shadow-lg rounded-lg overflow-auto"
-            style={{ transform: `scale(${state.zoom})` }}
-            dangerouslySetInnerHTML={{ __html: textContent }}
-          />
         )}
       </div>
 
