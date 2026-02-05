@@ -79,9 +79,9 @@ class VerifierConfig:
     level: VerificationLevel = VerificationLevel.STANDARD
 
     # Relevance thresholds
-    # Note: For hybrid search with RRF, scores are typically 0.01-0.03 (1/(k+rank) where k=60)
-    # For cosine similarity, scores are 0-1. We use a low default to support both.
-    embedding_relevance_threshold: float = 0.005  # For RRF/embedding scores
+    # QUICK mode uses cosine similarity (0-1) from metadata, not RRF fusion scores
+    # 0.35 filters truly irrelevant chunks while keeping borderline-relevant ones
+    embedding_relevance_threshold: float = 0.35  # Cosine similarity threshold for QUICK mode
     llm_relevance_threshold: float = 0.6  # For LLM-assessed relevance
 
     # Confidence thresholds
@@ -282,12 +282,14 @@ Respond with ONLY a JSON object:
         relevances = []
 
         # Quick mode: embedding similarity only (no LLM calls)
+        # Use cosine similarity from metadata (0-1 range), NOT the RRF fusion score
+        # which is typically 0.006-0.02 and makes any threshold meaningless
         if self.config.level == VerificationLevel.QUICK:
             for doc, retrieval_score in docs:
                 chunk_id = doc.metadata.get("chunk_id", "unknown")
                 content = doc.page_content[:500]
                 similarity = doc.metadata.get("similarity_score", retrieval_score)
-                is_relevant = retrieval_score >= self.config.embedding_relevance_threshold
+                is_relevant = similarity >= self.config.embedding_relevance_threshold
 
                 relevances.append(ChunkRelevance(
                     chunk_id=chunk_id,

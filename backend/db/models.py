@@ -640,6 +640,7 @@ class Document(Base, UUIDMixin, TimestampMixin):
     kg_extracted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     kg_entity_count: Mapped[int] = mapped_column(Integer, default=0)
     kg_relation_count: Mapped[int] = mapped_column(Integer, default=0)
+    kg_chunks_processed: Mapped[int] = mapped_column(Integer, default=0)
 
     def __repr__(self) -> str:
         return f"<Document(filename='{self.filename}', status='{self.processing_status}')>"

@@ -1728,10 +1728,16 @@ async def start_extraction_job(
             )
 
         # Create new job
+        # When specific document_ids are provided, force only_new_documents=False
+        # so the user can re-extract already-completed documents
+        effective_only_new = request.only_new_documents
+        if request.document_ids:
+            effective_only_new = False
+
         job = await service.create_job(
             user_id=get_user_uuid(user),
             organization_id=org_id,
-            only_new_documents=request.only_new_documents,
+            only_new_documents=effective_only_new,
             document_ids=request.document_ids,
             provider_id=request.provider_id,
         )

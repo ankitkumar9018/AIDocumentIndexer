@@ -213,6 +213,7 @@ from backend.services.rag_module.prompts import (
     DEEPSEEK_SMALL_TEMPLATE,
     get_intelligence_grounding as _get_intelligence_grounding,
     get_intelligence_top_k as _get_intelligence_top_k,
+    MAXIMUM_INTELLIGENCE_TEMPLATE,
 )
 
 # Phase 70: Resilience patterns for LLM calls
@@ -930,9 +931,361 @@ class RAGService:
             )
         return self._verifier
 
-    def _get_memory(self, session_id: str) -> ConversationBufferWindowMemory:
+    def _get_memory(self, session_id: str, model_name: Optional[str] = None) -> ConversationBufferWindowMemory:
         """Get or create conversation memory for session using centralized manager."""
-        return self._session_memory.get_memory(session_id)
+        return self._session_memory.get_memory(session_id, model_name=model_name)
+
+    async def _get_memory_with_rehydration(
+        self, session_id: str, model_name: Optional[str] = None
+    ) -> ConversationBufferWindowMemory:
+        """
+        Get memory with DB rehydration — restores conversation after restarts.
+        Only loads from DB on first access (when session not yet in memory).
+        Gated by conversation.db_rehydration_enabled setting.
+        """
+        # Check if already in memory
+        info = self._session_memory.get_session_info(session_id)
+        if info is not None:
+            return self._session_memory.get_memory(session_id, model_name=model_name)
+
+        # Check if DB rehydration is enabled
+        rehydration_enabled = True
+        try:
+            from backend.services.settings import get_settings_service
+            _settings = get_settings_service()
+            _val = await _settings.get_setting("conversation.db_rehydration_enabled")
+            if _val is not None:
+                rehydration_enabled = bool(_val)
+        except Exception:
+            pass
+
+        if not rehydration_enabled:
+            return self._session_memory.get_memory(session_id, model_name=model_name)
+
+        # Not in memory — try to load from DB
+        db_messages = None
+        try:
+            from backend.db.database import async_session_context
+            from backend.db.models import ChatMessage as ChatMessageModel
+            from sqlalchemy import select
+            import uuid
+
+            session_uuid = uuid.UUID(str(session_id)) if not isinstance(session_id, uuid.UUID) else session_id
+
+            async with async_session_context() as db:
+                query = (
+                    select(ChatMessageModel)
+                    .where(ChatMessageModel.session_id == session_uuid)
+                    .order_by(ChatMessageModel.created_at.asc())
+                )
+                result = await db.execute(query)
+                messages = result.scalars().all()
+
+                if messages:
+                    db_messages = [
+                        {"role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role), "content": msg.content}
+                        for msg in messages
+                    ]
+                    logger.info(
+                        "Loaded DB messages for rehydration",
+                        session_id=str(session_id),
+                        message_count=len(db_messages),
+                    )
+        except Exception as e:
+            logger.debug("DB rehydration fetch failed, using empty memory", error=str(e))
+
+        return self._session_memory.get_memory_with_rehydration(
+            session_id=str(session_id),
+            model_name=model_name,
+            db_messages=db_messages,
+        )
+
+    async def _rewrite_conversational_query(
+        self,
+        question: str,
+        chat_history: list,
+        llm: Any,
+        model_name: Optional[str] = None,
+    ) -> str:
+        """
+        Rewrite a follow-up question into a standalone query using conversation history.
+
+        This is critical for conversational RAG: "list all of them" becomes
+        "list all planetary boundaries that have been breached".
+
+        For tiny models (<3B), uses lightweight keyword injection instead of LLM call.
+        For larger models, uses a fast LLM rewrite.
+        """
+        if not chat_history:
+            return question
+
+        # Extract recent context
+        recent_msgs = []
+        for msg in chat_history[-6:]:  # Last 3 turns
+            role = "Human" if isinstance(msg, HumanMessage) else "Assistant"
+            content = msg.content if hasattr(msg, 'content') else str(msg)
+            recent_msgs.append(f"{role}: {content[:300]}")
+
+        if not recent_msgs:
+            return question
+
+        from backend.services.session_memory import get_model_tier
+        tier = get_model_tier(model_name) if model_name else {"tier": "small"}
+
+        # For tiny and small models (<9B): use heuristic keyword injection
+        # Small models can't reliably follow meta-instructions like "rewrite this question"
+        if tier["tier"] in ("tiny", "small"):
+            return self._heuristic_query_rewrite(question, chat_history)
+
+        # For medium+ models (14B+): LLM-based rewriting
+        conversation_str = "\n".join(recent_msgs[-4:])  # Last 2 turns max
+
+        rewrite_prompt = (
+            f"Given this conversation:\n{conversation_str}\n\n"
+            f"Rewrite the follow-up question as a standalone question that includes "
+            f"all necessary context. Keep it concise. If the question is already "
+            f"standalone, return it unchanged.\n\n"
+            f"Follow-up: {question}\n"
+            f"Standalone question:"
+        )
+
+        try:
+            from langchain_core.messages import HumanMessage as HMsg
+            result = await llm.ainvoke([HMsg(content=rewrite_prompt)])
+            rewritten = result.content.strip()
+            # Strip common prefixes the LLM might add
+            for prefix in ["Standalone question:", "Rewritten:", "Question:", "Standalone:"]:
+                if rewritten.lower().startswith(prefix.lower()):
+                    rewritten = rewritten[len(prefix):].strip()
+            # Take only the first line (some models output explanation after)
+            if "\n" in rewritten:
+                rewritten = rewritten.split("\n")[0].strip()
+            # Sanity check: don't use if way too long or empty
+            if rewritten and len(rewritten) < len(question) * 5 and len(rewritten) > 5:
+                logger.info(
+                    "Query rewritten for conversation context",
+                    original=question[:100],
+                    rewritten=rewritten[:100],
+                    model_tier=tier["tier"],
+                )
+                return rewritten
+            else:
+                logger.info("LLM query rewrite failed sanity check", rewritten=rewritten[:100], length=len(rewritten))
+        except Exception as e:
+            logger.debug("LLM query rewrite failed, using heuristic", error=str(e))
+
+        # Fallback to heuristic
+        return self._heuristic_query_rewrite(question, chat_history)
+
+    def _heuristic_query_rewrite(self, question: str, chat_history: list) -> str:
+        """
+        Lightweight query rewrite for small models that can't do meta-tasks.
+
+        Strategy:
+        1. Detect if question has vague references (pronouns, "them", "those")
+        2. Extract key topic/entities from BOTH user questions AND assistant answers
+        3. Replace or enrich the vague question with extracted context
+
+        Example: "Which of them have been breached?" + history about "planetary boundaries"
+        → "Which of the planetary boundaries have been breached?"
+        """
+        # Detect if question is vague (short, has pronouns, lacks specifics)
+        vague_indicators = [
+            "them", "these", "those", "it", "this", "that",
+            "they", "its", "their", "above", "more", "else",
+            "all of", "list", "what about", "how about", "same",
+            "which of", "how many", "tell me more",
+        ]
+        q_lower = question.lower()
+        is_vague = len(question.split()) < 8 or any(v in q_lower for v in vague_indicators)
+
+        if not is_vague:
+            return question
+
+        # Extract key terms from BOTH user messages AND assistant responses
+        # Assistant responses often contain the actual topic entities
+        key_terms = []
+        for msg in chat_history[-4:]:
+            content = msg.content if hasattr(msg, 'content') else str(msg)
+            # Use the first 500 chars of assistant messages (contains topic summary)
+            text = content[:500] if isinstance(msg, AIMessage) else content
+
+            # Extended stop words
+            stop_words = {
+                "about", "which", "these", "those", "their", "where", "there",
+                "would", "could", "should", "please", "thanks", "based", "following",
+                "information", "context", "question", "answer", "according",
+                "provided", "mentioned", "include", "includes", "including",
+                "however", "therefore", "sources", "source", "document",
+            }
+            words = [w.strip(".,;:!?()[]{}\"'*-") for w in text.split()]
+            # Get multi-word terms: look for capitalized phrases (likely proper nouns/topics)
+            terms = []
+            i = 0
+            while i < len(words):
+                w = words[i]
+                if len(w) > 3 and w.lower() not in stop_words:
+                    # Check if this starts a multi-word capitalized phrase
+                    if w[0].isupper() and i + 1 < len(words) and words[i + 1][0:1].isupper():
+                        phrase = w
+                        j = i + 1
+                        while j < len(words) and words[j][0:1].isupper() and len(words[j]) > 2:
+                            phrase += " " + words[j]
+                            j += 1
+                        terms.append(phrase)
+                        i = j
+                        continue
+                    elif len(w) > 4:
+                        terms.append(w)
+                i += 1
+            key_terms.extend(terms[:8])
+
+        if key_terms:
+            # Deduplicate with substring-aware matching
+            # "Planetary Boundaries" subsumes "Boundaries", "planetary" subsumes "planetary"
+            seen_lower = set()
+            unique_terms = []
+            for t in key_terms:
+                tl = t.lower()
+                # Skip if already seen or is a substring of an existing term
+                if tl in seen_lower:
+                    continue
+                is_substring = any(tl in s for s in seen_lower) or any(s in tl for s in seen_lower if len(s) > 3)
+                if is_substring:
+                    continue
+                seen_lower.add(tl)
+                unique_terms.append(t)
+
+            # Prefer multi-word terms as the topic (they're more descriptive)
+            multi_word = [t for t in unique_terms if " " in t]
+            if multi_word:
+                topic = multi_word[0]  # Best multi-word term (e.g., "Planetary Boundaries")
+            else:
+                topic = " ".join(unique_terms[:2])  # At most 2 single-word terms
+
+            enriched = question
+
+            # Pronoun replacement patterns
+            import re
+            replacements = [
+                (r'\b(of them)\b', f'of the {topic}'),
+                (r'\b(about them)\b', f'about the {topic}'),
+                (r'\b(about it)\b', f'about {topic}'),
+                (r'\b(about this)\b', f'about {topic}'),
+                (r'\b(about these)\b', f'about the {topic}'),
+                (r'\b(about those)\b', f'about the {topic}'),
+            ]
+
+            replaced = False
+            for pattern, replacement in replacements:
+                new_q = re.sub(pattern, replacement, enriched, flags=re.IGNORECASE)
+                if new_q != enriched:
+                    enriched = new_q
+                    replaced = True
+                    break
+
+            # If no pronoun was replaced, append concise context
+            if not replaced:
+                context_str = topic  # Use the same concise topic
+                enriched = f"{question} regarding {context_str}"
+
+            logger.info("Heuristic query rewrite", original=question[:80], enriched=enriched[:150])
+            return enriched
+
+        return question
+
+    async def _stuff_then_refine(
+        self,
+        question: str,
+        chunks: List[str],
+        llm: Any,
+        model_name: Optional[str] = None,
+        system_prompt: str = "",
+        max_chunk_tokens: int = 2000,
+    ) -> str:
+        """
+        Stuff-then-refine strategy for when chunks exceed context window.
+
+        1. Stuff: Process the first batch of chunks that fit in context
+        2. Refine: For each remaining batch, refine the answer with new info
+
+        This is critical for small LLMs (1-3B) where context window is 2-4K tokens.
+        For larger models, this is rarely needed since chunks fit comfortably.
+        """
+        from backend.services.session_memory import estimate_tokens
+
+        if not chunks:
+            return ""
+
+        # Split chunks into batches that fit within max_chunk_tokens
+        batches = []
+        current_batch = []
+        current_tokens = 0
+
+        for chunk in chunks:
+            chunk_tokens = estimate_tokens(chunk)
+            if current_tokens + chunk_tokens > max_chunk_tokens and current_batch:
+                batches.append("\n\n".join(current_batch))
+                current_batch = [chunk]
+                current_tokens = chunk_tokens
+            else:
+                current_batch.append(chunk)
+                current_tokens += chunk_tokens
+
+        if current_batch:
+            batches.append("\n\n".join(current_batch))
+
+        if len(batches) <= 1:
+            # Everything fits in one batch — no refinement needed
+            return batches[0] if batches else ""
+
+        logger.info(
+            "Stuff-then-refine: splitting context into batches",
+            total_chunks=len(chunks),
+            batches=len(batches),
+            model=model_name,
+        )
+
+        # Phase 1: Stuff — get initial answer from first batch
+        initial_prompt = (
+            f"Based on the following information, answer the question.\n\n"
+            f"Information:\n{batches[0]}\n\n"
+            f"Question: {question}\n"
+            f"Answer:"
+        )
+
+        try:
+            result = await llm.ainvoke([HumanMessage(content=initial_prompt)])
+            current_answer = result.content.strip()
+        except Exception as e:
+            logger.warning("Stuff-then-refine initial phase failed", error=str(e))
+            return batches[0]  # Fallback: just return first batch as context
+
+        # Phase 2: Refine — update answer with each additional batch
+        for i, batch in enumerate(batches[1:], 1):
+            refine_prompt = (
+                f"Here is an existing answer to the question:\n{current_answer}\n\n"
+                f"Here is additional information:\n{batch}\n\n"
+                f"Refine the answer using the additional information if relevant. "
+                f"If the new information isn't relevant, keep the original answer.\n\n"
+                f"Question: {question}\n"
+                f"Refined answer:"
+            )
+
+            try:
+                result = await llm.ainvoke([HumanMessage(content=refine_prompt)])
+                current_answer = result.content.strip()
+            except Exception as e:
+                logger.warning(f"Stuff-then-refine batch {i} failed", error=str(e))
+                break  # Keep current answer
+
+        logger.info(
+            "Stuff-then-refine complete",
+            batches_processed=len(batches),
+            answer_length=len(current_answer),
+        )
+
+        return current_answer
 
     def clear_memory(self, session_id: str):
         """Clear conversation memory for session."""
@@ -1182,6 +1535,26 @@ class RAGService:
                     question, query_embedding_for_cache
                 )
 
+                if question != original_question:
+                    # Sanity check: if spell correction makes question worse, revert
+                    # Check 1: word-level overlap (did we lose too many words?)
+                    orig_words = set(original_question.lower().split())
+                    corrected_words = set(question.lower().split())
+                    word_overlap = len(orig_words & corrected_words) / max(len(orig_words), 1)
+                    # Check 2: character-level edit distance ratio
+                    from difflib import SequenceMatcher
+                    char_similarity = SequenceMatcher(None, original_question.lower(), question.lower()).ratio()
+                    # Revert if either check fails
+                    should_revert = word_overlap < 0.5 or char_similarity < 0.6
+                    if should_revert:
+                        logger.info(
+                            "Spell correction reverted (too aggressive)",
+                            original=original_question[:80],
+                            corrected=question[:80],
+                            word_overlap=round(word_overlap, 2),
+                            char_similarity=round(char_similarity, 2),
+                        )
+                        question = original_question
                 if question != original_question:
                     logger.info(
                         "Phase 65: Query spell-corrected",
@@ -1540,29 +1913,26 @@ class RAGService:
                 )
                 stepback_result = None
 
-        # Phase 95L: Conversation-aware retrieval
-        # Enrich query with recent conversation context for better embeddings
+        # Phase 95L+: Conversational query rewriting (gated by setting)
+        # Rewrites follow-up questions into standalone queries using LLM or heuristics.
+        # "list all of them" → "list all planetary boundaries that have been breached"
         enriched_question = question
-        if session_id:
+        _query_rewriting_enabled = _s("conversation.query_rewriting_enabled", True)
+        _early_model_name = llm_config.model if llm_config else None
+        if session_id and _query_rewriting_enabled:
             try:
-                _conv_memory = self._get_memory(session_id)
+                # Use rehydration to restore history from DB after restarts
+                _conv_memory = await self._get_memory_with_rehydration(session_id, model_name=_early_model_name)
                 _conv_history = _conv_memory.load_memory_variables({}).get("chat_history", [])
                 if _conv_history:
-                    # Use last 2-3 user messages for context
-                    recent_user_msgs = [
-                        msg.content for msg in _conv_history[-6:]  # Last 3 turns (user+assistant pairs)
-                        if hasattr(msg, 'content') and isinstance(msg, HumanMessage)
-                    ][-3:]  # Take last 3 user messages
-                    if recent_user_msgs:
-                        conversation_context = " ".join(recent_user_msgs[-3:])
-                        # Prepend a compact version of recent context
-                        enriched_question = f"Context: {conversation_context[:200]}. Question: {question}"
-                        logger.debug("Conversation-aware retrieval",
-                            original_query=question[:100],
-                            enriched_query_length=len(enriched_question),
-                            context_messages=len(recent_user_msgs))
+                    enriched_question = await self._rewrite_conversational_query(
+                        question=question,
+                        chat_history=_conv_history,
+                        llm=llm,
+                        model_name=_early_model_name,
+                    )
             except Exception as e:
-                logger.debug("Conversation-aware retrieval failed, using original query", error=str(e))
+                logger.debug("Conversational query rewrite failed, using original query", error=str(e))
                 enriched_question = question
 
         # Retrieve relevant documents
@@ -1626,7 +1996,7 @@ class RAGService:
             )
         else:
             # PHASE 14: Pass query classification for adaptive retrieval (MMR, KG enhancement)
-            # Phase 95L: Use enriched_question for retrieval (conversation-aware), keep original question for LLM prompt
+            # Phase 95L: Use enriched_question for both retrieval and LLM prompt (conversation-aware)
             retrieved_docs = await self._retrieve(
                 enriched_question,
                 collection_filter=collection_filter,
@@ -1767,6 +2137,38 @@ class RAGService:
         else:
             logger.debug("Verification skipped (verifier not enabled)", docs_count=len(retrieved_docs))
 
+        # Trim back to top_k after verification (we over-fetched to give verifier headroom)
+        if len(retrieved_docs) > top_k:
+            retrieved_docs = retrieved_docs[:top_k]
+
+        # Retrieval quality gate for tiny models — if best score is too low,
+        # return early rather than letting the LLM hallucinate from irrelevant context
+        _gate_model = llm_config.model if llm_config else None
+        if _gate_model and _is_tiny_model(_gate_model) and retrieved_docs:
+            # Use similarity_score from metadata when available (0-1 range),
+            # because the tuple score may be an RRF fusion score (0.01-0.02 range)
+            # which would incorrectly trigger the quality gate.
+            best_score = max(
+                doc.metadata.get("similarity_score", score)
+                for doc, score in retrieved_docs
+            )
+            min_score_threshold = float(_s("rag.tiny_model_min_score", 0.25))
+            if best_score < min_score_threshold:
+                logger.info(
+                    "Retrieval quality gate: best score below threshold for tiny model, skipping LLM",
+                    best_score=best_score,
+                    threshold=min_score_threshold,
+                    model=_gate_model,
+                )
+                return RAGResponse(
+                    content="I couldn't find relevant information in the documents to answer this question. Try rephrasing your query or uploading more relevant documents.",
+                    sources=[],
+                    query=question,
+                    model=_gate_model,
+                    confidence_score=0.0,
+                    confidence_level="low",
+                )
+
         # Phase 95K: Compute freshness config for _format_context (async settings lookup)
         freshness_config = None
         try:
@@ -1782,6 +2184,8 @@ class RAGService:
             logger.debug("Freshness config lookup failed", error=str(e))
 
         # Load enhanced metadata (summaries, keywords, topics) for document-level context
+        # Include for ALL models — keywords/topics add only ~150 tokens per doc
+        # and help tiny models understand document context
         enhanced_metadata_map = None
         if _s("rag.include_enhanced_metadata"):
             try:
@@ -1923,6 +2327,76 @@ class RAGService:
                 logger.warning("Advanced sufficiency checker failed", error=str(e), error_type=type(e).__name__)
 
         # =============================================================================
+        # Stuff-Then-Refine: Handle context overflow for small LLMs
+        # =============================================================================
+        # If context exceeds chunk budget for tiny/small models, use iterative refinement
+        # instead of stuffing everything into a single prompt
+        from backend.services.session_memory import get_model_tier, estimate_tokens, calculate_token_budget
+        _stf_model_name = llm_config.model if llm_config else None
+        _tier_info = get_model_tier(_stf_model_name) if _stf_model_name else {"tier": "small"}
+        _context_tokens = estimate_tokens(context)
+
+        # Get the effective context window for this model
+        _ctx_window = 4096
+        try:
+            from backend.services.llm import get_recommended_context_window
+            _rec = get_recommended_context_window(_stf_model_name) if _stf_model_name else None
+            if _rec:
+                _ctx_window = _rec["recommended"]
+            else:
+                from backend.services.settings import get_settings_service
+                _stf_settings = get_settings_service()
+                _global_ctx = await _stf_settings.get_setting("llm.context_window")
+                if _global_ctx:
+                    _ctx_window = int(_global_ctx)
+        except Exception:
+            pass
+
+        _budget = calculate_token_budget(_ctx_window, _stf_model_name or "")
+        _stuff_then_refine_used = False
+        _stf_enabled = _s("conversation.stuff_then_refine_enabled", True)
+
+        if _stf_enabled and _tier_info["tier"] in ("tiny", "small") and _context_tokens > _budget["chunks"]:
+            # Context is too large for this model — use stuff-then-refine
+            logger.info(
+                "Context overflow detected for small model — using stuff-then-refine",
+                model=_stf_model_name,
+                tier=_tier_info["tier"],
+                context_tokens=_context_tokens,
+                chunk_budget=_budget["chunks"],
+            )
+            # Split context into individual chunk texts
+            _chunk_texts = [s.full_content or s.snippet for s in sources if s.full_content or s.snippet]
+            if _chunk_texts:
+                refined_answer = await self._stuff_then_refine(
+                    question=question,
+                    chunks=_chunk_texts,
+                    llm=llm,
+                    model_name=_stf_model_name,
+                    max_chunk_tokens=_budget["chunks"],
+                )
+                if refined_answer:
+                    _stuff_then_refine_used = True
+                    # Return refined answer directly (skip normal LLM call)
+                    return RAGResponse(
+                        content=refined_answer,
+                        sources=sources,
+                        query=question,
+                        model=_stf_model_name or "unknown",
+                        confidence_score=0.7,  # Slightly lower confidence for multi-pass
+                        confidence_level="medium",
+                        processing_time_ms=int((time.time() - start_time) * 1000),
+                        chunks_retrieved=len(sources),
+                        chunks_used=len(sources),
+                        metadata={
+                            "strategy": "stuff_then_refine",
+                            "tier": _tier_info["tier"],
+                            "batches": len(_chunk_texts),
+                            "context_overflow_tokens": _context_tokens - _budget["chunks"],
+                        },
+                    )
+
+        # =============================================================================
         # PHASE 51: RLM Integration for Large Context Queries
         # =============================================================================
         # Check if context exceeds RLM threshold (default 100K tokens)
@@ -2055,19 +2529,22 @@ class RAGService:
         model_name = llm_config.model if llm_config else None
         system_prompt = _get_system_prompt_for_model(model_name)
 
-        # Add intelligence-level grounding instructions (enhanced/maximum add stricter context grounding)
-        intelligence_grounding = _get_intelligence_grounding(intelligence_level)
-        if intelligence_grounding:
-            system_prompt = f"{system_prompt}\n{intelligence_grounding}"
-            logger.info(
-                "Intelligence grounding applied",
-                level=intelligence_level,
-                model=model_name,
-            )
-
         is_tiny = _is_tiny_model(model_name) if model_name else False
         is_llama = _is_llama_model(model_name) if model_name else False
         is_llama_sm = _is_llama_small(model_name) if model_name else False
+        # Detect any small model (<=14B) that shouldn't get MAXIMUM template
+        is_small_model = is_tiny or is_llama_sm or (
+            model_name and any(s in model_name.lower() for s in [
+                "7b", "8b", "9b", "13b", "14b", ":mini",
+            ])
+        )
+
+        # Add intelligence-level grounding instructions ONLY for larger models (7B+)
+        # Small models (<3B) perform worse with extra instructions — keep prompts short
+        if not is_tiny:
+            intelligence_grounding = _get_intelligence_grounding(intelligence_level)
+            if intelligence_grounding:
+                system_prompt = f"{system_prompt}\n{intelligence_grounding}"
 
         # Get research-backed sampling configuration (temperature, top_p, top_k, repeat_penalty)
         # Intent-based scaling: factual queries get lower temp, exploratory slightly higher
@@ -2113,13 +2590,13 @@ class RAGService:
                 intent=query_intent,
             )
 
-        # Intelligence-level temperature override: maximum/enhanced use lower temps for accuracy
-        if intelligence_level == "maximum" and sampling_config.get("temperature", 0.7) > 0.2:
-            sampling_config["temperature"] = 0.1
-            logger.info("Maximum intelligence: forced low temperature for accuracy", temp=0.1)
-        elif intelligence_level == "enhanced" and sampling_config.get("temperature", 0.7) > 0.4:
-            sampling_config["temperature"] = 0.3
-            logger.info("Enhanced intelligence: reduced temperature for accuracy", temp=0.3)
+        # Intelligence-level temperature override for larger models only
+        # Small models already use low temperatures via adaptive sampling
+        if not is_tiny:
+            if intelligence_level == "maximum" and sampling_config.get("temperature", 0.7) > 0.2:
+                sampling_config["temperature"] = 0.1
+            elif intelligence_level == "enhanced" and sampling_config.get("temperature", 0.7) > 0.4:
+                sampling_config["temperature"] = 0.3
 
         # For tiny models (<3B), always use the structured template
         # This provides ultra-explicit format that reduces hallucination
@@ -2154,6 +2631,11 @@ class RAGService:
         else:
             # Default template
             prompt_template = _get_template_for_model(model_name)
+
+        # Override template for maximum intelligence (only for larger models 20B+)
+        # Small models (<= 14B) can't synthesize well with the strict "quote exact sentences" template
+        if intelligence_level == "maximum" and not is_small_model:
+            prompt_template = MAXIMUM_INTELLIGENCE_TEMPLATE
 
         if language_instruction:
             system_prompt = f"{system_prompt}\n{language_instruction}"
@@ -2192,9 +2674,24 @@ class RAGService:
         from backend.core.config import settings as app_settings
 
         if session_id:
-            # Use conversational prompt with history
-            memory = self._get_memory(session_id)
+            # Use conversational prompt with DB rehydration + dynamic memory window
+            memory = await self._get_memory_with_rehydration(session_id, model_name=model_name)
             chat_history = memory.load_memory_variables({}).get("chat_history", [])
+
+            # Token budget enforcement: trim history to fit within allocated budget
+            from backend.services.session_memory import calculate_token_budget, estimate_tokens, trim_history_to_budget
+            ctx_window = _ctx_window if '_ctx_window' in dir() else 4096
+            try:
+                from backend.services.llm import get_recommended_context_window as _get_rec
+                _rec_bud = _get_rec(model_name) if model_name else None
+                if _rec_bud:
+                    ctx_window = _rec_bud["recommended"]
+            except Exception:
+                pass
+            sys_tokens = estimate_tokens(system_prompt)
+            chunk_tokens = estimate_tokens(context)
+            budget = calculate_token_budget(ctx_window, model_name or "", sys_tokens, chunk_tokens)
+            chat_history = trim_history_to_budget(chat_history, budget["history"])
 
             # PHASE 38: Apply context compression for long conversations
             compressed_context = ""
@@ -2240,18 +2737,23 @@ class RAGService:
 
             # Build messages with optional compressed context
             # Phase 82: Use _make_system_message for Anthropic prompt caching
+            # Use enriched_question so the LLM sees the resolved query (e.g., "list all planetary boundaries")
+            # instead of the vague original (e.g., "list all of them")
+            # Use model-specific template (with step-by-step scaffolding for small models)
+            # instead of generic CONVERSATIONAL_RAG_TEMPLATE — chat_history provides conversation context
+            _llm_question = enriched_question if enriched_question != question else question
             if compressed_context:
                 messages = [
                     _make_system_message(f"{system_prompt}\n\nPrevious Conversation Summary:\n{compressed_context}", model_name),
                     *dspy_demos_messages,  # Phase 93: DSPy few-shot demos
-                    HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
+                    HumanMessage(content=prompt_template.format(context=context, question=_llm_question)),
                 ]
             else:
                 messages = [
                     _make_system_message(system_prompt, model_name),
                     *dspy_demos_messages,  # Phase 93: DSPy few-shot demos
                     *chat_history,
-                    HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
+                    HumanMessage(content=prompt_template.format(context=context, question=_llm_question)),
                 ]
         else:
             # Single-turn query with adaptive template
@@ -2904,9 +3406,29 @@ class RAGService:
                 )
                 return
 
+        # Conversational query rewriting for streaming path
+        # Rewrites "list all of them" → "list all planetary boundaries" using history
+        enriched_question = question
+        _stream_model_name = llm_config.model if llm_config else None
+        _stream_qr_enabled = _s("conversation.query_rewriting_enabled", True)
+        if session_id and _stream_qr_enabled:
+            try:
+                _conv_memory = await self._get_memory_with_rehydration(session_id, model_name=_stream_model_name)
+                _conv_history = _conv_memory.load_memory_variables({}).get("chat_history", [])
+                if _conv_history:
+                    enriched_question = await self._rewrite_conversational_query(
+                        question=question,
+                        chat_history=_conv_history,
+                        llm=llm,
+                        model_name=_stream_model_name,
+                    )
+            except Exception as e:
+                logger.debug("Streaming: query rewrite failed, using original", error=str(e))
+                enriched_question = question
+
         # Retrieve documents
         retrieved_docs = await self._retrieve(
-            question,
+            enriched_question,
             collection_filter=collection_filter,
             access_tier=access_tier,
             top_k=top_k,
@@ -2929,10 +3451,17 @@ class RAGService:
         model_name = llm_config.model if llm_config else None
         system_prompt = _get_system_prompt_for_model(model_name)
 
-        # Add intelligence-level grounding instructions
-        intelligence_grounding = _get_intelligence_grounding(intelligence_level)
-        if intelligence_grounding:
-            system_prompt = f"{system_prompt}\n{intelligence_grounding}"
+        # Add intelligence-level grounding instructions ONLY for larger models
+        is_tiny_stream = _is_tiny_model(model_name) if model_name else False
+        is_small_stream = is_tiny_stream or (
+            model_name and any(s in model_name.lower() for s in [
+                "7b", "8b", "9b", "13b", "14b", ":mini",
+            ])
+        ) or (_is_llama_small(model_name) if model_name else False)
+        if not is_tiny_stream:
+            intelligence_grounding = _get_intelligence_grounding(intelligence_level)
+            if intelligence_grounding:
+                system_prompt = f"{system_prompt}\n{intelligence_grounding}"
 
         if language_instruction:
             system_prompt = f"{system_prompt}\n{language_instruction}"
@@ -2975,17 +3504,46 @@ class RAGService:
                 model=model_name,
             )
 
+        # Intelligence-level temperature override for streaming
+        # Intelligence-level temperature override for larger models only
+        if not is_tiny_stream:
+            if intelligence_level == "maximum" and sampling_config.get("temperature", 0.7) > 0.2:
+                sampling_config["temperature"] = 0.1
+            elif intelligence_level == "enhanced" and sampling_config.get("temperature", 0.7) > 0.4:
+                sampling_config["temperature"] = 0.3
+
         # Select template based on model
         prompt_template = _get_template_for_model(model_name)
 
+        # Override template for maximum intelligence (only for larger models 20B+)
+        if intelligence_level == "maximum" and not is_small_stream:
+            prompt_template = MAXIMUM_INTELLIGENCE_TEMPLATE
+
         if session_id:
-            memory = self._get_memory(session_id)
+            memory = await self._get_memory_with_rehydration(session_id, model_name=model_name)
             chat_history = memory.load_memory_variables({}).get("chat_history", [])
 
+            # Token budget enforcement for streaming path
+            from backend.services.session_memory import calculate_token_budget, estimate_tokens, trim_history_to_budget
+            ctx_window = 4096
+            try:
+                from backend.services.llm import get_recommended_context_window as _get_rec_s
+                _rec_s = _get_rec_s(model_name) if model_name else None
+                if _rec_s:
+                    ctx_window = _rec_s["recommended"]
+            except Exception:
+                pass
+            sys_tokens = estimate_tokens(system_prompt)
+            chunk_tokens = estimate_tokens(context)
+            budget = calculate_token_budget(ctx_window, model_name or "", sys_tokens, chunk_tokens)
+            chat_history = trim_history_to_budget(chat_history, budget["history"])
+
+            # Use model-specific template (with step-by-step scaffolding for small models)
+            # instead of generic CONVERSATIONAL_RAG_TEMPLATE — chat_history already provides context
             messages = [
                 _make_system_message(system_prompt, model_name),
                 *chat_history,
-                HumanMessage(content=f"{CONVERSATIONAL_RAG_TEMPLATE}\n\nQuestion: {question}".replace("{context}", context)),
+                HumanMessage(content=prompt_template.format(context=context, question=enriched_question)),
             ]
         else:
             messages = [
@@ -3312,6 +3870,25 @@ class RAGService:
                 query=question,
                 chunks=chunks,
             )
+
+            # If no data points were found, the query likely isn't a true aggregation query
+            # (e.g., "how many boundaries breached" is factual, not numerical aggregation)
+            # Fall back to standard RAG which can answer from context directly
+            if aggregation_result.count == 0:
+                logger.info(
+                    "Aggregation found 0 data points — falling back to standard RAG",
+                    question=question[:50],
+                )
+                return await self.query(
+                    question=question,
+                    session_id=session_id,
+                    collection_filter=collection_filter,
+                    access_tier=access_tier,
+                    user_id=user_id,
+                    folder_id=folder_id,
+                    include_subfolders=include_subfolders,
+                    language=language,
+                )
 
             # Generate natural language response
             response_text = await extractor.generate_aggregation_response(
@@ -3834,7 +4411,7 @@ class RAGService:
                 rerank_result = await reranker.rerank(
                     query=query,
                     candidates=all_results,
-                    top_k=top_k,
+                    final_top_k=top_k,
                 )
 
                 if rerank_result.reranked_documents:
@@ -4058,6 +4635,12 @@ class RAGService:
                             "Smart pre-filter returned no candidates, using full search"
                         )
 
+            # Over-fetch slightly to give the verifier a larger pool to filter from.
+            # The verifier (QUICK mode) removes chunks with low cosine similarity,
+            # so fetching extra ensures we still have top_k after filtering.
+            # Synthetic chunks are already filtered at the vectorstore level.
+            search_top_k = top_k + 4
+
             # Perform search - use hybrid (LightRAG/RAPTOR), two-stage (ColBERT), or hierarchical retrieval
             # Priority: HybridRetriever > Two-stage > Hierarchical > Standard
             logger.info(
@@ -4083,7 +4666,7 @@ class RAGService:
                     hybrid_results, metrics = await self._hybrid_retriever.retrieve(
                         query=query,
                         query_embedding=query_embedding,
-                        top_k=top_k,
+                        top_k=search_top_k,
                         document_ids=document_ids,
                         access_tier_level=access_tier,
                         vector_weight=vector_weight,
@@ -4139,7 +4722,7 @@ class RAGService:
                         query=query,
                         query_embedding=query_embedding,
                         search_type=search_type,
-                        top_k=top_k,
+                        top_k=search_top_k,
                         access_tier_level=access_tier,
                         document_ids=document_ids,
                         vector_weight=vector_weight,
@@ -4154,7 +4737,7 @@ class RAGService:
                         query=query,
                         query_embedding=query_embedding,
                         search_type=search_type,
-                        top_k=top_k,
+                        top_k=search_top_k,
                         access_tier_level=access_tier,
                         document_ids=document_ids,
                         vector_weight=vector_weight,
@@ -4169,7 +4752,7 @@ class RAGService:
                     query=query,
                     query_embedding=query_embedding,
                     search_type=search_type,
-                    top_k=top_k,
+                    top_k=search_top_k,
                     access_tier_level=access_tier,
                     document_ids=document_ids,
                     vector_weight=vector_weight,
@@ -4184,7 +4767,7 @@ class RAGService:
                     query=query,
                     query_embedding=query_embedding,
                     search_type=search_type,
-                    top_k=top_k,
+                    top_k=search_top_k,
                     access_tier_level=access_tier,
                     document_ids=document_ids,
                     vector_weight=vector_weight,
@@ -4199,7 +4782,7 @@ class RAGService:
                     query=query,
                     query_embedding=query_embedding,
                     search_type=search_type,
-                    top_k=top_k,
+                    top_k=search_top_k,
                     access_tier_level=access_tier,
                     document_ids=document_ids,
                     vector_weight=vector_weight,
@@ -4210,20 +4793,15 @@ class RAGService:
                 )
 
             # Convert SearchResult to LangChain Document format
+            # Note: synthetic chunks (hypothetical questions) are already filtered
+            # at the vectorstore level in vectorstore_local.py
             langchain_results = []
-            logger.info(
-                "Vector search returned results",
-                total_results=len(results),
-                first_result_doc_id=results[0].document_id if results else None,
-            )
-            # Note: The vectorstore already applies similarity threshold filtering
-            # during the search phase. The scores here are RRF fusion scores for
-            # hybrid search, which are on a different scale (typically 0.01-0.02).
-            # We should NOT filter again here as it would incorrectly discard results.
             for result in results:
                 doc = Document(
                     page_content=result.content,
                     metadata={
+                        # Spread extra metadata first so explicit fields take precedence
+                        **result.metadata,
                         "document_id": result.document_id,
                         "document_name": result.document_filename or result.document_title or f"Document {result.document_id[:8]}",
                         "chunk_id": result.chunk_id,
@@ -4235,7 +4813,6 @@ class RAGService:
                         "prev_chunk_snippet": result.prev_chunk_snippet,
                         "next_chunk_snippet": result.next_chunk_snippet,
                         "chunk_index": result.chunk_index,
-                        **result.metadata,
                     },
                 )
                 langchain_results.append((doc, result.score))
@@ -4756,6 +5333,11 @@ class RAGService:
                     if str(chunk.id) in existing_chunk_ids:
                         continue  # Skip duplicates
 
+                    # Skip synthetic chunks (hypothetical questions) from KG results
+                    chunk_meta = chunk.chunk_metadata or {}
+                    if chunk_meta.get("chunk_type") == "hypothetical_question":
+                        continue
+
                     # Build metadata from chunk attributes (Chunk model doesn't have metadata dict)
                     doc = Document(
                         page_content=chunk.content,
@@ -5175,10 +5757,6 @@ class RAGService:
 
         for doc, score in retrieved_docs:
             metadata = doc.metadata or {}
-
-            # Skip hypothetical question chunks - synthetic text should not appear in context
-            if metadata.get("chunk_type") == "hypothetical_question":
-                continue
 
             source_num += 1
 

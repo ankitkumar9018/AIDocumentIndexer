@@ -1650,7 +1650,7 @@ async def create_session(
 @router.post("/feedback")
 async def submit_feedback(
     user: AuthenticatedUser,
-    message_id: UUID,
+    message_id: str,
     rating: int = Query(..., ge=1, le=5),
     comment: Optional[str] = None,
     session_id: Optional[UUID] = None,
@@ -1727,11 +1727,16 @@ async def submit_feedback(
                     personalization_service = get_personalization_service()
 
                     # Get the original message to extract query and response details
-                    message_query = select(ChatMessageModel).where(
-                        ChatMessageModel.id == message_id
-                    )
-                    msg_result = await db.execute(message_query)
-                    chat_message = msg_result.scalar_one_or_none()
+                    chat_message = None
+                    try:
+                        msg_uuid = UUID(message_id)
+                        message_query = select(ChatMessageModel).where(
+                            ChatMessageModel.id == msg_uuid
+                        )
+                        msg_result = await db.execute(message_query)
+                        chat_message = msg_result.scalar_one_or_none()
+                    except (ValueError, TypeError):
+                        pass  # message_id is not a valid UUID (e.g. frontend timestamp)
 
                     if chat_message:
                         # Determine response format from content structure

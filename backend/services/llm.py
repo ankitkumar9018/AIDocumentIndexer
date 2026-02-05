@@ -378,10 +378,12 @@ class LLMFactory:
 
         elif provider == "ollama":
             from langchain_ollama import ChatOllama
+            num_ctx = kwargs.pop("num_ctx", 4096)
             return ChatOllama(
                 model=model,
                 temperature=temperature,
                 base_url=llm_config.ollama_host,
+                num_ctx=num_ctx,
                 **kwargs,
             )
 
@@ -1097,6 +1099,49 @@ class EnhancedLLMFactory:
             source=config.source,
         )
 
+        # Read context window for Ollama models — resolution order:
+        # 1. Per-model override (from llm.model_context_overrides setting)
+        # 2. Hardcoded research-backed recommendation
+        # 3. Global llm.context_window setting (fallback for unknown models)
+        if config.provider_type == "ollama" and "num_ctx" not in kwargs:
+            try:
+                from backend.services.settings import get_settings_service
+                settings_svc = get_settings_service()
+
+                resolved_ctx = None
+                resolution_source = "default"
+
+                # 1. Check per-model override
+                overrides = await settings_svc.get_setting("llm.model_context_overrides")
+                if isinstance(overrides, dict) and config.model in overrides:
+                    resolved_ctx = int(overrides[config.model])
+                    resolution_source = "per_model_override"
+
+                # 2. Check hardcoded recommendation
+                if resolved_ctx is None:
+                    rec = get_recommended_context_window(config.model)
+                    if rec:
+                        resolved_ctx = rec["recommended"]
+                        resolution_source = "recommendation"
+
+                # 3. Fall back to global setting
+                if resolved_ctx is None:
+                    ctx_window = await settings_svc.get_setting("llm.context_window")
+                    if ctx_window:
+                        resolved_ctx = int(ctx_window)
+                        resolution_source = "global_setting"
+
+                if resolved_ctx:
+                    kwargs["num_ctx"] = resolved_ctx
+                    logger.info(
+                        "Resolved context window",
+                        model=config.model,
+                        num_ctx=resolved_ctx,
+                        source=resolution_source,
+                    )
+            except Exception:
+                pass  # Use default 4096 from _create_model_from_config
+
         # Create the model using the resolved config
         model = cls._create_model_from_config(config, **kwargs)
 
@@ -1170,6 +1215,13 @@ class EnhancedLLMFactory:
             else:
                 litellm_model = f"{config.provider_type}/{config.model}"
 
+            # For Ollama models, pass num_ctx via model_kwargs so LiteLLM
+            # forwards it to the Ollama API (controls context window size)
+            if config.provider_type == "ollama":
+                num_ctx = model_kwargs.pop("num_ctx", 4096)
+                model_kwargs.setdefault("model_kwargs", {})
+                model_kwargs["model_kwargs"]["num_ctx"] = num_ctx
+
             return ChatLiteLLM(
                 model=litellm_model,
                 **model_kwargs,
@@ -1183,10 +1235,12 @@ class EnhancedLLMFactory:
             )
         elif config.provider_type == "ollama":
             from langchain_ollama import ChatOllama
+            num_ctx = kwargs.pop("num_ctx", 4096)
             return ChatOllama(
                 model=config.model,
                 temperature=config.temperature,
                 base_url=config.api_base_url or llm_config.ollama_host,
+                num_ctx=num_ctx,
             )
         elif config.provider_type == "anthropic":
             from langchain_anthropic import ChatAnthropic
@@ -1615,6 +1669,156 @@ async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
             "chat_models": [],
             "embedding_models": [],
             "vision_models": [],
+        }
+
+
+# =============================================================================
+# Per-Model Context Window Recommendations (Research-Backed 2025-2026)
+# =============================================================================
+# Each entry: recommended = practical sweet spot for RAG/QA tasks
+#             max = model architecture limit
+#             vram = estimated VRAM at recommended ctx (Q4 quantization)
+# Sub-3B: "lost in the middle" past 4K. 7-9B: sweet spot 4-8K.
+# DeepSeek R1: needs headroom for chain-of-thought tokens.
+
+MODEL_CONTEXT_RECOMMENDATIONS: Dict[str, Dict[str, Any]] = {
+    # Llama 3.2 family
+    "llama3.2:1b":       {"recommended": 2048,  "max": 128000, "vram": "~1.5-2 GB"},
+    "llama-3.2-1b":      {"recommended": 2048,  "max": 128000, "vram": "~1.5-2 GB"},
+    "llama3.2:3b":       {"recommended": 8192,  "max": 128000, "vram": "~3-4 GB"},
+    "llama3.2:latest":   {"recommended": 8192,  "max": 128000, "vram": "~3-4 GB"},
+    "llama-3.2-3b":      {"recommended": 8192,  "max": 128000, "vram": "~3-4 GB"},
+    # Llama 3.1 / 3 larger
+    "llama3.1:8b":       {"recommended": 8192,  "max": 128000, "vram": "~6-8 GB"},
+    "llama3.1:latest":   {"recommended": 8192,  "max": 128000, "vram": "~6-8 GB"},
+    "llama3:8b":         {"recommended": 8192,  "max": 128000, "vram": "~6-8 GB"},
+    "llama3:70b":        {"recommended": 16384, "max": 128000, "vram": "~40-48 GB"},
+    # DeepSeek R1 (distilled)
+    "deepseek-r1:1.5b":  {"recommended": 2048,  "max": 128000, "vram": "~1.5-2.5 GB"},
+    "deepseek-r1:7b":    {"recommended": 6144,  "max": 128000, "vram": "~5-7 GB"},
+    "deepseek-r1:8b":    {"recommended": 6144,  "max": 128000, "vram": "~6-8 GB"},
+    "deepseek-r1:14b":   {"recommended": 8192,  "max": 128000, "vram": "~10-13 GB"},
+    "deepseek-r1:32b":   {"recommended": 8192,  "max": 128000, "vram": "~20-24 GB"},
+    "deepseek-r1:70b":   {"recommended": 16384, "max": 128000, "vram": "~40-48 GB"},
+    # Phi-3
+    "phi3:mini":         {"recommended": 4096,  "max": 128000, "vram": "~3-4 GB"},
+    "phi3:medium":       {"recommended": 8192,  "max": 128000, "vram": "~10-13 GB"},
+    # Qwen 2.5
+    "qwen2.5:0.5b":     {"recommended": 2048,  "max": 128000, "vram": "~0.8-1.2 GB"},
+    "qwen2.5:1.5b":     {"recommended": 2048,  "max": 128000, "vram": "~1.5-2 GB"},
+    "qwen2.5:3b":       {"recommended": 4096,  "max": 128000, "vram": "~3-4 GB"},
+    "qwen2.5:7b":       {"recommended": 8192,  "max": 128000, "vram": "~6-8 GB"},
+    "qwen2.5:14b":      {"recommended": 8192,  "max": 128000, "vram": "~10-13 GB"},
+    "qwen2.5:32b":      {"recommended": 8192,  "max": 128000, "vram": "~20-24 GB"},
+    # Gemma 2 (hard 8K architecture limit)
+    "gemma2:2b":         {"recommended": 4096,  "max": 8192,   "vram": "~2-3 GB"},
+    "gemma2:9b":         {"recommended": 8192,  "max": 8192,   "vram": "~7-9 GB"},
+    "gemma2:27b":        {"recommended": 8192,  "max": 8192,   "vram": "~18-22 GB"},
+    # Mistral / Mixtral
+    "mistral:7b":        {"recommended": 8192,  "max": 32000,  "vram": "~5-7 GB"},
+    "mistral:latest":    {"recommended": 8192,  "max": 32000,  "vram": "~5-7 GB"},
+    "mixtral:8x7b":      {"recommended": 16384, "max": 32000,  "vram": "~30-32 GB"},
+    "mixtral:latest":    {"recommended": 16384, "max": 32000,  "vram": "~30-32 GB"},
+    # CodeLlama
+    "codellama:7b":      {"recommended": 8192,  "max": 16384,  "vram": "~5-7 GB"},
+    "codellama:13b":     {"recommended": 8192,  "max": 16384,  "vram": "~9-11 GB"},
+    "codellama:34b":     {"recommended": 8192,  "max": 16384,  "vram": "~20-24 GB"},
+}
+
+
+def get_recommended_context_window(model_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Get research-backed recommended context window for an Ollama model.
+
+    Uses exact match first, then longest substring match for flexibility
+    (e.g., "llama3.2:3b-q4_K_M" matches "llama3.2:3b").
+
+    Returns:
+        Dict with 'recommended', 'max', 'vram' or None if unknown model.
+    """
+    if not model_name:
+        return None
+
+    model_lower = model_name.lower()
+
+    # Exact match first
+    if model_lower in MODEL_CONTEXT_RECOMMENDATIONS:
+        return MODEL_CONTEXT_RECOMMENDATIONS[model_lower]
+
+    # Substring match (longest match wins for specificity)
+    best_match = None
+    best_len = 0
+    for pattern, rec in MODEL_CONTEXT_RECOMMENDATIONS.items():
+        if pattern in model_lower and len(pattern) > best_len:
+            best_match = rec
+            best_len = len(pattern)
+
+    return best_match
+
+
+async def get_ollama_model_context_length(model_name: str = None, base_url: str = None) -> Dict[str, Any]:
+    """
+    Get the maximum context length for an Ollama model via /api/show.
+
+    Args:
+        model_name: Model name. Defaults to configured chat model.
+        base_url: Ollama API URL. Defaults to config.
+
+    Returns:
+        dict with 'context_length', 'model_name', 'parameter_size'
+    """
+    import httpx
+
+    ollama_url = base_url or llm_config.ollama_host
+
+    if not model_name:
+        model_name = os.getenv("DEFAULT_CHAT_MODEL", "llama3.2:latest")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{ollama_url}/api/show",
+                json={"name": model_name},
+                timeout=10.0,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                model_info = data.get("model_info", {})
+
+                # Find context_length key (varies by model family)
+                context_length = None
+                for key, value in model_info.items():
+                    if "context_length" in key.lower():
+                        context_length = value
+                        break
+
+                parameter_size = data.get("details", {}).get("parameter_size", "")
+
+                return {
+                    "success": True,
+                    "model_name": model_name,
+                    "context_length": context_length,
+                    "parameter_size": parameter_size,
+                }
+            return {
+                "success": False,
+                "error": f"Ollama returned {response.status_code}",
+                "model_name": model_name,
+                "context_length": None,
+            }
+    except httpx.ConnectError:
+        return {
+            "success": False,
+            "error": "Cannot connect to Ollama",
+            "model_name": model_name,
+            "context_length": None,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "model_name": model_name,
+            "context_length": None,
         }
 
 

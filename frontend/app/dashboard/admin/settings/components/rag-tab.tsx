@@ -1898,6 +1898,97 @@ export function RagTab({ localSettings, handleSettingChange }: RagTabProps) {
         </CardContent>
       </Card>
 
+      {/* Conversation Memory */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <MessageSquare className="h-5 w-5" />
+            Conversation Memory
+          </CardTitle>
+          <CardDescription>
+            Smart conversation handling — adapts memory, query rewriting, and context management by model size
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Dynamic Memory Window</p>
+              <p className="text-sm text-muted-foreground">
+                Adjust conversation history length based on model size (tiny: 3 turns, small: 6, medium: 10, large: 15)
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["conversation.dynamic_memory_window"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("conversation.dynamic_memory_window", checked)}
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Query Rewriting</p>
+              <p className="text-sm text-muted-foreground">
+                Resolve pronouns and references in follow-up questions (heuristic for small models, LLM for 14B+)
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["conversation.query_rewriting_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("conversation.query_rewriting_enabled", checked)}
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">DB Rehydration</p>
+              <p className="text-sm text-muted-foreground">
+                Restore conversation history from database after backend restart
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["conversation.db_rehydration_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("conversation.db_rehydration_enabled", checked)}
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Token Budget Enforcement</p>
+              <p className="text-sm text-muted-foreground">
+                Enforce per-component token budgets to prevent context window overflow
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["conversation.token_budget_enforcement"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("conversation.token_budget_enforcement", checked)}
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 rounded-lg border">
+            <div>
+              <p className="font-medium">Stuff-Then-Refine</p>
+              <p className="text-sm text-muted-foreground">
+                Process chunks iteratively when they exceed small model context windows
+              </p>
+            </div>
+            <Switch
+              checked={localSettings["conversation.stuff_then_refine_enabled"] as boolean ?? true}
+              onCheckedChange={(checked) => handleSettingChange("conversation.stuff_then_refine_enabled", checked)}
+            />
+          </div>
+
+          <div className="bg-blue-50 dark:bg-blue-950/30 rounded-lg p-4 mt-2">
+            <div className="flex items-start gap-3">
+              <Brain className="h-5 w-5 text-blue-500 mt-0.5" />
+              <div>
+                <p className="font-medium text-sm">Model-Adaptive Behavior</p>
+                <p className="text-sm text-muted-foreground mt-1">
+                  These features automatically adapt to your model size. Small models (1-3B) get shorter history windows and heuristic query rewriting. Medium models (9-34B) get LLM-based rewriting. Large models (34B+) get full history and advanced context management.
+                </p>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Query Pipeline Visualization */}
       <Card>
         <CardHeader>

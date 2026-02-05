@@ -96,6 +96,20 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         value_type=ValueType.NUMBER,
         description="Maximum tokens for LLM responses"
     ),
+    SettingDefinition(
+        key="llm.context_window",
+        category=SettingCategory.LLM,
+        default_value=4096,
+        value_type=ValueType.NUMBER,
+        description="Context window size for Ollama models (num_ctx). Controls how much text the model can process. 4096-8192 recommended for RAG. Used as fallback for models without a specific recommendation or override."
+    ),
+    SettingDefinition(
+        key="llm.model_context_overrides",
+        category=SettingCategory.LLM,
+        default_value={},
+        value_type=ValueType.JSON,
+        description="Per-model context window overrides. JSON mapping model name to num_ctx value (e.g. {\"deepseek-r1:8b\": 6144}). Overrides both global setting and built-in recommendations."
+    ),
 
     # ==========================================================================
     # Phase 70: LLM Resilience Settings (Circuit Breaker + Retry)
@@ -575,7 +589,7 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     SettingDefinition(
         key="rag.similarity_threshold",
         category=SettingCategory.RAG,
-        default_value=0.55,
+        default_value=0.40,
         value_type=ValueType.NUMBER,
         description="Minimum similarity score for document retrieval (0.0-1.0). Higher = stricter filtering, lower = more results but potentially less relevant."
     ),
@@ -2635,6 +2649,46 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     ),
 
     # ==========================================================================
+    # Conversation Memory Settings (Dynamic window, rehydration, query rewriting)
+    # ==========================================================================
+
+    SettingDefinition(
+        key="conversation.db_rehydration_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Restore conversation history from DB after backend restart. Ensures follow-up questions work across restarts."
+    ),
+    SettingDefinition(
+        key="conversation.query_rewriting_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Rewrite follow-up questions into standalone queries using LLM. Critical for conversational RAG accuracy (+30-45% precision)."
+    ),
+    SettingDefinition(
+        key="conversation.dynamic_memory_window",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Automatically size conversation memory window based on model size (3 turns for tiny, 6 for small, 10 for medium, 15 for large)."
+    ),
+    SettingDefinition(
+        key="conversation.stuff_then_refine_enabled",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="When context exceeds model capacity, use iterative stuff-then-refine strategy instead of truncation. Best for small LLMs."
+    ),
+    SettingDefinition(
+        key="conversation.token_budget_enforcement",
+        category=SettingCategory.RAG,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Enforce token budgets for system prompt, history, chunks, and generation buffer. Prevents context window overflow."
+    ),
+
+    # ==========================================================================
     # System Settings (Custom Instructions, Language, etc.)
     # ==========================================================================
     SettingDefinition(
@@ -2981,6 +3035,13 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Include document summaries, keywords, and topics in RAG context for richer LLM responses"
+    ),
+    SettingDefinition(
+        key="rag.tiny_model_min_score",
+        category=SettingCategory.RAG,
+        default_value=0.25,
+        value_type=ValueType.NUMBER,
+        description="Minimum retrieval score for tiny models (<3B). Below this, the LLM is skipped to prevent hallucination on irrelevant context."
     ),
 
     # ==========================================================================

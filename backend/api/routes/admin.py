@@ -2611,6 +2611,91 @@ async def get_llm_provider_types(admin: AdminUser):
     }
 
 
+@router.get("/llm/ollama-context-length")
+async def get_ollama_context_length(
+    admin: AdminUser,
+    model_name: Optional[str] = Query(None, description="Model name (defaults to configured chat model)"),
+    base_url: str = Query("http://localhost:11434", description="Ollama API base URL"),
+):
+    """
+    Get the maximum context length supported by an Ollama model.
+
+    Returns the model's native context_length from its metadata.
+    Useful for knowing the max value for the llm.context_window setting.
+    """
+    from backend.services.llm import get_ollama_model_context_length
+
+    result = await get_ollama_model_context_length(model_name, base_url)
+    return result
+
+
+@router.get("/llm/model-context-recommendations")
+async def get_model_context_recommendations(
+    admin: AdminUser,
+    base_url: str = Query("http://localhost:11434", description="Ollama API base URL"),
+):
+    """
+    Get context window recommendations for all installed Ollama models.
+
+    For each installed model, returns the research-backed recommended context window,
+    max context, VRAM estimate, user override (if any), and the effective value
+    that would be used at inference time.
+    """
+    from backend.services.llm import (
+        list_ollama_models as get_ollama_models,
+        get_recommended_context_window,
+        MODEL_CONTEXT_RECOMMENDATIONS,
+    )
+    from backend.services.settings import get_settings_service
+
+    settings_svc = get_settings_service()
+
+    overrides = await settings_svc.get_setting("llm.model_context_overrides") or {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    global_ctx = await settings_svc.get_setting("llm.context_window") or 4096
+
+    # Get installed models from Ollama
+    models_result = await get_ollama_models(base_url)
+    chat_models = models_result.get("chat_models", [])
+
+    models_info = []
+    for m in chat_models:
+        model_name = m.get("name", "")
+        rec = get_recommended_context_window(model_name)
+
+        # Determine effective context window (same resolution as llm.py)
+        override_value = overrides.get(model_name)
+        if override_value is not None:
+            effective = int(override_value)
+            source = "override"
+        elif rec:
+            effective = rec["recommended"]
+            source = "recommendation"
+        else:
+            effective = int(global_ctx)
+            source = "global"
+
+        models_info.append({
+            "model_name": model_name,
+            "parameter_size": m.get("parameter_size", ""),
+            "family": m.get("family", ""),
+            "recommended": rec["recommended"] if rec else None,
+            "max": rec["max"] if rec else None,
+            "vram": rec["vram"] if rec else None,
+            "override": int(override_value) if override_value is not None else None,
+            "effective": effective,
+            "source": source,
+        })
+
+    return {
+        "success": True,
+        "models": models_info,
+        "global_context_window": int(global_ctx),
+        "overrides": overrides,
+    }
+
+
 @router.get("/llm/ollama-models")
 async def list_ollama_models(
     admin: AdminUser,

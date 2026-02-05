@@ -721,7 +721,7 @@ export default function ChatPage() {
       filename: sources[0].filename,
       sources: sources.sort((a, b) => (a.pageNumber || 0) - (b.pageNumber || 0)),
       avgSimilarity: sources.reduce((acc, s) => acc + s.similarity, 0) / sources.length,
-    }));
+    })).sort((a, b) => b.avgSimilarity - a.avgSimilarity);
   }, [selectedSources]);
 
   // Navigate to document detail page
@@ -1139,7 +1139,8 @@ export default function ChatPage() {
                   const docId = (s.document_id as string) || (s.source as string) || "unknown";
                   // Use similarity_score (original vector similarity 0-1) for display,
                   // fallback to relevance_score (RRF score ~0.01-0.03) if not available
-                  const similarityValue = (s.similarity_score as number) || (s.score as number) || (s.relevance_score as number) || 0;
+                  // Use ?? (nullish coalescing) not || to preserve valid 0 values
+                  const similarityValue = (s.similarity_score as number) ?? (s.score as number) ?? (s.relevance_score as number) ?? 0;
                   return {
                     documentId: docId,
                     filename: (s.document_name as string) || (s.source as string) || `Document ${docId.slice(0, 8)}`,
@@ -1414,26 +1415,10 @@ export default function ChatPage() {
 
   const handleFeedback = async (messageId: string, isPositive: boolean) => {
     try {
-      // Call feedback API - backend expects query parameters
       const rating = isPositive ? 5 : 1;
-      const params = new URLSearchParams({
-        message_id: messageId,
-        rating: rating.toString(),
-      });
-
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/chat/feedback?${params}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-      });
-
-      if (response.ok) {
-        // Track which feedback was given for visual indication
-        setFeedbackGiven(prev => ({ ...prev, [messageId]: isPositive ? 'up' : 'down' }));
-        console.log("Feedback submitted:", { messageId, isPositive });
-      }
+      await api.submitChatFeedback(messageId, rating);
+      setFeedbackGiven(prev => ({ ...prev, [messageId]: isPositive ? 'up' : 'down' }));
+      console.log("Feedback submitted:", { messageId, isPositive });
     } catch (error) {
       console.error("Failed to submit feedback:", error);
     }

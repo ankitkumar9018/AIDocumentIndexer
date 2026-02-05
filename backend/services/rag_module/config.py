@@ -114,7 +114,7 @@ class RAGConfig:
         if top_k is None:
             top_k = settings.get_default_value("rag.top_k") or 10
         if similarity_threshold is None:
-            similarity_threshold = settings.get_default_value("rag.similarity_threshold") or 0.55
+            similarity_threshold = settings.get_default_value("rag.similarity_threshold") or 0.40
         if rerank_results is None:
             rerank_results = settings.get_default_value("rag.rerank_results")
             if rerank_results is None:

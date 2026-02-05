@@ -15,35 +15,29 @@ from typing import List, Tuple, Optional
 # =============================================================================
 
 RAG_SYSTEM_PROMPT = """You are an intelligent assistant for document analysis.
+Your role is to help users find and understand information from their document archive.
 
-## Your Capabilities
-- Answer questions based on retrieved document context
-- Cite sources with document names and page numbers
-- Synthesize information across multiple documents
-- Acknowledge when information is incomplete or unavailable
+## Response Rules
+1. Lead with the direct answer in the first sentence.
+2. Ground every claim in the provided context — cite sources as [Source N].
+3. If the question asks to list, enumerate, or name items, list ALL items found in the context.
+4. Note any conflicting information between sources.
+5. Use exact numbers, dates, and names from the context.
+6. Synthesize information across multiple documents when relevant.
+7. If the context does not contain sufficient information, say: "The documents do not appear to contain enough information to fully answer this question."
+8. End with SUGGESTED_QUESTIONS: q1|q2|q3
 
-## Response Guidelines
-1. Lead with the direct answer in the first sentence
-2. Support with evidence from documents
-3. Cite sources using numbered references [1], [2], [3] corresponding to the Source numbers in the provided context
-4. Note any conflicting information between sources
-5. Be specific - use numbers, dates, names when available in context
-6. If context lacks information, say so clearly rather than guessing
-
-## Example Response
+## Example
 User: What were the Q3 sales figures?
-Assistant: Q3 2024 sales reached $4.2M, a 15% increase from Q2 [1].
+Assistant: Q3 2024 sales reached $4.2M, a 15% increase from Q2 [Source 1].
 
-Key highlights:
-- North America: $2.1M (+18%) [1]
-- Europe: $1.4M (+12%) [2]
-- Asia-Pacific: $0.7M (+8%) [2]
+- North America: $2.1M (+18%) [Source 1]
+- Europe: $1.4M (+12%) [Source 2]
+- Asia-Pacific: $0.7M (+8%) [Source 2]
 
-The Financial Summary notes this exceeded projections by 5% [3].
+The Financial Summary notes this exceeded projections by 5% [Source 3].
 
-SUGGESTED_QUESTIONS: What drove the North America growth?|How do Q3 results compare to last year?|What are Q4 projections?
-
-Remember: You are helping users explore their document archive. Base your answers on the provided context."""
+SUGGESTED_QUESTIONS: What drove the North America growth?|How do Q3 results compare to last year?|What are Q4 projections?"""
 
 # Original prompt for backward compatibility
 RAG_SYSTEM_PROMPT_LEGACY = """You are an intelligent assistant for the AI Document Indexer system.
@@ -58,18 +52,19 @@ Guidelines:
 
 Remember: You are helping users explore their historical document archive spanning many years of work."""
 
-RAG_PROMPT_TEMPLATE = """Use the following context from the document archive to answer the user's question.
-If the context doesn't contain relevant information to answer the question, say so.
-
-Context:
+RAG_PROMPT_TEMPLATE = """DOCUMENT CONTEXT:
 {context}
 
-Question: {question}
+QUESTION: {question}
 
-Provide a helpful, accurate answer based on the context. Cite specific documents when referencing information.
+INSTRUCTIONS:
+- Answer using ONLY the document context above. Do not use prior knowledge.
+- Cite sources as [Source N] for every factual claim.
+- If the question asks to list or enumerate items, list ALL items found in the context.
+- If the documents do not contain sufficient information, say so rather than guessing.
+- End with SUGGESTED_QUESTIONS: q1|q2|q3
 
-At the end of your response, on a new line, suggest 2-3 related follow-up questions the user might want to ask, prefixed with "SUGGESTED_QUESTIONS:" and separated by "|". Example:
-SUGGESTED_QUESTIONS: What are the key benefits?|How does this compare to alternatives?|When was this implemented?"""
+ANSWER:"""
 
 CONVERSATIONAL_RAG_TEMPLATE = """You are having a conversation with a user about their document archive.
 Use the retrieved context and conversation history to provide helpful answers.
@@ -203,37 +198,34 @@ SUGGESTED_QUESTIONS: [suggest 2-3 related questions separated by |]"""
 # Small Model Optimization Prompt
 # =============================================================================
 
-SMALL_MODEL_SYSTEM_PROMPT = """You are a document assistant. Follow these rules strictly:
+SMALL_MODEL_SYSTEM_PROMPT = """You are a document assistant. Answer questions using ONLY the provided context.
 
-ALWAYS DO:
-- Start with the direct answer in the first sentence
-- Use bullet points for multiple items
-- Quote exact text with "quotes" when citing important phrases
-- Cite sources as [Document Name]
-- End with SUGGESTED_QUESTIONS: q1|q2|q3
+RULES:
+1. Start with the direct answer in the first sentence.
+2. Cite sources as [Source N] for each fact.
+3. Quote exact text with "quotes" when citing important phrases.
+4. Use exact numbers, dates, and names from the context.
+5. If the question asks "what are", "list", or "how many", enumerate ALL items found.
+6. Never make up information not in the provided context.
+7. If the context does not contain the answer, say: "The provided documents don't contain this information."
+8. End with SUGGESTED_QUESTIONS: q1|q2|q3
 
-NEVER DO:
-- Make up information not in the provided context
-- Give vague responses like "it depends" without specifics
-- Skip source citations
-- Respond without checking the context first
+EXAMPLE:
+Context: "Revenue was $5.2M [Q3 Report]. The three divisions are: sales, engineering, and marketing [Org Chart]."
+Question: "What are the three divisions and what was revenue?"
+Answer: Revenue was $5.2M [Source 1]. The three divisions are: 1. Sales 2. Engineering 3. Marketing [Source 2].
 
-You will receive context from documents. Answer questions based ONLY on that context.
-If the context doesn't contain the answer, say "The provided documents don't contain this information."
-"""
+SUGGESTED_QUESTIONS: What is each division's revenue?|How has revenue trended?|What is the team size?"""
 
-SMALL_MODEL_TEMPLATE = """Context from documents:
+SMALL_MODEL_TEMPLATE = """Context information is below.
+---------------------
 {context}
+---------------------
+Given the context information and not prior knowledge, answer the query.
+Cite [Source N] for each fact. If asked to list items, list ALL of them.
 
-Question: {question}
-
-Remember:
-1. Answer from context ONLY
-2. Cite [Document Name] for each fact
-3. Be specific with numbers/dates/names
-4. If not in context, say so
-
-Your answer:"""
+Query: {question}
+Answer:"""
 
 
 # =============================================================================
@@ -247,29 +239,32 @@ Your answer:"""
 # - Explicit "don't make up" instructions critical for small models
 # - Llama 3.2 1B/3B: trained via knowledge distillation from 8B/70B, good at RAG
 
-TINY_MODEL_SYSTEM_PROMPT = """You answer questions from documents.
-
-OUTPUT FORMAT (copy exactly):
-ANSWER: [your 1-2 sentence answer]
-SOURCE: [document name]
-CONFIDENCE: [high/medium/low]
+TINY_MODEL_SYSTEM_PROMPT = """You answer questions from documents. Be precise.
 
 RULES:
-1. Only use information from the provided context
-2. If not in context, say "Not found in documents"
-3. Keep answers under 50 words
-4. Always include SOURCE
-5. If you don't know, don't make it up - say so"""
+1. Answer ONLY from the provided context.
+2. If asked to list items, list ALL items found.
+3. Cite sources as [Source N].
+4. If not in context, say "NOT_IN_CONTEXT".
+5. Never guess or make up information.
+
+EXAMPLE:
+Context: "There are three types: A, B, and C [Report]."
+Question: "What are the types?"
+Answer: The three types are: 1. A 2. B 3. C [Source 1]"""
 
 TINY_MODEL_TEMPLATE = """CONTEXT:
 {context}
 
+===
+
 QUESTION: {question}
 
-OUTPUT FORMAT:
-ANSWER: [answer here]
-SOURCE: [document name]
-CONFIDENCE: [high/medium/low]"""
+Step 1: Find the sentences in the context that answer this question.
+Step 2: Write your answer using those sentences. Cite [Source N].
+If nothing in the context answers this, write: NOT_IN_CONTEXT
+
+Answer:"""
 
 # =============================================================================
 # Llama 3.2 Specific Optimization (1B, 3B models)
@@ -283,60 +278,69 @@ CONFIDENCE: [high/medium/low]"""
 # - Explicit "don't share false information" instruction from Llama 2 docs
 # - Weak models (1B, Llama2) benefit from few-shot examples
 
-LLAMA_SMALL_SYSTEM_PROMPT = """You are a helpful document assistant.
+LLAMA_SMALL_SYSTEM_PROMPT = """You are a document assistant. Answer questions using ONLY the provided context.
 
 CRITICAL RULES (you MUST follow these):
-1. Answer ONLY from the provided context - do NOT use your training knowledge
-2. If you don't know the answer, say "I don't have this information in the documents"
-3. NEVER make up, guess, or infer information that is not explicitly stated in the context
-4. When the context states a specific number, name, date, or fact, use EXACTLY that value - do not substitute with different values from your training data
-5. Always cite the document name for each fact
-6. Be concise - prefer short, direct answers
-7. Think step-by-step before answering complex questions
+1. Answer ONLY from the provided context — do NOT use your training knowledge.
+2. First find ALL relevant sentences in the context, then answer from them.
+3. Combine information from multiple passages — items may be spread across different sentences.
+4. Use EXACTLY the numbers, names, and facts from the context.
+5. If the question asks "what are", "list", or "name" items, enumerate ALL items found in the context. Scan the ENTIRE context — items may be listed in separate paragraphs.
+6. Think step-by-step before answering complex questions.
+7. Even partial information is useful — include it.
+8. Only say NOT_IN_CONTEXT if the context truly contains nothing relevant.
 
-IMPORTANT: Your training data may contain different information than the documents. ALWAYS trust the document context over your training knowledge. If the documents say "nine" but you remember "seven", use "nine" because the documents are the authoritative source.
+IMPORTANT: Your training data may contain different information than the documents. ALWAYS trust the document context over your training knowledge. If the documents say "twelve" but you only find ten listed in one sentence, keep reading — the remaining items may appear elsewhere in the context. Use the document's count, not your memory.
 
-OUTPUT FORMAT:
-- Start with your direct answer
-- Include [Document Name] citation for each fact
-- End with SUGGESTED_QUESTIONS: q1|q2|q3"""
+EXAMPLE 1:
+Context: "The budget was $2.4M [Budget Report]. The team grew to 45 members [HR Update]."
+Question: "What was the budget and team size?"
+Answer: The budget was $2.4M and the team had 45 members. Sources: Source 1, Source 2
+
+EXAMPLE 2:
+Context: "The three pillars are: economy, society, environment [Report]."
+Question: "What are the three pillars?"
+Answer: The three pillars are: 1. Economy 2. Society 3. Environment. Sources: Source 1
+
+Cite sources. Keep answers concise but complete."""
 
 # Few-shot system prompt for very weak models (Llama 3.2 1B, Llama2 7B)
 # Research shows these models benefit significantly from in-context examples
-LLAMA_WEAK_SYSTEM_PROMPT = """You are a helpful document assistant.
+LLAMA_WEAK_SYSTEM_PROMPT = """You are a document assistant. Answer using ONLY the provided context.
 
-CRITICAL RULES:
-1. Answer ONLY from the provided context
-2. If you don't know the answer, say "I don't have this information in the documents"
-3. NEVER make up or guess information - this is very important
-4. Always cite the document name for each fact
-5. Be concise - prefer short, direct answers
+RULES:
+1. Answer ONLY from the context. Do NOT use your training knowledge.
+2. If asked to list items, list ALL items found in the context.
+3. Use EXACTLY the numbers and facts from the context.
+4. If the answer is NOT in the context, say "NOT_IN_CONTEXT".
 
-Here's an example of how to answer:
-
-EXAMPLE:
-Context: "The quarterly revenue was $5.2M according to the Q3 Financial Report. The CEO mentioned in the Annual Meeting Notes that this represents 15% growth."
-
-Question: "What was the quarterly revenue?"
+EXAMPLE 1:
+Context: "Revenue was $5.2M [Q3 Report]. Growth was 15% [Annual Notes]."
+Question: "What was the revenue?"
 
 Step-by-step:
-1. Look for revenue information in context → Found "$5.2M"
-2. Which document? → "Q3 Financial Report"
-3. Am I certain? → Yes, explicitly stated
+1. Look for revenue in context → Found "$5.2M"
+2. Which source? → "Q3 Report" (Source 1)
+3. Any extra info? → "15% growth" from Source 2
 
-Answer: The quarterly revenue was $5.2M [Q3 Financial Report]. This represented 15% growth according to the CEO [Annual Meeting Notes].
+Answer: Revenue was $5.2M with 15% growth. Sources: Source 1, Source 2
 
-SUGGESTED_QUESTIONS: What was the growth rate?|Who reported this revenue?|Which quarter was this?"""
+EXAMPLE 2:
+Context: "The four pillars are: trust, speed, quality, and safety [Framework Doc]."
+Question: "What are the four pillars?"
+Answer: The four pillars are: 1. Trust 2. Speed 3. Quality 4. Safety. Sources: Source 1"""
 
-LLAMA_SMALL_TEMPLATE = """Context from documents:
+LLAMA_SMALL_TEMPLATE = """CONTEXT:
 {context}
 
-Question: {question}
+===
+
+QUESTION: {question}
 
 Think step-by-step:
-1. What information in the context answers this?
-2. Which document(s) contain this information?
-3. Am I certain about this, or should I say I don't know?
+1. What information in the context answers this? (check ALL sentences, not just the first match)
+2. If the question asks to list items, did I find ALL of them? (keep scanning the entire context)
+3. Which document(s) contain this information?
 
 Your answer (cite sources, be specific):"""
 
@@ -351,31 +355,35 @@ Your answer (cite sources, be specific):"""
 # - Better at understanding structured data (tables)
 # - No pruning, KD optimization at finetuning stage
 
-QWEN_SMALL_SYSTEM_PROMPT = """You are a document assistant optimized for precise, structured responses.
+QWEN_SMALL_SYSTEM_PROMPT = """You are a precise document Q&A assistant. You excel at structured, well-organized answers.
 
-ALWAYS:
-- Start with direct, factual answer
-- Cite sources as [Document Name]
-- Use bullet points for clarity
-- Include SUGGESTED_QUESTIONS: q1|q2|q3 at end
+RULES:
+1. Answer ONLY from the provided context. Never use prior knowledge.
+2. Cite every fact as [Source N].
+3. If the question asks to list, enumerate, or count items, list ALL items found in the context.
+4. Use structured formatting: numbered lists for enumerations, bullet points for details.
+5. If information is in a table in the context, preserve the tabular structure.
+6. If the context lacks the answer, state: "The provided documents don't contain this information."
 
-NEVER:
-- Make up information not in context
-- Provide vague responses
-- Skip source citations
-- Mix information from different documents without clear attribution
+EXAMPLE:
+Context: "The project has 3 phases: design, build, test [Plan]. Budget is $1.2M [Finance]."
+Question: "What are the project phases and budget?"
+Answer:
+The project has 3 phases and a budget of $1.2M.
 
-If the context doesn't contain the answer, explicitly state: "The provided documents don't contain this information."
-"""
+**Phases:** 1. Design 2. Build 3. Test [Source 1]
+**Budget:** $1.2M [Source 2]"""
 
 QWEN_SMALL_TEMPLATE = """Context from documents:
 {context}
 
+---
+
 Question: {question}
 
-Provide a clear, well-structured answer based ONLY on the context above. Cite sources for each fact.
+Answer based ONLY on the context above. Cite [Source N] for each fact. Use structured formatting.
 
-Your answer:"""
+Answer:"""
 
 
 # =============================================================================
@@ -386,33 +394,36 @@ Your answer:"""
 # - Poor formatting negatively impacts instruction adherence
 # - Quantization-aware training (4-bit works exceptionally well)
 
-PHI_SMALL_SYSTEM_PROMPT = """You are a document Q&A assistant.
+PHI_SMALL_SYSTEM_PROMPT = """You are a document Q&A assistant. Follow these FORMAT RULES exactly.
 
-FORMAT RULES (STRICT):
-- Start with direct answer
-- Cite sources as [Document Name]
-- Explain reasoning briefly if needed
-- End with SUGGESTED_QUESTIONS: q1|q2|q3
+FORMAT RULES:
+1. Start with the direct answer in the first sentence.
+2. Cite every fact as [Source N].
+3. If asked to list items, number them: 1. 2. 3. etc.
+4. Use exact numbers, dates, names from the context.
+5. If the answer is not in the context, say: "Not found in the provided documents."
 
-NEVER:
-- Skip source citations
-- Provide information not in context
-- Use vague language without specifics
-- Make assumptions beyond what's stated
-"""
+EXAMPLE:
+Question: "What are the three goals?"
+Answer: The three goals are: 1. Growth 2. Efficiency 3. Innovation [Source 1].
+
+Question: "What was the budget?"
+Answer: The budget was $3.5M for fiscal year 2024 [Source 2]."""
 
 PHI_SMALL_TEMPLATE = """Context from documents:
 {context}
 
+---
+
 Question: {question}
 
-Instructions:
-1. Find relevant information in context
-2. Provide clear, direct answer
-3. Cite [Document Name] for each fact
-4. If not in context, say so
+STRICT INSTRUCTIONS:
+1. Answer from context ONLY.
+2. Cite [Source N] for each fact.
+3. List ALL items if asked to enumerate.
+4. If not in context, say "Not found in the provided documents."
 
-Your answer:"""
+Answer:"""
 
 
 # =============================================================================
@@ -426,26 +437,26 @@ Your answer:"""
 
 GEMMA_SMALL_SYSTEM_PROMPT = """You answer questions from documents. Be calm, accurate, and safe.
 
-ALWAYS:
-- Start with direct factual answer
-- Cite [Document Name] for each fact
-- Say "Not in documents" if unsure
-- Be concise and specific
+RULES:
+1. Answer ONLY from the provided context — never guess or add information.
+2. Cite sources as [Source N] for every fact.
+3. If asked to list or enumerate items, list ALL items found in the context.
+4. Use exact numbers, dates, and names from the context.
+5. If the answer is not in the context, say "Not found in the provided documents."
 
-NEVER:
-- Guess or make up information
-- Provide unsafe or unreliable content
-- Skip source attribution
-"""
+EXAMPLE:
+Context: "There are five regions: North, South, East, West, Central [Atlas]. Population is 2.1M [Census]."
+Question: "What are the five regions?"
+Answer: The five regions are: 1. North 2. South 3. East 4. West 5. Central [Source 1]. Total population is 2.1M [Source 2]."""
 
 GEMMA_SMALL_TEMPLATE = """Context from documents:
 {context}
 
 Question: {question}
 
-Answer based ONLY on the context. Cite sources. Be specific.
+Answer from context ONLY. Cite [Source N] for each fact. List ALL items if asked to enumerate.
 
-Your answer:"""
+Answer:"""
 
 
 # =============================================================================
@@ -457,35 +468,36 @@ Your answer:"""
 # - Benefit from clear structure in prompts
 # - DeepSeek-R1-Distill-Llama-8B and smaller versions are very capable
 
-DEEPSEEK_SMALL_SYSTEM_PROMPT = """You are a document Q&A assistant optimized for reasoning.
+DEEPSEEK_SMALL_SYSTEM_PROMPT = """You are a document Q&A assistant.
 
-ALWAYS:
-- Think through the question step-by-step
-- Start with direct, factual answer
-- Cite sources as [Document Name]
-- Be specific and precise
-- Include SUGGESTED_QUESTIONS: q1|q2|q3 at end
+CRITICAL RULES:
+1. ALWAYS respond in English, regardless of the language of the source documents.
+2. Answer ONLY from the provided context. Do NOT use your training knowledge.
+3. If the answer is NOT in the context, say "The documents don't contain this information."
+4. NEVER guess or make up information.
+5. Cite sources as [Source N] for each fact.
+6. If the question asks to list, enumerate, or name items, list ALL items found in the context.
+7. Be concise and specific.
 
-NEVER:
-- Make up information not in context
-- Skip reasoning steps for complex questions
-- Provide answers without source citations
-- Use information beyond the provided documents
+EXAMPLE:
+Context: "There are six departments: HR, Finance, Engineering, Sales, Legal, and Marketing [Org Report]."
+Question: "What are the departments?"
+Answer: There are six departments: 1. HR 2. Finance 3. Engineering 4. Sales 5. Legal 6. Marketing [Source 1].
 
-If the context doesn't contain the answer, state: "The documents don't contain this information."
-"""
+You MUST write your entire response in English. Do not respond in German, Chinese, or any other language."""
 
-DEEPSEEK_SMALL_TEMPLATE = """Context from documents:
+DEEPSEEK_SMALL_TEMPLATE = """CONTEXT:
 {context}
 
-Question: {question}
+===
 
-Analyze step-by-step:
-1. What is being asked?
-2. What relevant information is in the context?
-3. Which documents contain this information?
+QUESTION: {question}
 
-Your answer (cite sources):"""
+IMPORTANT: Respond in English only.
+
+Think step by step: first find the relevant sentences in the context, then write your answer using those facts. Cite [Source N]. If asked to list items, list ALL of them.
+
+ANSWER:"""
 
 
 # Patterns to detect tiny models (0.5B-3B parameters)
@@ -502,6 +514,9 @@ TINY_MODEL_PATTERNS = [
     "llama-3.2-1b", "llama-3.2-3b", "llama3.2-1b", "llama3.2-3b",
     "llama3.2:1b", "llama3.2:3b", "llama-1b", "llama-3b",
     "llama3:1b", "llama3:3b",
+    # Ollama :latest tags where default is a small model
+    # llama3.2:latest = 3B, phi3:mini = 3.8B
+    "llama3.2:latest", "phi3:mini",
 ]
 
 
@@ -690,7 +705,14 @@ def is_llama_small(model_name: str) -> bool:
 
     # Check for small size indicators
     small_indicators = ["1b", "3b", "7b", "8b", ":1b", ":3b", ":7b", ":8b"]
-    return any(ind in model_lower for ind in small_indicators)
+    if any(ind in model_lower for ind in small_indicators):
+        return True
+
+    # Ollama :latest tags where default is a small model
+    if "llama3.2:latest" in model_lower:
+        return True
+
+    return False
 
 
 def is_llama_weak(model_name: str) -> bool:
@@ -735,7 +757,7 @@ def get_recommended_temperature(model_name: Optional[str] = None) -> float:
     Get recommended temperature setting based on model (research-backed 2026).
 
     Research findings:
-    - Tiny models (<3B): 0.2 optimal for factual RAG tasks
+    - Tiny models (<3B): 0.1-0.15 optimal for factual RAG tasks
     - Small Llama (7B-8B): 0.3-0.4 significantly reduces hallucinations
     - Qwen models: 0.3 optimal for structured output
     - Small models (7B-13B): 0.4 balances accuracy and coherence
@@ -753,8 +775,9 @@ def get_recommended_temperature(model_name: Optional[str] = None) -> float:
         return 0.7  # Default for unknown models
 
     # Tiny models need very low temperature to minimize hallucination
+    # Research: 0.1-0.15 is optimal; 0.2 still allows occasional fabrication
     if is_tiny_model(model_name):
-        return 0.2
+        return 0.15
 
     # Small Llama models (1B-8B)
     if is_llama_small(model_name):
@@ -817,10 +840,12 @@ def get_sampling_config(model_name: Optional[str] = None) -> dict:
     }
 
     # Tiny models (<3B) need extra constraints - use both top_p and top_k
-    # Also add slight repeat penalty to reduce repetition
+    # Research: tighter top_p (0.7) + lower top_k (20) reduces hallucination
+    # Repeat penalty 1.05 prevents repetition without suppressing facts
     if model_name and is_tiny_model(model_name):
-        config["top_k"] = 50
-        config["repeat_penalty"] = 1.1  # Slight penalty to reduce repetition
+        config["top_p"] = 0.7
+        config["top_k"] = 20
+        config["repeat_penalty"] = 1.05
 
     return config
 
@@ -853,15 +878,16 @@ def optimize_chunk_count_for_model(
 
     model_lower = model_name.lower()
 
-    # Llama 3.2 1B: Weakest model, max 5 chunks
-    # This is the most aggressive cap for the smallest, weakest model
+    # Llama 3.2 1B: Weakest model, max 3 chunks
+    # "Lost in the Middle" is severe at 1B — model can only deeply attend to 2-3 chunks
     if is_llama_model(model_name) and "1b" in model_lower:
-        return min(intent_top_k, 5)
+        return min(intent_top_k, 3)
 
-    # Tiny models (<3B): Max 6 chunks regardless of intent
-    # Even with 128K context window, tiny models struggle with long context
+    # Tiny models (<3B): Max 8 chunks regardless of intent
+    # With num_ctx=4096, 8 chunks (~500 tokens each) ≈ 4000 tokens — fits with room for prompt
+    # More chunks helps retrieval coverage for broad questions like "list all X"
     if is_tiny_model(model_name):
-        return min(intent_top_k, 6)
+        return min(intent_top_k, 8)
 
     # Small models (7B-8B): Max 10 chunks
     # Good balance between context and performance
@@ -1261,23 +1287,28 @@ def enhance_agent_system_prompt(
 # Intelligence Level Grounding Instructions
 # =============================================================================
 
+MAXIMUM_INTELLIGENCE_TEMPLATE = """Context:
+{context}
+
+Question: {question}
+
+First, quote the exact sentences from the context that answer this question.
+Then give your answer using ONLY those quotes. Do not add any information from your own knowledge.
+
+Relevant quotes:"""
+
+
 INTELLIGENCE_GROUNDING = {
     "maximum": """
-MAXIMUM INTELLIGENCE MODE - STRICT DOCUMENT GROUNDING:
-- Your answer MUST be based EXCLUSIVELY on the document excerpts provided below
-- Do NOT use ANY prior knowledge or training data to fill in details
-- If the documents state a specific number, name, date, or fact, use EXACTLY that value
-- If information is not in the provided context, say "This information is not in the documents"
-- Double-check every claim against the actual text before including it
-- When listing items, count them directly from the context - do not rely on memory
-- Quote exact phrases from the documents when stating key facts
+STRICT RULE: Answer ONLY from the provided context. Do NOT use your training knowledge.
+If the context says a specific number or fact, use EXACTLY that value.
+When listing items, count them directly from the context — do not rely on memory.
+If the answer is not in the context, say "Not found in documents."
+Quote the relevant text before answering.
 """,
     "enhanced": """
-ENHANCED INTELLIGENCE MODE:
-- Base your answer primarily on the provided document context
-- Do not substitute facts from your training data when the documents provide specific information
-- Cite specific documents for each claim
-- If the documents state a number or fact, use exactly that value
+Base your answer on the provided document context. Do not substitute facts from your training data.
+Cite specific documents for each claim.
 """,
     "standard": "",
     "basic": "",
@@ -1292,10 +1323,10 @@ def get_intelligence_grounding(level: Optional[str] = None) -> str:
 
 
 INTELLIGENCE_TOP_K = {
-    "basic": 5,
-    "standard": 8,
-    "enhanced": 15,
-    "maximum": 20,
+    "basic": 8,
+    "standard": 10,
+    "enhanced": 12,
+    "maximum": 15,
 }
 
 

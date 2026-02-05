@@ -10,7 +10,7 @@ import asyncio
 import os
 import uuid
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
 
 import structlog
@@ -913,6 +913,15 @@ class KGExtractionJobRunner:
                 )
                 return
 
+            # Pre-load chunk counts for adaptive timeout calculation
+            doc_ids = [doc.id for doc in documents]
+            chunk_count_result = await self.db.execute(
+                select(Chunk.document_id, func.count(Chunk.id))
+                .where(Chunk.document_id.in_(doc_ids))
+                .group_by(Chunk.document_id)
+            )
+            chunk_counts: Dict[uuid.UUID, int] = dict(chunk_count_result.all())
+
             # Define Ray remote function for document processing
             @ray.remote
             def process_document_ray(doc_id: str, provider_id: Optional[str] = None) -> Dict[str, Any]:
@@ -952,7 +961,33 @@ class KGExtractionJobRunner:
                             # Clean up any stale entity data from previous extraction runs
                             await kg_service.delete_document_data(uuid.UUID(doc_id))
 
-                            stats = await kg_service.process_document_for_graph(uuid.UUID(doc_id))
+                            # Progress callback that persists chunk progress to DB
+                            # Uses raw sqlite3 for synchronous writes since the callback is sync
+                            import os
+                            _db_path = os.path.join(
+                                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "data", "aidocindexer.db"
+                            )
+
+                            def progress_cb(chunks_done: int, total_chunks: int):
+                                try:
+                                    import sqlite3
+                                    conn = sqlite3.connect(_db_path)
+                                    # Use MAX to prevent jumping values when multiple workers
+                                    # write to the same document from duplicate jobs
+                                    conn.execute(
+                                        "UPDATE documents SET kg_chunks_processed = MAX(COALESCE(kg_chunks_processed, 0), ?) WHERE id = ?",
+                                        (chunks_done, doc_id),
+                                    )
+                                    conn.commit()
+                                    conn.close()
+                                except Exception:
+                                    pass  # Don't break extraction if progress write fails
+
+                            stats = await kg_service.process_document_for_graph(
+                                uuid.UUID(doc_id),
+                                progress_callback=progress_cb,
+                            )
 
                             return {
                                 "success": True,
@@ -993,6 +1028,12 @@ class KGExtractionJobRunner:
 
                 batch = documents[batch_start:batch_start + batch_size]
 
+                # Mark batch documents as "processing" and reset chunk progress
+                for doc in batch:
+                    doc.kg_extraction_status = "processing"
+                    doc.kg_chunks_processed = 0
+                await self.db.commit()
+
                 # Submit batch to Ray
                 futures = [
                     process_document_ray.remote(str(doc.id), self.provider_id)
@@ -1004,7 +1045,7 @@ class KGExtractionJobRunner:
                 # Use ray.wait() to process results as each document completes,
                 # giving real-time progress updates instead of waiting for entire batch
                 # Adaptive timeout: base setting + 5s per chunk for the largest doc in batch
-                max_chunks = max((doc.chunk_count or 0) for doc in batch)
+                max_chunks = max((chunk_counts.get(doc.id, 0)) for doc in batch)
                 ray_timeout = float(max(ray_task_timeout, 600 + max_chunks * 5))
                 remaining = list(futures)
 
@@ -1339,7 +1380,10 @@ class KGExtractionJobService:
         self,
         organization_id: Optional[uuid.UUID] = None,
     ) -> Optional[KGExtractionJob]:
-        """Get the currently running job for an organization with fresh data."""
+        """Get the currently running job for an organization with fresh data.
+
+        Jobs inactive for >30 minutes are automatically marked as failed (stale).
+        """
         # CRITICAL: Expire cached objects to ensure fresh read
         self.db.expire_all()
 
@@ -1356,7 +1400,33 @@ class KGExtractionJobService:
             )
 
         result = await self.db.execute(query.order_by(KGExtractionJob.created_at.desc()).limit(1))
-        return result.scalar_one_or_none()
+        job = result.scalar_one_or_none()
+
+        # Auto-cleanup stale jobs: if no activity for 30+ minutes, mark as failed
+        if job:
+            stale_threshold = datetime.now(timezone.utc) - timedelta(minutes=30)
+            last_active = job.last_activity_at or job.started_at or job.created_at
+            # Ensure timezone-aware comparison
+            if last_active.tzinfo is None:
+                last_active = last_active.replace(tzinfo=timezone.utc)
+            if last_active < stale_threshold:
+                logger.warning(
+                    "Auto-cleaning stale KG extraction job",
+                    job_id=str(job.id),
+                    last_activity=str(last_active),
+                )
+                job.status = "failed"
+                job.completed_at = datetime.now(timezone.utc)
+                error_log = job.error_log or []
+                error_log.append({
+                    "error": "Job marked as failed due to inactivity (stale)",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+                job.error_log = error_log
+                await self.db.commit()
+                return None
+
+        return job
 
     async def list_jobs(
         self,
@@ -1567,12 +1637,15 @@ class KGExtractionJobService:
             chunks_processed = None
             if live_progress:
                 chunks_processed = live_progress.get("done", 0)
+            elif status == "processing" and hasattr(doc, 'kg_chunks_processed') and doc.kg_chunks_processed is not None:
+                # Fallback: read DB-persisted progress (used by Ray workers)
+                chunks_processed = doc.kg_chunks_processed
 
             details.append({
                 "document_id": doc_id_str,
                 "filename": doc.original_filename or doc.filename or doc_id_str,
                 "status": status,
-                "chunk_count": chunk_counts.get(doc_id_str, doc.chunk_count or 0),
+                "chunk_count": chunk_counts.get(doc_id_str, 0),
                 "chunks_processed": chunks_processed,
                 "kg_entity_count": doc.kg_entity_count or 0,
                 "kg_relation_count": doc.kg_relation_count or 0,

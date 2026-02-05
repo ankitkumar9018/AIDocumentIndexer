@@ -927,6 +927,25 @@ def run_kg_extraction_job(
         from backend.services.kg_extraction_job import KGExtractionJobRunner
         from backend.db.database import get_async_session_factory
 
+        # Guard: check if the job is still in a valid state before processing.
+        # Old tasks can persist in Redis queue across worker restarts.
+        async def _check_job_valid():
+            from backend.db.models import KGExtractionJob
+            from sqlalchemy import select
+            session_factory = get_async_session_factory()
+            async with session_factory() as db_session:
+                result = await db_session.execute(
+                    select(KGExtractionJob.status).where(
+                        KGExtractionJob.id == uuid.UUID(job_id)
+                    )
+                )
+                status = result.scalar_one_or_none()
+                return status in (None, "queued", "running")
+
+        if not run_async(_check_job_valid()):
+            logger.warning(f"Skipping stale KG extraction job: job_id={job_id} (no longer queued/running)")
+            return {"status": "skipped", "job_id": job_id, "reason": "Job no longer in valid state"}
+
         async def _run_job():
             session_factory = get_async_session_factory()
             async with session_factory() as db_session:

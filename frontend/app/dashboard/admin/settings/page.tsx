@@ -1284,6 +1284,8 @@ export default function AdminSettingsPage() {
         <ModelsTab
           ModelConfigurationSection={ModelConfigurationSection}
           providers={providersData?.providers || []}
+          localSettings={localSettings}
+          handleSettingChange={handleSettingChange}
         />
 
         {/* Job Queue Tab */}

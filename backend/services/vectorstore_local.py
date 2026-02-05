@@ -204,7 +204,12 @@ class ChromaVectorStore:
         # Get or create collection
         self._collection = self._client.get_or_create_collection(
             name=collection_name,
-            metadata={"hnsw:space": self.chroma_config.distance_function},
+            metadata={
+                "hnsw:space": self.chroma_config.distance_function,
+                "hnsw:search_ef": 100,   # Default 10 → 100 for better recall with small embeddings
+                "hnsw:construction_ef": 200,  # Better index quality
+                "hnsw:M": 32,  # More connections = better recall
+            },
         )
 
         logger.info(
@@ -691,10 +696,11 @@ class ChromaVectorStore:
             embedding_dims=len(query_embedding) if query_embedding else 0,
         )
 
-        # Query ChromaDB
+        # Query ChromaDB — over-fetch to compensate for synthetic chunk filtering
+        fetch_k = top_k + 10  # Extra buffer for hypothetical question chunks that get filtered
         results = self._collection.query(
             query_embeddings=[query_embedding],
-            n_results=top_k,
+            n_results=fetch_k,
             where=where_clause,
             include=["documents", "metadatas", "distances"],
         )
@@ -721,6 +727,11 @@ class ChromaVectorStore:
                 metadata = results["metadatas"][0][i] if results["metadatas"] else {}
                 content = results["documents"][0][i] if results["documents"] else ""
 
+                # Skip synthetic chunks (hypothetical questions) at the vectorstore level
+                # These are embedded for document discovery but should never appear in results
+                if metadata.get("chunk_type") == "hypothetical_question":
+                    continue
+
                 search_results.append(SearchResult(
                     chunk_id=chunk_id,
                     document_id=metadata.get("document_id", ""),
@@ -737,6 +748,9 @@ class ChromaVectorStore:
                     page_number=metadata.get("page_number"),
                     section_title=metadata.get("section_title"),
                 ))
+
+        # Trim back to requested top_k after synthetic chunk filtering
+        search_results = search_results[:top_k]
 
         # Filter out soft-deleted documents and private docs
         filtered_results = await self._filter_soft_deleted(search_results)
@@ -797,6 +811,10 @@ class ChromaVectorStore:
             for i, chunk_id in enumerate(results["ids"]):
                 content = results["documents"][i] if results["documents"] else ""
                 metadata = results["metadatas"][i] if results["metadatas"] else {}
+
+                # Skip synthetic chunks (hypothetical questions) at the vectorstore level
+                if metadata.get("chunk_type") == "hypothetical_question":
+                    continue
 
                 # Simple substring match
                 if query_lower in content.lower():
@@ -953,18 +971,23 @@ class ChromaVectorStore:
             for doc, score, metadata in top_docs:
                 doc_id_str = str(doc.id)
 
-                # Get first chunk from ChromaDB
+                # Get first real chunk from ChromaDB (skip synthetic/hypothetical)
                 chroma_results = self._collection.get(
                     where={"document_id": doc_id_str},
                     include=["documents", "metadatas"],
-                    limit=1,
+                    limit=10,  # Fetch a few to skip any synthetic chunks
                 )
 
                 first_chunk_id = ""
                 first_chunk_content = ""
                 if chroma_results["ids"]:
-                    first_chunk_id = chroma_results["ids"][0]
-                    first_chunk_content = chroma_results["documents"][0] if chroma_results["documents"] else ""
+                    for ci, cid in enumerate(chroma_results["ids"]):
+                        cmeta = chroma_results["metadatas"][ci] if chroma_results["metadatas"] else {}
+                        if cmeta.get("chunk_type") == "hypothetical_question":
+                            continue
+                        first_chunk_id = cid
+                        first_chunk_content = chroma_results["documents"][ci] if chroma_results["documents"] else ""
+                        break
 
                 summary = metadata.get("summary_detailed") or metadata.get("summary_short") or ""
                 content = summary if summary else first_chunk_content
@@ -1070,7 +1093,9 @@ class ChromaVectorStore:
             )
 
         # Reciprocal Rank Fusion
-        k = 60
+        # k=30 amplifies differences between top ranks (vs k=60 which flattens them)
+        # This helps when keyword search ranks the right content higher than vector search
+        k = 30
         scores: Dict[str, Tuple[float, SearchResult]] = {}
 
         # Process vector results - preserve original similarity scores
@@ -1111,10 +1136,38 @@ class ChromaVectorStore:
                     scores[result.chunk_id] = (rrf_score, result)
 
         # Boost existing chunk scores for documents with enhanced metadata matches
+        # Multiplicative boost: rewards already-high-scoring chunks more than low-scoring ones
+        # (prevents glossary chunks from getting the same absolute boost as content chunks)
         for chunk_id, (current_score, result) in list(scores.items()):
             if result.document_id in enhanced_doc_scores:
-                boost = enhanced_doc_scores[result.document_id] * 0.5
-                scores[chunk_id] = (current_score + boost, result)
+                boost_factor = 1.0 + enhanced_doc_scores[result.document_id]
+                scores[chunk_id] = (current_score * boost_factor, result)
+
+        # Content-type penalty: demote glossary/reference/toc chunks that match
+        # vocabulary but don't contain substantive answers
+        # Detection is heuristic based on content patterns
+        for chunk_id, (current_score, result) in list(scores.items()):
+            content_lower = result.content.lower() if result.content else ""
+            section_lower = (result.section_title or "").lower()
+
+            penalty = 1.0  # No penalty by default
+            # Glossary/definition pages: short entries with many definitions
+            if any(kw in section_lower for kw in ("glossary", "definitions", "terminology", "abbreviations")):
+                penalty = 0.5
+            # Reference/citation pages
+            elif any(kw in section_lower for kw in ("references", "bibliography", "works cited")):
+                penalty = 0.4
+            elif content_lower.count("et al.") > 2 or content_lower.count("doi:") > 1:
+                penalty = 0.5
+            # Table of contents
+            elif "table of contents" in section_lower or "contents" == section_lower.strip():
+                penalty = 0.2
+            # Image credits / Getty Images / stock photo attributions
+            elif "getty images" in content_lower or "shutterstock" in content_lower or "stock photo" in content_lower:
+                penalty = 0.1
+
+            if penalty < 1.0:
+                scores[chunk_id] = (current_score * penalty, result)
 
         # Sort by combined score and return top_k
         sorted_results = sorted(
