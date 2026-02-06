@@ -1083,3 +1083,145 @@ def run_reindex_all_job(
             "job_id": job_id,
             "error": str(e),
         }
+
+
+# =============================================================================
+# Phase 98: Tag-Triggered Re-embedding Task
+# =============================================================================
+
+@shared_task(bind=True, name="backend.tasks.document_tasks.reembed_document_chunks")
+def reembed_document_chunks(
+    self,
+    document_id: str,
+    new_tags: List[str],
+) -> Dict[str, Any]:
+    """
+    Re-embed all chunks of a document with updated tag context.
+
+    Phase 98: Called when document tags change and tags.reembed_on_change is enabled.
+    This regenerates embeddings with the new tag prefix for improved retrieval quality.
+
+    Args:
+        document_id: UUID of the document
+        new_tags: The updated tags to prepend to chunk text
+
+    Returns:
+        Dict with re-embedding results
+    """
+    logger.info(f"Starting chunk re-embedding: document_id={document_id}, tags={new_tags}")
+
+    self.update_state(
+        state="PROGRESS",
+        meta={
+            "progress": 10,
+            "message": "Loading document chunks...",
+            "document_id": document_id,
+        }
+    )
+
+    try:
+        from backend.db.database import get_sync_session
+        from backend.db.models import Document, Chunk
+        from backend.services.embeddings import get_embedding_service
+        from backend.services.vectorstore_local import get_chroma_vector_store as get_local_vectorstore
+        from sqlalchemy import select
+        from uuid import UUID as PyUUID
+
+        doc_uuid = PyUUID(document_id)
+        session = get_sync_session()
+
+        try:
+            # Get document
+            document = session.execute(
+                select(Document).where(Document.id == doc_uuid)
+            ).scalar_one_or_none()
+
+            if not document:
+                raise ValueError(f"Document not found: {document_id}")
+
+            # Get all chunks for this document
+            chunks = session.execute(
+                select(Chunk)
+                .where(Chunk.document_id == doc_uuid)
+                .order_by(Chunk.chunk_index)
+            ).scalars().all()
+
+            if not chunks:
+                logger.warning(f"No chunks found for document: {document_id}")
+                return {"status": "success", "document_id": document_id, "chunks_updated": 0}
+
+            self.update_state(
+                state="PROGRESS",
+                meta={
+                    "progress": 30,
+                    "message": f"Re-embedding {len(chunks)} chunks...",
+                    "document_id": document_id,
+                }
+            )
+
+            # Prepare texts with new tag prefix
+            tag_prefix = f"[Tags: {', '.join(new_tags)}] " if new_tags else ""
+            texts_to_embed = [tag_prefix + chunk.content for chunk in chunks]
+            chunk_ids = [str(chunk.id) for chunk in chunks]
+
+            # Generate new embeddings (sync, non-Ray)
+            embedding_service = get_embedding_service(use_ray=False)
+            new_embeddings = embedding_service.embed_texts(texts_to_embed)
+
+            self.update_state(
+                state="PROGRESS",
+                meta={
+                    "progress": 70,
+                    "message": "Updating vector store...",
+                    "document_id": document_id,
+                }
+            )
+
+            # Update ChromaDB with new embeddings
+            vectorstore = get_local_vectorstore()
+            collection = vectorstore._collection
+
+            # Update each chunk's embedding
+            for i, (chunk_id, embedding) in enumerate(zip(chunk_ids, new_embeddings)):
+                try:
+                    collection.update(
+                        ids=[chunk_id],
+                        embeddings=[embedding],
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update embedding for chunk {chunk_id}: {e}")
+
+            # Also update chunk metadata in DB with new tags
+            for chunk in chunks:
+                chunk_metadata = chunk.chunk_metadata or {}
+                chunk_metadata["document_tags"] = new_tags
+                chunk.chunk_metadata = chunk_metadata
+
+            session.commit()
+
+            logger.info(
+                f"Re-embedded {len(chunks)} chunks for document {document_id} "
+                f"with tags: {new_tags}"
+            )
+
+            result = {
+                "chunks_updated": len(chunks),
+                "tags": new_tags,
+                "embedding_dimensions": len(new_embeddings[0]) if new_embeddings else 0,
+            }
+        finally:
+            session.close()
+
+        return {
+            "status": "success",
+            "document_id": document_id,
+            **result,
+        }
+
+    except Exception as e:
+        logger.error(f"Chunk re-embedding failed: document_id={document_id} - {str(e)}")
+        return {
+            "status": "failed",
+            "document_id": document_id,
+            "error": str(e),
+        }

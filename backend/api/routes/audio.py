@@ -1036,7 +1036,7 @@ async def ultra_fast_tts_synthesize(
     from backend.core.config import settings
 
     # Check if ultra-fast TTS is enabled
-    if not getattr(settings, "ENABLE_ULTRA_FAST_TTS", False):
+    if not settings.ENABLE_ULTRA_FAST_TTS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Ultra-fast TTS is not enabled. Set ENABLE_ULTRA_FAST_TTS=true in config.",
@@ -1099,7 +1099,7 @@ async def ultra_fast_tts_stream(
     """
     from backend.core.config import settings
 
-    if not getattr(settings, "ENABLE_ULTRA_FAST_TTS", False):
+    if not settings.ENABLE_ULTRA_FAST_TTS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Ultra-fast TTS is not enabled. Set ENABLE_ULTRA_FAST_TTS=true in config.",
@@ -1142,7 +1142,7 @@ async def list_ultra_fast_providers(
     import os
     from backend.core.config import settings
 
-    enabled = getattr(settings, "ENABLE_ULTRA_FAST_TTS", False)
+    enabled = settings.ENABLE_ULTRA_FAST_TTS
 
     providers = []
 

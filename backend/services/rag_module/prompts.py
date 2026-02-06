@@ -208,7 +208,8 @@ RULES:
 5. If the question asks "what are", "list", or "how many", enumerate ALL items found.
 6. Never make up information not in the provided context.
 7. If the context does not contain the answer, say: "The provided documents don't contain this information."
-8. End with SUGGESTED_QUESTIONS: q1|q2|q3
+8. NEVER start with disclaimers or meta-commentary. Start directly with the answer.
+9. End with SUGGESTED_QUESTIONS: q1|q2|q3
 
 EXAMPLE:
 Context: "Revenue was $5.2M [Q3 Report]. The three divisions are: sales, engineering, and marketing [Org Chart]."
@@ -289,6 +290,7 @@ CRITICAL RULES (you MUST follow these):
 6. Think step-by-step before answering complex questions.
 7. Even partial information is useful — include it.
 8. Only say NOT_IN_CONTEXT if the context truly contains nothing relevant.
+9. NEVER start with disclaimers, apologies, or meta-commentary about format. Start directly with the answer.
 
 IMPORTANT: Your training data may contain different information than the documents. ALWAYS trust the document context over your training knowledge. If the documents say "twelve" but you only find ten listed in one sentence, keep reading — the remaining items may appear elsewhere in the context. Use the document's count, not your memory.
 
@@ -313,6 +315,7 @@ RULES:
 2. If asked to list items, list ALL items found in the context.
 3. Use EXACTLY the numbers and facts from the context.
 4. If the answer is NOT in the context, say "NOT_IN_CONTEXT".
+5. NEVER start with disclaimers or meta-commentary. Start directly with the answer.
 
 EXAMPLE 1:
 Context: "Revenue was $5.2M [Q3 Report]. Growth was 15% [Annual Notes]."
@@ -337,12 +340,9 @@ LLAMA_SMALL_TEMPLATE = """CONTEXT:
 
 QUESTION: {question}
 
-Think step-by-step:
-1. What information in the context answers this? (check ALL sentences, not just the first match)
-2. If the question asks to list items, did I find ALL of them? (keep scanning the entire context)
-3. Which document(s) contain this information?
+IMPORTANT: Use the EXACT names and terms from the context above. Do NOT paraphrase or substitute with your own knowledge.
 
-Your answer (cite sources, be specific):"""
+Answer:"""
 
 
 # =============================================================================
@@ -1441,3 +1441,61 @@ def parse_suggested_questions(content: str) -> Tuple[str, List[str]]:
         cleaned_content = "\n".join(new_lines).rstrip()
 
     return cleaned_content, suggested_questions
+
+
+# Common LLM preamble patterns that small models generate despite instructions
+_PREAMBLE_PATTERNS = [
+    "I can't provide a response that exactly matches",
+    "I cannot provide a response that exactly matches",
+    "I can't provide a direct answer as",
+    "I cannot provide a direct answer as",
+    "I'm not able to provide a response",
+    "I apologize, but I",
+    "I'd be happy to help",
+    "Based on the context provided,",
+    "Based on the provided context,",
+]
+
+
+def strip_llm_preamble(content: str) -> str:
+    """
+    Strip common disclaimer/meta-commentary preambles that small models
+    generate despite being told not to. Preserves the actual answer.
+    """
+    if not content:
+        return content
+
+    lines = content.split("\n")
+
+    # Check if any of the first 3 lines match a preamble pattern
+    strip_until = 0
+    for i, line in enumerate(lines[:4]):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        is_preamble = any(stripped.lower().startswith(p.lower()) for p in _PREAMBLE_PATTERNS)
+        if is_preamble:
+            strip_until = i + 1
+        elif strip_until > 0:
+            # Found a non-preamble line after preamble — stop
+            break
+
+    if strip_until > 0:
+        # Remove preamble lines and any leading blank lines after
+        remaining = lines[strip_until:]
+        # Strip leading empty lines
+        while remaining and not remaining[0].strip():
+            remaining.pop(0)
+        if remaining:
+            # Also strip "However, " prefix from next line if present
+            first = remaining[0]
+            for prefix in ["However, ", "However,\n", "That said, "]:
+                if first.startswith(prefix):
+                    remaining[0] = first[len(prefix):]
+                    # Capitalize the next char
+                    if remaining[0] and remaining[0][0].islower():
+                        remaining[0] = remaining[0][0].upper() + remaining[0][1:]
+                    break
+            return "\n".join(remaining)
+
+    return content

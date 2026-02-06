@@ -12,6 +12,7 @@ End-to-end document processing pipeline that orchestrates:
 Supports both synchronous and Ray-parallel processing.
 """
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Callable, Union, Awaitable, Tuple
 from pathlib import Path
@@ -298,7 +299,9 @@ class DocumentPipeline:
             logger.info("Multimodal processing enabled for image understanding")
 
         # Track processed file hashes for deduplication
-        self._processed_hashes: Dict[str, str] = {}
+        # Phase 98: Use OrderedDict with max size to prevent memory leaks
+        self._processed_hashes: OrderedDict[str, str] = OrderedDict()
+        self._max_hash_cache_size: int = int(os.getenv("PIPELINE_MAX_HASH_CACHE", "10000"))
 
         logger.info(
             "Initialized document pipeline",
@@ -935,6 +938,23 @@ class DocumentPipeline:
             result.chunks = chunks
             result.chunk_count = len(chunks)
 
+            # Phase 98: Inject document tags into chunk metadata for tag-augmented embeddings
+            # Tags are prepended to chunk text during embedding generation (embeddings.py)
+            doc_tags = (metadata or {}).get("tags", [])
+            if isinstance(doc_tags, str):
+                doc_tags = [t.strip() for t in doc_tags.split(",") if t.strip()]
+            if doc_tags:
+                for chunk in chunks:
+                    if chunk.metadata is None:
+                        chunk.metadata = {}
+                    chunk.metadata["document_tags"] = doc_tags
+                logger.debug(
+                    "Injected document tags into chunk metadata",
+                    document_id=document_id,
+                    num_chunks=len(chunks),
+                    tags=doc_tags,
+                )
+
             logger.debug(
                 "Document chunked",
                 document_id=document_id,
@@ -1011,6 +1031,36 @@ class DocumentPipeline:
             self._update_status(document_id, ProcessingStatus.INDEXING)
             self._update_progress(document_id, 4, 5)
 
+            # Phase 98: Filter garbage chunks before indexing
+            # Content types like "image_credit" and "copyright" should not be indexed
+            SKIP_CONTENT_TYPES = {"image_credit", "copyright"}
+            if chunks:
+                original_chunk_count = len(chunks)
+                # Get indices of chunks to keep
+                keep_indices = [
+                    i for i, c in enumerate(chunks)
+                    if c.metadata.get("content_type") not in SKIP_CONTENT_TYPES
+                ]
+                skipped_count = original_chunk_count - len(keep_indices)
+
+                if skipped_count > 0:
+                    # Filter chunks
+                    chunks = [chunks[i] for i in keep_indices]
+
+                    # Filter corresponding embeddings (they're 1-to-1 with chunks)
+                    if result.embeddings and len(result.embeddings) == original_chunk_count:
+                        result.embeddings = [result.embeddings[i] for i in keep_indices]
+
+                    logger.info(
+                        "Filtered garbage chunks before indexing",
+                        document_id=document_id,
+                        skipped=skipped_count,
+                        remaining=len(chunks),
+                        skipped_types=list(SKIP_CONTENT_TYPES),
+                    )
+                    result.metadata = result.metadata or {}
+                    result.metadata["garbage_chunks_skipped"] = skipped_count
+
             # Warn if embeddings are missing (will affect searchability)
             if chunks and not result.embeddings:
                 logger.warning(
@@ -1027,6 +1077,10 @@ class DocumentPipeline:
                 if access_tier_id:
                     # Use original_filename from metadata if available, fallback to path.name
                     original_filename = (metadata or {}).get("original_filename") or path.name
+                    # Phase 98: Extract document tags for tag-augmented embeddings
+                    document_tags = (metadata or {}).get("tags", [])
+                    if isinstance(document_tags, str):
+                        document_tags = [t.strip() for t in document_tags.split(",") if t.strip()]
                     await self._index_with_custom_store(
                         document_id=document_id,
                         chunks=chunks,
@@ -1037,6 +1091,7 @@ class DocumentPipeline:
                         organization_id=organization_id,
                         uploaded_by_id=uploaded_by_id,
                         is_private=is_private,
+                        document_tags=document_tags if document_tags else None,
                     )
                 else:
                     logger.warning(
@@ -1071,7 +1126,10 @@ class DocumentPipeline:
             )
 
             # Track hash for deduplication
+            # Phase 98: Evict oldest entries to prevent unbounded memory growth
             self._processed_hashes[result.file_hash] = document_id
+            while len(self._processed_hashes) > self._max_hash_cache_size:
+                self._processed_hashes.popitem(last=False)  # Remove oldest (FIFO)
 
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
             result.processing_time_ms = processing_time
@@ -1375,6 +1433,7 @@ class DocumentPipeline:
         organization_id: Optional[str] = None,
         uploaded_by_id: Optional[str] = None,
         is_private: bool = False,
+        document_tags: Optional[List[str]] = None,
     ):
         """Index document chunks using our custom VectorStore."""
         if not self._custom_vectorstore:
@@ -1406,6 +1465,7 @@ class DocumentPipeline:
                 organization_id=organization_id,
                 uploaded_by_id=uploaded_by_id,
                 is_private=is_private,
+                document_tags=document_tags,
             )
 
             logger.debug(

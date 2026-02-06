@@ -410,7 +410,7 @@ class AgentBuilder:
             from backend.services.amem_memory import get_amem_service
             from backend.core.config import settings as core_settings
 
-            if getattr(core_settings, 'ENABLE_AGENT_MEMORY', True):
+            if core_settings.ENABLE_AGENT_MEMORY:
                 amem = await get_amem_service()
                 memories = await amem.retrieve(message, top_k=5)
 
@@ -462,7 +462,7 @@ class AgentBuilder:
             from backend.services.amem_memory import get_amem_service
             from backend.core.config import settings as core_settings
 
-            if getattr(core_settings, 'ENABLE_AGENT_MEMORY', True):
+            if core_settings.ENABLE_AGENT_MEMORY:
                 amem = await get_amem_service()
                 # Let A-Mem agent decide if this exchange should be remembered
                 await amem.process(
@@ -566,15 +566,15 @@ class AgentBuilder:
 
                     # Phase 59: Enable advanced RAG features
                     # Self-RAG for hallucination detection
-                    if getattr(core_settings, 'ENABLE_SELF_RAG', True):
+                    if core_settings.ENABLE_SELF_RAG:
                         rag_kwargs["use_self_rag"] = True
 
                     # Hybrid retrieval (LightRAG + RAPTOR fusion)
-                    if getattr(core_settings, 'ENABLE_LIGHTRAG', True) or getattr(core_settings, 'ENABLE_RAPTOR', True):
+                    if core_settings.ENABLE_LIGHTRAG or core_settings.ENABLE_RAPTOR:
                         rag_kwargs["use_hybrid_retrieval"] = True
 
                     # Tiered reranking (ColBERT → Cross-Encoder → LLM)
-                    if getattr(core_settings, 'ENABLE_TIERED_RERANKING', True):
+                    if core_settings.ENABLE_TIERED_RERANKING:
                         rag_kwargs["use_tiered_reranking"] = True
 
                     # Knowledge graph for entity relationships

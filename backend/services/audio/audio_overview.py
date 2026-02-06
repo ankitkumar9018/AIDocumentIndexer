@@ -693,7 +693,7 @@ class AudioOverviewService(CRUDService[AudioOverview]):
         """
         # Phase 60: Check if KG is enabled for audio
         from backend.core.config import settings
-        if not getattr(settings, 'KG_ENABLED', True) or not getattr(settings, 'KG_ENABLED_IN_AUDIO', True):
+        if not settings.KG_ENABLED or not settings.KG_ENABLED_IN_AUDIO:
             logger.debug("KG disabled for audio overview")
             return []
 

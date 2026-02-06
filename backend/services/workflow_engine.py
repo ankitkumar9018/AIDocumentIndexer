@@ -2815,7 +2815,7 @@ User Question: {prompt}"""
 
                     # Phase 59: Enable advanced RAG features from config
                     # Self-RAG for hallucination detection
-                    if config.get("use_self_rag", getattr(core_settings, 'ENABLE_SELF_RAG', True)):
+                    if config.get("use_self_rag", core_settings.ENABLE_SELF_RAG):
                         rag_kwargs["use_self_rag"] = True
 
                     # Hybrid retrieval (LightRAG + RAPTOR)
@@ -2827,7 +2827,7 @@ User Question: {prompt}"""
                         rag_kwargs["enable_knowledge_graph"] = True
 
                     # Query expansion
-                    if config.get("use_query_expansion", getattr(core_settings, 'ENABLE_QUERY_EXPANSION', True)):
+                    if config.get("use_query_expansion", core_settings.ENABLE_QUERY_EXPANSION):
                         rag_kwargs["enable_query_expansion"] = True
 
                     # Execute RAG query with full pipeline
@@ -2947,7 +2947,7 @@ Please provide a comprehensive answer based on the context above."""
             # Self-RAG for hallucination detection (default from global settings)
             use_self_rag = agent_config.get(
                 "use_self_rag",
-                getattr(core_settings, 'ENABLE_SELF_RAG', True)
+                core_settings.ENABLE_SELF_RAG
             )
             if use_self_rag:
                 rag_kwargs["use_self_rag"] = True
@@ -2955,8 +2955,8 @@ Please provide a comprehensive answer based on the context above."""
             # Hybrid retrieval (LightRAG + RAPTOR fusion)
             use_hybrid = agent_config.get(
                 "use_hybrid_retrieval",
-                getattr(core_settings, 'ENABLE_LIGHTRAG', True) or
-                getattr(core_settings, 'ENABLE_RAPTOR', True)
+                core_settings.ENABLE_LIGHTRAG or
+                core_settings.ENABLE_RAPTOR
             )
             if use_hybrid:
                 rag_kwargs["use_hybrid_retrieval"] = True
@@ -2964,7 +2964,7 @@ Please provide a comprehensive answer based on the context above."""
             # Tiered reranking
             use_reranking = agent_config.get(
                 "use_tiered_reranking",
-                getattr(core_settings, 'ENABLE_TIERED_RERANKING', True)
+                core_settings.ENABLE_TIERED_RERANKING
             )
             if use_reranking:
                 rag_kwargs["use_tiered_reranking"] = True
@@ -2972,7 +2972,7 @@ Please provide a comprehensive answer based on the context above."""
             # Context compression for long responses
             use_compression = agent_config.get(
                 "use_context_compression",
-                getattr(core_settings, 'ENABLE_CONTEXT_COMPRESSION', True)
+                core_settings.ENABLE_CONTEXT_COMPRESSION
             )
             if use_compression:
                 rag_kwargs["use_context_compression"] = True

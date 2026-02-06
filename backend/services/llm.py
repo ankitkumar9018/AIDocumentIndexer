@@ -225,10 +225,24 @@ class LLMFactory:
     Factory for creating LLM instances.
 
     Supports multiple providers through LiteLLM abstraction.
+
+    Phase 98: Added LRU-style bounded caches to prevent memory leaks.
+    Default max size is 50 instances per cache. When exceeded, oldest
+    entries are evicted. Each LLM instance can hold significant memory.
     """
 
     _instances: Dict[str, BaseChatModel] = {}
     _embedding_instances: Dict[str, Embeddings] = {}
+    _max_cache_size: int = int(os.getenv("LLM_MAX_CACHE_SIZE", "50"))
+
+    @classmethod
+    def _evict_oldest(cls, cache: Dict, max_size: int) -> None:
+        """Evict oldest entries from cache if it exceeds max size (LRU-style)."""
+        while len(cache) > max_size:
+            # Python 3.7+ dicts maintain insertion order, so first key is oldest
+            oldest_key = next(iter(cache))
+            del cache[oldest_key]
+            logger.debug("Evicted oldest LLM instance from cache", key=oldest_key)
 
     @classmethod
     def get_chat_model(
@@ -274,11 +288,14 @@ class LLMFactory:
                 max_tokens=max_tokens,
                 **kwargs,
             )
+            # Phase 98: Evict oldest entries to prevent unbounded memory growth
+            cls._evict_oldest(cls._instances, cls._max_cache_size)
             logger.info(
                 "Created chat model",
                 provider=provider,
                 model=model,
                 temperature=temperature,
+                cache_size=len(cls._instances),
             )
 
         return cls._instances[cache_key]
@@ -443,10 +460,13 @@ class LLMFactory:
                 provider=provider,
                 model=model,
             )
+            # Phase 98: Evict oldest entries to prevent unbounded memory growth
+            cls._evict_oldest(cls._embedding_instances, cls._max_cache_size)
             logger.info(
                 "Created embeddings model",
                 provider=provider,
                 model=model,
+                cache_size=len(cls._embedding_instances),
             )
 
         return cls._embedding_instances[cache_key]
@@ -571,8 +591,12 @@ class LLMConfigManager:
     """
 
     # Configuration cache with TTL (5 minutes default, reduces DB queries by ~60%)
+    # Phase 98: Added max_cache_entries and periodic cleanup to prevent memory leaks
     _cache: Dict[str, Tuple[Any, datetime]] = {}
     _cache_ttl_seconds: int = int(os.getenv("LLM_CONFIG_CACHE_TTL_SECONDS", "300"))
+    _max_cache_entries: int = int(os.getenv("LLM_CONFIG_MAX_CACHE_ENTRIES", "500"))
+    _cleanup_counter: int = 0
+    _cleanup_interval: int = 50  # Run cleanup every 50 cache operations
 
     # Environment variable mapping for API keys
     ENV_KEY_MAP = {
@@ -850,6 +874,35 @@ class LLMConfigManager:
         """Set value in cache with TTL."""
         expiry = datetime.now() + timedelta(seconds=cls._cache_ttl_seconds)
         cls._cache[key] = (value, expiry)
+
+        # Phase 98: Periodic cleanup to prevent memory leaks from expired entries
+        cls._cleanup_counter += 1
+        if cls._cleanup_counter >= cls._cleanup_interval:
+            cls._cleanup_counter = 0
+            cls._cleanup_expired_entries()
+
+    @classmethod
+    def _cleanup_expired_entries(cls) -> None:
+        """Remove all expired entries from cache (Phase 98: memory leak prevention)."""
+        now = datetime.now()
+        expired_keys = [k for k, (_, exp) in cls._cache.items() if now >= exp]
+        for key in expired_keys:
+            del cls._cache[key]
+
+        # Also enforce max cache size (LRU-style: remove oldest entries)
+        if len(cls._cache) > cls._max_cache_entries:
+            # Sort by expiry time and remove oldest
+            sorted_keys = sorted(cls._cache.keys(), key=lambda k: cls._cache[k][1])
+            to_remove = len(cls._cache) - cls._max_cache_entries
+            for key in sorted_keys[:to_remove]:
+                del cls._cache[key]
+
+        if expired_keys or len(cls._cache) > cls._max_cache_entries * 0.9:
+            logger.debug(
+                "LLMConfigManager cache cleanup",
+                expired_removed=len(expired_keys),
+                current_size=len(cls._cache),
+            )
 
     @classmethod
     async def invalidate_cache(cls, key: Optional[str] = None) -> None:

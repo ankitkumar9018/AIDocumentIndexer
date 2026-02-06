@@ -1346,7 +1346,11 @@ def print_summary(results: Dict, args=None):
 
 
 def stop_all_services(deps: Dict) -> Dict[str, bool]:
-    """Stop all running services."""
+    """Stop all running services.
+
+    Phase 98: Enhanced to kill orphaned processes more thoroughly,
+    preventing memory leaks from zombie processes after crashes.
+    """
     results = {}
     services_config = deps.get('services', {})
 
@@ -1381,6 +1385,40 @@ def stop_all_services(deps: Dict) -> Dict[str, bool]:
     code, _, _ = run_command(['pkill', '-f', 'raylet'], check=False)
     code, _, _ = run_command(['pkill', '-f', 'gcs_server'], check=False)
     results['ray'] = True
+
+    # Phase 98: Kill orphaned processes that may leak memory
+    if system != 'windows':
+        orphan_patterns = [
+            # Backend-related processes
+            'uvicorn.*backend',
+            'python.*backend',
+            'gunicorn.*backend',
+            # ChromaDB processes (can accumulate after crashes)
+            'chroma',
+            'chromadb',
+            # Embedding model processes (fastembed, sentence-transformers)
+            'fastembed',
+            'sentence.transformers',
+            # Frontend-related processes
+            'node.*frontend',
+            'next.*dev',
+            # Ollama model processes (separate from server)
+            'ollama.*run',
+        ]
+
+        for pattern in orphan_patterns:
+            code, _, _ = run_command(['pkill', '-f', pattern], check=False)
+            if code == 0:
+                logger.debug(f"Killed orphaned processes matching: {pattern}")
+
+        results['orphaned_processes'] = True
+
+        # Give processes time to terminate gracefully
+        time.sleep(1)
+
+        # Force kill any remaining stubborn processes (SIGKILL)
+        for pattern in orphan_patterns[:4]:  # Only force-kill critical backend processes
+            run_command(['pkill', '-9', '-f', pattern], check=False)
 
     return results
 

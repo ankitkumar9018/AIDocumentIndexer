@@ -1297,7 +1297,7 @@ class KnowledgeGraphService:
         """
         # Determine batch mode from settings if not specified
         if use_batch is None:
-            use_batch = getattr(settings, 'KG_BATCH_EXTRACTION_DEFAULT', True)
+            use_batch = settings.KG_BATCH_EXTRACTION_DEFAULT
 
         if use_batch and len(chunks) > 1:
             # Use batch extraction for multiple chunks
@@ -1370,7 +1370,7 @@ class KnowledgeGraphService:
         # Calculate optimal batch size if not provided
         # Phase 60: Use KG_BATCH_SIZE setting as default
         if batch_size is None:
-            batch_size = getattr(settings, 'KG_BATCH_SIZE', 4)
+            batch_size = settings.KG_BATCH_SIZE
             model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None)
             # Override with model-optimized size if smaller
             model_optimal = _calculate_optimal_batch_size(model_name)
@@ -4216,7 +4216,7 @@ async def extract_knowledge_graph(
 
     # Use settings default if not specified
     if use_batch is None:
-        use_batch = getattr(settings, 'KG_BATCH_EXTRACTION_DEFAULT', True)
+        use_batch = settings.KG_BATCH_EXTRACTION_DEFAULT
 
     try:
         # Extract entities from text

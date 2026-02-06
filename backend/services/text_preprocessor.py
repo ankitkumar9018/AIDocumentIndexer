@@ -14,7 +14,7 @@ Features:
 
 import re
 import hashlib
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 from dataclasses import dataclass, field
 import structlog
 
@@ -50,6 +50,34 @@ class PreprocessingConfig:
         r"^Printed in.*$",
         r"^www\.[^\s]+\s*$",  # URLs alone on a line
     ])
+
+    # Garbage block removal (image credits, stock photo attributions)
+    remove_garbage_blocks: bool = True
+    garbage_block_patterns: List[str] = field(default_factory=lambda: [
+        # Stock photo providers
+        r"getty\s*images",
+        r"shutterstock",
+        r"adobe\s*stock",
+        r"123rf",
+        r"istock(?:photo)?",
+        r"alamy",
+        r"dreamstime",
+        r"depositphotos",
+        r"pond5",
+        r"bigstock",
+        # Attribution patterns
+        r"(?:image|photo|picture|illustration)\s*(?:credit|courtesy|source|by)\s*:",
+        r"(?:photograph|photographer)\s*(?:by|:)",
+        r"©\s*\d{4}.*(?:getty|shutterstock|adobe|istock|alamy)",
+        r"licensed\s+(?:from|under|via)",
+        r"stock\s+(?:photo|image|picture)",
+        r"royalty[\s-]*free",
+        # German attribution patterns (for the test case)
+        r"bildnachweis",
+        r"fotocredit",
+        r"bildquelle",
+    ])
+    garbage_block_threshold: float = 0.5  # Remove paragraph if >50% of lines match
 
     # Content deduplication (more aggressive, off by default)
     deduplicate_content: bool = False
@@ -94,15 +122,20 @@ class TextPreprocessor:
         """
         self.config = config or PreprocessingConfig()
         self._compiled_patterns: List[re.Pattern] = []
+        self._compiled_garbage_patterns: List[re.Pattern] = []
 
         if self.config.remove_boilerplate:
             self._compile_patterns()
+
+        if self.config.remove_garbage_blocks:
+            self._compile_garbage_patterns()
 
         logger.info(
             "TextPreprocessor initialized",
             enabled=self.config.enabled,
             normalize_whitespace=self.config.normalize_whitespace,
             remove_boilerplate=self.config.remove_boilerplate,
+            remove_garbage_blocks=self.config.remove_garbage_blocks,
             deduplicate_content=self.config.deduplicate_content,
         )
 
@@ -111,6 +144,13 @@ class TextPreprocessor:
         self._compiled_patterns = [
             re.compile(pattern, re.IGNORECASE | re.MULTILINE)
             for pattern in self.config.boilerplate_patterns
+        ]
+
+    def _compile_garbage_patterns(self):
+        """Pre-compile garbage block regex patterns for performance."""
+        self._compiled_garbage_patterns = [
+            re.compile(pattern, re.IGNORECASE)
+            for pattern in self.config.garbage_block_patterns
         ]
 
     def preprocess(self, text: str) -> PreprocessingResult:
@@ -152,6 +192,13 @@ class TextPreprocessor:
             before = len(processed)
             processed = self._remove_boilerplate(processed)
             stats["boilerplate_removed"] = before - len(processed)
+
+        # Step 3b: Remove garbage blocks (image credits, stock photo attributions)
+        if self.config.remove_garbage_blocks:
+            before = len(processed)
+            processed, garbage_blocks_removed = self._filter_garbage_blocks(processed)
+            stats["garbage_blocks_removed"] = garbage_blocks_removed
+            stats["garbage_chars_removed"] = before - len(processed)
 
         # Step 4: Clean excessive punctuation
         if self.config.remove_excessive_punctuation:
@@ -293,6 +340,73 @@ class TextPreprocessor:
                 filtered_lines.append(line)
 
         return "\n".join(filtered_lines)
+
+    def _filter_garbage_blocks(self, text: str) -> tuple:
+        """
+        Remove contiguous blocks (paragraphs) of garbage text.
+
+        Garbage blocks are typically image credits, stock photo attributions,
+        and similar non-content text that pollutes RAG retrieval.
+
+        Strategy:
+        1. Split text into paragraphs (by double newline)
+        2. For each paragraph, count how many lines match garbage patterns
+        3. If >threshold of lines match, remove the entire paragraph
+        4. Log removed paragraphs for transparency
+
+        Args:
+            text: Text to filter
+
+        Returns:
+            Tuple of (filtered_text, num_paragraphs_removed)
+        """
+        if not self._compiled_garbage_patterns:
+            return text, 0
+
+        paragraphs = re.split(r'\n\s*\n', text)
+        filtered_paragraphs = []
+        removed_count = 0
+
+        for para in paragraphs:
+            para_stripped = para.strip()
+            if not para_stripped:
+                continue
+
+            lines = [l.strip() for l in para_stripped.split('\n') if l.strip()]
+            if not lines:
+                continue
+
+            # Count lines matching garbage patterns
+            garbage_lines = 0
+            for line in lines:
+                for pattern in self._compiled_garbage_patterns:
+                    if pattern.search(line):
+                        garbage_lines += 1
+                        break
+
+            # Calculate garbage ratio
+            garbage_ratio = garbage_lines / len(lines) if lines else 0
+
+            if garbage_ratio >= self.config.garbage_block_threshold:
+                # This paragraph is mostly garbage - remove it
+                removed_count += 1
+                logger.debug(
+                    "Removed garbage block",
+                    garbage_ratio=round(garbage_ratio, 2),
+                    line_count=len(lines),
+                    preview=para_stripped[:100] + "..." if len(para_stripped) > 100 else para_stripped,
+                )
+            else:
+                filtered_paragraphs.append(para)
+
+        if removed_count > 0:
+            logger.info(
+                "Filtered garbage blocks from text",
+                paragraphs_removed=removed_count,
+                paragraphs_kept=len(filtered_paragraphs),
+            )
+
+        return '\n\n'.join(filtered_paragraphs), removed_count
 
     def _clean_punctuation(self, text: str) -> str:
         """Remove excessive repeated punctuation."""

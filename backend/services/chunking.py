@@ -274,12 +274,87 @@ class FastChunker:
 
     def _detect_content_type(self, text: str) -> str:
         """
-        Phase 76: Detect content type for optimal chunking strategy.
+        Phase 76+: Detect content type for optimal chunking strategy and garbage filtering.
 
         Returns:
-            Content type: "code", "tabular", "structured", "narrative"
+            Content type: "code", "tabular", "structured", "narrative",
+                          "image_credit", "copyright", "toc", "glossary"
+
+        Phase 98: Added garbage content types (image_credit, copyright, toc, glossary)
+        to enable filtering at index time.
         """
         import re
+
+        text_lower = text.lower()
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        line_count = len(lines)
+
+        # =========================================================================
+        # GARBAGE CONTENT DETECTION (check first - these should be filtered)
+        # =========================================================================
+
+        # Image credit / stock photo attribution patterns
+        image_credit_patterns = [
+            r'getty\s*images',
+            r'shutterstock',
+            r'adobe\s*stock',
+            r'123rf',
+            r'istock(?:photo)?',
+            r'alamy',
+            r'dreamstime',
+            r'depositphotos',
+            r'(?:image|photo|picture)\s*(?:credit|courtesy|source|by)\s*:',
+            r'(?:photograph|photographer)\s*(?:by|:)',
+            r'stock\s+(?:photo|image|picture)',
+            r'bildnachweis',  # German: image credit
+            r'fotocredit',    # German: photo credit
+        ]
+        image_credit_matches = sum(1 for p in image_credit_patterns if re.search(p, text_lower))
+        if image_credit_matches >= 3:
+            return "image_credit"
+
+        # Copyright-heavy content (legal boilerplate)
+        copyright_patterns = [
+            r'©\s*\d{4}',
+            r'copyright\s+\d{4}',
+            r'all\s+rights\s+reserved',
+            r'licensed\s+under',
+            r'permission\s+is\s+(?:hereby\s+)?granted',
+            r'without\s+(?:prior\s+)?(?:written\s+)?permission',
+            r'terms\s+(?:of\s+use|and\s+conditions)',
+            r'proprietary\s+and\s+confidential',
+        ]
+        copyright_matches = sum(1 for p in copyright_patterns if re.search(p, text_lower))
+        # If >40% of content is copyright-related, classify as copyright
+        if copyright_matches >= 4 or (line_count > 0 and copyright_matches / line_count > 0.4):
+            return "copyright"
+
+        # Table of Contents patterns
+        toc_patterns = [
+            r'\.\s*\.+\s*\d+',         # ... 42
+            r'\.{3,}\s*\d+',           # ...42
+            r'page\s+\d+',             # page 42
+            r'^\d+\.\d+\s+[A-Z]',      # 1.1 Section title
+            r'^\d+\s+[A-Z].*\d+$',     # 1 Introduction 5
+        ]
+        toc_matches = sum(len(re.findall(p, text, re.MULTILINE | re.IGNORECASE)) for p in toc_patterns)
+        # High density of TOC patterns suggests this is a table of contents
+        if line_count > 0 and toc_matches / line_count > 0.5:
+            return "toc"
+
+        # Glossary / definition patterns
+        glossary_patterns = [
+            r'^[A-Z][a-zA-Z\s]+:\s+[A-Z]',           # Term: Definition
+            r'^[A-Z][a-zA-Z\s]+\s+[-–—]\s+[A-Z]',    # Term - Definition
+            r'^\*\*[^*]+\*\*:\s+',                    # **Term**: definition (markdown)
+        ]
+        glossary_matches = sum(len(re.findall(p, text, re.MULTILINE)) for p in glossary_patterns)
+        if line_count > 3 and glossary_matches / line_count > 0.6:
+            return "glossary"
+
+        # =========================================================================
+        # STANDARD CONTENT TYPES
+        # =========================================================================
 
         # Code patterns
         code_patterns = [
@@ -382,6 +457,9 @@ class FastChunker:
                 chunk_text = cc.text if hasattr(cc, 'text') else str(cc)
                 chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:12]
 
+                # Phase 98: Detect content type for each chunk (enables garbage filtering at index time)
+                content_type = self._detect_content_type(chunk_text)
+
                 chunk = FastChunk(
                     content=chunk_text,
                     index=i,
@@ -394,6 +472,7 @@ class FastChunker:
                         "document_id": document_id,
                         "strategy": selected_strategy.value,
                         "chunker": "chonkie",
+                        "content_type": content_type,  # Phase 98: garbage detection
                     },
                 )
                 chunks.append(chunk)
@@ -439,6 +518,8 @@ class FastChunker:
             chunk_text = text[start:end].strip()
             if chunk_text:
                 chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:12]
+                # Phase 98: Detect content type for garbage filtering
+                content_type = self._detect_content_type(chunk_text)
                 chunks.append(FastChunk(
                     content=chunk_text,
                     index=index,
@@ -451,6 +532,7 @@ class FastChunker:
                         "document_id": document_id,
                         "strategy": "fallback",
                         "chunker": "simple",
+                        "content_type": content_type,  # Phase 98: garbage detection
                     },
                 ))
                 index += 1

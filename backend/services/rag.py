@@ -180,6 +180,7 @@ from backend.services.rag_module.prompts import (
     LANGUAGE_NAMES,
     get_language_instruction as _get_language_instruction,
     parse_suggested_questions as _parse_suggested_questions,
+    strip_llm_preamble as _strip_llm_preamble,
     # Phase 14: Enhanced prompt selection
     get_template_for_intent as _get_template_for_intent,
     get_system_prompt_for_model as _get_system_prompt_for_model,
@@ -717,13 +718,14 @@ class RAGService:
 
         # Phase 58: Initialize HybridRetriever for LightRAG + RAPTOR fusion
         # HybridRetriever is used when LightRAG or RAPTOR is enabled
+        # Phase 98: Use direct attribute access - settings defined in core/config.py
         from backend.core.config import settings as core_settings
         self._hybrid_retriever: Optional[HybridRetriever] = None
         self._use_hybrid_retriever = (
-            getattr(core_settings, 'ENABLE_LIGHTRAG', False) or
-            getattr(core_settings, 'ENABLE_RAPTOR', False) or
-            getattr(core_settings, 'ENABLE_WARP', False) or
-            getattr(core_settings, 'ENABLE_COLPALI', False)
+            core_settings.ENABLE_LIGHTRAG or
+            core_settings.ENABLE_RAPTOR or
+            core_settings.ENABLE_WARP or
+            core_settings.ENABLE_COLPALI
         )
         # HybridRetriever is initialized lazily in _retrieve_with_custom_store
         # to avoid circular dependencies and allow async initialization
@@ -742,7 +744,7 @@ class RAGService:
         # Phase 66: Initialize Adaptive Router for intelligent query routing
         # Routes queries to optimal strategies (DIRECT, HYBRID, TWO_STAGE, AGENTIC, GRAPH)
         self._adaptive_router: Optional[AdaptiveRouter] = None
-        self._enable_adaptive_routing = getattr(core_settings, 'ENABLE_ADAPTIVE_ROUTING', True)
+        self._enable_adaptive_routing = core_settings.ENABLE_ADAPTIVE_ROUTING
         if self._enable_adaptive_routing:
             self._adaptive_router = get_adaptive_router(
                 query_classifier=self._query_classifier,
@@ -752,15 +754,15 @@ class RAGService:
         self._rag_fusion: Optional[RAGFusion] = None
         self._context_compressor: Optional[ContextCompressor] = None
         self._stepback_prompter: Optional[StepBackPrompter] = None
-        self._enable_rag_fusion = getattr(core_settings, 'ENABLE_RAG_FUSION', True)
-        self._enable_context_compression = getattr(core_settings, 'ENABLE_CONTEXT_COMPRESSION', True)
-        self._enable_stepback_prompting = getattr(core_settings, 'ENABLE_STEPBACK_PROMPTING', True)
-        self._enable_context_reordering = getattr(core_settings, 'ENABLE_CONTEXT_REORDERING', True)
+        self._enable_rag_fusion = core_settings.ENABLE_RAG_FUSION
+        self._enable_context_compression = core_settings.ENABLE_CONTEXT_COMPRESSION
+        self._enable_stepback_prompting = core_settings.ENABLE_STEPBACK_PROMPTING
+        self._enable_context_reordering = core_settings.ENABLE_CONTEXT_REORDERING
 
         # Phase 66: LazyGraphRAG for cost-efficient knowledge graph retrieval
         # Uses query-time community summarization instead of index-time (99% cost reduction)
         self._lazy_graphrag: Optional[LazyGraphRAGService] = None
-        self._enable_lazy_graphrag = getattr(core_settings, 'ENABLE_LAZY_GRAPHRAG', True)
+        self._enable_lazy_graphrag = core_settings.ENABLE_LAZY_GRAPHRAG
         self._last_lazy_graphrag_context: Optional[LazyGraphContext] = None
 
         logger.info(
@@ -1801,6 +1803,50 @@ class RAGService:
                     model=llm_config.model if llm_config else None,
                 )
 
+        # Phase 98: Model-tier-aware retrieval configuration
+        # Adapts retrieval features based on the generation model's capabilities
+        from backend.services.session_memory import get_model_tier
+        _model_tier = get_model_tier(llm_config.model if llm_config else None)
+        _tier_name = _model_tier.get("tier", "small")
+
+        # Tier-specific retrieval settings (defaults to True if setting not found)
+        TIER_RETRIEVAL_CONFIG = {
+            "tiny": {   # ≤3B: Less context capacity, simpler prompts
+                "use_lightrag": False,      # Too expensive for context budget
+                "use_raptor": False,        # Hierarchical overkill for small context
+                "over_fetch_factor": 1.5,   # Smaller over-fetch
+            },
+            "small": {  # 7-9B: Moderate context
+                "use_lightrag": True,
+                "use_raptor": False,
+                "over_fetch_factor": 2.0,
+            },
+            "medium": { # 14B: Good context capacity
+                "use_lightrag": True,
+                "use_raptor": True,
+                "over_fetch_factor": 2.0,
+            },
+            "large": {  # 30B+: Full context capacity
+                "use_lightrag": True,
+                "use_raptor": True,
+                "over_fetch_factor": 2.5,
+            },
+        }
+
+        _tier_config = TIER_RETRIEVAL_CONFIG.get(_tier_name, TIER_RETRIEVAL_CONFIG["small"])
+        _tier_use_lightrag = _tier_config.get("use_lightrag", True)
+        _tier_use_raptor = _tier_config.get("use_raptor", True)
+        _tier_over_fetch = _tier_config.get("over_fetch_factor", 2.0)
+
+        logger.debug(
+            "Phase 98: Model-tier retrieval config applied",
+            model=llm_config.model if llm_config else None,
+            tier=_tier_name,
+            use_lightrag=_tier_use_lightrag,
+            use_raptor=_tier_use_raptor,
+            over_fetch=_tier_over_fetch,
+        )
+
         # Get folder-scoped document IDs if folder_id is specified
         folder_document_ids = None
         if folder_id:
@@ -2210,7 +2256,7 @@ class RAGService:
 
         # Phase 79: Graph-O1 enhanced reasoning (beam search over knowledge graph)
         from backend.core.config import settings as _go1_settings
-        if getattr(_go1_settings, 'KG_ENABLED', False):
+        if _go1_settings.KG_ENABLED:
             try:
                 graph_o1_enabled = _s("rag.graph_o1_enabled", False)
                 if graph_o1_enabled:
@@ -2402,8 +2448,8 @@ class RAGService:
         # Check if context exceeds RLM threshold (default 100K tokens)
         # RLM excels at processing 10M+ token contexts with O(log N) complexity
         from backend.core.config import settings
-        rlm_enabled = getattr(settings, 'ENABLE_RLM', True)
-        rlm_threshold = getattr(settings, 'RLM_THRESHOLD_TOKENS', 100000)
+        rlm_enabled = settings.ENABLE_RLM
+        rlm_threshold = settings.RLM_THRESHOLD_TOKENS
 
         # Estimate context tokens (rough estimate: 4 chars per token)
         estimated_context_tokens = len(context) // 4
@@ -2425,11 +2471,11 @@ class RAGService:
 
                 # Configure RLM
                 rlm_config = RLMConfig(
-                    root_model=getattr(settings, 'RLM_ROOT_MODEL', 'gpt-4o'),
-                    recursive_model=getattr(settings, 'RLM_RECURSIVE_MODEL', 'gpt-4o-mini'),
-                    max_iterations=getattr(settings, 'RLM_MAX_ITERATIONS', 20),
-                    timeout_seconds=getattr(settings, 'RLM_TIMEOUT_SECONDS', 120.0),
-                    log_trajectory=getattr(settings, 'RLM_LOG_TRAJECTORY', False),
+                    root_model=settings.RLM_ROOT_MODEL,
+                    recursive_model=settings.RLM_RECURSIVE_MODEL,
+                    max_iterations=settings.RLM_MAX_ITERATIONS,
+                    timeout_seconds=settings.RLM_TIMEOUT_SECONDS,
+                    log_trajectory=settings.RLM_LOG_TRAJECTORY,
                 )
 
                 # Process with RLM
@@ -2694,8 +2740,11 @@ class RAGService:
             chat_history = trim_history_to_budget(chat_history, budget["history"])
 
             # PHASE 38: Apply context compression for long conversations
+            # Phase 98: Use proper settings service
             compressed_context = ""
-            if getattr(app_settings, "ENABLE_CONTEXT_COMPRESSION", False) and len(chat_history) > 10:
+            _comp_settings = get_settings_service()
+            _compression_enabled = await _comp_settings.get_setting("rag.context_compression_enabled")
+            if _compression_enabled and len(chat_history) > 10:
                 try:
                     from backend.services.context_compression import get_context_compressor
 
@@ -2768,9 +2817,10 @@ class RAGService:
         # Research shows this dramatically reduces hallucinations in small models
 
         # PHASE 42: GenerativeCache - Check cache before LLM generation
+        # Phase 98: Use direct attribute access - setting defined in core/config.py
         cache_hit = False
         cached_response = None
-        if getattr(app_settings, "ENABLE_GENERATIVE_CACHE", False):
+        if app_settings.ENABLE_GENERATIVE_CACHE:
             try:
                 from backend.services.generative_cache import get_generative_cache, ContentType
 
@@ -2997,11 +3047,13 @@ class RAGService:
             except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
                 logger.warning("Answer refinement failed", error=str(e), error_type=type(e).__name__)
 
-        # Parse suggested questions from the response
+        # Strip small-model preamble disclaimers and parse suggested questions
+        raw_content = _strip_llm_preamble(raw_content)
         content, suggested_questions = _parse_suggested_questions(raw_content)
 
         # PHASE 42: Cache the generated response for future use
-        if getattr(app_settings, "ENABLE_GENERATIVE_CACHE", False) and not cache_hit:
+        # Phase 98: Use direct attribute access
+        if app_settings.ENABLE_GENERATIVE_CACHE and not cache_hit:
             try:
                 from backend.services.generative_cache import get_generative_cache, ContentType
 
@@ -3655,11 +3707,29 @@ class RAGService:
                             yield StreamChunk(type="content", data=content)
             else:
                 # Standard streaming without citations
+                # Buffer initial tokens to strip preamble disclaimers from small models
+                _preamble_buffer = ""
+                _preamble_done = False
+                _preamble_max_chars = 200  # Only buffer first ~200 chars to check
                 async for chunk in stream:
                     content = chunk.content if hasattr(chunk, 'content') else str(chunk)
                     if content:
                         response_buffer.write(content)
-                        yield StreamChunk(type="content", data=content)
+                        if not _preamble_done:
+                            _preamble_buffer += content
+                            if len(_preamble_buffer) >= _preamble_max_chars or "\n\n" in _preamble_buffer:
+                                # Strip preamble and flush
+                                _preamble_done = True
+                                cleaned = _strip_llm_preamble(_preamble_buffer)
+                                if cleaned:
+                                    yield StreamChunk(type="content", data=cleaned)
+                        else:
+                            yield StreamChunk(type="content", data=content)
+                # Flush any remaining preamble buffer (short responses)
+                if not _preamble_done and _preamble_buffer:
+                    cleaned = _strip_llm_preamble(_preamble_buffer)
+                    if cleaned:
+                        yield StreamChunk(type="content", data=cleaned)
 
             # Send sources after content
             if self.config.include_sources and sources:
@@ -3746,6 +3816,10 @@ class RAGService:
                     error_message=str(e),
                 )
             yield StreamChunk(type="error", data=str(e))
+        finally:
+            # Phase 98: Explicitly close StringIO to prevent memory leaks on exceptions
+            if response_buffer is not None:
+                response_buffer.close()
 
     async def handle_aggregation_query(
         self,
@@ -4254,10 +4328,7 @@ class RAGService:
 
         # Phase 60: KG-based query expansion with related entities
         from backend.core.config import settings as app_settings
-        if (
-            getattr(app_settings, 'KG_ENABLED', True)
-            and getattr(app_settings, 'KG_QUERY_EXPANSION_ENABLED', True)
-        ):
+        if app_settings.KG_ENABLED and app_settings.KG_QUERY_EXPANSION_ENABLED:
             try:
                 from backend.services.knowledge_graph import get_kg_service
                 kg_service = await get_kg_service()
@@ -4270,7 +4341,7 @@ class RAGService:
 
                 if entities:
                     # Get related entity names for query expansion
-                    max_entities = getattr(app_settings, 'KG_EXPANSION_MAX_ENTITIES', 5)
+                    max_entities = app_settings.KG_EXPANSION_MAX_ENTITIES
                     entity_names = [e.name for e in entities[:max_entities]]
 
                     # Create expanded query with entity names
@@ -4402,8 +4473,11 @@ class RAGService:
 
         # PHASE 43: Apply tiered reranking if enabled
         # Multi-stage pipeline: ColBERT -> Cross-Encoder -> (optional) LLM
-        from backend.core.config import settings as app_settings
-        if getattr(app_settings, "ENABLE_TIERED_RERANKING", False) and len(all_results) > 3:
+        # Phase 98: Use proper settings service instead of getattr fallback
+        from backend.services.settings import get_settings_service
+        _tiered_settings = get_settings_service()
+        _tiered_enabled = await _tiered_settings.get_setting("rerank.tiered_enabled")
+        if _tiered_enabled and len(all_results) > 3:
             try:
                 from backend.services.tiered_reranking import get_tiered_reranker
 

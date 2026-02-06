@@ -317,23 +317,27 @@ class HybridRetriever:
         )
 
     def _update_config_from_settings(self):
-        """Update config from global settings."""
+        """Update config from global settings.
+
+        Phase 98: Use direct attribute access instead of getattr fallbacks.
+        These settings are defined with defaults in core/config.py.
+        """
         if settings.ENABLE_COLBERT_RETRIEVAL:
             self.config.enable_colbert = True
         if settings.ENABLE_CONTEXTUAL_RETRIEVAL:
             self.config.enable_contextual = True
         # Phase 51: WARP and ColPali settings
-        if getattr(settings, 'ENABLE_WARP', False):
+        if settings.ENABLE_WARP:
             self.config.enable_warp = True
             self.config.warp_weight = 0.25  # Higher weight - WARP is high quality
-        if getattr(settings, 'ENABLE_COLPALI', False):
+        if settings.ENABLE_COLPALI:
             self.config.enable_colpali = True
             self.config.colpali_weight = 0.15  # Lower weight - specialized for visual
         # Phase 58: LightRAG and RAPTOR settings
-        if getattr(settings, 'ENABLE_LIGHTRAG', False):
+        if settings.ENABLE_LIGHTRAG:
             self.config.enable_lightrag = True
             self.config.lightrag_weight = 0.2  # Good for entity-based queries
-        if getattr(settings, 'ENABLE_RAPTOR', False):
+        if settings.ENABLE_RAPTOR:
             self.config.enable_raptor = True
             self.config.raptor_weight = 0.15  # Good for hierarchical docs
 
@@ -1173,7 +1177,8 @@ async def get_hybrid_retriever(
             vectorstore = get_vector_store()
 
         # Phase 62: Auto-initialize ColBERT if enabled
-        if colbert_retriever is None and getattr(settings, 'ENABLE_COLBERT_RETRIEVAL', False):
+        # Phase 98: Use direct attribute access - settings defined in core/config.py
+        if colbert_retriever is None and settings.ENABLE_COLBERT_RETRIEVAL:
             try:
                 from backend.services.colbert_retriever import ColBERTRetriever
                 colbert_retriever = ColBERTRetriever()
@@ -1185,7 +1190,7 @@ async def get_hybrid_retriever(
                 logger.warning("Failed to initialize ColBERT retriever", error=str(e))
 
         # Phase 51: Auto-initialize WARP if enabled
-        if warp_retriever is None and getattr(settings, 'ENABLE_WARP', False):
+        if warp_retriever is None and settings.ENABLE_WARP:
             try:
                 from backend.services.warp_retriever import get_warp_retriever
                 warp_retriever = await get_warp_retriever()
@@ -1196,7 +1201,7 @@ async def get_hybrid_retriever(
                 logger.warning("Failed to initialize WARP retriever", error=str(e))
 
         # Phase 51: Auto-initialize ColPali if enabled
-        if colpali_retriever is None and getattr(settings, 'ENABLE_COLPALI', False):
+        if colpali_retriever is None and settings.ENABLE_COLPALI:
             try:
                 from backend.services.colpali_retriever import get_colpali_retriever
                 colpali_retriever = await get_colpali_retriever()
@@ -1207,7 +1212,7 @@ async def get_hybrid_retriever(
                 logger.warning("Failed to initialize ColPali retriever", error=str(e))
 
         # Phase 62: Auto-initialize LightRAG if enabled
-        if lightrag_retriever is None and getattr(settings, 'ENABLE_LIGHTRAG', False):
+        if lightrag_retriever is None and settings.ENABLE_LIGHTRAG:
             try:
                 from backend.services.lightrag_retriever import LightRAGRetriever
                 from backend.services.knowledge_graph import get_kg_service
@@ -1221,7 +1226,7 @@ async def get_hybrid_retriever(
                 logger.warning("Failed to initialize LightRAG retriever", error=str(e))
 
         # Phase 62: Auto-initialize RAPTOR if enabled
-        if raptor_retriever is None and getattr(settings, 'ENABLE_RAPTOR', False):
+        if raptor_retriever is None and settings.ENABLE_RAPTOR:
             try:
                 from backend.services.raptor_retriever import RAPTORRetriever
                 raptor_retriever = RAPTORRetriever(vectorstore)
@@ -1233,7 +1238,7 @@ async def get_hybrid_retriever(
                 logger.warning("Failed to initialize RAPTOR retriever", error=str(e))
 
         # Phase 62: Auto-initialize contextual embeddings if enabled
-        if contextual_service is None and getattr(settings, 'ENABLE_CONTEXTUAL_EMBEDDINGS', False):
+        if contextual_service is None and settings.ENABLE_CONTEXTUAL_EMBEDDINGS:
             try:
                 from backend.services.contextual_embeddings import ContextualEmbeddingService
                 contextual_service = ContextualEmbeddingService()
@@ -1245,7 +1250,7 @@ async def get_hybrid_retriever(
                 logger.warning("Failed to initialize contextual service", error=str(e))
 
         # Phase 62: Auto-initialize tiered reranker if enabled
-        if reranker is None and getattr(settings, 'ENABLE_TIERED_RERANKING', False):
+        if reranker is None and settings.ENABLE_TIERED_RERANKING:
             try:
                 from backend.services.tiered_reranking import get_tiered_reranker
                 reranker = await get_tiered_reranker()

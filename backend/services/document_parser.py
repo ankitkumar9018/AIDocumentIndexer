@@ -519,7 +519,7 @@ class DocumentParser:
         """
         # Check if VLM is enabled
         from backend.core.config import settings
-        vlm_enabled = getattr(settings, 'ENABLE_VLM', True)
+        vlm_enabled = settings.ENABLE_VLM
 
         if vlm_enabled:
             try:

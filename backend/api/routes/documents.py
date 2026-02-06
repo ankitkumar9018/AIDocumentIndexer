@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional, List, Dict
 from uuid import UUID
 import io
+import json
 import zipfile
 import tempfile
 import os
@@ -38,6 +39,7 @@ from backend.services.permissions import (
     get_permission_service,
 )
 from backend.services.vectorstore import get_vector_store, SearchType
+from backend.services.vectorstore_local import get_chroma_vector_store as get_local_vectorstore
 from backend.services.audit import AuditAction, get_audit_service
 from backend.services.auto_tagger import AutoTaggerService
 
@@ -288,6 +290,77 @@ def document_to_response(
         image_analysis_completed_at=doc.image_analysis_completed_at,
         image_analysis_error=doc.image_analysis_error,
     )
+
+
+# =============================================================================
+# Phase 98: Helper Functions for Tag Sync
+# =============================================================================
+
+async def _sync_tags_to_kg_entities(
+    db: AsyncSession,
+    document_id: UUID,
+    tags: List[str],
+) -> int:
+    """
+    Sync document tags to KG entities linked to this document.
+
+    Phase 98: Updates Entity.properties["source_document_tags"] for entities
+    that have mentions in this document. Enables tag-based filtering in KG queries.
+
+    Args:
+        db: Database session
+        document_id: Document UUID
+        tags: New tags to sync
+
+    Returns:
+        Number of entities updated
+    """
+    from backend.db.models import Entity, EntityMention
+    from sqlalchemy import select
+
+    try:
+        # Get entity IDs linked to this document via EntityMention
+        mentions_query = select(EntityMention.entity_id).where(
+            EntityMention.document_id == document_id
+        ).distinct()
+        mentions_result = await db.execute(mentions_query)
+        entity_ids = [m for m in mentions_result.scalars().all()]
+
+        if not entity_ids:
+            return 0
+
+        # Update each entity's properties with document tags
+        updated_count = 0
+        for entity_id in entity_ids:
+            entity_result = await db.execute(
+                select(Entity).where(Entity.id == entity_id)
+            )
+            entity = entity_result.scalar_one_or_none()
+            if entity:
+                props = entity.properties or {}
+                # Track tags per source document (entity may span multiple docs)
+                source_tags = props.get("source_document_tags", {})
+                source_tags[str(document_id)] = tags
+                props["source_document_tags"] = source_tags
+                entity.properties = props
+                updated_count += 1
+
+        await db.commit()
+        logger.info(
+            "Synced tags to KG entities",
+            document_id=str(document_id),
+            entities_updated=updated_count,
+            tags=tags,
+        )
+        return updated_count
+
+    except Exception as e:
+        logger.warning(
+            "Failed to sync tags to KG entities",
+            document_id=str(document_id),
+            error=str(e),
+        )
+        return 0
 
 
 # =============================================================================
@@ -680,6 +753,45 @@ async def update_document(
 
     await db.commit()
     await db.refresh(document)
+
+    # Phase 98: Sync tags to ChromaDB if tags were updated
+    if update.tags is not None or update.collection is not None:
+        new_tags = document.tags or []
+        try:
+            vectorstore = get_local_vectorstore()
+            if vectorstore:
+                await vectorstore.update_document_tags(
+                    document_id=str(document_id),
+                    tags=new_tags,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to sync tags to ChromaDB",
+                document_id=str(document_id),
+                error=str(e),
+            )
+
+        # Phase 98: Queue re-embedding if setting enabled
+        try:
+            from backend.services.settings import get_settings_service
+            settings_service = get_settings_service()
+            reembed_enabled = await settings_service.get_setting("tags.reembed_on_change")
+            if reembed_enabled and new_tags:
+                from backend.tasks.document_tasks import reembed_document_chunks
+                reembed_document_chunks.delay(str(document_id), new_tags)
+                logger.info("Queued re-embedding task", document_id=str(document_id))
+        except Exception as e:
+            logger.warning("Failed to queue re-embedding task", error=str(e))
+
+        # Phase 98: Sync tags to KG entities if setting enabled
+        try:
+            from backend.services.settings import get_settings_service
+            settings_service = get_settings_service()
+            kg_sync_enabled = await settings_service.get_setting("tags.sync_to_kg")
+            if kg_sync_enabled:
+                await _sync_tags_to_kg_entities(db, document_id, new_tags)
+        except Exception as e:
+            logger.warning("Failed to sync tags to KG", document_id=str(document_id), error=str(e))
 
     # Log the update
     audit_service = get_audit_service()
@@ -2333,6 +2445,39 @@ async def auto_tag_document(
     document.tags = merged_tags
     await db.commit()
 
+    # Phase 98: Sync tags to ChromaDB
+    try:
+        vectorstore = get_local_vectorstore()
+        if vectorstore:
+            await vectorstore.update_document_tags(
+                document_id=str(document_id),
+                tags=merged_tags,
+            )
+    except Exception as e:
+        logger.warning("Failed to sync auto-tags to ChromaDB", document_id=str(document_id), error=str(e))
+
+    # Phase 98: Queue re-embedding if setting enabled
+    try:
+        from backend.services.settings import get_settings_service
+        settings_service = get_settings_service()
+        reembed_enabled = await settings_service.get_setting("tags.reembed_on_change")
+        if reembed_enabled and merged_tags:
+            from backend.tasks.document_tasks import reembed_document_chunks
+            reembed_document_chunks.delay(str(document_id), merged_tags)
+            logger.info("Queued re-embedding task for auto-tagged document", document_id=str(document_id))
+    except Exception as e:
+        logger.warning("Failed to queue re-embedding task", error=str(e))
+
+    # Phase 98: Sync tags to KG entities if setting enabled
+    try:
+        from backend.services.settings import get_settings_service
+        settings_service = get_settings_service()
+        kg_sync_enabled = await settings_service.get_setting("tags.sync_to_kg")
+        if kg_sync_enabled:
+            await _sync_tags_to_kg_entities(db, document_id, merged_tags)
+    except Exception as e:
+        logger.warning("Failed to sync auto-tags to KG", document_id=str(document_id), error=str(e))
+
     # Log audit
     audit_service = get_audit_service()
     await audit_service.log(
@@ -3124,6 +3269,55 @@ async def bulk_update_tags(
             })
 
     await db.commit()
+
+    # Phase 98: Sync tags to ChromaDB for all updated documents
+    if request.add_tags or request.remove_tags:
+        try:
+            vectorstore = get_local_vectorstore()
+            if vectorstore:
+                for doc in documents:
+                    # Parse current tags from the doc
+                    current_tags = []
+                    if doc.tags:
+                        try:
+                            current_tags = json.loads(doc.tags) if isinstance(doc.tags, str) else list(doc.tags)
+                        except (json.JSONDecodeError, TypeError):
+                            current_tags = []
+                    await vectorstore.update_document_tags(
+                        document_id=str(doc.id),
+                        tags=current_tags,
+                    )
+        except Exception as e:
+            logger.warning("Failed to sync bulk tags to ChromaDB", error=str(e))
+
+        # Phase 98: Queue re-embedding and KG sync for bulk tag updates
+        try:
+            from backend.services.settings import get_settings_service
+            settings_service = get_settings_service()
+            reembed_enabled = await settings_service.get_setting("tags.reembed_on_change")
+            kg_sync_enabled = await settings_service.get_setting("tags.sync_to_kg")
+
+            for doc in documents:
+                current_tags = []
+                if doc.tags:
+                    try:
+                        current_tags = json.loads(doc.tags) if isinstance(doc.tags, str) else list(doc.tags)
+                    except (json.JSONDecodeError, TypeError):
+                        current_tags = []
+
+                # Queue re-embedding if enabled
+                if reembed_enabled and current_tags:
+                    from backend.tasks.document_tasks import reembed_document_chunks
+                    reembed_document_chunks.delay(str(doc.id), current_tags)
+
+                # Sync to KG if enabled
+                if kg_sync_enabled:
+                    await _sync_tags_to_kg_entities(db, doc.id, current_tags)
+
+            if reembed_enabled:
+                logger.info("Queued re-embedding tasks for bulk tag update", count=len(documents))
+        except Exception as e:
+            logger.warning("Failed to queue re-embedding/KG sync for bulk tags", error=str(e))
 
     logger.info(
         "Bulk tag update completed",

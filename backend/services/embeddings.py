@@ -2671,7 +2671,17 @@ class EmbeddingService:
         )
 
         results = []
-        texts = [chunk.content for chunk in chunks]
+
+        # Phase 98: Prepend document tags to chunk content for tag-augmented embeddings
+        # Research shows this improves retrieval by increasing intra-document cohesion
+        texts = []
+        for chunk in chunks:
+            tags = chunk.metadata.get("document_tags", []) if chunk.metadata else []
+            if tags and isinstance(tags, list):
+                tag_prefix = f"[Tags: {', '.join(str(t) for t in tags)}] "
+                texts.append(tag_prefix + chunk.content)
+            else:
+                texts.append(chunk.content)
 
         # Process in batches
         for i in range(0, len(texts), batch_size):
@@ -2752,20 +2762,35 @@ def embed_batch_ray(
     Ray remote function for batch embedding.
 
     This runs on Ray workers for distributed processing.
-    """
-    # Reconstruct config from dict (Ray requires serializable objects)
-    # LLMConfig reads from env vars, so we create instance and override from dict if provided
-    config = LLMConfig.from_env()
-    if config_dict:
-        if config_dict.get("openai_api_key"):
-            config.openai_api_key = config_dict["openai_api_key"]
-        if config_dict.get("ollama_base_url"):
-            config.ollama_base_url = config_dict["ollama_base_url"]
-        if config_dict.get("anthropic_api_key"):
-            config.anthropic_api_key = config_dict["anthropic_api_key"]
 
-    service = EmbeddingService(provider=provider, model=model, config=config)
-    return service.embed_texts(texts)
+    Phase 98: Added explicit cleanup to prevent memory leaks when tasks timeout.
+    """
+    import gc
+    service = None
+    try:
+        # Reconstruct config from dict (Ray requires serializable objects)
+        # LLMConfig reads from env vars, so we create instance and override from dict if provided
+        config = LLMConfig.from_env()
+        if config_dict:
+            if config_dict.get("openai_api_key"):
+                config.openai_api_key = config_dict["openai_api_key"]
+            if config_dict.get("ollama_base_url"):
+                config.ollama_base_url = config_dict["ollama_base_url"]
+            if config_dict.get("anthropic_api_key"):
+                config.anthropic_api_key = config_dict["anthropic_api_key"]
+
+        service = EmbeddingService(provider=provider, model=model, config=config)
+        return service.embed_texts(texts)
+    finally:
+        # Phase 98: Explicit cleanup to release model memory on Ray workers
+        if service is not None:
+            # Clear internal model references if they exist
+            if hasattr(service, '_model'):
+                service._model = None
+            if hasattr(service, '_embeddings'):
+                service._embeddings = None
+        # Force garbage collection to release model memory
+        gc.collect()
 
 
 class RayEmbeddingService:
@@ -3008,7 +3033,16 @@ class RayEmbeddingService:
         if not chunks:
             return []
 
-        texts = [chunk.content for chunk in chunks]
+        # Phase 98: Prepend document tags to chunk content for tag-augmented embeddings
+        texts = []
+        for chunk in chunks:
+            tags = chunk.metadata.get("document_tags", []) if chunk.metadata else []
+            if tags and isinstance(tags, list):
+                tag_prefix = f"[Tags: {', '.join(str(t) for t in tags)}] "
+                texts.append(tag_prefix + chunk.content)
+            else:
+                texts.append(chunk.content)
+
         embeddings = self.embed_texts_parallel(texts)
 
         results = []

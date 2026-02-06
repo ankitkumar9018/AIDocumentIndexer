@@ -6802,11 +6802,11 @@ async def get_rlm_config(
     """
     return RLMConfigResponse(
         enabled=settings.ENABLE_RLM,
-        provider=getattr(settings, "RLM_PROVIDER", "anthropic"),
-        context_threshold=getattr(settings, "RLM_THRESHOLD", 100000),
-        max_context_tokens=getattr(settings, "RLM_MAX_CONTEXT", 10000000),
-        sandbox_type=getattr(settings, "RLM_SANDBOX", "local"),
-        enable_self_refinement=getattr(settings, "RLM_SELF_REFINE", True),
+        provider=settings.RLM_PROVIDER,
+        context_threshold=settings.RLM_THRESHOLD,
+        max_context_tokens=settings.RLM_MAX_CONTEXT,
+        sandbox_type=settings.RLM_SANDBOX,
+        enable_self_refinement=settings.RLM_SELF_REFINE,
     )
 
 
@@ -7316,4 +7316,669 @@ async def get_performance_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get performance status: {str(e)}"
+        )
+
+
+# =============================================================================
+# Garbage Chunk Cleanup (Phase 98)
+# =============================================================================
+
+class GarbageCleanupRequest(BaseModel):
+    """Request model for garbage chunk cleanup."""
+    dry_run: bool = Field(
+        default=True,
+        description="If True, only count garbage chunks without deleting"
+    )
+
+
+class GarbageCleanupResponse(BaseModel):
+    """Response model for garbage chunk cleanup."""
+    dry_run: bool
+    total_garbage_chunks: int
+    by_document: Dict[str, int]
+    deleted: bool
+    message: str
+
+
+@router.post(
+    "/cleanup-garbage-chunks",
+    tags=["admin"],
+    summary="Clean up garbage chunks (image credits, copyright notices)",
+    response_model=GarbageCleanupResponse,
+)
+async def cleanup_garbage_chunks(
+    request: GarbageCleanupRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+) -> GarbageCleanupResponse:
+    """
+    Scan and optionally delete garbage chunks from the database.
+
+    Garbage chunks are those containing:
+    - Image credits (Getty Images, Shutterstock, etc.)
+    - Stock photo attributions
+    - Copyright notices that don't add value to RAG retrieval
+
+    Use dry_run=true (default) to see what would be deleted first.
+    """
+    import re
+    from backend.db.models import Chunk as ChunkModel, Document as DocumentModel
+
+    # Garbage detection patterns (same as text_preprocessor.py)
+    garbage_patterns = [
+        r'getty\s*images',
+        r'shutterstock',
+        r'adobe\s*stock',
+        r'123rf',
+        r'istock(?:photo)?',
+        r'alamy',
+        r'dreamstime',
+        r'depositphotos',
+        r'(?:image|photo|picture)\s*(?:credit|courtesy|source|by)\s*:',
+        r'stock\s+(?:photo|image|picture)',
+        r'bildnachweis',
+        r'fotocredit',
+    ]
+    compiled_patterns = [re.compile(p, re.IGNORECASE) for p in garbage_patterns]
+
+    try:
+        # Query all chunks
+        result = await db.execute(
+            select(ChunkModel, DocumentModel.title)
+            .join(DocumentModel, ChunkModel.document_id == DocumentModel.id)
+        )
+        rows = result.all()
+
+        garbage_chunks = []
+        by_document: Dict[str, int] = {}
+
+        for chunk, doc_title in rows:
+            content_lower = (chunk.content or "").lower()
+
+            # Check if chunk matches garbage patterns
+            match_count = sum(1 for p in compiled_patterns if p.search(content_lower))
+
+            if match_count >= 3:  # Multiple matches = likely garbage
+                garbage_chunks.append(chunk)
+                doc_name = doc_title or "Unknown"
+                by_document[doc_name] = by_document.get(doc_name, 0) + 1
+
+        total_garbage = len(garbage_chunks)
+
+        if request.dry_run:
+            return GarbageCleanupResponse(
+                dry_run=True,
+                total_garbage_chunks=total_garbage,
+                by_document=by_document,
+                deleted=False,
+                message=f"Found {total_garbage} garbage chunks. Set dry_run=false to delete.",
+            )
+
+        # Actually delete the garbage chunks
+        if garbage_chunks:
+            garbage_ids = [str(c.id) for c in garbage_chunks]
+
+            # Delete from SQLite
+            for chunk in garbage_chunks:
+                await db.delete(chunk)
+            await db.commit()
+
+            # Delete from ChromaDB
+            try:
+                from backend.services.vectorstore_local import LocalVectorStore
+                vectorstore = LocalVectorStore()
+                vectorstore._collection.delete(ids=garbage_ids)
+                logger.info("Deleted garbage chunks from ChromaDB", count=len(garbage_ids))
+            except Exception as chroma_err:
+                logger.warning(
+                    "Failed to delete from ChromaDB (may not exist there)",
+                    error=str(chroma_err),
+                )
+
+            logger.info(
+                "Garbage chunks cleaned up",
+                admin_user=admin.user_id,
+                total_deleted=total_garbage,
+            )
+
+        return GarbageCleanupResponse(
+            dry_run=False,
+            total_garbage_chunks=total_garbage,
+            by_document=by_document,
+            deleted=True,
+            message=f"Deleted {total_garbage} garbage chunks from {len(by_document)} documents.",
+        )
+
+    except Exception as e:
+        logger.error("Failed to cleanup garbage chunks", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to cleanup garbage chunks: {str(e)}"
+        )
+
+
+# =============================================================================
+# Phase 98: Feature Audit Endpoint
+# =============================================================================
+
+class FeatureStatus(BaseModel):
+    """Status of a single feature."""
+    config_default: bool
+    runtime_value: bool
+    functional: bool
+    reason: Optional[str] = None
+
+
+class FeatureAuditResponse(BaseModel):
+    """Response for feature audit endpoint."""
+    features: Dict[str, FeatureStatus]
+    summary: Dict[str, int]  # counts by status
+
+
+@router.post("/feature-audit", response_model=FeatureAuditResponse)
+async def audit_features(
+    admin: AdminUser,
+):
+    """
+    Audit all advanced RAG features and their current status.
+
+    Phase 98: Returns the status of all advanced features, showing:
+    - config_default: What the feature defaults to in config
+    - runtime_value: What it's currently set to at runtime
+    - functional: Whether the feature can actually work (dependencies met)
+    - reason: Why a feature might not be functional
+
+    This helps diagnose why features might not be working as expected.
+    """
+    from backend.core.config import settings
+
+    features = {}
+
+    # Tiered Reranking
+    try:
+        tiered_functional = True
+        tiered_reason = None
+        try:
+            from backend.services.tiered_reranking import get_tiered_reranker
+            # Just check if module imports
+        except ImportError as e:
+            tiered_functional = False
+            tiered_reason = f"Import error: {str(e)}"
+        features["tiered_reranking"] = FeatureStatus(
+            config_default=True,  # Default in config.py
+            runtime_value=settings.ENABLE_TIERED_RERANKING,
+            functional=tiered_functional,
+            reason=tiered_reason,
+        )
+    except Exception:
+        features["tiered_reranking"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # LightRAG
+    try:
+        lightrag_functional = True
+        lightrag_reason = None
+        try:
+            from backend.services.lightrag_service import get_lightrag_service
+        except ImportError as e:
+            lightrag_functional = False
+            lightrag_reason = f"Import error: {str(e)}"
+        features["lightrag"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_LIGHTRAG,
+            functional=lightrag_functional,
+            reason=lightrag_reason,
+        )
+    except Exception:
+        features["lightrag"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # RAPTOR
+    try:
+        raptor_functional = True
+        raptor_reason = None
+        try:
+            from backend.services.raptor_retriever import RaptorRetriever
+        except ImportError as e:
+            raptor_functional = False
+            raptor_reason = f"Import error: {str(e)}"
+        features["raptor"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_RAPTOR,
+            functional=raptor_functional,
+            reason=raptor_reason,
+        )
+    except Exception:
+        features["raptor"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # Self-RAG
+    try:
+        features["self_rag"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_SELF_RAG,
+            functional=True,
+            reason=None,
+        )
+    except Exception:
+        features["self_rag"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # Adaptive Routing
+    try:
+        features["adaptive_routing"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_ADAPTIVE_ROUTING,
+            functional=True,
+            reason=None,
+        )
+    except Exception:
+        features["adaptive_routing"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # RAG Fusion
+    try:
+        features["rag_fusion"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_RAG_FUSION,
+            functional=True,
+            reason=None,
+        )
+    except Exception:
+        features["rag_fusion"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # Context Compression
+    try:
+        features["context_compression"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_CONTEXT_COMPRESSION,
+            functional=True,
+            reason=None,
+        )
+    except Exception:
+        features["context_compression"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # Knowledge Graph
+    try:
+        kg_functional = True
+        kg_reason = None
+        try:
+            from backend.services.knowledge_graph import get_kg_service
+        except ImportError as e:
+            kg_functional = False
+            kg_reason = f"Import error: {str(e)}"
+        features["knowledge_graph"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.KG_ENABLED,
+            functional=kg_functional,
+            reason=kg_reason,
+        )
+    except Exception:
+        features["knowledge_graph"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # LazyGraphRAG
+    try:
+        features["lazy_graphrag"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_LAZY_GRAPHRAG,
+            functional=True,
+            reason=None,
+        )
+    except Exception:
+        features["lazy_graphrag"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # User Personalization
+    try:
+        features["user_personalization"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_USER_PERSONALIZATION,
+            functional=True,
+            reason=None,
+        )
+    except Exception:
+        features["user_personalization"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # Agent Memory
+    try:
+        agent_mem_functional = True
+        agent_mem_reason = None
+        try:
+            from backend.services.mem0_memory import get_memory_service
+        except ImportError as e:
+            agent_mem_functional = False
+            agent_mem_reason = f"Import error: {str(e)}"
+        features["agent_memory"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_AGENT_MEMORY,
+            functional=agent_mem_functional,
+            reason=agent_mem_reason,
+        )
+    except Exception:
+        features["agent_memory"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # RLM (Recursive Language Model)
+    try:
+        rlm_functional = True
+        rlm_reason = None
+        try:
+            from backend.services.rlm_service import RecursiveLMService
+        except ImportError as e:
+            rlm_functional = False
+            rlm_reason = f"Import error: {str(e)}"
+        features["rlm"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_RLM,
+            functional=rlm_functional,
+            reason=rlm_reason,
+        )
+    except Exception:
+        features["rlm"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # VLM (Vision Language Model)
+    try:
+        vlm_functional = True
+        vlm_reason = None
+        try:
+            from backend.services.vlm_processor import get_vlm_processor
+        except ImportError as e:
+            vlm_functional = False
+            vlm_reason = f"Import error: {str(e)}"
+        features["vlm"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_VLM,
+            functional=vlm_functional,
+            reason=vlm_reason,
+        )
+    except Exception:
+        features["vlm"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # Ultra-fast TTS
+    try:
+        tts_functional = True
+        tts_reason = None
+        try:
+            from backend.services.audio.ultra_fast_tts import get_ultra_fast_tts
+        except ImportError as e:
+            tts_functional = False
+            tts_reason = f"Import error: {str(e)}"
+        features["ultra_fast_tts"] = FeatureStatus(
+            config_default=True,
+            runtime_value=settings.ENABLE_ULTRA_FAST_TTS,
+            functional=tts_functional,
+            reason=tts_reason,
+        )
+    except Exception:
+        features["ultra_fast_tts"] = FeatureStatus(
+            config_default=True,
+            runtime_value=False,
+            functional=False,
+            reason="Failed to check status",
+        )
+
+    # Calculate summary
+    enabled_count = sum(1 for f in features.values() if f.runtime_value)
+    functional_count = sum(1 for f in features.values() if f.functional and f.runtime_value)
+    disabled_count = sum(1 for f in features.values() if not f.runtime_value)
+
+    summary = {
+        "total": len(features),
+        "enabled": enabled_count,
+        "functional": functional_count,
+        "disabled": disabled_count,
+        "enabled_but_not_functional": enabled_count - functional_count,
+    }
+
+    logger.info(
+        "Feature audit completed",
+        admin_user=admin.user_id,
+        enabled=enabled_count,
+        functional=functional_count,
+    )
+
+    return FeatureAuditResponse(
+        features=features,
+        summary=summary,
+    )
+
+
+# =============================================================================
+# Phase 98: Tag Backfill Endpoint
+# =============================================================================
+
+class TagBackfillRequest(BaseModel):
+    """Request for tag backfill."""
+    dry_run: bool = Field(default=True, description="If true, only count documents needing backfill")
+    reembed: bool = Field(default=False, description="Also re-embed chunks with tag prefix (slow)")
+    document_ids: Optional[List[str]] = Field(default=None, description="Specific document IDs to backfill (null = all)")
+
+
+class TagBackfillResponse(BaseModel):
+    """Response for tag backfill."""
+    dry_run: bool
+    total_documents: int
+    documents_with_tags: int
+    chunks_updated: int
+    reembedding_queued: int
+    kg_entities_updated: int = 0
+    message: str
+
+
+@router.post("/backfill-tags", response_model=TagBackfillResponse)
+async def backfill_document_tags(
+    request: TagBackfillRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Backfill document tags to chunk metadata and ChromaDB.
+
+    Phase 98: For documents uploaded before tag-augmented embeddings were added,
+    this endpoint propagates existing document tags to:
+    1. Chunk metadata (document_tags field)
+    2. ChromaDB metadata (for filtering)
+    3. Optionally re-embeds chunks with tag prefix (slow, requires Celery)
+
+    Use dry_run=true (default) to see what would be updated first.
+    """
+    from backend.db.models import Document, Chunk
+    from backend.services.vectorstore_local import get_chroma_vector_store as get_local_vectorstore
+
+    try:
+        # Query documents with tags
+        query = select(Document).where(Document.tags.isnot(None))
+        if request.document_ids:
+            from uuid import UUID as PyUUID
+            doc_uuids = [PyUUID(did) for did in request.document_ids]
+            query = query.where(Document.id.in_(doc_uuids))
+
+        result = await db.execute(query)
+        documents = result.scalars().all()
+
+        total_documents = len(documents)
+        documents_with_tags = sum(1 for d in documents if d.tags and len(d.tags) > 0)
+        chunks_updated = 0
+        reembedding_queued = 0
+        kg_entities_updated = 0
+
+        if request.dry_run:
+            # Count chunks that would be updated
+            for doc in documents:
+                if doc.tags:
+                    chunk_result = await db.execute(
+                        select(func.count(Chunk.id)).where(Chunk.document_id == doc.id)
+                    )
+                    chunks_updated += chunk_result.scalar() or 0
+
+            return TagBackfillResponse(
+                dry_run=True,
+                total_documents=total_documents,
+                documents_with_tags=documents_with_tags,
+                chunks_updated=chunks_updated,
+                reembedding_queued=0,
+                message=f"Would update {chunks_updated} chunks across {documents_with_tags} documents. Set dry_run=false to apply.",
+            )
+
+        # Actually backfill
+        vectorstore = get_local_vectorstore()
+
+        for doc in documents:
+            if not doc.tags:
+                continue
+
+            tags = doc.tags
+
+            # Update chunk metadata in DB
+            chunks_result = await db.execute(
+                select(Chunk).where(Chunk.document_id == doc.id)
+            )
+            chunks = chunks_result.scalars().all()
+
+            for chunk in chunks:
+                chunk_metadata = chunk.chunk_metadata or {}
+                chunk_metadata["document_tags"] = tags
+                chunk.chunk_metadata = chunk_metadata
+                chunks_updated += 1
+
+            # Update ChromaDB metadata
+            if vectorstore:
+                try:
+                    await vectorstore.update_document_tags(
+                        document_id=str(doc.id),
+                        tags=tags,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to update ChromaDB tags",
+                        document_id=str(doc.id),
+                        error=str(e),
+                    )
+
+            # Queue re-embedding if requested
+            if request.reembed:
+                try:
+                    from backend.tasks.document_tasks import reembed_document_chunks
+                    reembed_document_chunks.delay(str(doc.id), tags)
+                    reembedding_queued += 1
+                except Exception as e:
+                    logger.warning(
+                        "Failed to queue re-embedding",
+                        document_id=str(doc.id),
+                        error=str(e),
+                    )
+
+            # Sync tags to KG entities linked to this document
+            try:
+                from backend.db.models import Entity, EntityMention
+                mentions_result = await db.execute(
+                    select(EntityMention.entity_id)
+                    .where(EntityMention.document_id == doc.id)
+                    .distinct()
+                )
+                entity_ids = mentions_result.scalars().all()
+                for entity_id in entity_ids:
+                    entity_result = await db.execute(
+                        select(Entity).where(Entity.id == entity_id)
+                    )
+                    entity = entity_result.scalar_one_or_none()
+                    if entity:
+                        props = entity.properties or {}
+                        source_tags = props.get("source_document_tags", {})
+                        source_tags[str(doc.id)] = tags
+                        props["source_document_tags"] = source_tags
+                        entity.properties = props
+                        kg_entities_updated += 1
+            except Exception as e:
+                logger.warning(
+                    "Failed to sync tags to KG entities",
+                    document_id=str(doc.id),
+                    error=str(e),
+                )
+
+        await db.commit()
+
+        logger.info(
+            "Tag backfill completed",
+            admin_user=admin.user_id,
+            documents=documents_with_tags,
+            chunks=chunks_updated,
+            reembedding_queued=reembedding_queued,
+        )
+
+        return TagBackfillResponse(
+            dry_run=False,
+            total_documents=total_documents,
+            documents_with_tags=documents_with_tags,
+            chunks_updated=chunks_updated,
+            reembedding_queued=reembedding_queued,
+            kg_entities_updated=kg_entities_updated,
+            message=f"Updated {chunks_updated} chunks across {documents_with_tags} documents."
+            + (f" Queued {reembedding_queued} documents for re-embedding." if reembedding_queued else "")
+            + (f" Synced tags to {kg_entities_updated} KG entities." if kg_entities_updated else ""),
+        )
+
+    except Exception as e:
+        logger.error("Tag backfill failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Tag backfill failed: {str(e)}"
         )

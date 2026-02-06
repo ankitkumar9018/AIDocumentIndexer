@@ -3086,6 +3086,24 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         value_type=ValueType.STRING,
         description="Comma-separated list of fallback embedding providers in priority order"
     ),
+
+    # ==========================================================================
+    # Phase 98: Tag Integration Settings
+    # ==========================================================================
+    SettingDefinition(
+        key="tags.reembed_on_change",
+        category=SettingCategory.PROCESSING,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Re-embed chunks when document tags change. Improves retrieval quality by updating tag context in embeddings, but costs processing time. Recommended for smaller document collections."
+    ),
+    SettingDefinition(
+        key="tags.sync_to_kg",
+        category=SettingCategory.PROCESSING,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Sync document tags to Knowledge Graph entities when tags change. Enables tag-based entity filtering in KG queries."
+    ),
 ]
 
 # Build lookup dictionary

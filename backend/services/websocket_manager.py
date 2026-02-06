@@ -423,6 +423,8 @@ class WebSocketManager:
         async def heartbeat_loop():
             while True:
                 await asyncio.sleep(interval)
+                # Phase 98: Clean up orphaned channel subscribers before heartbeat
+                self._cleanup_orphaned_channels()
                 await self.broadcast(
                     WebSocketMessage(
                         event=EventType.HEARTBEAT,
@@ -431,6 +433,38 @@ class WebSocketManager:
                 )
 
         self._heartbeat_task = asyncio.create_task(heartbeat_loop())
+
+    def _cleanup_orphaned_channels(self):
+        """
+        Phase 98: Remove channel subscribers that no longer have active connections.
+
+        This prevents memory leaks from orphaned subscribers after ungraceful disconnects.
+        """
+        active_connections = set(self._connections.keys())
+        orphaned_removed = 0
+        empty_channels = []
+
+        for channel, subscribers in self._channel_subscribers.items():
+            # Find subscribers that are no longer connected
+            orphaned = subscribers - active_connections
+            if orphaned:
+                subscribers -= orphaned
+                orphaned_removed += len(orphaned)
+
+            # Mark empty channels for removal
+            if not subscribers:
+                empty_channels.append(channel)
+
+        # Remove empty channels
+        for channel in empty_channels:
+            del self._channel_subscribers[channel]
+
+        if orphaned_removed > 0 or empty_channels:
+            logger.debug(
+                "Cleaned up orphaned WebSocket channel subscribers",
+                orphaned_removed=orphaned_removed,
+                empty_channels_removed=len(empty_channels),
+            )
 
     async def stop_heartbeat(self):
         """Stop heartbeat task."""

@@ -435,6 +435,10 @@ class SessionMemoryManager:
         ]
 
         for session_id in stale_sessions:
+            # Phase 98: Explicitly clear memory buffer before removing
+            memory = self._memory_store.get(session_id)
+            if memory and hasattr(memory, 'chat_memory') and hasattr(memory.chat_memory, 'messages'):
+                memory.chat_memory.messages.clear()
             self._memory_store.pop(session_id, None)
             self._session_info.pop(session_id, None)
 
@@ -443,6 +447,40 @@ class SessionMemoryManager:
                 "Cleaned up stale sessions",
                 count=len(stale_sessions),
                 cutoff_hours=self.cleanup_stale_after_hours,
+            )
+
+        # Phase 98: Trim all active session buffers to prevent unbounded growth
+        self._trim_session_buffers()
+
+    def _trim_session_buffers(self):
+        """
+        Phase 98: Trim internal message buffers to prevent memory leaks.
+
+        ConversationBufferWindowMemory stores ALL messages internally even though
+        it only uses the last k for prompting. This method trims the buffer to
+        just keep 2*k messages (giving some headroom for context).
+        """
+        trimmed_count = 0
+        for session_id, memory in self._memory_store.items():
+            info = self._session_info.get(session_id)
+            if not info:
+                continue
+
+            memory_k = info.memory_k
+            max_buffer_size = memory_k * 2  # Keep 2x the window size
+
+            # Access the internal message buffer
+            if hasattr(memory, 'chat_memory') and hasattr(memory.chat_memory, 'messages'):
+                messages = memory.chat_memory.messages
+                if len(messages) > max_buffer_size:
+                    # Trim to keep only the most recent messages
+                    del messages[:-max_buffer_size]
+                    trimmed_count += 1
+
+        if trimmed_count > 0:
+            logger.debug(
+                "Trimmed session memory buffers",
+                sessions_trimmed=trimmed_count,
             )
 
     def clear_all(self):

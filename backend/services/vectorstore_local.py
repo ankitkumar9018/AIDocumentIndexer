@@ -236,6 +236,7 @@ class ChromaVectorStore:
         organization_id: Optional[str] = None,
         uploaded_by_id: Optional[str] = None,
         is_private: bool = False,
+        document_tags: Optional[List[str]] = None,  # Phase 98: Full tags array
     ) -> List[str]:
         """
         Add chunks with embeddings to ChromaDB and SQLite database.
@@ -295,6 +296,8 @@ class ChromaVectorStore:
                 "organization_id": organization_id or "",
                 "uploaded_by_id": uploaded_by_id or "",
                 "is_private": is_private,
+                # Phase 98: Full document tags for tag-based filtering
+                "document_tags": ",".join(document_tags) if document_tags else "",
             })
 
             # Prepare SQLite chunk record (use has_embedding flag for UI tracking)
@@ -479,6 +482,64 @@ class ChromaVectorStore:
         except Exception as e:
             logger.error("Failed to upsert chunk embedding", chunk_id=chunk_id, error=str(e))
             return False
+
+    async def update_document_tags(
+        self,
+        document_id: str,
+        tags: List[str],
+    ) -> int:
+        """
+        Phase 98: Update tags for all chunks of a document in ChromaDB.
+
+        This is called when document tags are updated to keep ChromaDB metadata
+        in sync with the database.
+
+        Args:
+            document_id: Document ID
+            tags: New list of tags
+
+        Returns:
+            Number of chunks updated
+        """
+        try:
+            # Get all chunks for this document
+            results = self._collection.get(
+                where={"document_id": document_id},
+                include=["metadatas"],
+            )
+
+            if not results["ids"]:
+                logger.debug("No chunks found for document", document_id=document_id)
+                return 0
+
+            # Prepare updated metadata for each chunk
+            tags_str = ",".join(tags) if tags else ""
+            updated_metadatas = []
+            for metadata in results["metadatas"]:
+                metadata["document_tags"] = tags_str
+                updated_metadatas.append(metadata)
+
+            # Update all chunks with new tags
+            self._collection.update(
+                ids=results["ids"],
+                metadatas=updated_metadatas,
+            )
+
+            logger.info(
+                "Updated document tags in ChromaDB",
+                document_id=document_id,
+                tags=tags,
+                chunks_updated=len(results["ids"]),
+            )
+            return len(results["ids"])
+
+        except Exception as e:
+            logger.error(
+                "Failed to update document tags in ChromaDB",
+                document_id=document_id,
+                error=str(e),
+            )
+            return 0
 
     # =========================================================================
     # Search Operations

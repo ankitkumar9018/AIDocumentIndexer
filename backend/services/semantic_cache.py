@@ -328,6 +328,20 @@ class SemanticQueryCache:
                 emb_array = np.array(embedding, dtype=np.float32)
                 self._embeddings.append((query_hash, emb_array))
 
+                # Phase 98: Enforce bounds on _embeddings list to prevent memory leaks
+                # This is a safety net in case _remove_entry isn't called synchronously
+                if len(self._embeddings) > self.config.max_entries:
+                    # Keep only embeddings that exist in cache (handles race conditions)
+                    cache_hashes = set(self._cache.keys())
+                    self._embeddings = [
+                        (h, e) for h, e in self._embeddings if h in cache_hashes
+                    ]
+                    logger.debug(
+                        "Trimmed embeddings list to match cache",
+                        embeddings_count=len(self._embeddings),
+                        cache_count=len(self._cache),
+                    )
+
                 # Mark FAISS index as dirty (needs rebuild)
                 if self._use_faiss:
                     self._faiss_modifications += 1

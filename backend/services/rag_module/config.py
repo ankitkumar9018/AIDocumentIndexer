@@ -227,14 +227,14 @@ class RAGConfig:
             if enable_self_rag is None:
                 # Fall back to core settings (which reads env var with proper default)
                 from backend.core.config import settings as core_settings
-                enable_self_rag = getattr(core_settings, 'ENABLE_SELF_RAG', True)
+                enable_self_rag = core_settings.ENABLE_SELF_RAG
         if self_rag_min_supported_ratio == 0.7:  # Default value, might be overridden
             stored_value = settings.get_default_value("rag.self_rag_min_supported_ratio")
             if stored_value is not None:
                 self_rag_min_supported_ratio = stored_value
             else:
                 from backend.core.config import settings as core_settings
-                self_rag_min_supported_ratio = getattr(core_settings, 'SELF_RAG_MIN_SUPPORTED_RATIO', 0.7)
+                self_rag_min_supported_ratio = core_settings.SELF_RAG_MIN_SUPPORTED_RATIO
 
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold

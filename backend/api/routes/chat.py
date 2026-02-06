@@ -733,7 +733,7 @@ async def create_chat_completion(
             # PHASE 40/48: Retrieve relevant memories to enhance context
             memory_context = None
             from backend.core.config import settings as app_settings
-            if getattr(app_settings, "ENABLE_AGENT_MEMORY", False):
+            if app_settings.ENABLE_AGENT_MEMORY:
                 try:
                     from backend.services.mem0_memory import get_memory_service
 
@@ -773,7 +773,7 @@ async def create_chat_completion(
 
             # Phase 60: Add KG entity context for enhanced query understanding
             kg_context = ""
-            if getattr(settings, 'KG_ENABLED', True) and getattr(settings, 'KG_ENABLED_IN_CHAT', True):
+            if settings.KG_ENABLED and settings.KG_ENABLED_IN_CHAT:
                 try:
                     kg_service = await get_kg_service()
 
@@ -790,7 +790,7 @@ async def create_chat_completion(
                         kg_results = await kg_service.search_by_entities(
                             entity_names=entity_names,
                             collection=request.first_collection_filter,
-                            max_hops=getattr(settings, 'KG_MAX_HOPS', 2),
+                            max_hops=settings.KG_MAX_HOPS,
                             limit=3,
                         )
 
@@ -817,7 +817,7 @@ async def create_chat_completion(
 
             # Phase 66: Get personalized prompt additions based on user preferences
             personalization_additions = ""
-            if getattr(app_settings, "ENABLE_USER_PERSONALIZATION", True):
+            if app_settings.ENABLE_USER_PERSONALIZATION:
                 try:
                     personalization_service = get_personalization_service()
                     personalization_additions = await personalization_service.get_personalized_prompt_additions(
@@ -949,7 +949,7 @@ async def create_chat_completion(
                 )
 
                 # PHASE 40/48: Extract and save important information to memory
-                if getattr(app_settings, "ENABLE_AGENT_MEMORY", False):
+                if app_settings.ENABLE_AGENT_MEMORY:
                     try:
                         from backend.services.mem0_memory import get_memory_service, MemoryType
 
@@ -978,7 +978,7 @@ async def create_chat_completion(
                         logger.warning("Failed to save memory", error=str(e))
 
                 # Phase 66: Record query for personalization learning
-                if getattr(app_settings, "ENABLE_USER_PERSONALIZATION", True):
+                if app_settings.ENABLE_USER_PERSONALIZATION:
                     try:
                         personalization_service = get_personalization_service()
                         # Extract topics from KG entities if available
@@ -1722,7 +1722,7 @@ async def submit_feedback(
 
             # Phase 66: Record feedback for personalization learning
             from backend.core.config import settings as app_settings
-            if getattr(app_settings, "ENABLE_USER_PERSONALIZATION", True):
+            if app_settings.ENABLE_USER_PERSONALIZATION:
                 try:
                     personalization_service = get_personalization_service()
 
