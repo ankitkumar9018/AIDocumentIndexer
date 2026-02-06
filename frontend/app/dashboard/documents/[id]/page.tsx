@@ -36,6 +36,9 @@ import {
   Save,
   ChevronDown,
   Eye,
+  ExternalLink,
+  Upload,
+  Server,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -112,6 +115,7 @@ export default function DocumentDetailPage() {
   // Collapsible section states
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
     info: true,
+    source_info: false,
     status_overview: true,
     summary: true,
     insights: false,
@@ -386,7 +390,15 @@ export default function DocumentDetailPage() {
             <div className="flex items-center gap-3">
               <FileText className="h-8 w-8 text-muted-foreground" />
               <div>
-                <h1 className="text-2xl font-bold tracking-tight">{document.name}</h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-2xl font-bold tracking-tight">{document.name}</h1>
+                  {!document.is_stored_locally && (
+                    <Badge variant="outline" className="text-xs gap-1 shrink-0">
+                      <Globe className="h-3 w-3" />
+                      External
+                    </Badge>
+                  )}
+                </div>
                 <p className="text-muted-foreground text-sm">
                   Uploaded {new Date(document.created_at).toLocaleDateString()}
                 </p>
@@ -634,6 +646,168 @@ export default function DocumentDetailPage() {
         </Card>
       </Collapsible>
 
+      {/* Source Information — Provenance & origin tracking */}
+      {(document.source_type || document.upload_source_info || document.source_url) && (
+        <Collapsible open={openSections.source_info} onOpenChange={() => toggleSection("source_info")}>
+          <Card>
+            <CollapsibleTrigger asChild>
+              <CardHeader className="cursor-pointer hover:bg-muted/30 transition-colors">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <CardTitle>Source Information</CardTitle>
+                    <Badge variant={document.is_stored_locally ? "secondary" : "outline"} className="text-xs">
+                      {document.is_stored_locally ? "Stored Locally" : "External Source"}
+                    </Badge>
+                  </div>
+                  <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${openSections.source_info ? "rotate-180" : ""}`} />
+                </div>
+                <CardDescription>How and where this document was uploaded from</CardDescription>
+              </CardHeader>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <CardContent>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Upload Method */}
+                  {!!document.upload_source_info?.upload_method && (
+                    <div className="flex items-start gap-3">
+                      <Upload className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium">Upload Method</p>
+                        <p className="text-sm text-muted-foreground">
+                          {String(document.upload_source_info.upload_method).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Source Type */}
+                  {document.source_type && (
+                    <div className="flex items-start gap-3">
+                      <Server className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium">Source Type</p>
+                        <p className="text-sm text-muted-foreground">
+                          {document.source_type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Uploaded By */}
+                  {!!document.upload_source_info?.uploaded_by && (
+                    <div className="flex items-start gap-3">
+                      <Shield className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium">Uploaded By</p>
+                        <p className="text-sm text-muted-foreground truncate">
+                          {String(document.upload_source_info.uploaded_by).slice(0, 16)}...
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Upload Time */}
+                  {!!document.upload_source_info?.uploaded_at && (
+                    <div className="flex items-start gap-3">
+                      <Clock className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium">Upload Time</p>
+                        <p className="text-sm text-muted-foreground">
+                          {new Date(String(document.upload_source_info.uploaded_at)).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Client Info */}
+                  {!!document.upload_source_info?.client_ip && (
+                    <div className="flex items-start gap-3">
+                      <Globe className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium">Client IP</p>
+                        <p className="text-sm text-muted-foreground">
+                          {String(document.upload_source_info.client_ip)}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* User Agent */}
+                  {!!document.upload_source_info?.user_agent && (
+                    <div className="flex items-start gap-3 sm:col-span-2">
+                      <HardDrive className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">User Agent</p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          {String(document.upload_source_info.user_agent)}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Connector Info (for synced docs) */}
+                  {!!document.upload_source_info?.connector_type && (
+                    <div className="flex items-start gap-3">
+                      <Database className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium">Connector</p>
+                        <p className="text-sm text-muted-foreground">
+                          {String(document.upload_source_info.connector_name || document.upload_source_info.connector_type)}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* External URL */}
+                  {document.source_url && (
+                    <div className="flex items-start gap-3 sm:col-span-2">
+                      <ExternalLink className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium">Source URL</p>
+                        <a
+                          href={document.source_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm text-blue-600 dark:text-blue-400 hover:underline truncate block"
+                        >
+                          {document.source_url}
+                        </a>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Original Path */}
+                  {!!document.upload_source_info?.original_path && (
+                    <div className="flex items-start gap-3 sm:col-span-2">
+                      <FolderOpen className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">Original Path</p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          {String(document.upload_source_info.original_path)}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Storage Mode */}
+                  {!!document.upload_source_info?.storage_mode && (
+                    <div className="flex items-start gap-3">
+                      <HardDrive className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium">Storage Mode</p>
+                        <p className="text-sm text-muted-foreground">
+                          {String(document.upload_source_info.storage_mode).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </CollapsibleContent>
+          </Card>
+        </Collapsible>
+      )}
+
       {/* Status Overview - Embeddings, KG, Enhancement, Images */}
       <Collapsible open={openSections.status_overview} onOpenChange={() => toggleSection("status_overview")}>
         <Card>
@@ -824,6 +998,10 @@ export default function DocumentDetailPage() {
                   fileName={document.name}
                   fileType={document.file_type || ""}
                   className="h-[600px]"
+                  isStoredLocally={document.is_stored_locally}
+                  sourceUrl={document.source_url}
+                  sourceType={document.source_type}
+                  summaryShort={document.enhanced_metadata?.summary_short}
                 />
               </div>
             </CardContent>

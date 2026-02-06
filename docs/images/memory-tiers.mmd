@@ -1,0 +1,17 @@
+flowchart TD
+    MODEL[Model Name] --> PARSE[Parse size from name]
+    PARSE --> TIER{Model Size?}
+
+    TIER -->|3B or less| TINY["Tiny Tier<br/>k=3 turns<br/>budget: 10/10/60/20%"]
+    TIER -->|3-9B| SMALL["Small Tier<br/>k=6 turns<br/>budget: 10/15/55/20%"]
+    TIER -->|9-34B| MEDIUM["Medium Tier<br/>k=10 turns<br/>budget: 10/15/60/15%"]
+    TIER -->|Over 34B| LARGE["Large Tier<br/>k=15 turns<br/>budget: 10/15/60/15%"]
+
+    TINY --> REWRITE{Follow-up?}
+    SMALL --> REWRITE
+    MEDIUM --> REWRITE
+    LARGE --> REWRITE
+
+    REWRITE -->|Yes + Small model| HEURISTIC[Heuristic Rewrite<br/>pronoun replacement]
+    REWRITE -->|Yes + Large model| LLM_RW[LLM Rewrite<br/>standalone question]
+    REWRITE -->|No| PASS[Use original query]

@@ -569,9 +569,15 @@ class Document(Base, UUIDMixin, TimestampMixin):
     # hypothetical_questions, document_type, enhanced_at, model_used
     enhanced_metadata: Mapped[Optional[dict]] = mapped_column(JSONType())
 
-    # Source info (for auto-indexed files)
+    # Source info (for auto-indexed and external-sourced files)
     source_path: Mapped[Optional[str]] = mapped_column(String(1000))
     is_auto_indexed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # External source tracking — populated for connector-synced documents
+    source_url: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)  # URL in external system (GDrive, OneDrive, etc.)
+    source_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # Connector type: google_drive, notion, local_upload, etc.
+    is_stored_locally: Mapped[bool] = mapped_column(Boolean, default=True)  # False = file processed but not stored (process-only mode)
+    # Upload source metadata — tracks who uploaded from where
+    upload_source_info: Mapped[Optional[dict]] = mapped_column(JSONType(), nullable=True)  # {client_ip, user_agent, upload_method, system_name, original_path}
 
     # Private document flag
     # When True, only the uploaded_by user or superadmins can access this document.

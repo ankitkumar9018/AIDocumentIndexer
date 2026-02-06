@@ -1,0 +1,26 @@
+flowchart TD
+    subgraph "Stage 1: Dense Search"
+        QE[Query Embedding] --> HNSW[HNSW ANN Search<br/>ChromaDB / PGVector]
+        HNSW --> DENSE_RESULTS[Top-15 by cosine sim]
+    end
+
+    subgraph "Stage 2: Sparse Search"
+        QT[Query Tokens] --> BM25_IDX[BM25 Index<br/>PostgreSQL FTS]
+        BM25_IDX --> SPARSE_RESULTS[Top-15 by BM25 score]
+    end
+
+    subgraph "Stage 3: Optional Advanced"
+        COLBERT[ColBERT/WARP<br/>Late Interaction]
+        LIGHTRAG[LightRAG<br/>Dual-Level]
+        RAPTOR[RAPTOR<br/>Tree-Organized]
+    end
+
+    subgraph "Stage 4: Fusion"
+        DENSE_RESULTS --> RRF[Reciprocal Rank Fusion<br/>RRF = Sum 1 / k+rank]
+        SPARSE_RESULTS --> RRF
+        COLBERT --> RRF
+        LIGHTRAG --> RRF
+        RAPTOR --> RRF
+        RRF --> DEDUP[Deduplicate by chunk_id]
+        DEDUP --> TOP_K[Return Top-K<br/>default: 10]
+    end

@@ -1,15 +1,21 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Loader2, AlertCircle, FileText, Presentation, File, ExternalLink, Download, Image as ImageIcon, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Loader2, AlertCircle, FileText, Presentation, File, ExternalLink, Download, Image as ImageIcon, ChevronLeft, ChevronRight, Globe, HardDrive } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { api } from '@/lib/api';
 
 interface UploadedDocumentPreviewProps {
   documentId: string;
   fileName: string;
   fileType: string;
   className?: string;
+  isStoredLocally?: boolean;
+  sourceUrl?: string | null;
+  sourceType?: string | null;
+  summaryShort?: string | null;
 }
 
 interface PreviewMetadata {
@@ -29,18 +35,26 @@ interface PreviewMetadata {
  * - PPTX: Rendered slides with navigation
  * - DOCX: HTML rendering
  * - Text files: Raw content display
+ * - External sources: iframe attempt + fallback placeholder
  */
 export function UploadedDocumentPreview({
   documentId,
   fileName,
   fileType,
-  className
+  className,
+  isStoredLocally = true,
+  sourceUrl,
+  sourceType,
+  summaryShort
 }: UploadedDocumentPreviewProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<PreviewMetadata | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [slideImages, setSlideImages] = useState<string[]>([]);
+  const [iframeError, setIframeError] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importSuccess, setImportSuccess] = useState(false);
 
   const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
   const DEV_MODE = process.env.NEXT_PUBLIC_DEV_MODE === 'true';
@@ -70,6 +84,134 @@ export function UploadedDocumentPreview({
   const isPdf = formatLower === 'pdf';
   const isPptx = formatLower === 'pptx';
   const isDocx = formatLower === 'docx';
+
+  // ── External Source Preview Logic ──────────────────────────────────────
+  const isExternal = !isStoredLocally && !importSuccess;
+
+  // Build an embeddable preview URL for external sources
+  const getExternalPreviewUrl = (): string | null => {
+    if (!sourceUrl) return null;
+
+    // Google Drive: use Google Docs Viewer
+    if (sourceType === 'google_drive' || sourceUrl.includes('drive.google.com')) {
+      return `https://docs.google.com/gview?url=${encodeURIComponent(sourceUrl)}&embedded=true`;
+    }
+
+    // Direct PDF link: try iframe embed
+    if (sourceUrl.toLowerCase().endsWith('.pdf')) {
+      return sourceUrl;
+    }
+
+    // Notion, Confluence, etc. — can't embed, return null
+    return null;
+  };
+
+  const handleImportLocal = async () => {
+    setIsImporting(true);
+    try {
+      await api.importDocumentLocal(documentId);
+      setImportSuccess(true);
+    } catch (err) {
+      console.error('Import failed:', err);
+      setError(`Failed to import: ${(err as Error).message}`);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleOpenInSource = () => {
+    if (sourceUrl) {
+      window.open(sourceUrl, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  // ── External Source Rendering ──────────────────────────────────────────
+  if (isExternal) {
+    const externalPreviewUrl = getExternalPreviewUrl();
+    const sourceLabel = sourceType
+      ? sourceType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+      : 'External';
+
+    return (
+      <div className={cn('flex flex-col h-full', className)}>
+        {/* Header bar */}
+        <div className="flex items-center justify-between gap-2 mb-3 px-1">
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-xs gap-1">
+              <Globe className="h-3 w-3" />
+              {sourceLabel}
+            </Badge>
+            <span className="text-sm text-muted-foreground truncate max-w-[300px]">
+              {fileName}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            {sourceUrl && (
+              <Button variant="outline" size="sm" onClick={handleOpenInSource}>
+                <ExternalLink className="h-4 w-4 mr-2" />
+                Open in Source
+              </Button>
+            )}
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleImportLocal}
+              disabled={isImporting}
+            >
+              {isImporting ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <HardDrive className="h-4 w-4 mr-2" />
+              )}
+              {isImporting ? 'Importing...' : 'Import Copy'}
+            </Button>
+          </div>
+        </div>
+
+        {/* Preview area */}
+        {externalPreviewUrl && !iframeError ? (
+          <iframe
+            src={externalPreviewUrl}
+            className="flex-1 w-full min-h-[350px] border rounded-lg"
+            title={`Preview of ${fileName}`}
+            onError={() => setIframeError(true)}
+            onLoad={(e) => {
+              // Some iframes fail silently — check if we can detect it
+              try {
+                const iframe = e.target as HTMLIFrameElement;
+                // Cross-origin iframes will throw on contentDocument access; that's OK
+                if (iframe.contentDocument?.title === '') {
+                  // Likely blocked
+                }
+              } catch {
+                // Cross-origin — expected, preview is probably working
+              }
+            }}
+            sandbox="allow-scripts allow-same-origin allow-popups"
+          />
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center bg-muted rounded-lg gap-4 min-h-[350px]">
+            {getFormatIcon(formatLower)}
+            <div className="text-center max-w-md">
+              <p className="text-sm font-medium mb-1">{fileName}</p>
+              <p className="text-xs text-muted-foreground mb-3">
+                This document is stored externally ({sourceLabel}).
+                {!externalPreviewUrl && ' Preview is not available for this source type.'}
+                {iframeError && ' The external source blocked embedded preview.'}
+              </p>
+              {summaryShort && (
+                <p className="text-xs text-muted-foreground italic border-l-2 border-muted-foreground/30 pl-3 text-left mb-3">
+                  {summaryShort}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Standard Local Preview Logic (unchanged) ──────────────────────────
 
   useEffect(() => {
     async function fetchMetadata() {
@@ -130,29 +272,6 @@ export function UploadedDocumentPreview({
   const handleNextPage = () => {
     if (metadata?.page_count && currentPage < metadata.page_count) {
       setCurrentPage(currentPage + 1);
-    }
-  };
-
-  // Get icon based on format
-  const getFormatIcon = () => {
-    switch (formatLower) {
-      case 'pdf':
-        return <FileText className="h-16 w-16 text-red-500" />;
-      case 'pptx':
-      case 'ppt':
-        return <Presentation className="h-16 w-16 text-orange-500" />;
-      case 'docx':
-      case 'doc':
-        return <FileText className="h-16 w-16 text-blue-500" />;
-      case 'png':
-      case 'jpg':
-      case 'jpeg':
-      case 'gif':
-      case 'webp':
-      case 'svg':
-        return <ImageIcon className="h-16 w-16 text-green-500" />;
-      default:
-        return <File className="h-16 w-16 text-muted-foreground" />;
     }
   };
 
@@ -356,7 +475,7 @@ export function UploadedDocumentPreview({
   // Fallback for unsupported formats - show download option
   return (
     <div className={cn('flex flex-col items-center justify-center h-[400px] bg-muted rounded-lg gap-4', className)}>
-      {getFormatIcon()}
+      {getFormatIcon(formatLower)}
       <div className="text-center">
         <p className="text-sm font-medium mb-1">{fileName}</p>
         <p className="text-xs text-muted-foreground mb-4">
@@ -375,4 +494,27 @@ export function UploadedDocumentPreview({
       </div>
     </div>
   );
+}
+
+// Helper: Get icon based on format
+function getFormatIcon(formatLower: string) {
+  switch (formatLower) {
+    case 'pdf':
+      return <FileText className="h-16 w-16 text-red-500" />;
+    case 'pptx':
+    case 'ppt':
+      return <Presentation className="h-16 w-16 text-orange-500" />;
+    case 'docx':
+    case 'doc':
+      return <FileText className="h-16 w-16 text-blue-500" />;
+    case 'png':
+    case 'jpg':
+    case 'jpeg':
+    case 'gif':
+    case 'webp':
+    case 'svg':
+      return <ImageIcon className="h-16 w-16 text-green-500" />;
+    default:
+      return <File className="h-16 w-16 text-muted-foreground" />;
+  }
 }

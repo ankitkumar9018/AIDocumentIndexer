@@ -7982,3 +7982,151 @@ async def backfill_document_tags(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Tag backfill failed: {str(e)}"
         )
+
+
+# ── Backfill ChromaDB chunk metadata with document filenames ────────────
+@router.post("/backfill-chunk-metadata")
+async def backfill_chunk_metadata(
+    dry_run: bool = True,
+    admin: AdminUser = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retroactively update ChromaDB chunk metadata with document_filename
+    for all chunks. Fixes 'unknown' source names in chat sources.
+    """
+    from backend.db.models import Document, Chunk
+    from backend.services.vectorstore_local import get_chroma_vector_store as get_local_vectorstore
+
+    # Get all documents with their filenames
+    result = await db.execute(
+        select(Document.id, Document.filename).where(Document.filename.isnot(None))
+    )
+    documents = result.all()
+
+    if not documents:
+        return {"message": "No documents found", "total": 0, "updated": 0}
+
+    doc_name_map = {str(doc.id): doc.filename for doc in documents}
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "total_documents": len(documents),
+            "message": f"Would update chunk metadata for {len(documents)} documents. Run with dry_run=false to apply.",
+        }
+
+    # Get ChromaDB collection
+    vectorstore = get_local_vectorstore()
+    collection = vectorstore._collection
+
+    chunks_updated = 0
+    docs_processed = 0
+    errors = []
+
+    for doc_id, filename in doc_name_map.items():
+        try:
+            # Get all chunks for this document from DB
+            chunk_result = await db.execute(
+                select(Chunk.id).where(Chunk.document_id == doc_id)
+            )
+            chunk_ids = [str(c.id) for c in chunk_result.scalars().all()]
+
+            if not chunk_ids:
+                continue
+
+            # Update ChromaDB metadata for each chunk
+            for chunk_id in chunk_ids:
+                try:
+                    existing = collection.get(ids=[chunk_id], include=["metadatas"])
+                    if existing and existing["metadatas"]:
+                        meta = existing["metadatas"][0]
+                        if not meta.get("document_name") or meta.get("document_name") == "unknown":
+                            meta["document_name"] = filename
+                            meta["document_filename"] = filename
+                            collection.update(ids=[chunk_id], metadatas=[meta])
+                            chunks_updated += 1
+                except Exception:
+                    pass  # Skip individual chunk errors
+
+            docs_processed += 1
+        except Exception as e:
+            errors.append(f"Doc {doc_id[:8]}: {str(e)[:100]}")
+
+    logger.info(
+        "Chunk metadata backfill completed",
+        admin_user=admin.user_id,
+        docs_processed=docs_processed,
+        chunks_updated=chunks_updated,
+    )
+
+    return {
+        "dry_run": False,
+        "total_documents": len(documents),
+        "docs_processed": docs_processed,
+        "chunks_updated": chunks_updated,
+        "errors": errors[:10] if errors else [],
+        "message": f"Updated {chunks_updated} chunks across {docs_processed} documents.",
+    }
+
+
+# =============================================================================
+# Storage Stats
+# =============================================================================
+
+@router.get("/storage/stats")
+async def get_storage_stats(
+    admin: AdminUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get document storage breakdown — local vs external, by source type."""
+    from sqlalchemy import case, literal_column
+
+    # Query storage breakdown
+    results = await db.execute(
+        select(
+            Document.source_type,
+            func.coalesce(Document.is_stored_locally, True).label("is_local"),
+            func.count().label("doc_count"),
+            func.coalesce(func.sum(Document.file_size), 0).label("total_size"),
+        )
+        .group_by(Document.source_type, "is_local")
+    )
+    rows = results.all()
+
+    local_count = 0
+    local_size = 0
+    external_count = 0
+    external_size = 0
+    by_source_type: dict = {}
+
+    for row in rows:
+        source_type = row.source_type or "local_upload"
+        is_local = row.is_local
+        count = row.doc_count
+        size = row.total_size or 0
+
+        if is_local:
+            local_count += count
+            local_size += size
+        else:
+            external_count += count
+            external_size += size
+
+        if source_type not in by_source_type:
+            by_source_type[source_type] = {"count": 0, "size": 0, "external_count": 0}
+
+        by_source_type[source_type]["count"] += count
+        by_source_type[source_type]["size"] += size
+        if not is_local:
+            by_source_type[source_type]["external_count"] += count
+
+    return {
+        "local_count": local_count,
+        "external_count": external_count,
+        "local_size_bytes": local_size,
+        "external_size_bytes": external_size,
+        "total_count": local_count + external_count,
+        "total_size_bytes": local_size + external_size,
+        "by_source_type": by_source_type,
+    }

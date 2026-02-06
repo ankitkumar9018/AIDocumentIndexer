@@ -72,6 +72,7 @@ export default function ConnectorsPage() {
   const [selectedConnector, setSelectedConnector] = useState<ConnectorInstance | null>(null);
   const [newConnectorType, setNewConnectorType] = useState<string>("");
   const [newConnectorName, setNewConnectorName] = useState<string>("");
+  const [newStorageMode, setNewStorageMode] = useState<string>("global_default");
 
   // Fetch connector types and instances using new hooks
   const { data: connectorTypes = [], isError: typesError } = useConnectorTypes();
@@ -88,10 +89,12 @@ export default function ConnectorsPage() {
       const data = await createConnectorMutation.mutateAsync({
         connector_type: newConnectorType,
         name: newConnectorName,
+        sync_config: newStorageMode !== "global_default" ? { storage_mode: newStorageMode } : undefined,
       });
       setIsCreateDialogOpen(false);
       setNewConnectorType("");
       setNewConnectorName("");
+      setNewStorageMode("global_default");
       toast.success("Connector created");
 
       // If it's OAuth-based, redirect to OAuth flow
@@ -217,6 +220,23 @@ export default function ConnectorsPage() {
                   value={newConnectorName}
                   onChange={(e) => setNewConnectorName(e.target.value)}
                 />
+              </div>
+              {/* Storage Mode Override */}
+              <div className="space-y-2">
+                <Label>Storage Mode</Label>
+                <Select value={newStorageMode} onValueChange={setNewStorageMode}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select storage mode" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="global_default">Use Global Default</SelectItem>
+                    <SelectItem value="download">Download & Store</SelectItem>
+                    <SelectItem value="process_only">Process Only (link only)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Override the global storage setting for this connector
+                </p>
               </div>
               {newConnectorType && (
                 <div className="p-4 bg-muted rounded-lg">

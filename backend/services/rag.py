@@ -1429,6 +1429,9 @@ class RAGService:
         use_multilingual_search: bool = False,  # Phase 59: Enable cross-lingual search
         skip_cache: bool = False,  # Skip all in-memory caches (Phase 65, SearchResultCache)
         intelligence_level: Optional[str] = None,  # Intelligence level: basic/standard/enhanced/maximum
+        temperature_override: Optional[float] = None,  # Per-request temperature (avoids session config race)
+        enable_cot: bool = False,  # Enable chain-of-thought reasoning
+        enable_verification: bool = False,  # Enable self-verification of answers
     ) -> RAGResponse:
         """
         Query the RAG system.
@@ -2233,20 +2236,32 @@ class RAGService:
         # Include for ALL models — keywords/topics add only ~150 tokens per doc
         # and help tiny models understand document context
         enhanced_metadata_map = None
-        if _s("rag.include_enhanced_metadata"):
+        document_name_map = None
+        doc_ids = []
+        try:
+            doc_ids = list({
+                doc.metadata.get("document_id")
+                for doc, _ in retrieved_docs
+                if doc.metadata and doc.metadata.get("document_id")
+            })
+        except Exception:
+            pass
+
+        if doc_ids:
+            # Load document names as fallback for chunks missing document_name in metadata
             try:
-                doc_ids = list({
-                    doc.metadata.get("document_id")
-                    for doc, _ in retrieved_docs
-                    if doc.metadata and doc.metadata.get("document_id")
-                })
-                if doc_ids:
-                    enhanced_metadata_map = await self._load_enhanced_metadata_for_docs(doc_ids)
+                document_name_map = await self._load_document_names(doc_ids)
             except Exception as e:
-                logger.debug("Enhanced metadata loading failed", error=str(e))
+                logger.debug("Document name loading failed", error=str(e))
+
+            if _s("rag.include_enhanced_metadata"):
+                try:
+                    enhanced_metadata_map = await self._load_enhanced_metadata_for_docs(doc_ids)
+                except Exception as e:
+                    logger.debug("Enhanced metadata loading failed", error=str(e))
 
         # Format context from retrieved documents
-        context, sources = self._format_context(retrieved_docs, include_collection_context, freshness_config=freshness_config, enhanced_metadata_map=enhanced_metadata_map)
+        context, sources = self._format_context(retrieved_docs, include_collection_context, freshness_config=freshness_config, enhanced_metadata_map=enhanced_metadata_map, document_name_map=document_name_map)
         logger.info(
             "RAG context formatted",
             context_length=len(context),
@@ -2592,6 +2607,19 @@ class RAGService:
             if intelligence_grounding:
                 system_prompt = f"{system_prompt}\n{intelligence_grounding}"
 
+        # Chain-of-thought: add reasoning instruction for 7B+ models
+        # Tiny models (<3B) can't do meta-tasks like CoT — they answer the instruction as a question
+        if enable_cot and not is_tiny:
+            system_prompt = f"{system_prompt}\nThink through this step by step before answering. Show your reasoning process."
+            logger.debug("Chain-of-thought enabled", model=model_name)
+
+        # Self-verification: override verification level to "thorough"
+        if enable_verification:
+            self.verification_level = "thorough"
+            if not self.verification_enabled:
+                self.verification_enabled = True
+            logger.debug("Self-verification set to thorough", model=model_name)
+
         # Get research-backed sampling configuration (temperature, top_p, top_k, repeat_penalty)
         # Intent-based scaling: factual queries get lower temp, exploratory slightly higher
         # PHASE 15: Model-based + intent-based temperature optimization
@@ -2600,9 +2628,18 @@ class RAGService:
         sampling_config = _get_adaptive_sampling_config(model_name, query_intent)
         recommended_temp = sampling_config["temperature"]
 
-        # Check if user has manually overridden temperature via session config
-        # Use explicit flag if available, otherwise fall back to value comparison
-        has_manual_override = (
+        # Check for per-request temperature override first (eliminates race condition
+        # where session config hasn't been written to DB yet on first message)
+        if temperature_override is not None:
+            logger.info(
+                "Using per-request temperature override",
+                request_temp=temperature_override,
+                optimized_temp=recommended_temp,
+                model=model_name,
+                intent=query_intent,
+            )
+            sampling_config["temperature"] = temperature_override
+        elif (
             llm_config
             and (
                 # Prefer explicit flag over value comparison
@@ -2614,18 +2651,15 @@ class RAGService:
                     and getattr(llm_config, 'temperature_explicitly_set', False)
                 )
             )
-        )
-
-        if has_manual_override:
-            # User has set manual temperature - respect their choice but log it
+        ):
+            # User has set manual temperature via session config
             logger.info(
-                "Using manual temperature override (Phase 15 optimization available)",
+                "Using session config temperature override (Phase 15 optimization available)",
                 manual_temp=llm_config.temperature,
                 optimized_temp=recommended_temp,
                 model=model_name,
                 intent=query_intent,
             )
-            # Keep the manual override in sampling_config
             sampling_config["temperature"] = llm_config.temperature
         else:
             # Use Phase 15 optimized temperature
@@ -5774,12 +5808,46 @@ class RAGService:
             )
             return {}
 
+    async def _load_document_names(
+        self, document_ids: List[str]
+    ) -> Dict[str, str]:
+        """
+        Batch-load document filenames for a list of document IDs.
+        Used as fallback when ChromaDB metadata lacks document_name.
+
+        Returns:
+            Dict mapping document_id -> filename string.
+        """
+        if not document_ids:
+            return {}
+        try:
+            async with async_session_context() as db:
+                result = await db.execute(
+                    select(DBDocument.id, DBDocument.filename).where(
+                        DBDocument.id.in_(document_ids)
+                    )
+                )
+                rows = result.all()
+                return {
+                    str(row.id): row.filename
+                    for row in rows
+                    if row.filename
+                }
+        except Exception as e:
+            logger.warning(
+                "Failed to load document names",
+                error=str(e),
+                doc_count=len(document_ids),
+            )
+            return {}
+
     def _format_context(
         self,
         retrieved_docs: List[Tuple[Document, float]],
         include_collection_context: bool = True,
         freshness_config: Optional[dict] = None,
         enhanced_metadata_map: Optional[Dict[str, dict]] = None,
+        document_name_map: Optional[Dict[str, str]] = None,
     ) -> Tuple[str, List[Source]]:
         """
         Format retrieved documents into context string and sources list.
@@ -5835,7 +5903,14 @@ class RAGService:
             source_num += 1
 
             # Build context entry - check document_name first (set by custom vectorstore)
-            doc_name = metadata.get("document_name") or metadata.get("document_filename") or f"Document {metadata.get('document_id', 'unknown')[:8]}"
+            # Fallback chain: metadata.document_name → metadata.document_filename → DB lookup → generic
+            doc_id = metadata.get("document_id", "")
+            doc_name = (
+                metadata.get("document_name")
+                or metadata.get("document_filename")
+                or (document_name_map.get(doc_id) if document_name_map and doc_id else None)
+                or f"Document {doc_id[:8] if doc_id else 'unknown'}"
+            )
             collection = metadata.get("collection")
 
             # Include collection info if enabled and available

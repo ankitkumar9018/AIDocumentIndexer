@@ -323,6 +323,18 @@ DEFAULT_MENU_SECTIONS = [
         description="Process audio and video content",
     ),
 
+    # Memory
+    MenuSection(
+        key="memory",
+        label="Memory",
+        icon="Brain",
+        path="/dashboard/memory",
+        min_role_level=RoleLevel.VIEWER,
+        is_simple_mode=False,
+        sort_order=23,
+        description="View and manage AI memory",
+    ),
+
     # Skills
     MenuSection(
         key="skills",
@@ -331,7 +343,7 @@ DEFAULT_MENU_SECTIONS = [
         path="/dashboard/skills",
         min_role_level=RoleLevel.EDITOR,
         is_simple_mode=False,
-        sort_order=23,
+        sort_order=24,
         badge="Beta",
         description="Custom AI skills",
     ),

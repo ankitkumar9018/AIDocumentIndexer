@@ -24,7 +24,6 @@ describe("DatabaseTab", () => {
 
   const defaultProps = {
     localSettings: mockLocalSettings,
-    handleSettingChange: jest.fn(),
     dbInfo: mockDbInfo,
     dbInfoLoading: false,
     connectionsData: mockConnectionsData,

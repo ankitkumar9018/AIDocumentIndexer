@@ -1252,7 +1252,7 @@ describe("Settings Page Handlers", () => {
   describe("Utility Functions", () => {
     describe("getProviderTypeConfig", () => {
       it("should return provider type configuration", () => {
-        const providerTypesData = {
+        const providerTypesData: { provider_types: Record<string, { name: string; fields: string[]; default_model: string; chat_models: string[]; embedding_models: string[] }> } = {
           provider_types: {
             openai: {
               name: "OpenAI",
@@ -1289,7 +1289,7 @@ describe("Settings Page Handlers", () => {
 
     describe("getDbTypeConfig", () => {
       it("should return database type configuration", () => {
-        const connectionTypesData = {
+        const connectionTypesData: { database_types: Record<string, { name: string; default_port: number | null; default_database: string }> } = {
           database_types: {
             postgresql: {
               name: "PostgreSQL",

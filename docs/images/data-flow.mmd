@@ -1,0 +1,39 @@
+graph LR
+    subgraph "Document Ingestion"
+        UPLOAD[Upload API<br/>POST /documents]
+        CONNECTOR[Connector Sync<br/>Google Drive / Notion]
+    end
+
+    subgraph "Processing Pipeline"
+        PARSE[Parse<br/>PDF/DOCX/PPTX/TXT]
+        CHUNK[Chunk<br/>Semantic + Sliding Window]
+        EMBED_DOC[Embed<br/>Generate Vectors]
+        INDEX[Index<br/>ChromaDB + BM25]
+    end
+
+    subgraph "Optional Enhancement"
+        ENHANCE[Enhance<br/>Summaries / Keywords]
+        KG_EXTRACT[KG Extract<br/>Entities / Relations]
+        IMG_ANALYZE[Image Analysis<br/>Vision Model]
+    end
+
+    subgraph "Query Pipeline"
+        QUERY[User Query]
+        RETRIEVE[Retrieve<br/>Hybrid Search]
+        GENERATE[Generate<br/>LLM + Context]
+        RESPOND[Response<br/>+ Sources + Confidence]
+    end
+
+    UPLOAD --> PARSE
+    CONNECTOR --> PARSE
+    PARSE --> CHUNK
+    CHUNK --> EMBED_DOC
+    EMBED_DOC --> INDEX
+
+    INDEX -.-> ENHANCE
+    INDEX -.-> KG_EXTRACT
+    INDEX -.-> IMG_ANALYZE
+
+    QUERY --> RETRIEVE
+    RETRIEVE -->|Top-K Chunks| GENERATE
+    GENERATE --> RESPOND

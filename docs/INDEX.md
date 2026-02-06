@@ -1,6 +1,6 @@
 # AIDocumentIndexer - Documentation Index
 
-**Last Updated:** January 26, 2026
+**Last Updated:** February 6, 2026
 
 ## Quick Links
 
@@ -330,7 +330,17 @@ Located in `/backend/scripts/`
 
 ---
 
-## Architecture
+## Architecture & Deep-Dive Documentation
+
+### System Design (with Mermaid diagrams)
+
+- **[System Architecture](SYSTEM_ARCHITECTURE.md)** — High-level component map, data flow, database schema, deployment architecture (all with Mermaid diagrams)
+- **[RAG Pipeline](RAG_PIPELINE.md)** — End-to-end query flow: cache check → spell correction → classification → routing → retrieval → verification → LLM → response assembly (15 steps, detailed flowcharts)
+- **[Document Lifecycle](DOCUMENT_LIFECYCLE.md)** — Upload → Parse → Chunk → Embed → Enhance → KG Extract → Query (with state diagrams and sequence diagrams)
+- **[Scalability Analysis](SCALABILITY.md)** — Can it handle millions of docs? Bottleneck analysis, 4-tier scaling roadmap, cost estimates
+- **[Chat UI Architecture](CHAT_UI.md)** — Progressive disclosure layout, settings drawer, mode pills, contextual chips
+- **[Connector System](CONNECTOR_SYSTEM.md)** — External source sync, storage modes (download vs process-only), source tracking, external preview
+- **[Memory System](MEMORY_SYSTEM.md)** — Session memory tiers, query rewriting, DB rehydration, global user memory lifecycle
 
 ### System Components
 
@@ -589,6 +599,6 @@ python backend/scripts/backfill_chunk_embeddings.py
 
 ---
 
-**Last Updated:** January 26, 2026
-**Documentation Version:** 1.5 (Phase 96)
+**Last Updated:** February 6, 2026
+**Documentation Version:** 1.6 (Phase 2.5 — Architecture Docs)
 **System Version:** 0.1.0

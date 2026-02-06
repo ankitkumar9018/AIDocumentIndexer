@@ -677,6 +677,16 @@ class ConnectorSyncService(BaseService):
             self.log_warning("No content for resource", resource_id=resource.id)
             return
 
+        # Check per-connector storage mode override, then fall back to global setting
+        per_connector_mode = (instance.sync_config or {}).get("storage_mode") if instance.sync_config else None
+        if per_connector_mode and per_connector_mode != "global_default":
+            storage_mode = per_connector_mode
+        else:
+            from backend.services.settings import SettingsService
+            settings_service = SettingsService()
+            storage_mode = await settings_service.get_setting("connector.storage_mode") or "download"
+        is_process_only = storage_mode == "process_only"
+
         # Create or update document
         if synced_resource and synced_resource.document_id:
             # Update existing document
@@ -695,17 +705,41 @@ class ConnectorSyncService(BaseService):
                 organization_id=self._organization_id,
                 title=resource.name,
                 filename=resource.name,
+                original_filename=resource.name,
                 file_type=self._get_file_extension(resource.mime_type, resource.name),
                 file_size=len(content),
-                source_url=resource.web_url,
-                source_type="connector",
+                mime_type=resource.mime_type,
+                source_url=resource.web_url or resource.download_url,
+                source_type=instance.connector_type,
+                is_stored_locally=not is_process_only,
                 processing_status="pending",
+                upload_source_info={
+                    "upload_method": "connector_sync",
+                    "connector_type": instance.connector_type,
+                    "connector_name": instance.name,
+                    "external_id": resource.id,
+                    "external_path": resource.path,
+                    "external_url": resource.web_url or resource.download_url,
+                    "synced_at": datetime.utcnow().isoformat(),
+                    "storage_mode": storage_mode,
+                },
             )
             session.add(document)
             await session.flush()
 
-            # Save content to storage
+            # Save content to storage (temporary if process-only)
             await self._save_content(document.id, content, resource.name)
+
+            # In process-only mode, delete the local file after processing
+            if is_process_only:
+                try:
+                    await self._delete_stored_content(document.id, resource.name)
+                except Exception as e:
+                    self.log_warning(
+                        "Failed to clean up process-only file",
+                        error=str(e),
+                        document_id=str(document.id),
+                    )
 
         # Update synced resource record
         if synced_resource:
@@ -786,6 +820,19 @@ class ConnectorSyncService(BaseService):
 
         with open(file_path, "wb") as f:
             f.write(content)
+
+    async def _delete_stored_content(self, document_id: uuid.UUID, filename: str):
+        """Delete locally stored file content (for process-only mode)."""
+        import shutil
+        from pathlib import Path
+        from backend.core.config import settings
+
+        storage_path = Path(getattr(settings, "DOCUMENT_STORAGE_PATH", "./storage/documents"))
+        doc_dir = storage_path / str(document_id)
+
+        if doc_dir.exists():
+            shutil.rmtree(doc_dir)
+            self.log_info("Cleaned up process-only file", document_id=str(document_id))
 
 
 # Singleton scheduler instance

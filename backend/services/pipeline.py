@@ -1638,6 +1638,11 @@ class DocumentPipeline:
                     is_private=is_private,
                     # Folder assignment
                     folder_id=self._safe_uuid(folder_id),
+                    # Source tracking metadata
+                    source_url=metadata.get("source_url"),
+                    source_type=metadata.get("source_type"),
+                    is_stored_locally=metadata.get("is_stored_locally", True),
+                    upload_source_info=metadata.get("upload_source_info"),
                 )
 
                 db.add(document)

@@ -1,0 +1,77 @@
+graph TB
+    subgraph "Frontend - Next.js"
+        UI[Chat UI / Dashboard]
+        API_CLIENT[API Client<br/>React Query Hooks]
+    end
+
+    subgraph "Backend - FastAPI"
+        ROUTES[API Routes<br/>chat / documents / admin]
+        AUTH[Auth Middleware<br/>Bearer Token / OIDC]
+
+        subgraph "Core Services"
+            RAG[RAG Service]
+            LLM_SVC[LLM Service]
+            EMBED[Embedding Service]
+            PIPELINE[Document Pipeline]
+            KG[Knowledge Graph]
+            MEMORY[Session Memory]
+        end
+
+        subgraph "Retrieval Layer"
+            HYBRID[Hybrid Retriever]
+            VECTOR[Vector Store<br/>ChromaDB / PGVector]
+            BM25[BM25 Sparse Index]
+            CACHE[Semantic Cache<br/>FAISS + LRU]
+        end
+
+        subgraph "Intelligence Layer"
+            ROUTER[Adaptive Router]
+            CLASSIFIER[Query Classifier]
+            VERIFIER[Self-RAG Verifier]
+            EXPANDER[Query Expander]
+        end
+    end
+
+    subgraph "External Services"
+        OLLAMA[Ollama<br/>Local LLM]
+        OPENAI[OpenAI API]
+        ANTHROPIC[Anthropic API]
+    end
+
+    subgraph "Storage"
+        POSTGRES[(PostgreSQL<br/>+ pgvector)]
+        REDIS[(Redis Cache)]
+        FILES[File Storage<br/>./storage/documents]
+    end
+
+    UI --> API_CLIENT
+    API_CLIENT -->|HTTP/SSE| ROUTES
+    ROUTES --> AUTH
+    AUTH --> RAG
+    AUTH --> PIPELINE
+
+    RAG --> MEMORY
+    RAG --> CACHE
+    RAG --> CLASSIFIER
+    RAG --> ROUTER
+    RAG --> HYBRID
+    RAG --> LLM_SVC
+    RAG --> VERIFIER
+
+    HYBRID --> VECTOR
+    HYBRID --> BM25
+    HYBRID --> KG
+
+    VECTOR --> EMBED
+    EMBED --> OLLAMA
+    EMBED --> OPENAI
+
+    LLM_SVC --> OLLAMA
+    LLM_SVC --> OPENAI
+    LLM_SVC --> ANTHROPIC
+
+    PIPELINE --> POSTGRES
+    PIPELINE --> FILES
+    VECTOR --> POSTGRES
+    MEMORY --> POSTGRES
+    CACHE --> REDIS

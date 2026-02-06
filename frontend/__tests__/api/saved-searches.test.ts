@@ -135,7 +135,7 @@ describe('Saved Searches API', () => {
         date_from: null,
         date_to: null,
         file_types: ['pdf', 'docx'],
-        search_mode: 'hybrid',
+        search_mode: 'hybrid' as const,
       };
 
       const savedSearch = {
@@ -166,7 +166,7 @@ describe('Saved Searches API', () => {
         name: 'Existing Search',
         query: 'updated query',
         collection: 'UpdatedCollection',
-        search_mode: 'vector',
+        search_mode: 'vector' as const,
       };
 
       mockFetch.mockResolvedValueOnce({
@@ -236,7 +236,7 @@ describe('Saved Searches API', () => {
         query: 'documents',
         folder_id: 'folder-123',
         include_subfolders: true,
-        search_mode: 'hybrid',
+        search_mode: 'hybrid' as const,
       };
 
       mockFetch.mockResolvedValueOnce({
@@ -259,7 +259,7 @@ describe('Saved Searches API', () => {
         query: 'reports',
         date_from: '2025-01-01',
         date_to: '2025-12-31',
-        search_mode: 'keyword',
+        search_mode: 'keyword' as const,
       };
 
       mockFetch.mockResolvedValueOnce({
@@ -281,7 +281,7 @@ describe('Saved Searches API', () => {
         name: 'Multi-type Search',
         query: '',
         file_types: ['pdf', 'docx', 'xlsx'],
-        search_mode: 'hybrid',
+        search_mode: 'hybrid' as const,
       };
 
       mockFetch.mockResolvedValueOnce({

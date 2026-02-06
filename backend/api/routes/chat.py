@@ -251,6 +251,15 @@ class ChatRequest(BaseModel):
     # Chain of thought / verification
     enable_cot: bool = Field(default=False, description="Enable chain-of-thought reasoning")
     enable_verification: bool = Field(default=False, description="Enable self-verification of answers")
+    # Temperature override - sent inline with each request to avoid race condition
+    temperature_override: Optional[float] = Field(default=None, ge=0.0, le=2.0, description="Temperature override from UI (avoids race condition with session config)")
+    # Ensemble voting
+    ensemble_voting: bool = Field(default=False, description="Enable ensemble voting across multiple models")
+    ensemble_strategy: Optional[str] = Field(default=None, pattern="^(confidence|majority|weighted|consensus|synthesis)$", description="Ensemble voting strategy")
+    # Parallel knowledge
+    parallel_knowledge: bool = Field(default=False, description="Run RAG + general LLM in parallel")
+    parallel_output_mode: Optional[str] = Field(default=None, pattern="^(merged|separate|toggle)$", description="How to present parallel results")
+    parallel_general_provider_id: Optional[str] = Field(default=None, description="Provider ID for general knowledge query in parallel mode")
 
     @property
     def effective_collection_filters(self) -> Optional[List[str]]:
@@ -294,6 +303,10 @@ class ChatResponse(BaseModel):
     suggested_questions: Optional[List[str]] = None
     # Context sufficiency check result (Phase 2 enhancement)
     context_sufficiency: Optional[ContextSufficiencyInfo] = None
+    # Parallel knowledge (dual mode) fields
+    parallel_knowledge: bool = False  # Whether parallel mode was used
+    general_answer: Optional[str] = None  # General knowledge answer (when parallel_knowledge=True)
+    parallel_output_mode: Optional[str] = None  # "merged", "separate", "toggle"
 
 
 class ChatStreamChunk(BaseModel):
@@ -867,7 +880,89 @@ async def create_chat_completion(
                 is_superadmin=user.is_superadmin,  # Superadmin can access all private docs
                 skip_cache=request.skip_cache,  # Skip all caches for regenerate/refresh
                 intelligence_level=request.intelligence_level,  # Intelligence level for grounding
+                temperature_override=request.temperature_override,  # Per-request temperature (avoids race)
+                enable_cot=request.enable_cot,  # Chain-of-thought reasoning
+                enable_verification=request.enable_verification,  # Self-verification
             )
+
+            # Ensemble voting: re-query with multiple models using retrieved context
+            if request.ensemble_voting and response.sources:
+                try:
+                    from backend.services.ensemble_voting import get_ensemble_voting_service, VotingStrategy
+
+                    ensemble_service = get_ensemble_voting_service()
+                    # Build context from retrieved sources
+                    rag_context = "\n\n".join(
+                        f"[Source: {getattr(s, 'document_name', 'unknown')}]\n{getattr(s, 'full_content', '') or getattr(s, 'snippet', '')}"
+                        for s in response.sources[:request.max_sources]
+                    )
+                    strategy_map = {
+                        "confidence": VotingStrategy.CONFIDENCE,
+                        "majority": VotingStrategy.MAJORITY,
+                        "weighted": VotingStrategy.CONFIDENCE,
+                        "consensus": VotingStrategy.CONSENSUS,
+                        "synthesis": VotingStrategy.SYNTHESIS,
+                    }
+                    strategy = strategy_map.get(request.ensemble_strategy or "confidence", VotingStrategy.CONFIDENCE)
+                    ensemble_result = await ensemble_service.query(
+                        question=request.message,
+                        context=rag_context,
+                        strategy=strategy,
+                    )
+                    # Override the RAG answer with ensemble's voted answer
+                    response.content = ensemble_result.final_answer
+                    response.confidence_score = ensemble_result.confidence
+                    response.confidence_level = (
+                        "high" if ensemble_result.confidence > 0.8
+                        else "medium" if ensemble_result.confidence > 0.5
+                        else "low"
+                    )
+                    logger.info(
+                        "Ensemble voting applied",
+                        strategy=str(strategy),
+                        agreement=ensemble_result.agreement_level,
+                        models_used=len(ensemble_result.model_answers),
+                    )
+                except Exception as e:
+                    logger.warning("Ensemble voting failed, using single-model answer", error=str(e))
+
+            # Parallel knowledge: run general-mode query alongside RAG answer
+            general_answer = None
+            parallel_output_mode = None
+            if request.parallel_knowledge:
+                parallel_output_mode = request.parallel_output_mode or "merged"
+                try:
+                    from backend.services.general_chat import get_general_chat_service
+                    general_service = get_general_chat_service()
+                    general_response = await general_service.query(
+                        question=request.message,
+                        session_id=None,  # Don't persist general query to session history
+                        language=request.language or "en",
+                    )
+                    general_answer = general_response.content
+
+                    # If merged mode, synthesize both answers into one
+                    if parallel_output_mode == "merged" and general_answer:
+                        from backend.services.llm import LLMFactory
+                        merge_llm = await LLMFactory.get_chat_model()
+                        merge_prompt = (
+                            f"You have two answers to the question: \"{request.message}\"\n\n"
+                            f"**Answer from Documents (with citations):**\n{response.content}\n\n"
+                            f"**Answer from General Knowledge:**\n{general_answer}\n\n"
+                            "Synthesize these into a single comprehensive answer. "
+                            "Prioritize document-based information but supplement with general knowledge where helpful. "
+                            "Keep the document citations intact."
+                        )
+                        merge_result = await merge_llm.ainvoke(merge_prompt)
+                        response.content = merge_result.content if hasattr(merge_result, 'content') else str(merge_result)
+
+                    logger.info(
+                        "Parallel knowledge query completed",
+                        output_mode=parallel_output_mode,
+                        has_general_answer=bool(general_answer),
+                    )
+                except Exception as e:
+                    logger.warning("Parallel knowledge general query failed", error=str(e))
 
             # Convert sources to API format
             sources = []
@@ -1019,6 +1114,10 @@ async def create_chat_completion(
                 confidence_warning=response.confidence_warning if response.confidence_warning else None,
                 suggested_questions=response.suggested_questions if response.suggested_questions else None,
                 context_sufficiency=context_sufficiency_info,
+                # Parallel knowledge fields
+                parallel_knowledge=bool(request.parallel_knowledge and general_answer),
+                general_answer=general_answer if request.parallel_knowledge else None,
+                parallel_output_mode=parallel_output_mode if request.parallel_knowledge else None,
             )
 
     except Exception as e:

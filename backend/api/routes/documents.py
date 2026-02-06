@@ -122,6 +122,11 @@ class DocumentResponse(BaseModel):
     images_analyzed_count: int = 0
     image_analysis_completed_at: Optional[datetime] = None
     image_analysis_error: Optional[str] = None
+    # Source tracking / provenance
+    source_url: Optional[str] = None
+    source_type: Optional[str] = None
+    is_stored_locally: bool = True
+    upload_source_info: Optional[dict] = None
 
     class Config:
         from_attributes = True
@@ -289,6 +294,11 @@ def document_to_response(
         images_analyzed_count=doc.images_analyzed_count or 0,
         image_analysis_completed_at=doc.image_analysis_completed_at,
         image_analysis_error=doc.image_analysis_error,
+        # Source tracking / provenance
+        source_url=getattr(doc, "source_url", None),
+        source_type=getattr(doc, "source_type", None),
+        is_stored_locally=getattr(doc, "is_stored_locally", True),
+        upload_source_info=getattr(doc, "upload_source_info", None),
     )
 
 
@@ -1743,12 +1753,28 @@ async def download_document(
             detail="You don't have permission to download this document",
         )
 
-    # Check if file exists
-    file_path = Path(document.file_path)
-    if not file_path.exists():
+    # Check if file exists on disk
+    file_path = Path(document.file_path) if document.file_path else None
+    if not file_path or not file_path.exists():
+        # If file not stored locally, redirect to external source URL
+        source_url = getattr(document, 'source_url', None)
+        if source_url:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=source_url, status_code=302)
+
+        # Also check SyncedResource for external URL fallback
+        from backend.db.models import SyncedResource
+        synced = await db.execute(
+            select(SyncedResource).where(SyncedResource.document_id == document.id).limit(1)
+        )
+        synced_resource = synced.scalar_one_or_none()
+        if synced_resource and synced_resource.external_url:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=synced_resource.external_url, status_code=302)
+
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document file not found on disk",
+            detail="Document file not found on disk and no external source URL available",
         )
 
     # Get MIME type - infer from file extension if not stored
@@ -3621,3 +3647,108 @@ async def reanalyze_document_images(
         ),
         error=analysis_result.error,
     )
+
+
+# ── Import Local Copy ────────────────────────────────────────────────────
+
+@router.post("/{document_id}/import-local")
+async def import_document_local(
+    document_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Download an external document and store it locally.
+
+    Only available for documents where is_stored_locally=False and source_url is set.
+    Downloads the file from the external source and saves it to local storage.
+    """
+    import httpx
+    from backend.core.config import settings as app_settings
+
+    # Get document
+    query = select(Document).where(Document.id == document_id)
+    org_id = get_org_filter(user)
+    if org_id and not user.is_superadmin:
+        query = query.where(
+            or_(
+                Document.organization_id == org_id,
+                Document.organization_id.is_(None),
+            )
+        )
+
+    result = await db.execute(query)
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Check write permission
+    permission_service = get_permission_service()
+    has_write = await permission_service.check_document_access(
+        user_context=user,
+        document_id=str(document_id),
+        permission=Permission.WRITE,
+        session=db,
+    )
+    if not has_write:
+        raise HTTPException(status_code=403, detail="Write permission required")
+
+    # Must be an external document
+    if getattr(document, "is_stored_locally", True):
+        raise HTTPException(status_code=400, detail="Document is already stored locally")
+
+    source_url = getattr(document, "source_url", None)
+    if not source_url:
+        raise HTTPException(status_code=400, detail="No source URL available for this document")
+
+    # Download from external source
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
+            response = await client.get(source_url)
+            response.raise_for_status()
+            content = response.content
+    except httpx.HTTPError as e:
+        logger.error("Failed to download from external source", url=source_url, error=str(e))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to download from external source: {str(e)}",
+        )
+
+    # Save to local storage
+    storage_path = Path(getattr(app_settings, "DOCUMENT_STORAGE_PATH", "./storage/documents"))
+    storage_path.mkdir(parents=True, exist_ok=True)
+
+    filename = document.original_filename or document.filename or f"document_{document_id}"
+    file_path = storage_path / str(document_id) / filename
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Update document record
+    document.is_stored_locally = True
+    document.file_path = str(file_path)
+    document.file_size = len(content)
+
+    # Update upload_source_info
+    existing_info = document.upload_source_info or {}
+    existing_info["imported_locally_at"] = datetime.utcnow().isoformat()
+    existing_info["imported_by"] = user.user_id
+    document.upload_source_info = existing_info
+
+    await db.commit()
+
+    logger.info(
+        "Document imported locally",
+        document_id=str(document_id),
+        file_size=len(content),
+        user_id=user.user_id,
+    )
+
+    return {
+        "success": True,
+        "document_id": str(document_id),
+        "file_size": len(content),
+        "file_path": str(file_path),
+    }

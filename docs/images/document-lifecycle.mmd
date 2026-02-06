@@ -1,0 +1,18 @@
+stateDiagram-v2
+    [*] --> Uploaded : Upload API / Connector Sync
+    Uploaded --> Parsing : Auto-triggered
+    Parsing --> Chunking : Text extracted
+    Chunking --> Embedding : Chunks created
+    Embedding --> Indexed : Vectors stored
+    Indexed --> Enhanced : Optional
+    Enhanced --> KG_Extracted : Optional
+    KG_Extracted --> Queryable
+    Indexed --> Queryable : Skip enhancement
+
+    Parsing --> Failed : Parse error
+    Embedding --> Failed : Embed error
+    Failed --> Parsing : Retry
+
+    Queryable --> Deleted : Soft delete
+    Deleted --> Queryable : Restore
+    Deleted --> [*] : Hard delete

@@ -648,6 +648,7 @@ def register_routes(app: FastAPI) -> None:
     from backend.api.routes.metrics import router as metrics_router
     from backend.api.routes.folders import router as folders_router
     from backend.api.routes.preferences import router as preferences_router
+    from backend.api.routes.memory import router as memory_router
     from backend.api.routes.generation_templates import router as generation_templates_router
     from backend.api.routes.knowledge_graph import router as knowledge_graph_router
     from backend.api.routes.workflows import router as workflows_router
@@ -728,6 +729,7 @@ def register_routes(app: FastAPI) -> None:
     app.include_router(metrics_router, prefix="/api/v1/metrics", tags=["Metrics & Monitoring"])
     app.include_router(folders_router, prefix="/api/v1/folders", tags=["Folders"])
     app.include_router(preferences_router, prefix="/api/v1/preferences", tags=["User Preferences"])
+    app.include_router(memory_router, prefix="/api/v1/memory", tags=["Memory Management"])
     app.include_router(knowledge_graph_router, prefix="/api/v1/knowledge-graph", tags=["Knowledge Graph"])
     app.include_router(workflows_router, prefix="/api/v1/workflows", tags=["Workflows"])
     app.include_router(audio_router, prefix="/api/v1/audio", tags=["Audio Overviews"])

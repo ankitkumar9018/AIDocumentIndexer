@@ -47,6 +47,8 @@ describe("ModelsTab", () => {
   const defaultProps = {
     ModelConfigurationSection: MockModelConfigurationSection,
     providers: mockProvidersData.providers || [],
+    localSettings: mockLocalSettings,
+    handleSettingChange: jest.fn(),
   };
 
   it("renders the models tab", () => {

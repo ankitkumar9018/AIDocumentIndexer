@@ -1,0 +1,37 @@
+flowchart TD
+    START([User sends query]) --> CACHE{Semantic<br/>Cache Hit?}
+
+    CACHE -->|Hit| RETURN_CACHED[Return cached response]
+    CACHE -->|Miss| SPELL[Spell Correction]
+
+    SPELL --> CLASSIFY[Query Classification<br/>intent + complexity]
+
+    CLASSIFY --> ROUTE{Adaptive<br/>Router}
+
+    ROUTE -->|Simple| DENSE_ONLY[Dense Vector<br/>Search Only]
+    ROUTE -->|Standard| HYBRID_SEARCH[Hybrid Search<br/>Dense + BM25]
+    ROUTE -->|Complex| ADVANCED[Advanced RAG<br/>Fusion + HyDE + KG]
+
+    DENSE_ONLY --> MERGE[Merge and Rank<br/>RRF Fusion]
+    HYBRID_SEARCH --> MERGE
+    ADVANCED --> MERGE
+
+    MERGE --> VERIFY{Self-RAG<br/>Verification?}
+
+    VERIFY -->|Yes| CHECK[Verify chunk<br/>relevance + grounding]
+    VERIFY -->|No| ASSEMBLE
+
+    CHECK --> FILTER[Filter low-quality<br/>chunks]
+    FILTER --> ASSEMBLE[Assemble Context<br/>+ Memory + KG]
+
+    ASSEMBLE --> SELECT_PROMPT[Select Prompt<br/>Template]
+    SELECT_PROMPT --> INVOKE_LLM[Invoke LLM<br/>with context]
+
+    INVOKE_LLM --> PARSE[Parse Response<br/>citations + questions]
+    PARSE --> SCORE[Confidence<br/>Scoring]
+    SCORE --> SAVE[Save to Cache<br/>+ DB + Memory]
+    SAVE --> RESPOND([Return RAGResponse])
+
+    style START fill:#4CAF50,color:white
+    style RESPOND fill:#4CAF50,color:white
+    style RETURN_CACHED fill:#FF9800,color:white

@@ -38,6 +38,7 @@ import {
   Globe,
   BrainCog,
   Code,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -87,6 +88,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Separator } from "@/components/ui/separator";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CostApprovalDialog } from "@/components/cost-approval-dialog";
@@ -252,6 +260,9 @@ interface Message {
   query?: string;  // Original user query for this response (used for source highlighting)
   pipelineSteps?: PipelineStep[];
   pipelineTime?: number;
+  // Parallel knowledge (dual mode) fields
+  generalAnswer?: string;  // General knowledge answer in dual mode
+  parallelOutputMode?: string;  // "merged", "separate", "toggle"
 }
 
 interface Source {
@@ -265,6 +276,62 @@ interface Source {
   // Knowledge Graph enhancements
   fromKnowledgeGraph?: boolean;  // True if source was found via KG traversal
   kgEntities?: string[];  // Entity names associated with this source
+}
+
+/** Dual Mode Toggle: switch between RAG and General Knowledge views */
+function DualModeToggle({ message, renderWithCitations }: { message: Message; renderWithCitations: (children: React.ReactNode, sources: Source[]) => React.ReactNode }) {
+  const [activeTab, setActiveTab] = React.useState<"document" | "general">("document");
+  return (
+    <div className="w-full">
+      <div className="flex gap-1 mb-3 border-b">
+        <button
+          onClick={() => setActiveTab("document")}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 transition-colors",
+            activeTab === "document"
+              ? "border-blue-500 text-blue-600 dark:text-blue-400"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <FileSearch className="h-3.5 w-3.5" />
+          Document Knowledge
+        </button>
+        <button
+          onClick={() => setActiveTab("general")}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 transition-colors",
+            activeTab === "general"
+              ? "border-purple-500 text-purple-600 dark:text-purple-400"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <Brain className="h-3.5 w-3.5" />
+          General Knowledge
+        </button>
+      </div>
+      <div className="prose prose-sm dark:prose-invert max-w-none prose-chat text-left">
+        {activeTab === "document" ? (
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={message.sources && message.sources.length > 0 ? {
+              p: ({ children, ...props }) => (
+                <p {...props}>{renderWithCitations(children, message.sources || [])}</p>
+              ),
+              li: ({ children, ...props }) => (
+                <li {...props}>{renderWithCitations(children, message.sources || [])}</li>
+              ),
+            } : undefined}
+          >
+            {message.content}
+          </ReactMarkdown>
+        ) : (
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {message.generalAnswer || ""}
+          </ReactMarkdown>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function ChatPage() {
@@ -363,6 +430,8 @@ export default function ChatPage() {
   const [selfVerificationEnabled, setSelfVerificationEnabled] = useState(true);
   const [ensembleVotingEnabled, setEnsembleVotingEnabled] = useState(false);
   const [ensembleStrategy, setEnsembleStrategy] = useState<"majority" | "confidence" | "consensus" | "synthesis">("confidence");
+  // Settings drawer (right-side slide-out)
+  const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -467,6 +536,11 @@ export default function ChatPage() {
       if ((e.metaKey || e.ctrlKey) && e.key === "n") {
         e.preventDefault();
         handleNewChat();
+      }
+      // Cmd/Ctrl + , to toggle settings drawer
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setShowSettingsDrawer(prev => !prev);
       }
     };
 
@@ -1280,6 +1354,8 @@ export default function ChatPage() {
           language: outputLanguage, // Output language for response
           enhance_query: enhanceQuery ?? undefined, // Per-query enhancement override
           restrict_to_documents: sourceMode === "general" && restrictToDocuments, // Block AI knowledge in general mode
+          // Temperature override - sent inline to avoid race condition with session config
+          temperature_override: temperature ?? undefined,
           // Parallel Knowledge Enhancement
           parallel_knowledge: parallelKnowledgeEnabled && sourceMode === "documents",
           parallel_output_mode: parallelKnowledgeEnabled ? parallelOutputMode : undefined,
@@ -1347,6 +1423,9 @@ export default function ChatPage() {
                     { name: "Generating answer", status: "completed" as const, durationMs: Math.round(((response as unknown as Record<string, number>).processing_time_ms || 1400) * 0.45) },
                   ],
                   pipelineTime: (response as unknown as Record<string, number>).processing_time_ms,
+                  // Parallel knowledge (dual mode) fields
+                  generalAnswer: (response as unknown as Record<string, string>).general_answer || undefined,
+                  parallelOutputMode: (response as unknown as Record<string, string>).parallel_output_mode || undefined,
                 }
               : m
           )
@@ -1565,349 +1644,15 @@ export default function ChatPage() {
     <div className="flex h-[calc(100vh-8rem)] gap-2 sm:gap-4 overflow-hidden">
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+        {/* Header — Minimal: LLM selector, New Chat, History, Settings gear */}
+        <div className="flex items-center justify-between gap-3 mb-4">
           <div className="shrink-0">
             <h1 className="text-2xl font-bold">Chat with Documents</h1>
-            <p className="text-muted-foreground">
+            <p className="text-muted-foreground text-sm">
               Ask questions and get answers from your knowledge base
             </p>
           </div>
-          <div className="flex items-center gap-2 flex-wrap justify-end overflow-x-auto max-w-full pb-1">
-            {/* Temperature Settings */}
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button variant="outline" size="sm" className="gap-2">
-                  <Thermometer className="h-4 w-4" />
-                  <span className="hidden sm:inline">{temperature?.toFixed(1) ?? '...'}</span>
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-72" align="end">
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-sm font-medium">Temperature</Label>
-                      <span className="text-sm text-muted-foreground">
-                        {temperature !== null ? getTemperatureLabel(temperature) : 'Loading...'}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-xs text-muted-foreground w-6">0</span>
-                      <Slider
-                        value={[temperature ?? 0.7]}
-                        onValueChange={handleTemperatureChange}
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        className="flex-1"
-                        disabled={temperature === null}
-                      />
-                      <span className="text-xs text-muted-foreground w-6">1</span>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Lower values (0.0-0.3) make responses precise and focused.
-                      Higher values (0.7-1.0) make responses more creative.
-                    </p>
-                  </div>
-                  {temperature !== null && (
-                    <div className="pt-2 border-t space-y-2">
-                      <div className="flex justify-between text-xs items-center">
-                        <span className="text-muted-foreground">Current:</span>
-                        <span className="font-medium">{temperature.toFixed(2)}</span>
-                      </div>
-                      {optimizedTemperature !== null && (
-                        <div className="flex justify-between text-xs items-center">
-                          <span className="text-muted-foreground">Optimized for model:</span>
-                          <span className="font-medium text-blue-600 dark:text-blue-400">
-                            {optimizedTemperature.toFixed(2)}
-                          </span>
-                        </div>
-                      )}
-                      {!isManualTemperature && optimizedTemperature !== null && (
-                        <div className="text-xs text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/30 p-2 rounded">
-                          <p className="font-medium mb-1">✨ Smart Temperature Active</p>
-                          <p className="text-muted-foreground">
-                            Using AI-optimized temperature for {sessionLLMConfig?.model || "your model"}.
-                            Adjust slider to override.
-                          </p>
-                        </div>
-                      )}
-                      {isManualTemperature && optimizedTemperature !== null && (
-                        <div className="text-xs space-y-2">
-                          <div className="text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 p-2 rounded">
-                            <p className="font-medium mb-1">Manual Override Active</p>
-                            <p className="text-muted-foreground">
-                              Using {temperature.toFixed(2)} instead of optimized {optimizedTemperature.toFixed(2)}
-                            </p>
-                          </div>
-                          <Button
-                            onClick={resetToOptimizedTemperature}
-                            variant="outline"
-                            size="sm"
-                            className="w-full"
-                          >
-                            Reset to Optimized ({optimizedTemperature.toFixed(2)})
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </PopoverContent>
-            </Popover>
-
-            {/* Documents to Search */}
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  variant={topK ? "default" : "outline"}
-                  size="sm"
-                  className="gap-2"
-                  title="Documents to search per query"
-                >
-                  <FileSearch className="h-4 w-4" />
-                  <span className="text-xs sm:text-sm">{topK ? `${topK}` : ""}</span>
-                  <span className="hidden sm:inline">{topK ? "docs" : "Auto"}</span>
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-72" align="end">
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-sm font-medium">Documents to Search</Label>
-                      <span className="text-sm text-muted-foreground">
-                        {topK ? `${topK} documents` : "Default"}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-xs text-muted-foreground w-6">3</span>
-                      <Slider
-                        value={[topK || 10]}
-                        onValueChange={(value) => setTopK(value[0])}
-                        min={3}
-                        max={25}
-                        step={1}
-                        className="flex-1"
-                      />
-                      <span className="text-xs text-muted-foreground w-6">25</span>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      How many documents to search for each query. Higher = broader search but slower.
-                    </p>
-                  </div>
-                  <div className="pt-2 border-t flex justify-between items-center">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setTopK(null)}
-                      className="text-xs"
-                    >
-                      Reset to Default
-                    </Button>
-                    <span className="text-xs text-muted-foreground">
-                      {topK ? `${topK} docs` : "Using admin setting"}
-                    </span>
-                  </div>
-                </div>
-              </PopoverContent>
-            </Popover>
-
-            {/* Query Enhancement Toggle (popover variant) */}
-            {sourceMode === "documents" && (
-              <QueryEnhancementToggle
-                enabled={enhanceQuery ?? true}
-                onChange={handleEnhanceQueryChange}
-                variant="popover"
-                disabled={isLoading}
-              />
-            )}
-
-            {/* Output Language Selector - BEFORE Voice for visibility */}
-            <Select value={outputLanguage} onValueChange={setOutputLanguage}>
-              <SelectTrigger className="w-[100px] h-8 text-xs">
-                <Globe className="h-3 w-3 mr-1 flex-shrink-0" />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CHAT_LANGUAGES.map((lang) => (
-                  <SelectItem key={lang.code} value={lang.code}>
-                    {lang.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            {/* Voice Mode Toggle */}
-            <Button
-              variant={voiceModeEnabled ? "default" : "outline"}
-              size="sm"
-              onClick={() => {
-                setVoiceModeEnabled(!voiceModeEnabled);
-                if (!voiceModeEnabled) {
-                  setVoiceState("idle");
-                } else {
-                  setVoiceState("idle");
-                }
-              }}
-              className="gap-2"
-              title={voiceModeEnabled ? "Disable voice conversation mode" : "Enable voice conversation mode"}
-            >
-              <Mic className={cn("h-4 w-4", voiceModeEnabled && "text-primary-foreground")} />
-              <span className="hidden sm:inline">
-                {voiceModeEnabled ? "Voice On" : "Voice"}
-              </span>
-            </Button>
-
-            {/* Voice State Indicator - Only show when voice mode is enabled */}
-            {voiceModeEnabled && voiceState !== "idle" && (
-              <VoiceConversationIndicator state={voiceState} />
-            )}
-
-            {/* Agent Options Popover - Only show when agent mode is enabled */}
-            {agentEnabled && (
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button variant="outline" size="sm" className="gap-2">
-                    <Settings2 className="h-4 w-4" />
-                    <span className="hidden sm:inline">Agent Settings</span>
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-80" align="end">
-                  <div className="space-y-4">
-                    <div className="space-y-2">
-                      <h4 className="font-medium leading-none flex items-center gap-2">
-                        <Brain className="h-4 w-4" />
-                        Agent Mode Options
-                      </h4>
-                      <p className="text-sm text-muted-foreground">
-                        Configure how the AI agent processes your requests.
-                      </p>
-                    </div>
-
-                    {/* Search Documents Toggle */}
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="text-sm font-medium flex items-center gap-2">
-                          <FileSearch className="h-3 w-3" />
-                          Search Documents
-                        </Label>
-                        <p className="text-xs text-muted-foreground">
-                          Always search your uploaded documents first
-                        </p>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={agentOptions.search_documents}
-                        onChange={(e) =>
-                          setAgentOptions((prev) => ({
-                            ...prev,
-                            search_documents: e.target.checked,
-                          }))
-                        }
-                        className="h-4 w-4 rounded border-gray-300"
-                      />
-                    </div>
-
-                    {/* Include Web Search Toggle */}
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="text-sm font-medium flex items-center gap-2">
-                          <Search className="h-3 w-3" />
-                          Include Web Search
-                        </Label>
-                        <p className="text-xs text-muted-foreground">
-                          Also search the web for information
-                        </p>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={agentOptions.include_web_search}
-                        onChange={(e) =>
-                          setAgentOptions((prev) => ({
-                            ...prev,
-                            include_web_search: e.target.checked,
-                          }))
-                        }
-                        className="h-4 w-4 rounded border-gray-300"
-                      />
-                    </div>
-
-                    {/* Require Approval Toggle */}
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="text-sm font-medium flex items-center gap-2">
-                          <Check className="h-3 w-3" />
-                          Require Approval
-                        </Label>
-                        <p className="text-xs text-muted-foreground">
-                          Show plan before executing
-                        </p>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={agentOptions.require_approval}
-                        onChange={(e) =>
-                          setAgentOptions((prev) => ({
-                            ...prev,
-                            require_approval: e.target.checked,
-                          }))
-                        }
-                        className="h-4 w-4 rounded border-gray-300"
-                      />
-                    </div>
-
-                    {/* Max Steps Slider */}
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-sm font-medium flex items-center gap-2">
-                          <Zap className="h-3 w-3" />
-                          Max Steps
-                        </Label>
-                        <span className="text-sm text-muted-foreground">
-                          {agentOptions.max_steps}
-                        </span>
-                      </div>
-                      <Slider
-                        value={[agentOptions.max_steps]}
-                        onValueChange={([value]) =>
-                          setAgentOptions((prev) => ({
-                            ...prev,
-                            max_steps: value,
-                          }))
-                        }
-                        min={1}
-                        max={10}
-                        step={1}
-                        className="w-full"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Limit complexity of execution plan
-                      </p>
-                    </div>
-
-                    {/* Collection Context Toggle */}
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="text-sm font-medium flex items-center gap-2">
-                          <Tag className="h-3 w-3" />
-                          Show Collection Tags
-                        </Label>
-                        <p className="text-xs text-muted-foreground">
-                          Include collection names in AI context for better document grouping
-                        </p>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={includeCollectionContext}
-                        onChange={(e) => setIncludeCollectionContext(e.target.checked)}
-                        className="h-4 w-4 rounded border-gray-300"
-                      />
-                    </div>
-                  </div>
-                </PopoverContent>
-              </Popover>
-            )}
-
+          <div className="flex items-center gap-2">
             {/* LLM Model Selector */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -1930,7 +1675,6 @@ export default function ChatPage() {
                 <DropdownMenuItem
                   onClick={async () => {
                     if (currentSessionId) {
-                      // Use default by removing override
                       try {
                         await setSessionLLM.mutateAsync({
                           sessionId: currentSessionId,
@@ -1938,7 +1682,7 @@ export default function ChatPage() {
                         });
                         refetchSessionLLM();
                       } catch {
-                        // Ignore error if no override exists
+                        // Ignore error
                       }
                     }
                   }}
@@ -1957,12 +1701,8 @@ export default function ChatPage() {
                     key={provider.id}
                     onClick={async () => {
                       if (!currentSessionId) {
-                        // Create a session first
-                        const newSession = await createSession.mutateAsync(
-                          "New Chat"
-                        );
+                        const newSession = await createSession.mutateAsync("New Chat");
                         setCurrentSessionId(newSession.id);
-                        // Then set the LLM
                         await setSessionLLM.mutateAsync({
                           sessionId: newSession.id,
                           data: {
@@ -2008,36 +1748,26 @@ export default function ChatPage() {
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowHistory(!showHistory)}
-            >
-              <Clock className="h-4 w-4 mr-2" />
-              History
+            <Button variant="outline" size="sm" onClick={handleNewChat} title="New Chat (⌘N)">
+              <RefreshCw className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">New Chat</span>
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setShowHistory(!showHistory)}>
+              <Clock className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">History</span>
             </Button>
             <Button
               variant="outline"
               size="sm"
-              onClick={handleNewChat}
-              title="New Chat (⌘N)"
-            >
-              <RefreshCw className="h-4 w-4 mr-2" />
-              New Chat
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleExportChat}
-              disabled={messages.length <= 1}
-              title="Export Chat (⌘⇧E)"
-            >
-              {copiedId === "export" ? (
-                <Check className="h-4 w-4 mr-2" />
-              ) : (
-                <Copy className="h-4 w-4 mr-2" />
+              onClick={() => setShowSettingsDrawer(true)}
+              title="Chat Settings (⌘,)"
+              className={cn(
+                "gap-1.5",
+                (parallelKnowledgeEnabled || voiceModeEnabled || intelligenceLevel !== "enhanced" || isManualTemperature) && "border-blue-400 text-blue-600 dark:text-blue-400"
               )}
-              {copiedId === "export" ? "Copied!" : "Export"}
+            >
+              <Settings2 className="h-4 w-4" />
+              <span className="hidden sm:inline">Settings</span>
             </Button>
             <Button
               variant="outline"
@@ -2198,6 +1928,49 @@ export default function ChatPage() {
                           isExecuting={false}
                           thinkingContent={message.thinkingContent}
                         />
+                      ) : message.generalAnswer && message.parallelOutputMode === "separate" ? (
+                        /* Dual Mode: Side-by-side RAG + General Knowledge */
+                        <div className="w-full">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {/* Document Knowledge (RAG) */}
+                            <div className="border rounded-lg p-3 bg-background">
+                              <div className="flex items-center gap-2 mb-2 pb-2 border-b">
+                                <FileSearch className="h-4 w-4 text-blue-500" />
+                                <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">Document Knowledge</span>
+                              </div>
+                              <div className="prose prose-sm dark:prose-invert max-w-none prose-chat text-left">
+                                <ReactMarkdown
+                                  remarkPlugins={[remarkGfm]}
+                                  components={message.sources && message.sources.length > 0 ? {
+                                    p: ({ children, ...props }) => (
+                                      <p {...props}>{renderWithCitations(children, message.sources || [])}</p>
+                                    ),
+                                    li: ({ children, ...props }) => (
+                                      <li {...props}>{renderWithCitations(children, message.sources || [])}</li>
+                                    ),
+                                  } : undefined}
+                                >
+                                  {message.content}
+                                </ReactMarkdown>
+                              </div>
+                            </div>
+                            {/* General Knowledge */}
+                            <div className="border rounded-lg p-3 bg-background">
+                              <div className="flex items-center gap-2 mb-2 pb-2 border-b">
+                                <Brain className="h-4 w-4 text-purple-500" />
+                                <span className="text-xs font-semibold text-purple-600 dark:text-purple-400">General Knowledge</span>
+                              </div>
+                              <div className="prose prose-sm dark:prose-invert max-w-none prose-chat text-left">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  {message.generalAnswer}
+                                </ReactMarkdown>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ) : message.generalAnswer && message.parallelOutputMode === "toggle" ? (
+                        /* Dual Mode: Toggle between RAG and General */
+                        <DualModeToggle message={message} renderWithCitations={renderWithCitations} />
                       ) : (
                         <div className="prose prose-sm dark:prose-invert max-w-none prose-chat text-left">
                           {message.isStreaming ? (
@@ -2478,421 +2251,142 @@ export default function ChatPage() {
 
           {/* Input Area */}
           <div className="p-4 border-t">
-            {/* Mode Selection Controls */}
-            <div className="flex items-center justify-center gap-3 mb-3 flex-wrap">
-              {/* Source Mode Toggle: Documents vs General */}
-              <div className="flex items-center gap-1 p-1 bg-muted rounded-lg">
+            {/* Mode Pills — Clean pill toggle above input */}
+            <div className="flex items-center justify-center mb-3">
+              <div className="flex items-center p-1 bg-muted rounded-lg">
                 <Button
-                  variant={sourceMode === "documents" ? "default" : "ghost"}
+                  variant={sourceMode === "documents" && !agentEnabled ? "default" : "ghost"}
                   size="sm"
-                  onClick={() => setSourceMode("documents")}
-                  className="gap-1.5 h-8"
+                  onClick={() => { setSourceMode("documents"); setAgentEnabled(false); }}
+                  className="gap-1.5 h-8 rounded-md"
                 >
                   <FileSearch className="h-4 w-4" />
-                  <span className="hidden sm:inline">Documents</span>
+                  Documents
                 </Button>
                 <Button
-                  variant={sourceMode === "general" ? "default" : "ghost"}
+                  variant={sourceMode === "general" && !agentEnabled ? "default" : "ghost"}
                   size="sm"
-                  onClick={() => setSourceMode("general")}
-                  className="gap-1.5 h-8"
+                  onClick={() => { setSourceMode("general"); setAgentEnabled(false); }}
+                  className="gap-1.5 h-8 rounded-md"
                 >
                   <Brain className="h-4 w-4" />
-                  <span className="hidden sm:inline">General</span>
+                  General
+                </Button>
+                <Button
+                  variant={agentEnabled ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setAgentEnabled(!agentEnabled)}
+                  className={cn(
+                    "gap-1.5 h-8 rounded-md",
+                    agentEnabled && "bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600 text-white"
+                  )}
+                >
+                  <Bot className="h-4 w-4" />
+                  Agent
                 </Button>
               </div>
-
-              {/* No AI Knowledge Toggle - Only visible for general mode */}
-              {sourceMode === "general" && (
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant={restrictToDocuments ? "default" : "outline"}
-                      size="sm"
-                      className={cn(
-                        "gap-1.5 h-8",
-                        restrictToDocuments && "bg-amber-500 hover:bg-amber-600 text-white"
-                      )}
-                      aria-label="Toggle AI knowledge restriction"
-                    >
-                      <BrainCog className="h-4 w-4" aria-hidden="true" />
-                      <span className="hidden sm:inline">No AI Knowledge</span>
-                      {restrictToDocuments && (
-                        <Badge variant="secondary" className="text-[10px] px-1 py-0 bg-white/20 ml-1">
-                          ON
-                        </Badge>
-                      )}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-80" align="start">
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <div className="space-y-0.5">
-                          <Label htmlFor="restrict-toggle" className="text-sm font-medium">
-                            Disable AI Knowledge
-                          </Label>
-                          <p className="text-xs text-muted-foreground">
-                            Block pre-trained knowledge
-                          </p>
-                        </div>
-                        <Switch
-                          id="restrict-toggle"
-                          checked={restrictToDocuments}
-                          onCheckedChange={setRestrictToDocuments}
-                        />
-                      </div>
-                      <p className="text-xs text-muted-foreground border-t pt-2">
-                        When enabled, the AI will not use its general knowledge and will only respond
-                        based on your uploaded documents. Useful for ensuring answers come strictly
-                        from your document base.
-                      </p>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-              )}
-
-              {/* Agent Mode Toggle */}
-              <Button
-                variant={agentEnabled ? "default" : "outline"}
-                size="sm"
-                onClick={() => setAgentEnabled(!agentEnabled)}
-                className={cn(
-                  "gap-1.5 h-8",
-                  agentEnabled && "bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600"
-                )}
-              >
-                <Bot className="h-4 w-4" />
-                <span className="hidden sm:inline">Agent</span>
-                {agentEnabled && (
-                  <Badge variant="secondary" className="text-[10px] px-1 py-0 bg-white/20 ml-1">
-                    ON
-                  </Badge>
-                )}
-              </Button>
-
-              {/* Parallel Knowledge Enhancement Toggle - RAG + General combined */}
-              {sourceMode === "documents" && (
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant={parallelKnowledgeEnabled ? "default" : "outline"}
-                      size="sm"
-                      className={cn(
-                        "gap-1.5 h-8",
-                        parallelKnowledgeEnabled && "bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600"
-                      )}
-                      aria-label="Toggle parallel knowledge enhancement"
-                    >
-                      <Sparkles className="h-4 w-4" aria-hidden="true" />
-                      <span className="hidden sm:inline">Enhanced</span>
-                      {parallelKnowledgeEnabled && (
-                        <Badge variant="secondary" className="text-[10px] px-1 py-0 bg-white/20 ml-1">
-                          ON
-                        </Badge>
-                      )}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-80" align="start">
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <div className="space-y-0.5">
-                          <Label htmlFor="parallel-toggle" className="text-sm font-medium">
-                            Parallel Knowledge
-                          </Label>
-                          <p className="text-xs text-muted-foreground">
-                            Combine documents + general AI knowledge
-                          </p>
-                        </div>
-                        <Switch
-                          id="parallel-toggle"
-                          checked={parallelKnowledgeEnabled}
-                          onCheckedChange={setParallelKnowledgeEnabled}
-                        />
-                      </div>
-
-                      {parallelKnowledgeEnabled && (
-                        <>
-                          <div className="space-y-2">
-                            <Label className="text-xs font-medium">Output Mode</Label>
-                            <Select
-                              value={parallelOutputMode}
-                              onValueChange={(v) => setParallelOutputMode(v as "separate" | "merged" | "toggle")}
-                            >
-                              <SelectTrigger className="h-8 text-xs">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="merged">
-                                  <span className="flex items-center gap-2">
-                                    <Sparkles className="h-3 w-3" />
-                                    Merged (AI Synthesis)
-                                  </span>
-                                </SelectItem>
-                                <SelectItem value="separate">
-                                  <span className="flex items-center gap-2">
-                                    <Code className="h-3 w-3" />
-                                    Side by Side
-                                  </span>
-                                </SelectItem>
-                                <SelectItem value="toggle">
-                                  <span className="flex items-center gap-2">
-                                    <RefreshCw className="h-3 w-3" />
-                                    Toggle View
-                                  </span>
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-
-                          {providersData?.providers && providersData.providers.length > 1 && (
-                            <div className="space-y-2">
-                              <Label className="text-xs font-medium">General Knowledge Model</Label>
-                              <Select
-                                value={parallelGeneralModel || "same"}
-                                onValueChange={(v) => setParallelGeneralModel(v === "same" ? null : v)}
-                              >
-                                <SelectTrigger className="h-8 text-xs">
-                                  <SelectValue placeholder="Same as RAG model" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="same">Same as RAG model</SelectItem>
-                                  {providersData.providers
-                                    .filter((p: { is_active: boolean }) => p.is_active)
-                                    .map((provider: { id: string; name: string; default_chat_model?: string | null }) => (
-                                      <SelectItem key={provider.id} value={provider.id}>
-                                        {provider.name} ({provider.default_chat_model || "default"})
-                                      </SelectItem>
-                                    ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                          )}
-                        </>
-                      )}
-
-                      <p className="text-xs text-muted-foreground border-t pt-2">
-                        Runs two queries in parallel: one searches your documents (RAG),
-                        the other uses general AI knowledge. Results are combined for
-                        more comprehensive answers.
-                      </p>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-              )}
-
-              {/* Intelligence Enhancement Settings */}
-              {sourceMode === "documents" && (
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant={intelligenceLevel !== "basic" ? "default" : "outline"}
-                      size="sm"
-                      className={cn(
-                        "gap-1.5 h-8",
-                        intelligenceLevel === "maximum" && "bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600",
-                        intelligenceLevel === "enhanced" && "bg-gradient-to-r from-blue-500 to-indigo-500 hover:from-blue-600 hover:to-indigo-600"
-                      )}
-                      aria-label="Intelligence settings"
-                    >
-                      <BrainCog className="h-4 w-4" aria-hidden="true" />
-                      <span className="hidden sm:inline">Intelligence</span>
-                      <Badge variant="secondary" className="text-[10px] px-1 py-0 bg-white/20 ml-1">
-                        {intelligenceLevel.toUpperCase()}
-                      </Badge>
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-96" align="start">
-                    <div className="space-y-4">
-                      <div className="space-y-2">
-                        <Label className="text-sm font-medium">Intelligence Level</Label>
-                        <p className="text-xs text-muted-foreground">
-                          Higher levels use more AI techniques for better answers
-                        </p>
-                        <Select
-                          value={intelligenceLevel}
-                          onValueChange={(v) => setIntelligenceLevel(v as typeof intelligenceLevel)}
-                        >
-                          <SelectTrigger className="h-9">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="basic">
-                              <span className="flex items-center gap-2">
-                                <Zap className="h-3 w-3 text-gray-400" />
-                                Basic - Fast, standard RAG
-                              </span>
-                            </SelectItem>
-                            <SelectItem value="standard">
-                              <span className="flex items-center gap-2">
-                                <Brain className="h-3 w-3 text-blue-400" />
-                                Standard - CoT + Verification
-                              </span>
-                            </SelectItem>
-                            <SelectItem value="enhanced">
-                              <span className="flex items-center gap-2">
-                                <Sparkles className="h-3 w-3 text-indigo-400" />
-                                Enhanced - Full optimization
-                              </span>
-                            </SelectItem>
-                            <SelectItem value="maximum">
-                              <span className="flex items-center gap-2">
-                                <BrainCog className="h-3 w-3 text-purple-400" />
-                                Maximum - All features enabled
-                              </span>
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      <div className="border-t pt-3 space-y-3">
-                        <Label className="text-xs font-medium text-muted-foreground">Feature Toggles</Label>
-
-                        <div className="flex items-center justify-between">
-                          <div className="space-y-0.5">
-                            <Label htmlFor="cot-toggle" className="text-sm">Chain-of-Thought</Label>
-                            <p className="text-xs text-muted-foreground">Step-by-step reasoning</p>
-                          </div>
-                          <Switch
-                            id="cot-toggle"
-                            checked={chainOfThoughtEnabled}
-                            onCheckedChange={setChainOfThoughtEnabled}
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between">
-                          <div className="space-y-0.5">
-                            <Label htmlFor="verify-toggle" className="text-sm">Self-Verification</Label>
-                            <p className="text-xs text-muted-foreground">Check and correct answers</p>
-                          </div>
-                          <Switch
-                            id="verify-toggle"
-                            checked={selfVerificationEnabled}
-                            onCheckedChange={setSelfVerificationEnabled}
-                          />
-                        </div>
-
-                        {intelligenceLevel === "maximum" && (
-                          <div className="space-y-2 border-t pt-2">
-                            <div className="flex items-center justify-between">
-                              <div className="space-y-0.5">
-                                <Label htmlFor="thinking-toggle" className="text-sm">Extended Thinking</Label>
-                                <p className="text-xs text-muted-foreground">Deep analysis for complex queries</p>
-                              </div>
-                              <Switch
-                                id="thinking-toggle"
-                                checked={extendedThinkingEnabled}
-                                onCheckedChange={setExtendedThinkingEnabled}
-                              />
-                            </div>
-
-                            {extendedThinkingEnabled && (
-                              <Select
-                                value={thinkingLevel}
-                                onValueChange={(v) => setThinkingLevel(v as typeof thinkingLevel)}
-                              >
-                                <SelectTrigger className="h-8 text-xs">
-                                  <SelectValue placeholder="Thinking depth" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="minimal">Minimal</SelectItem>
-                                  <SelectItem value="low">Low</SelectItem>
-                                  <SelectItem value="medium">Medium</SelectItem>
-                                  <SelectItem value="high">High</SelectItem>
-                                  <SelectItem value="max">Maximum</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="border-t pt-3 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <div className="space-y-0.5">
-                            <Label htmlFor="ensemble-toggle" className="text-sm">Ensemble Voting</Label>
-                            <p className="text-xs text-muted-foreground">Cross-verify with multiple models</p>
-                          </div>
-                          <Switch
-                            id="ensemble-toggle"
-                            checked={ensembleVotingEnabled}
-                            onCheckedChange={setEnsembleVotingEnabled}
-                          />
-                        </div>
-
-                        {ensembleVotingEnabled && (
-                          <Select
-                            value={ensembleStrategy}
-                            onValueChange={(v) => setEnsembleStrategy(v as typeof ensembleStrategy)}
-                          >
-                            <SelectTrigger className="h-8 text-xs">
-                              <SelectValue placeholder="Voting strategy" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="majority">Majority Vote</SelectItem>
-                              <SelectItem value="confidence">Confidence Weighted</SelectItem>
-                              <SelectItem value="consensus">Require Consensus</SelectItem>
-                              <SelectItem value="synthesis">AI Synthesis</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        )}
-                      </div>
-
-                      <p className="text-xs text-muted-foreground border-t pt-2">
-                        These features make small LLMs perform at Claude-level quality
-                        through reasoning chains, self-verification, and multi-model consensus.
-                      </p>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-              )}
-
-              {/* Filter Toggle Button - Only visible for document mode */}
-              {sourceMode === "documents" && (
-                <Button
-                  variant={showFilters ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setShowFilters(!showFilters)}
-                  className="gap-1.5 h-8"
-                  aria-label="Toggle document filters"
-                  aria-expanded={showFilters}
-                >
-                  <Filter className="h-4 w-4" aria-hidden="true" />
-                  <span className="hidden sm:inline">Filters</span>
-                  {selectedCollections.length > 0 && (
-                    <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-xs">
-                      {selectedCollections.length}
-                    </Badge>
-                  )}
-                </Button>
-              )}
-              {/* Quick Upload Toggle Button */}
-              <Button
-                variant={showTempPanel ? "default" : "outline"}
-                size="sm"
-                onClick={() => setShowTempPanel(!showTempPanel)}
-                className="gap-1.5 h-8"
-                aria-label="Toggle quick document upload"
-                aria-expanded={showTempPanel}
-              >
-                <Upload className="h-4 w-4" aria-hidden="true" />
-                <span className="hidden sm:inline">Quick Upload</span>
-                {tempDocuments.length > 0 && (
-                  <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-xs">
-                    {tempDocuments.length}
-                  </Badge>
-                )}
-              </Button>
-
-              {/* Query Enhancement Toggle - Only for documents mode */}
-              {sourceMode === "documents" && (
-                <QueryEnhancementToggle
-                  enabled={enhanceQuery ?? true}
-                  onChange={handleEnhanceQueryChange}
-                  variant="inline"
-                  disabled={isLoading}
-                />
-              )}
             </div>
+
+            {/* Contextual Chips — Only shown when features are active */}
+            {(parallelKnowledgeEnabled || selectedCollections.length > 0 || selectedFolderId || tempDocuments.length > 0 || voiceModeEnabled || restrictToDocuments || intelligenceLevel !== "enhanced" || enhanceQuery === false || isManualTemperature || topK) && (
+              <div className="flex items-center justify-center gap-1.5 mb-3 flex-wrap">
+                {parallelKnowledgeEnabled && sourceMode === "documents" && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 cursor-pointer hover:bg-destructive/20 transition-colors text-xs py-0.5 px-2"
+                    onClick={() => setParallelKnowledgeEnabled(false)}
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    Dual Mode
+                    <X className="h-3 w-3 ml-0.5 opacity-60" />
+                  </Badge>
+                )}
+                {(selectedCollections.length > 0 || selectedFolderId) && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 cursor-pointer hover:bg-muted transition-colors text-xs py-0.5 px-2"
+                    onClick={() => setShowFilters(!showFilters)}
+                  >
+                    <Filter className="h-3 w-3" />
+                    Filters ({selectedCollections.length}{selectedFolderId ? '+folder' : ''})
+                  </Badge>
+                )}
+                {tempDocuments.length > 0 && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 cursor-pointer hover:bg-muted transition-colors text-xs py-0.5 px-2"
+                    onClick={() => setShowTempPanel(!showTempPanel)}
+                  >
+                    <Upload className="h-3 w-3" />
+                    {tempDocuments.length} file{tempDocuments.length > 1 ? 's' : ''} attached
+                  </Badge>
+                )}
+                {voiceModeEnabled && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 cursor-pointer hover:bg-destructive/20 transition-colors text-xs py-0.5 px-2"
+                    onClick={() => { setVoiceModeEnabled(false); setVoiceState("idle"); }}
+                  >
+                    <Mic className="h-3 w-3" />
+                    Voice On
+                    <X className="h-3 w-3 ml-0.5 opacity-60" />
+                  </Badge>
+                )}
+                {restrictToDocuments && sourceMode === "general" && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 cursor-pointer hover:bg-destructive/20 transition-colors text-xs py-0.5 px-2 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300"
+                    onClick={() => setRestrictToDocuments(false)}
+                  >
+                    <BrainCog className="h-3 w-3" />
+                    No AI Knowledge
+                    <X className="h-3 w-3 ml-0.5 opacity-60" />
+                  </Badge>
+                )}
+                {intelligenceLevel !== "enhanced" && sourceMode === "documents" && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 cursor-pointer hover:bg-muted transition-colors text-xs py-0.5 px-2"
+                    onClick={() => setShowSettingsDrawer(true)}
+                  >
+                    <Zap className="h-3 w-3" />
+                    {intelligenceLevel.charAt(0).toUpperCase() + intelligenceLevel.slice(1)}
+                  </Badge>
+                )}
+                {enhanceQuery === false && sourceMode === "documents" && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 cursor-pointer hover:bg-destructive/20 transition-colors text-xs py-0.5 px-2 text-amber-600 dark:text-amber-400"
+                    onClick={() => handleEnhanceQueryChange(true)}
+                  >
+                    <Search className="h-3 w-3" />
+                    Enhancement Off
+                    <X className="h-3 w-3 ml-0.5 opacity-60" />
+                  </Badge>
+                )}
+                {isManualTemperature && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 cursor-pointer hover:bg-muted transition-colors text-xs py-0.5 px-2"
+                    onClick={() => setShowSettingsDrawer(true)}
+                  >
+                    <Thermometer className="h-3 w-3" />
+                    Temp {temperature?.toFixed(1)}
+                  </Badge>
+                )}
+                {topK && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1 cursor-pointer hover:bg-destructive/20 transition-colors text-xs py-0.5 px-2"
+                    onClick={() => setTopK(null)}
+                  >
+                    <FileSearch className="h-3 w-3" />
+                    {topK} docs
+                    <X className="h-3 w-3 ml-0.5 opacity-60" />
+                  </Badge>
+                )}
+              </div>
+            )}
 
             {/* Voice Conversation Indicator */}
             {voiceModeEnabled && voiceState !== "idle" && (
@@ -3324,6 +2818,474 @@ export default function ChatPage() {
           setInput(`Edit the canvas content: ${instruction}`);
         }}
       />
+
+      {/* Settings Drawer — All advanced chat controls */}
+      <Sheet open={showSettingsDrawer} onOpenChange={setShowSettingsDrawer}>
+        <SheetContent side="right" className="w-[380px] sm:max-w-[380px] overflow-y-auto">
+          <SheetHeader className="pb-4">
+            <SheetTitle className="flex items-center gap-2">
+              <Settings2 className="h-5 w-5" />
+              Chat Settings
+            </SheetTitle>
+          </SheetHeader>
+
+          <div className="space-y-6 pb-8">
+            {/* ── MODEL & CREATIVITY ────────────────────────────── */}
+            <div className="space-y-4">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Model & Creativity</h4>
+
+              {/* Temperature */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm font-medium flex items-center gap-2">
+                    <Thermometer className="h-3.5 w-3.5" />
+                    Temperature
+                  </Label>
+                  <span className="text-sm text-muted-foreground">
+                    {temperature !== null ? `${temperature.toFixed(2)} · ${getTemperatureLabel(temperature)}` : 'Loading...'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-muted-foreground w-4">0</span>
+                  <Slider
+                    value={[temperature ?? 0.7]}
+                    onValueChange={handleTemperatureChange}
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    className="flex-1"
+                    disabled={temperature === null}
+                  />
+                  <span className="text-xs text-muted-foreground w-4">1</span>
+                </div>
+                {isManualTemperature && optimizedTemperature !== null && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">
+                      Optimized: {optimizedTemperature.toFixed(2)}
+                    </span>
+                    <Button
+                      onClick={resetToOptimizedTemperature}
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs text-blue-600 dark:text-blue-400"
+                    >
+                      Reset to Optimized
+                    </Button>
+                  </div>
+                )}
+                {!isManualTemperature && optimizedTemperature !== null && (
+                  <p className="text-xs text-green-600 dark:text-green-400">
+                    Smart temperature active for {sessionLLMConfig?.model || "your model"}
+                  </p>
+                )}
+              </div>
+
+              {/* Documents to Search */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm font-medium flex items-center gap-2">
+                    <FileSearch className="h-3.5 w-3.5" />
+                    Docs to Search
+                  </Label>
+                  <span className="text-sm text-muted-foreground">
+                    {topK ? `${topK} docs` : "Auto"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-muted-foreground w-4">3</span>
+                  <Slider
+                    value={[topK || 10]}
+                    onValueChange={(value) => setTopK(value[0])}
+                    min={3}
+                    max={25}
+                    step={1}
+                    className="flex-1"
+                  />
+                  <span className="text-xs text-muted-foreground w-6">25</span>
+                </div>
+                {topK && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setTopK(null)}
+                    className="h-6 text-xs text-muted-foreground"
+                  >
+                    Reset to Default
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <Separator />
+
+            {/* ── INTELLIGENCE ────────────────────────────────── */}
+            <div className="space-y-4">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Intelligence</h4>
+
+              {/* Intelligence Level */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Level</Label>
+                <Select value={intelligenceLevel} onValueChange={(v) => setIntelligenceLevel(v as typeof intelligenceLevel)}>
+                  <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="basic"><span className="flex items-center gap-2"><Zap className="h-3 w-3 text-gray-400" />Basic — Fast, standard RAG</span></SelectItem>
+                    <SelectItem value="standard"><span className="flex items-center gap-2"><Brain className="h-3 w-3 text-blue-400" />Standard — CoT + Verification</span></SelectItem>
+                    <SelectItem value="enhanced"><span className="flex items-center gap-2"><Sparkles className="h-3 w-3 text-indigo-400" />Enhanced — Full optimization</span></SelectItem>
+                    <SelectItem value="maximum"><span className="flex items-center gap-2"><BrainCog className="h-3 w-3 text-purple-400" />Maximum — All features</span></SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Query Enhancement */}
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label className="text-sm">Query Enhancement</Label>
+                  <p className="text-xs text-muted-foreground">Expand & rephrase queries</p>
+                </div>
+                <Switch
+                  checked={enhanceQuery ?? true}
+                  onCheckedChange={(v) => handleEnhanceQueryChange(v)}
+                />
+              </div>
+
+              {/* Chain-of-Thought */}
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label className="text-sm">Chain-of-Thought</Label>
+                  <p className="text-xs text-muted-foreground">Step-by-step reasoning</p>
+                </div>
+                <Switch checked={chainOfThoughtEnabled} onCheckedChange={setChainOfThoughtEnabled} />
+              </div>
+
+              {/* Self-Verification */}
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label className="text-sm">Self-Verification</Label>
+                  <p className="text-xs text-muted-foreground">Check and correct answers</p>
+                </div>
+                <Switch checked={selfVerificationEnabled} onCheckedChange={setSelfVerificationEnabled} />
+              </div>
+
+              {/* Ensemble Voting */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label className="text-sm">Ensemble Voting</Label>
+                    <p className="text-xs text-muted-foreground">Cross-verify with multiple models</p>
+                  </div>
+                  <Switch checked={ensembleVotingEnabled} onCheckedChange={setEnsembleVotingEnabled} />
+                </div>
+                {ensembleVotingEnabled && (
+                  <Select value={ensembleStrategy} onValueChange={(v) => setEnsembleStrategy(v as typeof ensembleStrategy)}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Strategy" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="majority">Majority Vote</SelectItem>
+                      <SelectItem value="confidence">Confidence Weighted</SelectItem>
+                      <SelectItem value="consensus">Require Consensus</SelectItem>
+                      <SelectItem value="synthesis">AI Synthesis</SelectItem>
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+
+              {/* Extended Thinking - only at maximum level */}
+              {intelligenceLevel === "maximum" && (
+                <div className="space-y-2 border-t pt-3">
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label className="text-sm">Extended Thinking</Label>
+                      <p className="text-xs text-muted-foreground">Deep analysis for complex queries</p>
+                    </div>
+                    <Switch checked={extendedThinkingEnabled} onCheckedChange={setExtendedThinkingEnabled} />
+                  </div>
+                  {extendedThinkingEnabled && (
+                    <Select value={thinkingLevel} onValueChange={(v) => setThinkingLevel(v as typeof thinkingLevel)}>
+                      <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Thinking depth" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="minimal">Minimal</SelectItem>
+                        <SelectItem value="low">Low</SelectItem>
+                        <SelectItem value="medium">Medium</SelectItem>
+                        <SelectItem value="high">High</SelectItem>
+                        <SelectItem value="max">Maximum</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <Separator />
+
+            {/* ── DOCUMENT MODE ───────────────────────────────── */}
+            <div className="space-y-4">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Document Mode</h4>
+
+              {/* Dual Mode */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label className="text-sm">Dual Mode (RAG + General)</Label>
+                    <p className="text-xs text-muted-foreground">Documents + general AI in parallel</p>
+                  </div>
+                  <Switch checked={parallelKnowledgeEnabled} onCheckedChange={setParallelKnowledgeEnabled} />
+                </div>
+                {parallelKnowledgeEnabled && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">Output Mode</Label>
+                      <Select value={parallelOutputMode} onValueChange={(v) => setParallelOutputMode(v as "separate" | "merged" | "toggle")}>
+                        <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="merged">Merged (AI Synthesis)</SelectItem>
+                          <SelectItem value="separate">Side by Side</SelectItem>
+                          <SelectItem value="toggle">Toggle View</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {providersData?.providers && providersData.providers.length > 1 && (
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">General Knowledge Model</Label>
+                        <Select value={parallelGeneralModel || "same"} onValueChange={(v) => setParallelGeneralModel(v === "same" ? null : v)}>
+                          <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Same as RAG model" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="same">Same as RAG model</SelectItem>
+                            {providersData.providers
+                              .filter((p: { is_active: boolean }) => p.is_active)
+                              .map((provider: { id: string; name: string; default_chat_model?: string | null }) => (
+                                <SelectItem key={provider.id} value={provider.id}>
+                                  {provider.name} ({provider.default_chat_model || "default"})
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Collection Filters */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm flex items-center gap-2">
+                    <Filter className="h-3.5 w-3.5" />
+                    Filters
+                  </Label>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 text-xs"
+                    onClick={() => {
+                      setShowSettingsDrawer(false);
+                      setShowFilters(!showFilters);
+                    }}
+                  >
+                    {showFilters ? "Hide" : "Show"} Panel
+                  </Button>
+                </div>
+                {selectedCollections.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {selectedCollections.map(c => (
+                      <Badge key={c} variant="secondary" className="text-xs">
+                        {c}
+                        <X
+                          className="h-3 w-3 ml-1 cursor-pointer opacity-60 hover:opacity-100"
+                          onClick={() => setSelectedCollections(prev => prev.filter(x => x !== c))}
+                        />
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+                {selectedFolderId && (
+                  <Badge variant="outline" className="text-xs">
+                    Folder scope active
+                    <X
+                      className="h-3 w-3 ml-1 cursor-pointer opacity-60 hover:opacity-100"
+                      onClick={() => setSelectedFolderId(null)}
+                    />
+                  </Badge>
+                )}
+              </div>
+
+              {/* No AI Knowledge */}
+              {sourceMode === "general" && (
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label className="text-sm">Disable AI Knowledge</Label>
+                    <p className="text-xs text-muted-foreground">Only answer from documents</p>
+                  </div>
+                  <Switch checked={restrictToDocuments} onCheckedChange={setRestrictToDocuments} />
+                </div>
+              )}
+
+              {/* Collection Context */}
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label className="text-sm">Show Collection Tags</Label>
+                  <p className="text-xs text-muted-foreground">Include collection names in AI context</p>
+                </div>
+                <Switch checked={includeCollectionContext} onCheckedChange={setIncludeCollectionContext} />
+              </div>
+            </div>
+
+            <Separator />
+
+            {/* ── OUTPUT ──────────────────────────────────────── */}
+            <div className="space-y-4">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Output</h4>
+
+              {/* Language */}
+              <div className="space-y-1.5">
+                <Label className="text-sm flex items-center gap-2">
+                  <Globe className="h-3.5 w-3.5" />
+                  Language
+                </Label>
+                <Select value={outputLanguage} onValueChange={setOutputLanguage}>
+                  <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {CHAT_LANGUAGES.map((lang) => (
+                      <SelectItem key={lang.code} value={lang.code}>
+                        {lang.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Voice Mode */}
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label className="text-sm flex items-center gap-2">
+                    <Mic className="h-3.5 w-3.5" />
+                    Voice Mode
+                  </Label>
+                  <p className="text-xs text-muted-foreground">Hands-free voice conversation</p>
+                </div>
+                <Switch
+                  checked={voiceModeEnabled}
+                  onCheckedChange={(v) => {
+                    setVoiceModeEnabled(v);
+                    setVoiceState("idle");
+                  }}
+                />
+              </div>
+            </div>
+
+            <Separator />
+
+            {/* ── QUICK UPLOAD ────────────────────────────────── */}
+            <div className="space-y-4">
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Quick Upload</h4>
+
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full gap-2"
+                onClick={() => {
+                  setShowSettingsDrawer(false);
+                  setShowTempPanel(true);
+                }}
+              >
+                <Upload className="h-4 w-4" />
+                {tempDocuments.length > 0 ? `${tempDocuments.length} file${tempDocuments.length > 1 ? 's' : ''} attached` : "Upload temp documents"}
+              </Button>
+              {tempDocuments.length > 0 && (
+                <div className="space-y-1">
+                  {tempDocuments.map(doc => (
+                    <div key={doc.id} className="flex items-center justify-between text-xs p-1.5 rounded bg-muted/50">
+                      <span className="truncate flex-1">{doc.filename}</span>
+                      <Badge variant="secondary" className="text-[10px] ml-2">{doc.file_type}</Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* ── AGENT OPTIONS (when agent mode enabled) ─────── */}
+            {agentEnabled && (
+              <>
+                <Separator />
+                <div className="space-y-4">
+                  <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Agent Options</h4>
+
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label className="text-sm">Search Documents</Label>
+                      <p className="text-xs text-muted-foreground">Search uploaded docs first</p>
+                    </div>
+                    <Switch
+                      checked={agentOptions.search_documents}
+                      onCheckedChange={(v) => setAgentOptions(prev => ({ ...prev, search_documents: v }))}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label className="text-sm">Web Search</Label>
+                      <p className="text-xs text-muted-foreground">Also search the web</p>
+                    </div>
+                    <Switch
+                      checked={agentOptions.include_web_search}
+                      onCheckedChange={(v) => setAgentOptions(prev => ({ ...prev, include_web_search: v }))}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label className="text-sm">Require Approval</Label>
+                      <p className="text-xs text-muted-foreground">Show plan before executing</p>
+                    </div>
+                    <Switch
+                      checked={agentOptions.require_approval}
+                      onCheckedChange={(v) => setAgentOptions(prev => ({ ...prev, require_approval: v }))}
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm">Max Steps</Label>
+                      <span className="text-sm text-muted-foreground">{agentOptions.max_steps}</span>
+                    </div>
+                    <Slider
+                      value={[agentOptions.max_steps]}
+                      onValueChange={([value]) => setAgentOptions(prev => ({ ...prev, max_steps: value }))}
+                      min={1}
+                      max={10}
+                      step={1}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+
+            <Separator />
+
+            {/* ── ACTIONS ─────────────────────────────────────── */}
+            <div className="space-y-3">
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full gap-2"
+                onClick={() => {
+                  handleExportChat();
+                  setShowSettingsDrawer(false);
+                }}
+                disabled={messages.length <= 1}
+              >
+                {copiedId === "export" ? (
+                  <Check className="h-4 w-4" />
+                ) : (
+                  <Copy className="h-4 w-4" />
+                )}
+                {copiedId === "export" ? "Copied!" : "Export Chat"}
+              </Button>
+              <p className="text-xs text-center text-muted-foreground">
+                Keyboard: <kbd className="px-1 py-0.5 rounded bg-muted text-xs">⌘,</kbd> to toggle this panel
+              </p>
+            </div>
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

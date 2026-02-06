@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Optional, List, Dict
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, BackgroundTasks, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, Form, BackgroundTasks, status
 from pydantic import BaseModel, Field
 import structlog
 
@@ -1030,10 +1030,16 @@ async def process_document_background(
     pipeline = DocumentPipeline(config=config)
 
     try:
+        # Build metadata with source tracking info
+        doc_metadata = {"original_filename": filename}
+        if hasattr(options, '_upload_source_info') and options._upload_source_info:
+            doc_metadata["upload_source_info"] = options._upload_source_info
+            doc_metadata["source_type"] = options._upload_source_info.get("upload_method", "local_upload")
+
         result = await pipeline.process_document(
             file_path=file_path,
             document_id=file_id_str,
-            metadata={"original_filename": filename},
+            metadata=doc_metadata,
             access_tier=options.access_tier,
             collection=options.collection,
             folder_id=options.folder_id,
@@ -1111,6 +1117,7 @@ async def process_document_background(
 
 @router.post("/single", response_model=UploadResponse)
 async def upload_single_file(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     collection: Optional[str] = Form(None),
@@ -1222,6 +1229,17 @@ async def upload_single_file(
         auto_generate_tags=auto_generate_tags,
     )
 
+    # Build upload source info for provenance tracking
+    upload_source_info = {
+        "upload_method": "web_upload",
+        "client_ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent", ""),
+        "uploaded_by": user.user_id if user else "anonymous",
+        "uploaded_at": datetime.utcnow().isoformat(),
+        "original_filename": file.filename,
+        "original_path": str(file_path),
+    }
+
     # Queue for processing - use Celery if available, otherwise BackgroundTasks
     if is_celery_enabled():
         # Submit to Celery for distributed processing
@@ -1243,6 +1261,8 @@ async def upload_single_file(
                 "folder_id": options.folder_id,
                 "organization_id": options.organization_id,
                 "is_private": options.is_private,
+                "source_type": "local_upload",
+                "upload_source_info": upload_source_info,
             },
             batch_id=None,
             file_id=str(file_id),
@@ -1250,6 +1270,8 @@ async def upload_single_file(
     else:
         # Fallback to FastAPI BackgroundTasks
         logger.info("Using BackgroundTasks (Celery disabled)", file_id=str(file_id))
+        # Attach upload source info to options for background task
+        options._upload_source_info = upload_source_info
         background_tasks.add_task(
             process_document_background,
             file_id=file_id,
@@ -1269,6 +1291,7 @@ async def upload_single_file(
 
 @router.post("/batch", response_model=BatchUploadResponse)
 async def upload_batch(
+    request: Request,
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     collection: Optional[str] = Form(None),
@@ -1371,6 +1394,16 @@ async def upload_batch(
                 is_private=is_private,
             )
 
+            # Build upload source info for batch
+            batch_source_info = {
+                "upload_method": "web_upload_batch",
+                "client_ip": request.client.host if request.client else None,
+                "user_agent": request.headers.get("user-agent", ""),
+                "uploaded_by": user.user_id if user else "anonymous",
+                "uploaded_at": datetime.utcnow().isoformat(),
+                "original_filename": file.filename,
+            }
+
             # Use Celery if available, otherwise BackgroundTasks
             if is_celery_enabled():
                 submit_default_task(
@@ -1390,11 +1423,14 @@ async def upload_batch(
                         "folder_id": options.folder_id,
                         "organization_id": options.organization_id,
                         "is_private": options.is_private,
+                        "source_type": "local_upload",
+                        "upload_source_info": batch_source_info,
                     },
                     batch_id=None,
                     file_id=str(file_id),
                 )
             else:
+                options._upload_source_info = batch_source_info
                 background_tasks.add_task(
                     process_document_background,
                     file_id=file_id,

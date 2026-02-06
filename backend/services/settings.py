@@ -3056,6 +3056,24 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
     ),
 
     # ==========================================================================
+    # Connector Storage Settings
+    # ==========================================================================
+    SettingDefinition(
+        key="connector.storage_mode",
+        category=SettingCategory.INGESTION,
+        default_value="download",
+        value_type=ValueType.STRING,
+        description="How to handle files from external connectors: 'download' = download and store locally, 'process_only' = process for indexing but don't store the file (uses external link for preview)"
+    ),
+    SettingDefinition(
+        key="connector.store_source_metadata",
+        category=SettingCategory.INGESTION,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Store source metadata (original path, connector type, external URL) for all documents"
+    ),
+
+    # ==========================================================================
     # Provider Failover Settings (Phase 2.2 - OpenClaw-inspired)
     # ==========================================================================
     SettingDefinition(
