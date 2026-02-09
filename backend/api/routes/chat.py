@@ -854,11 +854,6 @@ async def create_chat_completion(
                 else:
                     combined_context = f"User preferences:\n{personalization_additions}"
 
-            # DEBUG: Log full request parameters for RAG query troubleshooting
-            import sys
-            print(f"[CHAT DEBUG] intelligence_level={request.intelligence_level} skip_cache={request.skip_cache} "
-                  f"enable_cot={request.enable_cot} enable_verification={request.enable_verification} "
-                  f"message={request.message[:80]} top_k={request.top_k}", file=sys.stderr, flush=True)
             logger.info(
                 "RAG query user context",
                 user_id=user.user_id,

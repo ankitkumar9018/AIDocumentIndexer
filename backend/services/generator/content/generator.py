@@ -92,6 +92,7 @@ class ContentGenerator:
         sources: Optional[List["SourceReference"]] = None,
         template_analysis: Optional["TemplateAnalysis"] = None,
         slide_constraints: Optional[Dict[str, Any]] = None,
+        used_chunk_ids: Optional[set] = None,
     ) -> "Section":
         """Generate content for a single section.
 
@@ -116,7 +117,8 @@ class ContentGenerator:
         # Search for relevant sources if not provided
         if sources is None:
             sources = await self._search_sources_for_section(
-                job, section_title, section_description
+                job, section_title, section_description,
+                exclude_chunk_ids=used_chunk_ids,
             )
 
         # Log sources found for debugging
@@ -483,6 +485,7 @@ class ContentGenerator:
         job: "GenerationJob",
         section_title: str,
         section_description: str,
+        exclude_chunk_ids: Optional[set] = None,
     ) -> List["SourceReference"]:
         """Search for relevant sources for a section.
 
@@ -541,6 +544,7 @@ class ContentGenerator:
                 query=section_query,
                 limit=initial_limit,
                 collection_filter=collection_filter,
+                exclude_chunk_ids=exclude_chunk_ids,
             )
             logger.info(
                 "Vector search completed",
@@ -1773,6 +1777,10 @@ Every sentence must be in {language_name} - no exceptions!
     ) -> List["Section"]:
         """Generate content for all sections in a job.
 
+        Tracks chunk IDs across sections to avoid repeating the same
+        source material in different sections, ensuring each section
+        draws from distinct content.
+
         Args:
             job: The generation job with sections to generate
             template_analysis: Optional template analysis for constraints
@@ -1781,6 +1789,7 @@ Every sentence must be in {language_name} - no exceptions!
             List of sections with generated content
         """
         generated_sections = []
+        used_chunk_ids: set = set()
 
         for i, section_info in enumerate(job.outline.sections if job.outline else []):
             if isinstance(section_info, dict):
@@ -1796,8 +1805,14 @@ Every sentence must be in {language_name} - no exceptions!
                 section_description=description,
                 order=i,
                 template_analysis=template_analysis,
+                used_chunk_ids=used_chunk_ids,
             )
             generated_sections.append(section)
+
+            # Track chunks used by this section so subsequent sections get fresh content
+            for source in (section.sources or []):
+                if source.chunk_id:
+                    used_chunk_ids.add(source.chunk_id)
 
         return generated_sections
 

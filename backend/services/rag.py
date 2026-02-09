@@ -561,6 +561,72 @@ def get_search_cache() -> SearchResultCache:
     return _search_cache
 
 
+def _text_overlap_ratio(text_a: str, text_b: str) -> float:
+    """Word-set Jaccard similarity as cheap dedup proxy."""
+    words_a = set(text_a.lower().split())
+    words_b = set(text_b.lower().split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
+def _filter_score_gap(
+    retrieved_docs: List[Tuple[Document, float]],
+    min_top_score: float = 0.50,
+    ratio: float = 0.75,
+) -> List[Tuple[Document, float]]:
+    """Drop chunks whose similarity is much lower than the best chunk.
+
+    When the top chunk has a strong similarity score (≥ min_top_score),
+    chunks below ``top * ratio`` are noise from unrelated documents.
+    Always keeps at least 1 chunk.  Keyword-rescued chunks are preserved.
+    """
+    if len(retrieved_docs) <= 1:
+        return retrieved_docs
+
+    # Use cosine similarity from metadata (0-1), not the RRF tuple score
+    def _sim(doc_score):
+        doc, score = doc_score
+        return doc.metadata.get("similarity_score", score)
+
+    top_sim = max(_sim(ds) for ds in retrieved_docs)
+    if top_sim < min_top_score:
+        return retrieved_docs  # Low-confidence search — keep everything
+
+    threshold = top_sim * ratio
+    kept = []
+    for ds in retrieved_docs:
+        doc, score = ds
+        if _sim(ds) >= threshold or doc.metadata.get("keyword_rescued"):
+            kept.append(ds)
+
+    return kept if kept else [retrieved_docs[0]]
+
+
+def _deduplicate_chunks(
+    retrieved_docs: List[Tuple[Document, float]],
+    overlap_threshold: float = 0.80,
+) -> List[Tuple[Document, float]]:
+    """Remove near-duplicate chunks based on word overlap.
+
+    Keeps the first (highest-scored) chunk when duplicates are found.
+    Threshold of 0.80 = chunks sharing 80%+ of their words are duplicates.
+    """
+    if len(retrieved_docs) <= 2:
+        return retrieved_docs
+
+    deduped = [retrieved_docs[0]]
+    for doc, score in retrieved_docs[1:]:
+        is_dup = False
+        for kept_doc, _ in deduped:
+            if _text_overlap_ratio(doc.page_content, kept_doc.page_content) > overlap_threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append((doc, score))
+    return deduped
+
+
 # =============================================================================
 # RAG Service
 # =============================================================================
@@ -1439,6 +1505,7 @@ class RAGService:
         organization_id: Optional[str] = None,
         user_id: Optional[str] = None,
         is_superadmin: bool = False,
+        exclude_chunk_ids: Optional[set] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search documents without generating an LLM response.
@@ -1454,6 +1521,7 @@ class RAGService:
             organization_id: Organization ID for multi-tenant isolation
             user_id: User ID for private document access
             is_superadmin: Whether user is a superadmin (can access all private docs)
+            exclude_chunk_ids: Optional set of chunk IDs to exclude (for cross-section dedup)
 
         Returns:
             List of document dicts with content, source, and score
@@ -1466,6 +1534,14 @@ class RAGService:
             organization_id=organization_id,
         )
 
+        # Classify query to enable adaptive retrieval (MMR, listing rescue, weight tuning)
+        query_classification = None
+        try:
+            classifier = get_query_classifier()
+            query_classification = classifier.classify(query)
+        except Exception:
+            pass  # Classification is optional — proceed without it
+
         # Use _retrieve to get document chunks
         retrieved_docs = await self._retrieve(
             query=query,
@@ -1475,7 +1551,41 @@ class RAGService:
             organization_id=organization_id,
             user_id=user_id,
             is_superadmin=is_superadmin,
+            query_classification=query_classification,
         )
+
+        # Semantic dedup before trim (same as query() path)
+        _before_dedup = len(retrieved_docs)
+        retrieved_docs = _deduplicate_chunks(retrieved_docs, overlap_threshold=0.80)
+        if len(retrieved_docs) < _before_dedup:
+            logger.info(
+                "search() dedup removed near-duplicates",
+                before=_before_dedup,
+                after=len(retrieved_docs),
+            )
+
+        # Score-gap filter: drop chunks with similarity far below the best chunk
+        _before_gap = len(retrieved_docs)
+        retrieved_docs = _filter_score_gap(retrieved_docs, min_top_score=0.50, ratio=0.82)
+        if len(retrieved_docs) < _before_gap:
+            logger.info(
+                "search() score-gap filter removed low-confidence chunks",
+                before=_before_gap,
+                after=len(retrieved_docs),
+            )
+
+        # Trim to limit, preserving keyword_rescued chunks
+        if len(retrieved_docs) > limit:
+            rescued = [(doc, score) for doc, score in retrieved_docs if doc.metadata.get("keyword_rescued")]
+            non_rescued = [(doc, score) for doc, score in retrieved_docs if not doc.metadata.get("keyword_rescued")]
+            retrieved_docs = non_rescued[:limit] + rescued
+
+        # Exclude chunks already used in other sections (cross-section dedup)
+        if exclude_chunk_ids:
+            retrieved_docs = [
+                (doc, score) for doc, score in retrieved_docs
+                if doc.metadata.get("chunk_id") not in exclude_chunk_ids
+            ]
 
         # Format results for agent consumption
         results = []
@@ -2008,7 +2118,7 @@ class RAGService:
         # Phase 66: RAG-Fusion (Multi-Query with Reciprocal Rank Fusion)
         # =============================================================================
         rag_fusion_result: Optional[FusionResult] = None
-        if use_rag_fusion_for_query and self._custom_vectorstore and not _basic_tiny_mode:
+        if use_rag_fusion_for_query and self._custom_vectorstore and not _small_model:
             try:
                 logger.info("Phase 66: Applying RAG-Fusion with multi-query retrieval")
 
@@ -2053,7 +2163,7 @@ class RAGService:
         # =============================================================================
         stepback_result: Optional[StepBackResult] = None
         stepback_context = ""
-        if use_stepback_for_query and self._custom_vectorstore and not _basic_tiny_mode:
+        if use_stepback_for_query and self._custom_vectorstore and not _small_model:
             try:
                 logger.info("Phase 66: Applying Step-Back prompting for complex query")
 
@@ -2324,9 +2434,38 @@ class RAGService:
         else:
             logger.debug("Verification skipped (verifier not enabled)", docs_count=len(retrieved_docs))
 
-        # Trim back to top_k after verification (we over-fetched to give verifier headroom)
+        # Semantic deduplication FIRST: remove near-duplicate chunks to save context tokens
+        # Do this BEFORE trimming so dedup frees slots for diverse chunks that would
+        # otherwise be cut by the top_k trim (e.g. comprehensive listing chunks at rank #13
+        # survive if 2 near-duplicates from ranks #1-10 are removed)
+        _before_dedup = len(retrieved_docs)
+        retrieved_docs = _deduplicate_chunks(retrieved_docs, overlap_threshold=0.80)
+        if len(retrieved_docs) < _before_dedup:
+            logger.info(
+                "Semantic dedup removed near-duplicates",
+                before=_before_dedup,
+                after=len(retrieved_docs),
+            )
+
+        # Score-gap filter: drop chunks with similarity far below the best chunk.
+        # Prevents noise from unrelated documents (e.g. branding docs appearing for
+        # science queries) when the top chunk has strong similarity.
+        _before_gap = len(retrieved_docs)
+        retrieved_docs = _filter_score_gap(retrieved_docs, min_top_score=0.50, ratio=0.82)
+        if len(retrieved_docs) < _before_gap:
+            logger.info(
+                "Score-gap filter removed low-confidence chunks",
+                before=_before_gap,
+                after=len(retrieved_docs),
+            )
+
+        # Trim to top_k after dedup (we over-fetched to give verifier + dedup headroom)
+        # Preserve keyword_rescued chunks — they were injected specifically for list queries
+        # and should not be cut by the top_k trim
         if len(retrieved_docs) > top_k:
-            retrieved_docs = retrieved_docs[:top_k]
+            rescued = [(doc, score) for doc, score in retrieved_docs if doc.metadata.get("keyword_rescued")]
+            non_rescued = [(doc, score) for doc, score in retrieved_docs if not doc.metadata.get("keyword_rescued")]
+            retrieved_docs = non_rescued[:top_k] + rescued
 
         # Retrieval quality gate for tiny models — if best score is too low,
         # return early rather than letting the LLM hallucinate from irrelevant context
@@ -2406,6 +2545,7 @@ class RAGService:
             sources_count=len(sources),
             source_docs=[s.document_name[:30] if hasattr(s, 'document_name') else 'unknown' for s in sources[:3]] if sources else [],
         )
+
 
         # Phase 79: Graph-O1 enhanced reasoning (beam search over knowledge graph)
         from backend.core.config import settings as _go1_settings
@@ -2490,14 +2630,16 @@ class RAGService:
 
         # =============================================================================
         # Context Compression Pipeline (consolidates Phase 66, 79, 63)
+        # Skip for small models — LLM-based compression causes timeouts on local 8B
         # =============================================================================
-        context = await self._compress_context(
-            context=context,
-            question=question,
-            use_context_compression=use_context_compression,
-            settings_getter=_s,
-            llm=llm,
-        )
+        if not _small_model:
+            context = await self._compress_context(
+                context=context,
+                question=question,
+                use_context_compression=use_context_compression,
+                settings_getter=_s,
+                llm=llm,
+            )
 
         # =============================================================================
         # Phase 63: Advanced Sufficiency Checker (ICLR 2025)
@@ -2555,12 +2697,13 @@ class RAGService:
         _stuff_then_refine_used = False
         _stf_enabled = _s("conversation.stuff_then_refine_enabled", True)
 
-        # Only use stuff-then-refine when context genuinely overflows the token budget.
-        # Do NOT force it for tiny models — sequential LLM calls (5-8 per query) cause
-        # 300-960s response times on local Ollama and cascade circuit breaker failures.
+        # Only use stuff-then-refine when context genuinely overflows the token budget
+        # AND the model is tiny (<3B). Small models (7-14B) can handle larger context,
+        # and sequential LLM calls (5-8 per query) cause 300-960s response times on
+        # local Ollama. Phase 2.4 had no stuff-then-refine and scored 9/9 on 8B models.
         _overflow_stf = (
             _stf_enabled
-            and _tier_info["tier"] in ("tiny", "small")
+            and _tier_info["tier"] == "tiny"
             and _context_tokens > _budget["chunks"]
         )
 
@@ -2749,16 +2892,19 @@ class RAGService:
             ])
         )
 
-        # Add intelligence-level grounding instructions ONLY for larger models (7B+)
-        # Small models (<3B) perform worse with extra instructions — keep prompts short
-        if not is_tiny:
+        # Add intelligence-level grounding instructions ONLY for larger models (20B+)
+        # Small models (≤14B) already have grounding in their model-specific system prompts
+        # Adding extra grounding doubles instructions and confuses small models
+        if not is_small_model:
             intelligence_grounding = _get_intelligence_grounding(intelligence_level)
             if intelligence_grounding:
                 system_prompt = f"{system_prompt}\n{intelligence_grounding}"
 
-        # Chain-of-thought: add reasoning instruction for 7B+ models
-        # Tiny models (<3B) can't do meta-tasks like CoT — they answer the instruction as a question
-        if enable_cot and not is_tiny:
+        # Chain-of-thought: add reasoning instruction for large models (20B+) only
+        # Small models have step-by-step scaffolds built into their templates already
+        # (DeepSeek: 3-step decomposition, Llama: 3-step reasoning scaffold)
+        # Adding a SEPARATE CoT instruction creates redundant/conflicting instructions
+        if enable_cot and not is_small_model:
             system_prompt = f"{system_prompt}\nThink through this step by step before answering. Show your reasoning process."
             logger.debug("Chain-of-thought enabled", model=model_name)
 
@@ -2819,38 +2965,44 @@ class RAGService:
                 intent=query_intent,
             )
 
-        # Intelligence-level temperature override for larger models only
-        # Small models already use low temperatures via adaptive sampling
-        if not is_tiny:
+        # Intelligence-level temperature override for larger models only (20B+)
+        # Small models (≤14B) already use tuned temperatures via adaptive sampling
+        # Forcing 0.1 on reasoning models (DeepSeek-R1) kills their reasoning ability
+        if not is_small_model:
             if intelligence_level == "maximum" and sampling_config.get("temperature", 0.7) > 0.2:
                 sampling_config["temperature"] = 0.1
             elif intelligence_level == "enhanced" and sampling_config.get("temperature", 0.7) > 0.4:
                 sampling_config["temperature"] = 0.3
 
-        # For tiny models (<3B), always use the structured template
-        # This provides ultra-explicit format that reduces hallucination
-        if is_tiny:
-            # Llama 3.2 1B/3B uses step-by-step template, others use fixed-format
+        # Small models (≤14B): always use model-family-specific template
+        # These templates are tuned per model family (DeepSeek has 3-step decomposition,
+        # Llama has reasoning scaffold, etc.) and work better than generic intent templates
+        if is_small_model:
             prompt_template = _get_template_for_model(model_name)
             logger.info(
-                "Using optimized template for small model",
+                "Using model-family template for small model",
                 model=model_name,
-                is_llama=is_llama,
+                is_tiny=is_tiny,
                 recommended_temperature=recommended_temp,
             )
-        # Small Llama models (7B-8B) benefit from step-by-step reasoning
-        elif is_llama_sm:
-            prompt_template = LLAMA_SMALL_TEMPLATE
-            logger.info(
-                "Using Llama small model template with step-by-step reasoning",
-                model=model_name,
-                recommended_temperature=recommended_temp,
-            )
-        # For larger models, select prompt template based on query classification
+        # Larger models (20B+): select prompt template based on query classification
+        # Intent-based templates (list, comparison, summary, etc.) have better
+        # task-specific instructions for capable models
         elif query_classification:
             use_cot = query_classification.use_cot
-            intent_str = query_classification.intent.value if query_classification.intent else "factual"
+            # Use prompt_template from classification config (maps intent → template key correctly)
+            # e.g., EXPLORATORY → "list", AGGREGATION → "list", FACTUAL → "factual"
+            # Don't use intent.value directly — enum values don't match template map keys
+            intent_str = query_classification.prompt_template or (
+                query_classification.intent.value if query_classification.intent else "factual"
+            )
             prompt_template = _get_template_for_intent(intent_str, use_cot=use_cot)
+            # Strip SUGGESTED_QUESTIONS from templates just in case
+            if "SUGGESTED_QUESTIONS" in prompt_template:
+                prompt_template = "\n".join(
+                    line for line in prompt_template.split("\n")
+                    if "SUGGESTED_QUESTIONS" not in line
+                )
             logger.debug(
                 "Selected adaptive prompt template",
                 intent=intent_str,
@@ -2866,8 +3018,15 @@ class RAGService:
         if intelligence_level == "maximum" and not is_small_model:
             prompt_template = MAXIMUM_INTELLIGENCE_TEMPLATE
 
+        # Append language instruction — but use short version for small models
+        # Small models have limited context and long language instructions waste tokens
         if language_instruction:
-            system_prompt = f"{system_prompt}\n{language_instruction}"
+            if is_small_model and effective_language == "en":
+                pass  # English is already the default for small model prompts — skip instruction
+            elif is_small_model:
+                system_prompt = f"{system_prompt}\nRespond in {effective_language}."
+            else:
+                system_prompt = f"{system_prompt}\n{language_instruction}"
 
         # Phase 93: DSPy compiled prompt injection
         # When DSPy inference is enabled, override system prompt with compiled instructions
@@ -3333,10 +3492,10 @@ class RAGService:
                 confidence_warning = "Moderate confidence - results may be incomplete. Try adding more specific terms."
 
         # Apply CRAG for low-confidence results (auto-refine query)
-        # Skip in basic+tiny mode — extra LLM calls degrade quality for small models
+        # Skip for small models — extra LLM calls cause timeouts on local 8B models
         if (
             self._crag is not None
-            and not _basic_tiny_mode
+            and not _small_model
             and confidence_score is not None
             and confidence_score < self.config.crag_confidence_threshold
             and len(sources) > 0
@@ -3435,9 +3594,9 @@ class RAGService:
                 )
 
         # Self-RAG: Verify response against sources to detect hallucinations
-        # Skip in basic+tiny mode — extra LLM calls degrade quality for small models
+        # Skip for small models — extra LLM calls cause timeouts on local 8B models
         self_rag_result: Optional[SelfRAGResult] = None
-        if self._self_rag and content and sources and not _basic_tiny_mode:
+        if self._self_rag and content and sources and not _small_model:
             try:
                 # Convert sources to SearchResult format for Self-RAG
                 search_results_for_selfrag = [
@@ -3700,6 +3859,26 @@ class RAGService:
             is_superadmin=is_superadmin,
         )
 
+        # Semantic deduplication for streaming path
+        _before_dedup_stream = len(retrieved_docs)
+        retrieved_docs = _deduplicate_chunks(retrieved_docs, overlap_threshold=0.80)
+        if len(retrieved_docs) < _before_dedup_stream:
+            logger.info(
+                "Streaming: semantic dedup removed near-duplicates",
+                before=_before_dedup_stream,
+                after=len(retrieved_docs),
+            )
+
+        # Score-gap filter for streaming path
+        _before_gap_stream = len(retrieved_docs)
+        retrieved_docs = _filter_score_gap(retrieved_docs, min_top_score=0.50, ratio=0.82)
+        if len(retrieved_docs) < _before_gap_stream:
+            logger.info(
+                "Streaming: score-gap filter removed low-confidence chunks",
+                before=_before_gap_stream,
+                after=len(retrieved_docs),
+            )
+
         context, sources = self._format_context(retrieved_docs, include_collection_context)
 
         # Build prompt with language instruction
@@ -3712,20 +3891,26 @@ class RAGService:
         model_name = llm_config.model if llm_config else None
         system_prompt = _get_system_prompt_for_model(model_name)
 
-        # Add intelligence-level grounding instructions ONLY for larger models
+        # Add intelligence-level grounding instructions ONLY for larger models (20B+)
         is_tiny_stream = _is_tiny_model(model_name) if model_name else False
         is_small_stream = is_tiny_stream or (
             model_name and any(s in model_name.lower() for s in [
                 "7b", "8b", "9b", "13b", "14b", ":mini",
             ])
         ) or (_is_llama_small(model_name) if model_name else False)
-        if not is_tiny_stream:
+        if not is_small_stream:
             intelligence_grounding = _get_intelligence_grounding(intelligence_level)
             if intelligence_grounding:
                 system_prompt = f"{system_prompt}\n{intelligence_grounding}"
 
+        # Language instruction — use short version for small models, skip for English
         if language_instruction:
-            system_prompt = f"{system_prompt}\n{language_instruction}"
+            if is_small_stream and effective_language == "en":
+                pass  # English is already the default — skip instruction
+            elif is_small_stream:
+                system_prompt = f"{system_prompt}\nRespond in {effective_language}."
+            else:
+                system_prompt = f"{system_prompt}\n{language_instruction}"
 
         # Get research-backed sampling configuration (temperature, top_p, top_k, repeat_penalty)
         # Note: streaming doesn't have query_classification, so intent will be None (uses base config)
@@ -3765,9 +3950,9 @@ class RAGService:
                 model=model_name,
             )
 
-        # Intelligence-level temperature override for streaming
-        # Intelligence-level temperature override for larger models only
-        if not is_tiny_stream:
+        # Intelligence-level temperature override for larger models only (20B+)
+        # Small models (≤14B) already use tuned temperatures via adaptive sampling
+        if not is_small_stream:
             if intelligence_level == "maximum" and sampling_config.get("temperature", 0.7) > 0.2:
                 sampling_config["temperature"] = 0.1
             elif intelligence_level == "enhanced" and sampling_config.get("temperature", 0.7) > 0.4:
@@ -4993,11 +5178,11 @@ class RAGService:
                             "Smart pre-filter returned no candidates, using full search"
                         )
 
-            # Over-fetch slightly to give the verifier a larger pool to filter from.
+            # Over-fetch to give the verifier and MMR a larger pool to filter from.
             # The verifier (QUICK mode) removes chunks with low cosine similarity,
-            # so fetching extra ensures we still have top_k after filtering.
-            # Synthetic chunks are already filtered at the vectorstore level.
-            search_top_k = top_k + 4
+            # and MMR selects the most diverse top_k from the over-fetched pool.
+            # +6 ensures comprehensive listing chunks (often ranked ~13th) survive.
+            search_top_k = top_k + 6
 
             # Perform search - use hybrid (LightRAG/RAPTOR), two-stage (ColBERT), or hierarchical retrieval
             # Priority: HybridRetriever > Two-stage > Hierarchical > Standard
@@ -5251,6 +5436,80 @@ class RAGService:
                     original_count=len(langchain_results),
                     final_count=min(top_k, len(langchain_results)),
                 )
+
+            # Listing rescue: For list/enumerate queries, keyword search finds
+            # comprehensive listing chunks that rank poorly in vector search.
+            # Instead of taking the first non-hybrid keyword results (which are
+            # often generic), score candidates by enumeration density to find
+            # chunks that actually LIST items (commas, colons, "and" patterns).
+            if (
+                query_classification is not None
+                and query_classification.prompt_template == "list"
+                and self._custom_vectorstore is not None
+            ):
+                existing_chunk_ids = {
+                    doc.metadata.get("chunk_id") for doc, _ in langchain_results
+                }
+                try:
+                    kw_results = await self._custom_vectorstore.keyword_search(
+                        query=query,
+                        top_k=20,
+                        access_tier_level=access_tier,
+                        document_ids=document_ids,
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        is_superadmin=is_superadmin,
+                    )
+
+                    import re as _re
+                    rescue_candidates = []
+                    for kw_r in kw_results:
+                        if kw_r.chunk_id in existing_chunk_ids:
+                            continue
+                        content = kw_r.content or ""
+                        # Enumeration signals: chunks that list items
+                        enum_score = 0.0
+                        comma_count = content.count(",")
+                        if comma_count >= 3:
+                            enum_score += min(comma_count * 0.05, 0.5)
+                        # Colon before capitalized list items
+                        if _re.search(r":\s*[A-Z][a-z]+.*,\s*[A-Z]", content):
+                            enum_score += 0.3
+                        # "and" connecting final list item
+                        if _re.search(r",\s+and\s+[A-Z]", content):
+                            enum_score += 0.2
+                        rescue_candidates.append((kw_r, kw_r.score + enum_score))
+
+                    # Sort by combined score (keyword + enumeration density)
+                    rescue_candidates.sort(key=lambda x: x[1], reverse=True)
+
+                    rescue_count = 0
+                    for kw_r, combined_score in rescue_candidates[:2]:
+                        rescue_doc = Document(
+                            page_content=kw_r.content,
+                            metadata={
+                                **kw_r.metadata,
+                                "document_id": kw_r.document_id,
+                                "document_name": kw_r.document_filename or f"Document {kw_r.document_id[:8]}",
+                                "chunk_id": kw_r.chunk_id,
+                                "collection": kw_r.collection,
+                                "page_number": kw_r.page_number,
+                                "section_title": kw_r.section_title,
+                                "similarity_score": kw_r.similarity_score,
+                                "keyword_rescued": True,
+                            },
+                        )
+                        langchain_results.append((rescue_doc, combined_score * 0.01))
+                        existing_chunk_ids.add(kw_r.chunk_id)
+                        rescue_count += 1
+                    if rescue_count > 0:
+                        logger.info(
+                            "Listing rescue: injected enumeration chunks after MMR",
+                            rescued=rescue_count,
+                            total=len(langchain_results),
+                        )
+                except Exception as e:
+                    logger.debug("Listing rescue failed", error=str(e))
 
             return langchain_results
 

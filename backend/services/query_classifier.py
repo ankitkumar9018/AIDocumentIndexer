@@ -195,7 +195,7 @@ INTENT_RETRIEVAL_CONFIG = {
         "use_cot": False,
         "suggested_top_k": 12,  # Reduced from 15 - still comprehensive
         "similarity_threshold": 0.30,
-        "prompt_template": "summary",
+        "prompt_template": "list",  # "list all X", "enumerate X", "everything about X" → list format
     },
     QueryIntent.AGGREGATION: {
         "use_mmr": False,
@@ -417,6 +417,12 @@ class QueryClassifier:
         elif word_count >= 7:
             vec_weight = min(1.0, vec_weight + 0.1)
             kw_weight = max(0.0, kw_weight - 0.1)
+
+        # List/enumerate queries → boost keyword weight
+        # "list all planetary boundaries" needs keyword matching more than vector similarity
+        if re.match(r'^(list|enumerate|name)\s', query_lower):
+            kw_weight = min(1.0, kw_weight + 0.2)
+            vec_weight = max(0.0, vec_weight - 0.2)
 
         # Contains technical terms/acronyms → boost keyword
         if re.search(r'\b[A-Z]{2,}\b', query):  # Acronyms

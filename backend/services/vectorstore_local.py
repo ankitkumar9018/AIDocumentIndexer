@@ -1035,6 +1035,36 @@ class ChromaVectorStore:
         if not query_terms:
             query_terms = [t for t in query_lower.split() if len(t) > 1]  # fallback
 
+        # Build stem variants for each query term to handle plural/singular mismatches
+        # e.g. "boundaries" should also match "boundary", "entities" → "entity"
+        def _stem_variants(term: str) -> list:
+            """Generate simple plural/singular variants of a term."""
+            variants = [term]
+            if term.endswith("ies") and len(term) > 4:
+                variants.append(term[:-3] + "y")      # boundaries → boundary
+            elif term.endswith("es") and len(term) > 3:
+                variants.append(term[:-2])             # changes → chang (less useful)
+                variants.append(term[:-1])             # changes → change
+            elif term.endswith("s") and len(term) > 3:
+                variants.append(term[:-1])             # systems → system
+            # Also try adding common suffixes to match plurals from singular queries
+            if term.endswith("y") and len(term) > 3:
+                variants.append(term[:-1] + "ies")     # boundary → boundaries
+            elif not term.endswith("s"):
+                variants.append(term + "s")            # system → systems
+                variants.append(term + "es")           # process → processes
+            return variants
+
+        term_variants = {t: _stem_variants(t) for t in query_terms}
+
+        def _term_in_content(term: str, content: str) -> bool:
+            """Check if any variant of the term appears in content."""
+            return any(v in content for v in term_variants.get(term, [term]))
+
+        def _term_count_in_content(term: str, content: str) -> int:
+            """Count occurrences of any variant of the term in content."""
+            return sum(content.count(v) for v in term_variants.get(term, [term]))
+
         if results["ids"]:
             for i, chunk_id in enumerate(results["ids"]):
                 content = results["documents"][i] if results["documents"] else ""
@@ -1047,13 +1077,14 @@ class ChromaVectorStore:
                 content_lower = content.lower()
 
                 # Term-based matching: count how many query terms appear in the chunk
-                matching_terms = sum(1 for t in query_terms if t in content_lower)
+                # Uses stem variants to handle plural/singular (e.g. boundaries/boundary)
+                matching_terms = sum(1 for t in query_terms if _term_in_content(t, content_lower))
 
                 # Document-filename matching: if query terms appear in the parent document's
                 # filename, give the chunk a base score. This helps surface chunks from
                 # clearly relevant documents (e.g., "Planetary Health Check" for "planetary boundaries").
                 doc_filename_lower = (metadata.get("document_filename") or "").lower()
-                filename_matches = sum(1 for t in query_terms if t in doc_filename_lower)
+                filename_matches = sum(1 for t in query_terms if _term_in_content(t, doc_filename_lower))
                 filename_score = 0.0
                 if filename_matches > 0 and matching_terms == 0:
                     # Chunk content doesn't match but document title does
@@ -1062,11 +1093,27 @@ class ChromaVectorStore:
                 if matching_terms == 0 and filename_score == 0:
                     continue
 
-                # Score: coverage fraction × (1 + normalized term frequency)
+                # Phrase bonus: if consecutive query terms appear as a contiguous phrase,
+                # boost score proportional to phrase count. Chunks that mention
+                # "planetary boundary/boundaries" 5 times rank higher than those with 1 mention.
+                phrase_bonus = 0.0
+                if len(query_terms) >= 2 and matching_terms == len(query_terms):
+                    phrase_count = 0
+                    for j in range(len(query_terms) - 1):
+                        t1_variants = term_variants.get(query_terms[j], [query_terms[j]])
+                        t2_variants = term_variants.get(query_terms[j + 1], [query_terms[j + 1]])
+                        for v1 in t1_variants:
+                            for v2 in t2_variants:
+                                phrase_count += content_lower.count(f"{v1} {v2}")
+                    if phrase_count > 0:
+                        # 0.1 per phrase occurrence, capped at 0.5
+                        phrase_bonus = min(0.5, phrase_count * 0.1)
+
+                # Score: coverage fraction × (1 + normalized term frequency) + bonuses
                 term_coverage = matching_terms / len(query_terms)
-                total_tf = sum(content_lower.count(t) for t in query_terms if t in content_lower)
+                total_tf = sum(_term_count_in_content(t, content_lower) for t in query_terms if _term_in_content(t, content_lower))
                 word_count = max(len(content.split()), 1)
-                score = term_coverage * (1.0 + total_tf / word_count) + filename_score
+                score = term_coverage * (1.0 + total_tf / word_count) + filename_score + phrase_bonus
 
                 search_results.append(SearchResult(
                     chunk_id=chunk_id,
@@ -1390,9 +1437,12 @@ class ChromaVectorStore:
                 )
 
         # Reciprocal Rank Fusion
-        # k=30 amplifies differences between top ranks (vs k=60 which flattens them)
-        # This helps when keyword search ranks the right content higher than vector search
-        k = 30
+        # k=20 amplifies differences between top ranks more aggressively
+        # With k=20: rank 1 gets 1/21=0.048, rank 10 gets 1/30=0.033 (1.4x ratio)
+        # With k=30: rank 1 gets 1/31=0.032, rank 10 gets 1/40=0.025 (1.3x ratio)
+        # Lower k rewards top-ranked results more, which helps when keyword search
+        # correctly identifies comprehensive listing chunks
+        k = 20
         scores: Dict[str, Tuple[float, SearchResult]] = {}
 
         # Process vector results - preserve original similarity scores

@@ -1292,6 +1292,38 @@ Respond with JSON only:
                 "message": f"Unknown action: {action}. Valid: proceed, auto_repair, regenerate",
             }
 
+    async def verify_generated_document(
+        self,
+        file_path: str,
+        output_format,
+        expected_sections: int = 0,
+        job_title: str = "",
+    ) -> Dict[str, Any]:
+        """Delegate to DocumentVerifier for document verification."""
+        verifier = get_document_verifier()
+        return await verifier.verify_generated_document(
+            file_path=file_path,
+            output_format=output_format,
+            expected_sections=expected_sections,
+            job_title=job_title,
+        )
+
+    async def repair_document(
+        self,
+        file_path: str,
+        output_format,
+        verification_result: Dict[str, Any],
+        job=None,
+    ) -> Dict[str, Any]:
+        """Delegate to DocumentVerifier for document repair."""
+        verifier = get_document_verifier()
+        return await verifier.repair_document(
+            file_path=file_path,
+            output_format=output_format,
+            verification_result=verification_result,
+            job=job,
+        )
+
 
 # Singleton instance
 _generation_service: Optional[DocumentGenerationService] = None

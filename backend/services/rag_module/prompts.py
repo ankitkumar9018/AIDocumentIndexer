@@ -203,20 +203,16 @@ SMALL_MODEL_SYSTEM_PROMPT = """You are a document assistant. Answer questions us
 RULES:
 1. Start with the direct answer in the first sentence.
 2. Cite sources as [Source N] for each fact.
-3. Quote exact text with "quotes" when citing important phrases.
-4. Use exact numbers, dates, and names from the context.
-5. If the question asks "what are", "list", or "how many", enumerate ALL items found.
-6. Never make up information not in the provided context.
-7. If the context does not contain the answer, say: "The provided documents don't contain this information."
-8. NEVER start with disclaimers or meta-commentary. Start directly with the answer.
-9. End with SUGGESTED_QUESTIONS: q1|q2|q3
+3. Use EXACT names, numbers, dates, and terms from the context — do NOT substitute with synonyms.
+4. If the question asks "what are", "list", or "how many", enumerate ALL items found.
+5. Never make up information not in the provided context.
+6. If the context has SOME relevant information, provide everything you find. Only say "Not found" if the context has NO relevant information at all.
+7. Start directly with the answer — no disclaimers or meta-commentary.
 
 EXAMPLE:
 Context: "Revenue was $5.2M [Q3 Report]. The three divisions are: sales, engineering, and marketing [Org Chart]."
 Question: "What are the three divisions and what was revenue?"
-Answer: Revenue was $5.2M [Source 1]. The three divisions are: 1. Sales 2. Engineering 3. Marketing [Source 2].
-
-SUGGESTED_QUESTIONS: What is each division's revenue?|How has revenue trended?|What is the team size?"""
+Answer: Revenue was $5.2M [Source 1]. The three divisions are: 1. Sales 2. Engineering 3. Marketing [Source 2]."""
 
 SMALL_MODEL_TEMPLATE = """Context information is below.
 ---------------------
@@ -328,9 +324,13 @@ LLAMA_SMALL_TEMPLATE = """CONTEXT:
 
 QUESTION: {question}
 
-INSTRUCTIONS: Answer using ONLY the context above. Copy exact names and terms from the context — do NOT substitute with synonyms or common names.
+Think step-by-step:
+1. What information in the context answers this question?
+2. Include specific details: numbers, percentages, names, and key facts from the context.
+3. Which sources contain this information?
+4. Copy the EXACT names and terms from the context — do NOT substitute with synonyms.
 
-Answer:"""
+Answer in detail (cite [Source N]):"""
 
 
 # =============================================================================
@@ -456,36 +456,34 @@ Answer:"""
 # - Benefit from clear structure in prompts
 # - DeepSeek-R1-Distill-Llama-8B and smaller versions are very capable
 
-DEEPSEEK_SMALL_SYSTEM_PROMPT = """You are a document Q&A assistant. Answer questions using ONLY the provided context.
+DEEPSEEK_SMALL_SYSTEM_PROMPT = """You are a document Q&A assistant optimized for reasoning.
 
-RULES:
-1. ALWAYS respond in English.
-2. Answer ONLY from the provided context — do NOT use training knowledge.
-3. If the answer is NOT in the context, say "The documents don't contain this information."
-4. NEVER guess or make up information.
-5. Cite sources as [Source N] for each fact.
-6. If the question asks to list items, scan ALL sources and list EVERY item found.
-7. Be concise. Do NOT generate follow-up questions.
+ALWAYS:
+- Think through the question step-by-step
+- Start with direct, factual answer
+- Cite sources as [Source N] for each fact
+- Be specific and precise
+- If asked to list items, scan ALL sources and list EVERY item found
 
-EXAMPLE:
-Context: "There are six departments: HR, Finance, Engineering, Sales, Legal, and Marketing [Org Report]."
-Question: "What are the departments?"
-Answer: There are six departments: 1. HR 2. Finance 3. Engineering 4. Sales 5. Legal 6. Marketing [Source 1]."""
+NEVER:
+- Make up information not in context
+- Skip reasoning steps for complex questions
+- Use information beyond the provided documents
+- Generate follow-up questions
 
-DEEPSEEK_SMALL_TEMPLATE = """CONTEXT:
+If the context has SOME relevant information, provide everything you find. Only say "Not found" if there is NO relevant information at all."""
+
+DEEPSEEK_SMALL_TEMPLATE = """Context from documents:
 {context}
 
-===
+Question: {question}
 
-QUESTION: {question}
+Analyze step-by-step:
+1. What is being asked?
+2. What relevant information is in the context? Include specific numbers, percentages, and key details.
+3. Which documents contain this information?
 
-IMPORTANT: Respond in English only.
-
-Find the relevant facts in the context and write your answer. Cite [Source N].
-If asked to list items, scan ALL sources and list EVERY item you find — do not stop early.
-Do NOT generate follow-up questions. Only answer the question asked.
-
-ANSWER:"""
+Answer in detail (cite [Source N] for each fact):"""
 
 
 # Patterns to detect tiny models (0.5B-3B parameters)
@@ -780,9 +778,10 @@ def get_recommended_temperature(model_name: Optional[str] = None) -> float:
     if is_qwen_model(model_name):
         return 0.3
 
-    # DeepSeek models benefit from lower temp for reasoning
+    # DeepSeek-R1 models need moderate temperature for reasoning
+    # Research: R1 optimal at 0.5-0.7; 0.3 is too conservative, suppresses reasoning
     if is_deepseek_model(model_name):
-        return 0.3
+        return 0.5
 
     # Phi models benefit from lower temp for format adherence
     if is_phi_model(model_name):
@@ -871,14 +870,14 @@ def optimize_chunk_count_for_model(
     if is_llama_model(model_name) and "1b" in model_lower:
         return min(intent_top_k, 3)
 
-    # Tiny models (<3B): Max 8 chunks regardless of intent
-    # With num_ctx=4096, 8 chunks (~500 tokens each) ≈ 4000 tokens — fits with room for prompt
-    # More chunks helps retrieval coverage for broad questions like "list all X"
+    # Tiny models (<3B): Max 10 chunks regardless of intent
+    # Key listing chunk (all 9 planetary boundaries) ranks ~9th — need cap >= 10
+    # With num_ctx=4096, 10 chunks (~400 tokens avg) ≈ 4000 tokens — fits with room for prompt
     if is_tiny_model(model_name):
-        return min(intent_top_k, 8)
+        return min(intent_top_k, 10)
 
     # Small models (7B-8B): Max 10 chunks
-    # Good balance between context and performance
+    # Good balance between context coverage and "Lost in the Middle" problem
     if is_llama_small(model_name) or any(s in model_lower for s in ["7b", "8b"]):
         return min(intent_top_k, 10)
 
@@ -1290,8 +1289,8 @@ INTELLIGENCE_GROUNDING = {
     "maximum": """
 STRICT RULE: Answer ONLY from the provided context. Do NOT use your training knowledge.
 If the context says a specific number or fact, use EXACTLY that value.
-When listing items, count them directly from the context — do not rely on memory.
-If the answer is not in the context, say "Not found in documents."
+When listing items, extract each item directly from the context.
+If you find PARTIAL information, provide everything you can find and note what may be missing.
 Quote the relevant text before answering.
 """,
     "enhanced": """
