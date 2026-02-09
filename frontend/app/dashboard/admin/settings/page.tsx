@@ -75,6 +75,8 @@ import { IngestionTab } from "./components/ingestion-tab";
 import { InstructionsTab } from "./components/instructions-tab";
 import { RayTab } from "./components/ray-tab";
 import { MaintenanceTab } from "./components/maintenance-tab";
+import { VectorDBTab } from "./components/vectordb-tab";
+import { InfrastructureTab } from "./components/infrastructure-tab";
 import {
   Card,
   CardContent,
@@ -958,6 +960,14 @@ export default function AdminSettingsPage() {
                   <RefreshCw className="h-4 w-4" />
                   Maintenance
                 </TabsTrigger>
+                <TabsTrigger value="vectordb" className="w-full justify-start gap-2 px-3">
+                  <HardDrive className="h-4 w-4" />
+                  Vector DB
+                </TabsTrigger>
+                <TabsTrigger value="infrastructure" className="w-full justify-start gap-2 px-3">
+                  <Cpu className="h-4 w-4" />
+                  Infrastructure
+                </TabsTrigger>
               </TabsList>
             </div>
             {/* AI & MODELS */}
@@ -1111,6 +1121,10 @@ export default function AdminSettingsPage() {
             <TabsTrigger value="cache" className="flex items-center gap-1 text-xs">
               <HardDrive className="h-3 w-3" />
               Cache
+            </TabsTrigger>
+            <TabsTrigger value="vectordb" className="flex items-center gap-1 text-xs">
+              <Database className="h-3 w-3" />
+              Vector DB
             </TabsTrigger>
             <TabsTrigger value="evaluation" className="flex items-center gap-1 text-xs">
               <BarChart3 className="h-3 w-3" />
@@ -1311,6 +1325,12 @@ export default function AdminSettingsPage() {
 
         {/* Maintenance Tab - Reindex & KG Extraction (Phase 89) */}
         <MaintenanceTab />
+
+        {/* Vector DB Diagnostics Tab */}
+        <VectorDBTab />
+
+        {/* Infrastructure Tab - Scaling & Backend Configuration */}
+        <InfrastructureTab localSettings={localSettings} handleSettingChange={handleSettingChange} />
 
         {/* Evaluation Dashboard Tab (Phase 90) */}
         <EvaluationTab />

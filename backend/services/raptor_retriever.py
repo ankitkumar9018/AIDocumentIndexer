@@ -75,8 +75,8 @@ class RAPTORConfig:
     similarity_threshold: float = 0.7  # For semantic clustering
 
     # Summarization
-    summary_model: str = "gpt-4o-mini"
-    summary_provider: str = "openai"
+    summary_model: Optional[str] = None       # None = use provider's default model
+    summary_provider: Optional[str] = None    # None = use system-configured default
     summary_max_tokens: int = 500
 
     # Retrieval

@@ -757,7 +757,7 @@ class KnowledgeGraphService:
             try:
                 from langchain_anthropic import ChatAnthropic
                 return ChatAnthropic(
-                    model="claude-3-haiku-20240307",
+                    model=settings.KG_EXTRACTION_MODEL,
                     api_key=api_key,
                     temperature=0.3,
                 )
@@ -771,7 +771,7 @@ class KnowledgeGraphService:
             try:
                 from langchain_groq import ChatGroq
                 return ChatGroq(
-                    model="llama-3.1-70b-versatile",
+                    model=settings.KG_EXTRACTION_MODEL,
                     api_key=api_key,
                     temperature=0.3,
                 )
@@ -785,7 +785,7 @@ class KnowledgeGraphService:
             try:
                 from langchain_ollama import ChatOllama
                 return ChatOllama(
-                    model=os.getenv("OLLAMA_MODEL", "llama3.2"),
+                    model=settings.KG_EXTRACTION_MODEL or "llama3.2",
                     temperature=0.3,
                 )
             except ImportError:

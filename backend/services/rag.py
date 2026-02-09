@@ -18,6 +18,7 @@ import hashlib
 import io
 import os
 import traceback
+import uuid
 import structlog
 import numpy as np
 
@@ -181,6 +182,7 @@ from backend.services.rag_module.prompts import (
     get_language_instruction as _get_language_instruction,
     parse_suggested_questions as _parse_suggested_questions,
     strip_llm_preamble as _strip_llm_preamble,
+    strip_think_tags as _strip_think_tags,
     # Phase 14: Enhanced prompt selection
     get_template_for_intent as _get_template_for_intent,
     get_system_prompt_for_model as _get_system_prompt_for_model,
@@ -644,6 +646,8 @@ class RAGService:
         # Initialize verifier if enabled (lazy initialization to use shared embedding service)
         self._verifier: Optional[RAGVerifier] = None
         self._verifier_config: Optional[VerifierConfig] = None
+        self.verification_enabled = self.config.enable_verification
+        self.verification_level = self.config.verification_level
         if self.config.enable_verification:
             level_map = {
                 "none": VerificationLevel.NONE,
@@ -893,12 +897,106 @@ class RAGService:
             return llm, config
 
         except Exception as e:
+            # aiosqlite greenlet error: async_session_context() fails when
+            # another async session is already open (FastAPI dependency injection).
+            # Fallback: do a sync lookup of the session's LLM override.
+            if "greenlet_spawn" in str(e) and session_id:
+                try:
+                    return self._get_llm_for_session_sync(session_id)
+                except Exception as e2:
+                    logger.warning(
+                        "Sync fallback for session LLM also failed",
+                        session_id=session_id,
+                        error=str(e2),
+                    )
+
             logger.warning(
                 "Failed to get session LLM config, using default",
                 session_id=session_id,
                 error=str(e),
             )
             return self.llm, None
+
+    def _get_llm_for_session_sync(
+        self, session_id: str
+    ) -> Tuple[Any, Optional["LLMConfigResult"]]:
+        """
+        Sync fallback for get_llm_for_session.
+
+        When aiosqlite's greenlet can't handle nested async sessions,
+        fall back to a direct sync SQLite lookup of the session override.
+        """
+        from backend.db.database import db_config
+        from sqlalchemy import create_engine, text
+
+        sync_url = db_config.sync_url
+        engine = create_engine(sync_url)
+
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT provider_id, model_override "
+                        "FROM chat_session_llm_overrides "
+                        "WHERE session_id = :sid"
+                    ),
+                    {"sid": session_id},
+                ).fetchone()
+
+                if not row:
+                    return self.llm, None
+
+                provider_id, model_override = row[0], row[1]
+                if not provider_id:
+                    return self.llm, None
+
+                # Look up the provider to get type and api_base_url
+                provider_row = conn.execute(
+                    text(
+                        "SELECT provider_type, name, api_base_url, api_key_encrypted "
+                        "FROM llm_providers WHERE id = :pid"
+                    ),
+                    {"pid": provider_id},
+                ).fetchone()
+
+                if not provider_row:
+                    return self.llm, None
+
+                provider_type = provider_row[0]
+                provider_name = provider_row[1]
+                base_url = provider_row[2]
+                api_key = provider_row[3]
+
+            # Build the LLM from the resolved config
+            model = model_override or "llama3.2:latest"
+            config = LLMConfigResult(
+                provider_type=provider_type,
+                model=model,
+                api_base_url=base_url,
+                api_key=api_key or "",
+                source=f"session_override_sync:{session_id}",
+            )
+
+            llm = EnhancedLLMFactory._create_model_from_config(config)
+
+            # Cache the result
+            import time as _cache_time
+            cache_key = session_id
+            self._session_llm_cache[cache_key] = llm
+            self._session_config_cache[cache_key] = config
+            self._session_cache_times[cache_key] = _cache_time.time()
+
+            logger.info(
+                "Got LLM for session (sync fallback)",
+                session_id=session_id,
+                provider=provider_type,
+                model=model,
+            )
+
+            return llm, config
+
+        finally:
+            engine.dispose()
 
     def clear_session_llm_cache(self, session_id: Optional[str] = None):
         """Clear cached LLM for a session (or all sessions)."""
@@ -1258,7 +1356,7 @@ class RAGService:
 
         try:
             result = await llm.ainvoke([HumanMessage(content=initial_prompt)])
-            current_answer = result.content.strip()
+            current_answer = _strip_think_tags(result.content.strip())
         except Exception as e:
             logger.warning("Stuff-then-refine initial phase failed", error=str(e))
             return batches[0]  # Fallback: just return first batch as context
@@ -1266,17 +1364,18 @@ class RAGService:
         # Phase 2: Refine — update answer with each additional batch
         for i, batch in enumerate(batches[1:], 1):
             refine_prompt = (
-                f"Here is an existing answer to the question:\n{current_answer}\n\n"
-                f"Here is additional information:\n{batch}\n\n"
-                f"Refine the answer using the additional information if relevant. "
-                f"If the new information isn't relevant, keep the original answer.\n\n"
+                f"Current answer so far:\n{current_answer}\n\n"
+                f"New information:\n{batch}\n\n"
+                f"Update the answer by adding any NEW facts, names, or items from the new information. "
+                f"Keep ALL existing facts from the current answer. "
+                f"If the question asks for a list, add new items as bullet points.\n\n"
                 f"Question: {question}\n"
-                f"Refined answer:"
+                f"Updated answer:"
             )
 
             try:
                 result = await llm.ainvoke([HumanMessage(content=refine_prompt)])
-                current_answer = result.content.strip()
+                current_answer = _strip_think_tags(result.content.strip())
             except Exception as e:
                 logger.warning(f"Stuff-then-refine batch {i} failed", error=str(e))
                 break  # Keep current answer
@@ -1384,8 +1483,8 @@ class RAGService:
             # Get document name with proper fallback chain
             # Custom vectorstore sets "document_name", others may use "document_filename" or "source"
             doc_name = (
-                doc.metadata.get("document_name") or
                 doc.metadata.get("document_filename") or
+                doc.metadata.get("document_name") or
                 doc.metadata.get("source") or
                 "Unknown Document"
             )
@@ -1486,6 +1585,12 @@ class RAGService:
             val = _all_settings.get(key)
             return val if val is not None else default
 
+        # Initialize response variables early to prevent UnboundLocalError
+        # (Python treats these as local if assigned anywhere later in the function)
+        confidence_score = None
+        confidence_level = None
+        verification_result = None
+
         # PHASE 12: Enhanced debug logging for RAG search troubleshooting
         # Get vectorstore stats to help diagnose "no results" issues
         vectorstore_stats = None
@@ -1509,6 +1614,28 @@ class RAGService:
             is_superadmin=is_superadmin,
             vectorstore_stats=vectorstore_stats,
         )
+
+        # =============================================================================
+        # Feature gating: disable expensive LLM-based features for basic + tiny models
+        # =============================================================================
+        # Resolve LLM early so we know the actual model for gating decisions.
+        # This result is cached and reused at the later get_llm_for_session() call.
+        _early_llm, _early_llm_config = await self.get_llm_for_session(
+            session_id=session_id, user_id=user_id,
+        )
+        from backend.services.session_memory import get_model_tier as _get_model_tier_for_gating
+        _model_name_for_gating = (_early_llm_config.model if _early_llm_config else None) or _all_settings.get("llm.default_model")
+        _tier_for_gating = _get_model_tier_for_gating(_model_name_for_gating) if _model_name_for_gating else {"tier": "small"}
+        _basic_tiny_mode = (intelligence_level == "basic" and _tier_for_gating["tier"] in ("tiny", "small"))
+        # Small models (≤8B) can't do meta-tasks like query paraphrasing/HyDE regardless of intelligence level.
+        # They answer the rewrite prompt as a question instead of generating variations.
+        _small_model = _tier_for_gating["tier"] in ("tiny", "small")
+        if _basic_tiny_mode:
+            logger.info(
+                "Basic + tiny model mode: disabling expensive RAG features",
+                model=_model_name_for_gating,
+                tier=_tier_for_gating["tier"],
+            )
 
         # =============================================================================
         # Phase 65: Query Preprocessing (Spell Correction + Semantic Cache)
@@ -1536,8 +1663,10 @@ class RAGService:
                         logger.debug("Could not get query embedding for cache", error=str(e), error_type=type(e).__name__)
 
                 # Preprocess: spell correction + semantic cache check
+                # Include model+intelligence in cache key to prevent cross-model cache pollution
+                _cache_model_key = f"{_model_name_for_gating or 'default'}:{intelligence_level or 'enhanced'}"
                 question, phase65_cache_hit = await self._phase65_pipeline.preprocess_query(
-                    question, query_embedding_for_cache
+                    question, query_embedding_for_cache, model_key=_cache_model_key
                 )
 
                 if question != original_question:
@@ -1879,7 +2008,7 @@ class RAGService:
         # Phase 66: RAG-Fusion (Multi-Query with Reciprocal Rank Fusion)
         # =============================================================================
         rag_fusion_result: Optional[FusionResult] = None
-        if use_rag_fusion_for_query and self._custom_vectorstore:
+        if use_rag_fusion_for_query and self._custom_vectorstore and not _basic_tiny_mode:
             try:
                 logger.info("Phase 66: Applying RAG-Fusion with multi-query retrieval")
 
@@ -1924,7 +2053,7 @@ class RAGService:
         # =============================================================================
         stepback_result: Optional[StepBackResult] = None
         stepback_context = ""
-        if use_stepback_for_query and self._custom_vectorstore:
+        if use_stepback_for_query and self._custom_vectorstore and not _basic_tiny_mode:
             try:
                 logger.info("Phase 66: Applying Step-Back prompting for complex query")
 
@@ -2046,13 +2175,17 @@ class RAGService:
         else:
             # PHASE 14: Pass query classification for adaptive retrieval (MMR, KG enhancement)
             # Phase 95L: Use enriched_question for both retrieval and LLM prompt (conversation-aware)
+            # Disable query enhancement (HyDE, expansion) for small models (≤8B).
+            # These models can't do meta-tasks — they answer the rewrite prompt as a question,
+            # producing garbage paraphrases (e.g. "planetary boundaries" → "planetary horizon limits").
+            _effective_enhance = False if _small_model else enhance_query
             retrieved_docs = await self._retrieve(
                 enriched_question,
                 collection_filter=collection_filter,
                 access_tier=access_tier,
                 top_k=top_k,
                 document_ids=folder_document_ids,  # Filter to folder documents
-                enhance_query=enhance_query,
+                enhance_query=_effective_enhance,
                 organization_id=organization_id,
                 user_id=user_id,
                 is_superadmin=is_superadmin,
@@ -2072,11 +2205,16 @@ class RAGService:
                     user_id=user_id,
                 )
             else:
+                _top_doc = retrieved_docs[0][0] if retrieved_docs else None
+                _top_doc_name = (
+                    _top_doc.metadata.get("document_name", "unknown")[:50]
+                    if hasattr(_top_doc, 'metadata') else str(_top_doc)[:50]
+                ) if _top_doc else None
                 logger.info(
                     "RAG retrieval successful",
                     count=len(retrieved_docs),
                     top_doc_score=retrieved_docs[0][1] if retrieved_docs else None,
-                    top_doc_name=retrieved_docs[0][0].metadata.get("document_name", "unknown")[:50] if retrieved_docs else None,
+                    top_doc_name=_top_doc_name,
                 )
 
         # =============================================================================
@@ -2417,24 +2555,35 @@ class RAGService:
         _stuff_then_refine_used = False
         _stf_enabled = _s("conversation.stuff_then_refine_enabled", True)
 
-        if _stf_enabled and _tier_info["tier"] in ("tiny", "small") and _context_tokens > _budget["chunks"]:
-            # Context is too large for this model — use stuff-then-refine
+        # Only use stuff-then-refine when context genuinely overflows the token budget.
+        # Do NOT force it for tiny models — sequential LLM calls (5-8 per query) cause
+        # 300-960s response times on local Ollama and cascade circuit breaker failures.
+        _overflow_stf = (
+            _stf_enabled
+            and _tier_info["tier"] in ("tiny", "small")
+            and _context_tokens > _budget["chunks"]
+        )
+
+        if _overflow_stf:
             logger.info(
-                "Context overflow detected for small model — using stuff-then-refine",
+                "Using stuff-then-refine (context overflow)",
                 model=_stf_model_name,
                 tier=_tier_info["tier"],
                 context_tokens=_context_tokens,
                 chunk_budget=_budget["chunks"],
+                num_sources=len(sources),
             )
             # Split context into individual chunk texts
             _chunk_texts = [s.full_content or s.snippet for s in sources if s.full_content or s.snippet]
+            # Cap per-batch tokens for tiny models to keep each batch small
+            _max_batch_tokens = min(_budget["chunks"], 1500) if _tier_info["tier"] == "tiny" else _budget["chunks"]
             if _chunk_texts:
                 refined_answer = await self._stuff_then_refine(
                     question=question,
                     chunks=_chunk_texts,
                     llm=llm,
                     model_name=_stf_model_name,
-                    max_chunk_tokens=_budget["chunks"],
+                    max_chunk_tokens=_max_batch_tokens,
                 )
                 if refined_answer:
                     _stuff_then_refine_used = True
@@ -2825,6 +2974,10 @@ class RAGService:
             # Use model-specific template (with step-by-step scaffolding for small models)
             # instead of generic CONVERSATIONAL_RAG_TEMPLATE — chat_history provides conversation context
             _llm_question = enriched_question if enriched_question != question else question
+            # Detect list-type queries and append instruction for structured output
+            _list_patterns = ["list all", "list the", "name all", "enumerate", "what are the", "how many", "give me all"]
+            if any(p in _llm_question.lower() for p in _list_patterns):
+                _llm_question = _llm_question + "\n\nIMPORTANT: Present your answer as a numbered or bulleted list. Include ALL items found in the context."
             if compressed_context:
                 messages = [
                     _make_system_message(f"{system_prompt}\n\nPrevious Conversation Summary:\n{compressed_context}", model_name),
@@ -2840,10 +2993,14 @@ class RAGService:
                 ]
         else:
             # Single-turn query with adaptive template
+            _single_question = question
+            _list_patterns_st = ["list all", "list the", "name all", "enumerate", "what are the", "how many", "give me all"]
+            if any(p in _single_question.lower() for p in _list_patterns_st):
+                _single_question = _single_question + "\n\nIMPORTANT: Present your answer as a numbered or bulleted list. Include ALL items found in the context."
             messages = [
                 _make_system_message(system_prompt, model_name),
                 *dspy_demos_messages,  # Phase 93: DSPy few-shot demos
-                HumanMessage(content=prompt_template.format(context=context, question=question)),
+                HumanMessage(content=prompt_template.format(context=context, question=_single_question)),
             ]
 
         # Generate response with research-backed sampling parameters
@@ -2854,7 +3011,9 @@ class RAGService:
         # Phase 98: Use direct attribute access - setting defined in core/config.py
         cache_hit = False
         cached_response = None
-        if app_settings.ENABLE_GENERATIVE_CACHE:
+        # Include model+intelligence in cache query to prevent cross-model/cross-intelligence pollution
+        _gen_cache_query = f"{question}|{model_name or 'default'}|{intelligence_level or 'enhanced'}"
+        if app_settings.ENABLE_GENERATIVE_CACHE and not skip_cache:
             try:
                 from backend.services.generative_cache import get_generative_cache, ContentType
 
@@ -2876,7 +3035,7 @@ class RAGService:
                     )
 
                 cache_result = await gen_cache.get(
-                    query=question,
+                    query=_gen_cache_query,
                     context=context[:2000] if context else None,  # Use truncated context for cache key
                     content_type=cache_content_type,
                 )
@@ -2913,7 +3072,6 @@ class RAGService:
                 processing_time_ms=processing_time_ms,
                 suggested_questions=suggested_questions,
                 context_used=len(context) if context else 0,
-                cache_hit=True,
             )
 
         # Speculative RAG: parallel draft generation (if enabled and enough documents)
@@ -3081,13 +3239,16 @@ class RAGService:
             except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
                 logger.warning("Answer refinement failed", error=str(e), error_type=type(e).__name__)
 
+        # Strip DeepSeek-R1 <think> reasoning blocks before any post-processing
+        raw_content = _strip_think_tags(raw_content)
         # Strip small-model preamble disclaimers and parse suggested questions
         raw_content = _strip_llm_preamble(raw_content)
         content, suggested_questions = _parse_suggested_questions(raw_content)
 
         # PHASE 42: Cache the generated response for future use
         # Phase 98: Use direct attribute access
-        if app_settings.ENABLE_GENERATIVE_CACHE and not cache_hit:
+        # Also skip writing if skip_cache — caller explicitly wants fresh results, don't pollute cache
+        if app_settings.ENABLE_GENERATIVE_CACHE and not cache_hit and not skip_cache:
             try:
                 from backend.services.generative_cache import get_generative_cache, ContentType
 
@@ -3109,13 +3270,13 @@ class RAGService:
                     )
 
                 await gen_cache.set(
-                    query=question,
+                    query=_gen_cache_query,
                     response=raw_content,  # Cache raw content including suggested questions
                     context=context[:2000] if context else None,
                     content_type=cache_content_type,
                     metadata={
                         "model": model_name,
-                        "collection": collection_name,
+                        "collection": collection_filter,
                         "session_id": session_id,
                     },
                 )
@@ -3172,8 +3333,10 @@ class RAGService:
                 confidence_warning = "Moderate confidence - results may be incomplete. Try adding more specific terms."
 
         # Apply CRAG for low-confidence results (auto-refine query)
+        # Skip in basic+tiny mode — extra LLM calls degrade quality for small models
         if (
             self._crag is not None
+            and not _basic_tiny_mode
             and confidence_score is not None
             and confidence_score < self.config.crag_confidence_threshold
             and len(sources) > 0
@@ -3272,8 +3435,9 @@ class RAGService:
                 )
 
         # Self-RAG: Verify response against sources to detect hallucinations
+        # Skip in basic+tiny mode — extra LLM calls degrade quality for small models
         self_rag_result: Optional[SelfRAGResult] = None
-        if self._self_rag and content and sources:
+        if self._self_rag and content and sources and not _basic_tiny_mode:
             try:
                 # Convert sources to SearchResult format for Self-RAG
                 search_results_for_selfrag = [
@@ -3364,10 +3528,12 @@ class RAGService:
                     "confidence_score": confidence_score,
                     "confidence_level": confidence_level,
                 }
+                _cache_model_key = f"{model_name or 'default'}:{intelligence_level or 'enhanced'}"
                 await self._phase65_pipeline.cache_result(
                     original_question,  # Use original (pre-spell-corrected) for cache key
                     cache_data,
                     query_embedding_for_cache,
+                    model_key=_cache_model_key,
                 )
                 logger.debug("Phase 65: Cached result in semantic cache")
             except Exception as e:
@@ -3512,6 +3678,15 @@ class RAGService:
                 logger.debug("Streaming: query rewrite failed, using original", error=str(e))
                 enriched_question = question
 
+        # Feature gating for basic + tiny models in streaming path
+        from backend.services.session_memory import get_model_tier as _get_tier_stream
+        _stream_tier = _get_tier_stream(_stream_model_name) if _stream_model_name else {"tier": "small"}
+        _basic_tiny_mode = (intelligence_level == "basic" and _stream_tier["tier"] in ("tiny", "small"))
+        _small_model = _stream_tier["tier"] in ("tiny", "small")
+        _stream_enhance = False if _small_model else enhance_query
+        if _basic_tiny_mode:
+            logger.info("Streaming: basic + tiny model mode — skipping expensive features")
+
         # Retrieve documents
         retrieved_docs = await self._retrieve(
             enriched_question,
@@ -3519,7 +3694,7 @@ class RAGService:
             access_tier=access_tier,
             top_k=top_k,
             document_ids=document_ids,
-            enhance_query=enhance_query,
+            enhance_query=_stream_enhance,
             organization_id=organization_id,
             user_id=user_id,
             is_superadmin=is_superadmin,
@@ -3626,15 +3801,23 @@ class RAGService:
 
             # Use model-specific template (with step-by-step scaffolding for small models)
             # instead of generic CONVERSATIONAL_RAG_TEMPLATE — chat_history already provides context
+            _stream_llm_question = enriched_question
+            _list_pats = ["list all", "list the", "name all", "enumerate", "what are the", "how many", "give me all"]
+            if any(p in _stream_llm_question.lower() for p in _list_pats):
+                _stream_llm_question += "\n\nIMPORTANT: Present your answer as a numbered or bulleted list. Include ALL items found in the context."
             messages = [
                 _make_system_message(system_prompt, model_name),
                 *chat_history,
-                HumanMessage(content=prompt_template.format(context=context, question=enriched_question)),
+                HumanMessage(content=prompt_template.format(context=context, question=_stream_llm_question)),
             ]
         else:
+            _stream_single_q = question
+            _list_pats_s = ["list all", "list the", "name all", "enumerate", "what are the", "how many", "give me all"]
+            if any(p in _stream_single_q.lower() for p in _list_pats_s):
+                _stream_single_q += "\n\nIMPORTANT: Present your answer as a numbered or bulleted list. Include ALL items found in the context."
             messages = [
                 _make_system_message(system_prompt, model_name),
-                HumanMessage(content=prompt_template.format(context=context, question=question)),
+                HumanMessage(content=prompt_template.format(context=context, question=_stream_single_q)),
             ]
 
         # Stream response with sampling configuration - use StringIO for efficient string accumulation (O(n) vs O(n²))
@@ -3741,14 +3924,52 @@ class RAGService:
                             yield StreamChunk(type="content", data=content)
             else:
                 # Standard streaming without citations
-                # Buffer initial tokens to strip preamble disclaimers from small models
+                # Buffer initial tokens to strip <think> blocks and preamble disclaimers
                 _preamble_buffer = ""
                 _preamble_done = False
                 _preamble_max_chars = 200  # Only buffer first ~200 chars to check
+                _in_think_block = False  # Track if we're inside a <think> block
+                _think_buffer = ""  # Buffer think content to detect </think>
                 async for chunk in stream:
                     content = chunk.content if hasattr(chunk, 'content') else str(chunk)
                     if content:
                         response_buffer.write(content)
+
+                        # Handle <think> blocks from DeepSeek-R1 models
+                        if _in_think_block:
+                            _think_buffer += content
+                            if "</think>" in _think_buffer.lower():
+                                # Think block ended — extract content after </think>
+                                import re
+                                after = re.split(r"</think>", _think_buffer, maxsplit=1, flags=re.IGNORECASE)
+                                _in_think_block = False
+                                remainder = after[-1] if len(after) > 1 else ""
+                                _think_buffer = ""
+                                if remainder.strip():
+                                    content = remainder
+                                else:
+                                    continue
+                            else:
+                                continue  # Still inside <think> block, don't emit
+                        elif "<think>" in content.lower():
+                            # Entering a <think> block
+                            import re
+                            parts = re.split(r"<think>", content, maxsplit=1, flags=re.IGNORECASE)
+                            before = parts[0] if parts else ""
+                            _in_think_block = True
+                            _think_buffer = parts[1] if len(parts) > 1 else ""
+                            # Check if </think> is already in the same chunk
+                            if "</think>" in _think_buffer.lower():
+                                after = re.split(r"</think>", _think_buffer, maxsplit=1, flags=re.IGNORECASE)
+                                _in_think_block = False
+                                _think_buffer = ""
+                                remainder = after[-1] if len(after) > 1 else ""
+                                content = before + remainder
+                            else:
+                                content = before
+                            if not content.strip():
+                                continue
+
                         if not _preamble_done:
                             _preamble_buffer += content
                             if len(_preamble_buffer) >= _preamble_max_chars or "\n\n" in _preamble_buffer:
@@ -3961,7 +4182,7 @@ class RAGService:
                 "content": doc.page_content,
                 "chunk_id": doc.metadata.get("chunk_id"),
                 "metadata": {
-                    "document_name": doc.metadata.get("document_name", "Unknown"),
+                    "document_name": doc.metadata.get("document_filename") or doc.metadata.get("document_name", "Unknown"),
                     "document_id": doc.metadata.get("document_id"),
                     "page_number": doc.metadata.get("page_number"),
                     "similarity_score": score,
@@ -4515,21 +4736,50 @@ class RAGService:
             try:
                 from backend.services.tiered_reranking import get_tiered_reranker
 
+                from backend.services.tiered_reranking import RerankCandidate
+
                 reranker = await get_tiered_reranker()
-                rerank_result = await reranker.rerank(
+                # Convert (content, score) tuples to RerankCandidate objects
+                rerank_candidates = [
+                    RerankCandidate(
+                        id=str(i),
+                        content=content if isinstance(content, str) else str(content),
+                        score=score,
+                    )
+                    for i, (content, score) in enumerate(all_results)
+                ]
+                rerank_output = await reranker.rerank(
                     query=query,
-                    candidates=all_results,
+                    candidates=rerank_candidates,
                     final_top_k=top_k,
                 )
 
-                if rerank_result.reranked_documents:
-                    all_results = rerank_result.reranked_documents
-                    logger.info(
-                        "Tiered reranking applied",
-                        original_count=len(all_results),
-                        stages_used=rerank_result.stages_used,
-                        latency_ms=rerank_result.latency_ms,
-                    )
+                # rerank() returns (List[RerankResult], RerankerMetrics) tuple
+                # Map reranked results back to original (Document, score) tuples
+                # using the candidate ID (which is the original index)
+                if isinstance(rerank_output, tuple):
+                    rerank_results, rerank_metrics = rerank_output
+                    if rerank_results:
+                        reranked = []
+                        for r in rerank_results[:top_k]:
+                            if hasattr(r, 'candidate'):
+                                # Map back to original Document using index stored in candidate.id
+                                orig_idx = int(r.candidate.id) if r.candidate.id.isdigit() else 0
+                                if orig_idx < len(all_results):
+                                    orig_doc = all_results[orig_idx][0]
+                                    reranked.append((orig_doc, r.score))
+                                else:
+                                    reranked.append((r.candidate.content, r.score))
+                            else:
+                                reranked.append(r)
+                        all_results = reranked
+                        logger.info(
+                            "Tiered reranking applied",
+                            reranked_count=len(rerank_results),
+                        )
+                elif hasattr(rerank_output, 'reranked_documents') and rerank_output.reranked_documents:
+                    all_results = rerank_output.reranked_documents
+                    logger.info("Tiered reranking applied (legacy format)")
             except Exception as e:
                 logger.warning("Tiered reranking failed, using original order", error=str(e))
 
@@ -5252,6 +5502,8 @@ class RAGService:
                 get_knowledge_graph_service,
                 EntityType,
             )
+            from backend.db.models import Entity, EntityMention, EntityRelation
+            from sqlalchemy import select
 
             async with async_session_context() as db:
                 kg_service = await get_knowledge_graph_service(db)
@@ -5906,8 +6158,8 @@ class RAGService:
             # Fallback chain: metadata.document_name → metadata.document_filename → DB lookup → generic
             doc_id = metadata.get("document_id", "")
             doc_name = (
-                metadata.get("document_name")
-                or metadata.get("document_filename")
+                metadata.get("document_filename")
+                or metadata.get("document_name")
                 or (document_name_map.get(doc_id) if document_name_map and doc_id else None)
                 or f"Document {doc_id[:8] if doc_id else 'unknown'}"
             )

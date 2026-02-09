@@ -95,6 +95,7 @@ class ImageAnalysisService:
         """
         Check if vision model is configured and responding.
 
+        Priority: Settings DB → env var auto-detection → not available.
         Returns status with provider info and any issues found.
         """
         import os
@@ -103,38 +104,67 @@ class ImageAnalysisService:
         provider = None
         model = None
 
-        # Check Ollama (free option) - PRIORITIZE FREE LOCAL MODEL
-        has_ollama = bool(os.getenv("USE_OLLAMA") or os.getenv("OLLAMA_BASE_URL"))
-        if has_ollama:
-            provider = "ollama"
-            model = os.getenv("OLLAMA_VISION_MODEL", "llava")
-            # TODO: Could add ping check to verify ollama is running
+        # 1. Check settings DB first (rag.vision_provider / rag.vlm_provider)
+        try:
+            settings_provider = await self._settings.get_setting("rag.vision_provider")
+            if not settings_provider or settings_provider == "auto":
+                settings_provider = await self._settings.get_setting("rag.vlm_provider")
 
-        # Check OpenAI - only if key is valid (not a placeholder)
-        openai_key = os.getenv("OPENAI_API_KEY", "")
-        has_openai = bool(openai_key and not openai_key.startswith("sk-your-") and len(openai_key) > 20)
-        if has_openai and not provider:
-            provider = "openai"
-            model = "gpt-4o"
+            settings_model = await self._settings.get_setting("rag.vlm_model")
 
-        # Check Anthropic - only if key is valid (not a placeholder)
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        has_anthropic = bool(anthropic_key and not anthropic_key.startswith("sk-ant-") and len(anthropic_key) > 10)
-        if has_anthropic and not provider:
-            provider = "anthropic"
-            model = "claude-3-5-sonnet"
+            if settings_provider and settings_provider != "auto":
+                provider = settings_provider
+                if settings_model:
+                    model = settings_model
+                elif provider == "ollama":
+                    model = await self._settings.get_setting("rag.ollama_vision_model") or "llava"
+                elif provider == "openai":
+                    model = "gpt-4o"
+                elif provider == "anthropic":
+                    model = "claude-3-5-sonnet"
+        except Exception as e:
+            logger.debug("Could not read vision settings from DB", error=str(e))
 
+        # 2. Auto-detect from env vars if settings didn't specify a provider
+        if not provider:
+            # Check Ollama (free option) - PRIORITIZE FREE LOCAL MODEL
+            has_ollama = bool(os.getenv("USE_OLLAMA") or os.getenv("OLLAMA_BASE_URL"))
+            if has_ollama:
+                provider = "ollama"
+                model = os.getenv("OLLAMA_VISION_MODEL", "llava")
+
+            # Check OpenAI - only if key is valid (not a placeholder)
+            openai_key = os.getenv("OPENAI_API_KEY", "")
+            has_openai = bool(openai_key and not openai_key.startswith("sk-your-") and len(openai_key) > 20)
+            if has_openai and not provider:
+                provider = "openai"
+                model = "gpt-4o"
+
+            # Check Anthropic - only if key is valid (not a placeholder)
+            anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+            has_anthropic = bool(anthropic_key and not anthropic_key.startswith("sk-ant-") and len(anthropic_key) > 10)
+            if has_anthropic and not provider:
+                provider = "anthropic"
+                model = "claude-3-5-sonnet"
+
+        # 3. Build result with actionable notification
         available = provider is not None
 
         if not available:
-            issues.append("No vision model configured")
+            issues.append(
+                "No vision model configured. Go to Admin > Settings > RAG and set "
+                "'Vision Provider', or run 'ollama pull llava' for free local vision."
+            )
 
         return VisionStatus(
             available=available,
             provider=provider,
             model=model,
             issues=issues,
-            recommendation="Run 'ollama pull llava' for free local vision" if not available else None,
+            recommendation=(
+                "Configure a vision model in Admin > Settings > RAG (Vision Provider), "
+                "or run 'ollama pull llava' for free local vision."
+            ) if not available else None,
         )
 
     async def find_cached_caption(

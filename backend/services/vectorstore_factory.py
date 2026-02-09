@@ -39,30 +39,33 @@ _vector_backend: Optional[str] = None
 
 
 async def _get_vector_store_settings() -> str:
-    """Get vector store backend from settings."""
+    """Get vector store backend from settings (DB first, env fallback)."""
     global _vector_backend
 
     if _vector_backend is not None:
         return _vector_backend
 
-    # Check environment first
-    env_backend = os.getenv("VECTOR_STORE_BACKEND", "").lower()
-    if env_backend in ["pgvector", "qdrant", "milvus"]:
-        _vector_backend = env_backend
-        return _vector_backend
-
+    # Settings DB takes priority over env vars
     try:
         from backend.services.settings import get_settings_service
 
         settings = get_settings_service()
         backend = await settings.get_setting("vector_store.backend")
 
-        _vector_backend = backend if backend else "pgvector"
-        return _vector_backend
+        if backend and backend in ("pgvector", "qdrant", "milvus"):
+            _vector_backend = backend
+            return _vector_backend
     except Exception as e:
-        logger.debug("Could not load vector store settings, using pgvector", error=str(e))
-        _vector_backend = "pgvector"
+        logger.debug("Could not load vector store settings", error=str(e))
+
+    # Fallback to environment variable
+    env_backend = os.getenv("VECTOR_STORE_BACKEND", "").lower()
+    if env_backend in ["pgvector", "qdrant", "milvus"]:
+        _vector_backend = env_backend
         return _vector_backend
+
+    _vector_backend = "pgvector"
+    return _vector_backend
 
 
 def invalidate_vector_store_settings():
@@ -185,15 +188,28 @@ class VectorStoreFactory:
 
     @classmethod
     async def _create_qdrant(cls, config: Optional[Dict[str, Any]] = None) -> Any:
-        """Create Qdrant vector store."""
+        """Create Qdrant vector store. Reads config from settings if not provided."""
         try:
             from backend.services.vectorstore_qdrant import QdrantVectorStore
 
-            qdrant_config = config or {}
-            url = qdrant_config.get("url", os.getenv("QDRANT_URL", "localhost:6333"))
-            collection = qdrant_config.get("collection", "documents")
+            if config is None:
+                # Read connection config from settings (DB first, env fallback)
+                try:
+                    from backend.services.settings import get_settings_service
+                    settings_svc = get_settings_service()
+                    config = {
+                        "url": await settings_svc.get_setting("vector_store.qdrant_url") or os.getenv("QDRANT_URL", "localhost:6333"),
+                        "api_key": await settings_svc.get_setting("vector_store.qdrant_api_key") or os.getenv("QDRANT_API_KEY", ""),
+                        "collection": await settings_svc.get_setting("vector_store.qdrant_collection") or "documents",
+                    }
+                except Exception:
+                    config = {}
 
-            store = QdrantVectorStore(url=url, collection_name=collection)
+            url = config.get("url", os.getenv("QDRANT_URL", "localhost:6333"))
+            api_key = config.get("api_key", os.getenv("QDRANT_API_KEY", ""))
+            collection = config.get("collection", "documents")
+
+            store = QdrantVectorStore(url=url, collection_name=collection, api_key=api_key if api_key else None)
             await store.initialize()
 
             return store
@@ -205,14 +221,26 @@ class VectorStoreFactory:
 
     @classmethod
     async def _create_milvus(cls, config: Optional[Dict[str, Any]] = None) -> Any:
-        """Create Milvus vector store."""
+        """Create Milvus vector store. Reads config from settings if not provided."""
         try:
             from backend.services.vectorstore_milvus import MilvusVectorStore
 
-            milvus_config = config or {}
-            host = milvus_config.get("host", os.getenv("MILVUS_HOST", "localhost"))
-            port = milvus_config.get("port", int(os.getenv("MILVUS_PORT", "19530")))
-            collection = milvus_config.get("collection", "documents")
+            if config is None:
+                # Read connection config from settings (DB first, env fallback)
+                try:
+                    from backend.services.settings import get_settings_service
+                    settings_svc = get_settings_service()
+                    config = {
+                        "host": await settings_svc.get_setting("vector_store.milvus_host") or os.getenv("MILVUS_HOST", "localhost"),
+                        "port": int(await settings_svc.get_setting("vector_store.milvus_port") or os.getenv("MILVUS_PORT", "19530")),
+                        "collection": await settings_svc.get_setting("vector_store.milvus_collection") or "documents",
+                    }
+                except Exception:
+                    config = {}
+
+            host = config.get("host", os.getenv("MILVUS_HOST", "localhost"))
+            port = config.get("port", int(os.getenv("MILVUS_PORT", "19530")))
+            collection = config.get("collection", "documents")
 
             store = MilvusVectorStore(host=host, port=port, collection_name=collection)
             await store.initialize()

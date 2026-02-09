@@ -3654,7 +3654,7 @@ async def reanalyze_document_images(
 @router.post("/{document_id}/import-local")
 async def import_document_local(
     document_id: UUID,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_async_session),
 ):
     """

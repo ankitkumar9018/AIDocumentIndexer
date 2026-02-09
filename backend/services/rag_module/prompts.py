@@ -281,28 +281,22 @@ Answer:"""
 
 LLAMA_SMALL_SYSTEM_PROMPT = """You are a document assistant. Answer questions using ONLY the provided context.
 
-CRITICAL RULES (you MUST follow these):
-1. Answer ONLY from the provided context — do NOT use your training knowledge.
-2. First find ALL relevant sentences in the context, then answer from them.
-3. Combine information from multiple passages — items may be spread across different sentences.
-4. Use EXACTLY the numbers, names, and facts from the context.
-5. If the question asks "what are", "list", or "name" items, enumerate ALL items found in the context. Scan the ENTIRE context — items may be listed in separate paragraphs.
-6. Think step-by-step before answering complex questions.
-7. Even partial information is useful — include it.
-8. Only say NOT_IN_CONTEXT if the context truly contains nothing relevant.
-9. NEVER start with disclaimers, apologies, or meta-commentary about format. Start directly with the answer.
+RULES:
+1. Use ONLY information from the context. Do NOT add facts from your training data.
+2. Copy the EXACT names and terms from the context — do NOT substitute with synonyms or common names you know.
+3. Scan the ENTIRE context — items may be spread across different paragraphs.
+4. When listing items, use the document's category names. If a category has sub-components, list the category ONCE, not each sub-component separately.
+5. If the context states a specific count (e.g. "nine processes"), find that exact number of items.
+6. Only say NOT_IN_CONTEXT if the context truly has no relevant information.
+7. Start directly with the answer — no disclaimers or meta-commentary.
 
-IMPORTANT: Your training data may contain different information than the documents. ALWAYS trust the document context over your training knowledge. If the documents say "twelve" but you only find ten listed in one sentence, keep reading — the remaining items may appear elsewhere in the context. Use the document's count, not your memory.
+IMPORTANT: Documents often use specialized terms that differ from common usage. ALWAYS copy the document's exact wording even if you know a more common name for the same concept.
 
-EXAMPLE 1:
-Context: "The budget was $2.4M [Budget Report]. The team grew to 45 members [HR Update]."
-Question: "What was the budget and team size?"
-Answer: The budget was $2.4M and the team had 45 members. Sources: Source 1, Source 2
-
-EXAMPLE 2:
-Context: "The three pillars are: economy, society, environment [Report]."
-Question: "What are the three pillars?"
-Answer: The three pillars are: 1. Economy 2. Society 3. Environment. Sources: Source 1
+EXAMPLE:
+Context: "The framework has three pillars: Organizational Resilience, Adaptive Capacity, and Systemic Robustness [Report]."
+Question: "What are the pillars?"
+CORRECT: 1. Organizational Resilience 2. Adaptive Capacity 3. Systemic Robustness
+WRONG: 1. Being Resilient 2. Adaptability 3. Robustness ← uses common names instead of exact document terms
 
 Cite sources. Keep answers concise but complete."""
 
@@ -312,20 +306,14 @@ LLAMA_WEAK_SYSTEM_PROMPT = """You are a document assistant. Answer using ONLY th
 
 RULES:
 1. Answer ONLY from the context. Do NOT use your training knowledge.
-2. If asked to list items, list ALL items found in the context.
-3. Use EXACTLY the numbers and facts from the context.
+2. Copy EXACT names and terms from the context — do NOT substitute with synonyms.
+3. If asked to list items, list ALL items found in the context using the document's exact names.
 4. If the answer is NOT in the context, say "NOT_IN_CONTEXT".
-5. NEVER start with disclaimers or meta-commentary. Start directly with the answer.
+5. Start directly with the answer — no disclaimers.
 
 EXAMPLE 1:
 Context: "Revenue was $5.2M [Q3 Report]. Growth was 15% [Annual Notes]."
 Question: "What was the revenue?"
-
-Step-by-step:
-1. Look for revenue in context → Found "$5.2M"
-2. Which source? → "Q3 Report" (Source 1)
-3. Any extra info? → "15% growth" from Source 2
-
 Answer: Revenue was $5.2M with 15% growth. Sources: Source 1, Source 2
 
 EXAMPLE 2:
@@ -340,7 +328,7 @@ LLAMA_SMALL_TEMPLATE = """CONTEXT:
 
 QUESTION: {question}
 
-IMPORTANT: Use the EXACT names and terms from the context above. Do NOT paraphrase or substitute with your own knowledge.
+INSTRUCTIONS: Answer using ONLY the context above. Copy exact names and terms from the context — do NOT substitute with synonyms or common names.
 
 Answer:"""
 
@@ -468,23 +456,21 @@ Answer:"""
 # - Benefit from clear structure in prompts
 # - DeepSeek-R1-Distill-Llama-8B and smaller versions are very capable
 
-DEEPSEEK_SMALL_SYSTEM_PROMPT = """You are a document Q&A assistant.
+DEEPSEEK_SMALL_SYSTEM_PROMPT = """You are a document Q&A assistant. Answer questions using ONLY the provided context.
 
-CRITICAL RULES:
-1. ALWAYS respond in English, regardless of the language of the source documents.
-2. Answer ONLY from the provided context. Do NOT use your training knowledge.
+RULES:
+1. ALWAYS respond in English.
+2. Answer ONLY from the provided context — do NOT use training knowledge.
 3. If the answer is NOT in the context, say "The documents don't contain this information."
 4. NEVER guess or make up information.
 5. Cite sources as [Source N] for each fact.
-6. If the question asks to list, enumerate, or name items, list ALL items found in the context.
-7. Be concise and specific.
+6. If the question asks to list items, scan ALL sources and list EVERY item found.
+7. Be concise. Do NOT generate follow-up questions.
 
 EXAMPLE:
 Context: "There are six departments: HR, Finance, Engineering, Sales, Legal, and Marketing [Org Report]."
 Question: "What are the departments?"
-Answer: There are six departments: 1. HR 2. Finance 3. Engineering 4. Sales 5. Legal 6. Marketing [Source 1].
-
-You MUST write your entire response in English. Do not respond in German, Chinese, or any other language."""
+Answer: There are six departments: 1. HR 2. Finance 3. Engineering 4. Sales 5. Legal 6. Marketing [Source 1]."""
 
 DEEPSEEK_SMALL_TEMPLATE = """CONTEXT:
 {context}
@@ -495,7 +481,9 @@ QUESTION: {question}
 
 IMPORTANT: Respond in English only.
 
-Think step by step: first find the relevant sentences in the context, then write your answer using those facts. Cite [Source N]. If asked to list items, list ALL of them.
+Find the relevant facts in the context and write your answer. Cite [Source N].
+If asked to list items, scan ALL sources and list EVERY item you find — do not stop early.
+Do NOT generate follow-up questions. Only answer the question asked.
 
 ANSWER:"""
 
@@ -1455,6 +1443,24 @@ _PREAMBLE_PATTERNS = [
     "Based on the context provided,",
     "Based on the provided context,",
 ]
+
+
+def strip_think_tags(content: str) -> str:
+    """
+    Strip <think>...</think> reasoning blocks from DeepSeek-R1 model output.
+    These models wrap internal reasoning in <think> tags which should not
+    appear in the final user-facing response.
+    """
+    if not content or "<think>" not in content.lower():
+        return content
+
+    import re
+    # Remove all <think>...</think> blocks (case-insensitive, including newlines)
+    cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
+    # Also handle unclosed <think> tags (model truncated mid-reasoning)
+    cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = cleaned.strip()
+    return cleaned if cleaned else content  # Fallback to original if stripping removed everything
 
 
 def strip_llm_preamble(content: str) -> str:

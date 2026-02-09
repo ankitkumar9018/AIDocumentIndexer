@@ -139,6 +139,40 @@ _provider_rate_limiter = ProviderRateLimiter()
 
 
 # =============================================================================
+# Settings-aware helpers (cached, sync-safe)
+# =============================================================================
+
+_vllm_settings_cache: Dict[str, Optional[str]] = {}
+
+
+def _get_vllm_setting(key: str) -> Optional[str]:
+    """Get a vLLM/infrastructure setting from DB (cached, sync-safe)."""
+    if key in _vllm_settings_cache:
+        return _vllm_settings_cache[key]
+
+    try:
+        import asyncio
+        from backend.services.settings import get_settings_service
+        settings_svc = get_settings_service()
+        try:
+            asyncio.get_running_loop()
+            # Running loop exists — can't await. Return None, use env fallback.
+            return None
+        except RuntimeError:
+            # No running loop — safe to run sync
+            value = asyncio.run(settings_svc.get_setting(key))
+            _vllm_settings_cache[key] = value
+            return value
+    except Exception:
+        return None
+
+
+def invalidate_llm_infra_cache():
+    """Invalidate cached LLM infrastructure settings."""
+    _vllm_settings_cache.clear()
+
+
+# =============================================================================
 # Configuration
 # =============================================================================
 
@@ -165,8 +199,16 @@ class LLMConfig:
         self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "")
         self.anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
 
-        # Default settings
-        self.default_chat_model = os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o")
+        # Default settings — resolve model based on active provider
+        _env_model = os.getenv("DEFAULT_CHAT_MODEL", "")
+        if _env_model:
+            self.default_chat_model = _env_model
+        elif self.default_provider == "ollama":
+            self.default_chat_model = self.ollama_chat_model
+        elif self.default_provider == "anthropic":
+            self.default_chat_model = self.anthropic_model
+        else:
+            self.default_chat_model = self.openai_chat_model
         self.default_embedding_model = os.getenv("DEFAULT_EMBEDDING_MODEL", "text-embedding-3-small")
         self.embedding_dimension = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
         self.default_temperature = float(os.getenv("DEFAULT_TEMPERATURE", "0.7"))
@@ -177,24 +219,41 @@ class LLMConfig:
         Resolve the default LLM provider with smart detection.
 
         Priority:
-        1. Explicitly set DEFAULT_LLM_PROVIDER env var
-        2. Ollama if enabled and reachable (free, local)
-        3. OpenAI if API key is set
-        4. Anthropic if API key is set
-        5. Ollama as final fallback (assumes user will set it up)
+        1. Settings DB (llm.inference_backend) — admin-configurable
+        2. Explicitly set DEFAULT_LLM_PROVIDER env var (legacy)
+        3. Ollama if enabled (free, local)
+        4. OpenAI if API key is set
+        5. Anthropic if API key is set
+        6. Ollama as final fallback
         """
-        # If explicitly set, use that
+        # 1. Check settings DB first (admin-configurable)
+        try:
+            import asyncio
+            from backend.services.settings import get_settings_service
+            settings_svc = get_settings_service()
+            # Use sync wrapper since this is called in __init__
+            try:
+                loop = asyncio.get_running_loop()
+                # Can't await in sync context with running loop — use cached value
+            except RuntimeError:
+                # No running loop — safe to run
+                backend = asyncio.run(settings_svc.get_setting("llm.inference_backend"))
+                if backend and backend in ("ollama", "vllm", "openai", "anthropic"):
+                    return backend
+        except Exception:
+            pass  # Settings not available yet (startup), fall through
+
+        # 2. Explicitly set env var (legacy fallback)
         explicit_provider = os.getenv("DEFAULT_LLM_PROVIDER")
         if explicit_provider:
             return explicit_provider
 
-        # Check Ollama first (free, local)
+        # 3. Check Ollama first (free, local)
         ollama_enabled = os.getenv("OLLAMA_ENABLED", "true").lower() == "true"
         if ollama_enabled:
-            # Return ollama - it will fail gracefully if not running
             return "ollama"
 
-        # Check for valid API keys
+        # 4. Check for valid API keys
         openai_key = os.getenv("OPENAI_API_KEY", "")
         if openai_key and not openai_key.startswith("sk-your-"):
             return "openai"
@@ -203,7 +262,7 @@ class LLMConfig:
         if anthropic_key and not anthropic_key.startswith("sk-"):
             return "anthropic"
 
-        # Default to ollama (user should set up a provider)
+        # 5. Default to ollama
         return "ollama"
 
     @classmethod
@@ -311,7 +370,17 @@ class LLMFactory:
     ) -> BaseChatModel:
         """Create a new chat model instance."""
 
-        # Use LiteLLM if available (recommended)
+        # Use native LangChain for Ollama — litellm has timeout issues with local Ollama
+        if provider == "ollama":
+            return cls._create_native_model(
+                provider=provider,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+
+        # Use LiteLLM for cloud providers (recommended)
         if HAS_LITELLM:
             return cls._create_litellm_model(
                 provider=provider,
@@ -361,9 +430,11 @@ class LLMFactory:
             extra_params["api_base"] = llm_config.ollama_host
         elif provider == "vllm":
             # Phase 68: vLLM uses OpenAI-compatible API
-            vllm_api_base = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
+            # Settings DB takes priority over env vars
+            vllm_api_base = _get_vllm_setting("llm.vllm_api_base") or os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
+            vllm_api_key = _get_vllm_setting("llm.vllm_api_key") or os.getenv("VLLM_API_KEY", "dummy")
             extra_params["api_base"] = vllm_api_base
-            extra_params["api_key"] = os.getenv("VLLM_API_KEY", "dummy")
+            extra_params["api_key"] = vllm_api_key
 
         return ChatLiteLLM(
             model=litellm_model,
@@ -416,12 +487,14 @@ class LLMFactory:
 
         elif provider == "vllm":
             # Phase 68: vLLM integration - use OpenAI-compatible interface
-            vllm_api_base = os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
+            # Settings DB takes priority over env vars
+            vllm_api_base = _get_vllm_setting("llm.vllm_api_base") or os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
+            vllm_api_key = _get_vllm_setting("llm.vllm_api_key") or os.getenv("VLLM_API_KEY", "dummy")
             return ChatOpenAI(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                openai_api_key=os.getenv("VLLM_API_KEY", "dummy"),
+                openai_api_key=vllm_api_key,
                 openai_api_base=vllm_api_base,
                 **kwargs,
             )
@@ -1587,16 +1660,17 @@ async def generate_embedding(
 # Model Testing
 # =============================================================================
 
-async def test_llm_connection(provider: str = "openai") -> Dict[str, Any]:
+async def test_llm_connection(provider: Optional[str] = None) -> Dict[str, Any]:
     """
     Test LLM connection and return model info.
 
     Args:
-        provider: Provider to test
+        provider: Provider to test (defaults to llm_config.default_provider)
 
     Returns:
         dict: Connection test results
     """
+    provider = provider or llm_config.default_provider
     try:
         llm = get_chat_model(provider=provider)
         response = await llm.ainvoke([
@@ -1618,16 +1692,17 @@ async def test_llm_connection(provider: str = "openai") -> Dict[str, Any]:
         }
 
 
-async def test_embeddings_connection(provider: str = "openai") -> Dict[str, Any]:
+async def test_embeddings_connection(provider: Optional[str] = None) -> Dict[str, Any]:
     """
     Test embeddings connection.
 
     Args:
-        provider: Provider to test
+        provider: Provider to test (defaults to llm_config.default_provider)
 
     Returns:
         dict: Connection test results
     """
+    provider = provider or llm_config.default_provider
     try:
         embeddings = get_embeddings(provider=provider)
         result = await embeddings.aembed_query("test")
@@ -2126,17 +2201,36 @@ async def analyze_image(
     Returns:
         Model's analysis as string
     """
-    # Get appropriate vision model
+    # Get vision model from settings first, then provider-specific defaults
     provider = provider or llm_config.default_provider
     if model is None:
+        # Try reading from settings
+        try:
+            from backend.services.settings import get_settings_service
+            _settings = get_settings_service()
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                pass  # Can't do sync settings read in async context, use defaults below
+            else:
+                _vlm_model = asyncio.run(_settings.get_setting("rag.vlm_model"))
+                if _vlm_model:
+                    model = _vlm_model
+        except Exception:
+            pass
+    if model is None:
+        # Provider-specific vision model defaults
         if provider == "ollama":
-            model = "llava"  # Default vision model for Ollama
+            model = "llava"
         elif provider == "openai":
             model = "gpt-4o"
         elif provider == "anthropic":
             model = "claude-3-5-sonnet-20241022"
         else:
-            model = "gpt-4o"  # Fallback
+            model = "llava"  # Default to free local model
 
     llm = LLMFactory.get_chat_model(
         provider=provider,

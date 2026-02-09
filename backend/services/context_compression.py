@@ -85,8 +85,8 @@ class CompressionConfig:
 
     # Compression settings
     compression_level: CompressionLevel = CompressionLevel.MODERATE
-    summary_model: str = "gpt-4o-mini"  # Fast model for summarization
-    summary_provider: str = "openai"
+    summary_model: Optional[str] = None   # None = use provider's default model
+    summary_provider: Optional[str] = None  # None = use system-configured default
 
     # Anchoring (facts that should never be compressed)
     enable_anchoring: bool = True

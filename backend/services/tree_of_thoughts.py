@@ -71,10 +71,10 @@ class ToTConfig:
     search_strategy: SearchStrategy = SearchStrategy.BEAM
 
     # Model settings
-    thought_model: str = "gpt-4o-mini"
-    thought_provider: str = "openai"
-    evaluation_model: str = "gpt-4o-mini"
-    evaluation_provider: str = "openai"
+    thought_model: Optional[str] = None
+    thought_provider: Optional[str] = None
+    evaluation_model: Optional[str] = None
+    evaluation_provider: Optional[str] = None
     temperature: float = 0.7          # Higher for diverse thoughts
 
     # Best-of-N settings
@@ -86,12 +86,12 @@ class BestOfNConfig:
     """Configuration for Best-of-N sampling."""
     n_samples: int = 5              # Number of candidates to generate
     temperature: float = 0.8        # Temperature for diversity
-    model: str = "gpt-4o-mini"
-    provider: str = "openai"
+    model: Optional[str] = None
+    provider: Optional[str] = None
 
     # Reward model
     use_reward_model: bool = False
-    reward_model: str = "gpt-4o-mini"  # Use LLM as reward model
+    reward_model: Optional[str] = None  # Use LLM as reward model
 
 
 @dataclass(slots=True)
@@ -221,25 +221,31 @@ class TreeOfThoughts:
             return True
 
         try:
-            from backend.services.llm import LLMFactory
+            from backend.services.llm import LLMFactory, llm_config
+
+            # Resolve provider/model defaults lazily
+            _thought_provider = self.config.thought_provider or llm_config.default_provider
+            _thought_model = self.config.thought_model or llm_config.default_chat_model
+            _eval_provider = self.config.evaluation_provider or llm_config.default_provider
+            _eval_model = self.config.evaluation_model or llm_config.default_chat_model
 
             self._thought_llm = LLMFactory.get_chat_model(
-                provider=self.config.thought_provider,
-                model=self.config.thought_model,
+                provider=_thought_provider,
+                model=_thought_model,
                 temperature=self.config.temperature,
                 max_tokens=1024,
             )
 
             self._eval_llm = LLMFactory.get_chat_model(
-                provider=self.config.evaluation_provider,
-                model=self.config.evaluation_model,
+                provider=_eval_provider,
+                model=_eval_model,
                 temperature=0.1,  # Low temperature for evaluation
                 max_tokens=256,
             )
 
             logger.info(
                 "Tree of Thoughts initialized",
-                thought_model=self.config.thought_model,
+                thought_model=_thought_model,
                 search_strategy=self.config.search_strategy.value,
             )
 
@@ -673,19 +679,24 @@ class BestOfN:
             return True
 
         try:
-            from backend.services.llm import LLMFactory
+            from backend.services.llm import LLMFactory, llm_config
+
+            # Resolve provider/model defaults lazily
+            _provider = self.config.provider or llm_config.default_provider
+            _model = self.config.model or llm_config.default_chat_model
+            _reward_model = self.config.reward_model or llm_config.default_chat_model
 
             self._generator_llm = LLMFactory.get_chat_model(
-                provider=self.config.provider,
-                model=self.config.model,
+                provider=_provider,
+                model=_model,
                 temperature=self.config.temperature,
                 max_tokens=2048,
             )
 
             if self.config.use_reward_model:
                 self._reward_llm = LLMFactory.get_chat_model(
-                    provider=self.config.provider,
-                    model=self.config.reward_model,
+                    provider=_provider,
+                    model=_reward_model,
                     temperature=0.1,
                     max_tokens=256,
                 )
@@ -693,7 +704,7 @@ class BestOfN:
             logger.info(
                 "Best-of-N initialized",
                 n_samples=self.config.n_samples,
-                model=self.config.model,
+                model=_model,
             )
 
             self._initialized = True

@@ -146,6 +146,57 @@ class ChromaConfig:
 
 
 # =============================================================================
+# Helper functions
+# =============================================================================
+
+
+def _is_back_matter_content(content_lower: str) -> bool:
+    """Detect back-matter content (acknowledgements, reviewers, contributor lists, references).
+
+    These chunks match vocabulary keywords but don't contain substantive answers.
+    Uses heuristic patterns that work even without section_title metadata.
+    """
+    # Check first 200 chars for back-matter keywords (may not be at very start due to headers)
+    first_200 = content_lower[:200]
+    back_matter_keywords = (
+        "acknowledgement", "acknowledgment", "reviewer", "contributor",
+        "special thanks", "about the authors", "how to cite",
+        "suggested citation", "licensed under", "disclaimer",
+    )
+    if any(kw in first_200 for kw in back_matter_keywords):
+        return True
+
+    # Starts with common back-matter patterns
+    stripped = content_lower.strip()
+    if any(stripped.startswith(kw) for kw in ("contact:", "citation:", "authors:", "editors:")):
+        return True
+
+    # Dense abbreviated name lists: "X., Y., Z., ..." pattern (common in author lists)
+    # Count "., " patterns which indicate abbreviated first names
+    import re
+    abbrev_names = len(re.findall(r'\w\.,\s', content_lower))
+    if abbrev_names > 5:
+        return True
+
+    # Dense person name lists: high comma density + affiliation markers
+    commas = content_lower.count(",")
+    words = len(content_lower.split())
+    if words > 20 and commas > words * 0.15:
+        affiliation_markers = sum(1 for m in ("university", "institute", "department",
+                                               "professor", "dr.", "ph.d", "@",
+                                               "editor", "reviewer")
+                                  if m in content_lower)
+        if affiliation_markers >= 1:
+            return True
+
+    # Dense URL/email patterns
+    if content_lower.count("@") > 2 or content_lower.count("http") > 2:
+        return True
+
+    return False
+
+
+# =============================================================================
 # ChromaDB Vector Store
 # =============================================================================
 
@@ -298,6 +349,8 @@ class ChromaVectorStore:
                 "is_private": is_private,
                 # Phase 98: Full document tags for tag-based filtering
                 "document_tags": ",".join(document_tags) if document_tags else "",
+                # Phase 98: Content type for retrieval penalty (glossary, toc, image_credit, etc.)
+                "content_type": chunk_data.get("metadata", {}).get("content_type", "") if isinstance(chunk_data.get("metadata"), dict) else "",
             })
 
             # Prepare SQLite chunk record (use has_embedding flag for UI tracking)
@@ -774,6 +827,11 @@ class ChromaVectorStore:
         )
 
         search_results = []
+        # Track documents identified by hypothetical question matches
+        # These questions are meant to identify relevant documents, not provide answers
+        self._hypothetical_match_docs: Dict[str, float] = {}
+        _hyp_filtered_count = 0
+
         if results["ids"] and results["ids"][0]:
             for i, chunk_id in enumerate(results["ids"][0]):
                 # Convert distance to similarity (for cosine: similarity = 1 - distance)
@@ -788,9 +846,17 @@ class ChromaVectorStore:
                 metadata = results["metadatas"][0][i] if results["metadatas"] else {}
                 content = results["documents"][0][i] if results["documents"] else ""
 
-                # Skip synthetic chunks (hypothetical questions) at the vectorstore level
-                # These are embedded for document discovery but should never appear in results
+                # Hypothetical questions identify relevant documents but shouldn't appear in results.
+                # Collect their document IDs so hybrid_search can fetch real content from those docs.
                 if metadata.get("chunk_type") == "hypothetical_question":
+                    _hyp_filtered_count += 1
+                    doc_id = metadata.get("document_id", "")
+                    if doc_id and similarity > 0.5:
+                        # Keep the highest similarity score per document
+                        self._hypothetical_match_docs[doc_id] = max(
+                            self._hypothetical_match_docs.get(doc_id, 0.0),
+                            similarity,
+                        )
                     continue
 
                 search_results.append(SearchResult(
@@ -804,14 +870,103 @@ class ChromaVectorStore:
                     metadata={
                         "chunk_index": metadata.get("chunk_index", 0),
                         "token_count": metadata.get("token_count", 0),
+                        "content_type": metadata.get("content_type", ""),
                         **({"chunk_type": metadata["chunk_type"]} if "chunk_type" in metadata else {}),
                     },
                     page_number=metadata.get("page_number"),
                     section_title=metadata.get("section_title"),
                 ))
 
-        # Trim back to requested top_k after synthetic chunk filtering
-        search_results = search_results[:top_k]
+        # Hypothetical question routing: when synthetic question chunks matched the query,
+        # use their document IDs to fetch real content chunks directly.
+        # This implements the intended flow: hypothetical questions identify the document,
+        # then we fetch real content from those docs to include in results.
+        # This runs inside similarity_search so it works regardless of whether the caller
+        # is hybrid_search(), hybrid_retriever, or direct vector search.
+        hyp_match_docs = self._hypothetical_match_docs
+        if _hyp_filtered_count > 0 or hyp_match_docs:
+            logger.warning(
+                "Similarity search: hypothetical question routing",
+                normal_results=len(search_results),
+                hyp_filtered=_hyp_filtered_count,
+                hyp_match_docs=len(hyp_match_docs),
+                fetch_k=fetch_k,
+            )
+        if hyp_match_docs:
+            import sys
+            print(f"[HYP ROUTING] Found {len(hyp_match_docs)} docs, top_sim={max(hyp_match_docs.values()):.3f}", file=sys.stderr, flush=True)
+            logger.warning(
+                "Hypothetical question routing: identified documents",
+                doc_count=len(hyp_match_docs),
+                top_similarity=max(hyp_match_docs.values()),
+            )
+            existing_chunk_ids = {r.chunk_id for r in search_results}
+            for doc_id, hyp_sim in hyp_match_docs.items():
+                try:
+                    # Fetch MORE chunks than top_k — the initial query already got the top-K most
+                    # similar chunks globally, so we need to go deeper into this specific document
+                    # to find chunks that rank lower by embedding similarity but are still relevant
+                    # (e.g., infographic chunks with OCR text that embeds poorly)
+                    routing_fetch_k = max(top_k * 3, 50)
+                    doc_results = self._collection.query(
+                        query_embeddings=[query_embedding],
+                        n_results=routing_fetch_k,
+                        where={"document_id": doc_id},
+                        include=["documents", "metadatas", "distances"],
+                    )
+                    added = 0
+                    max_routed_add = top_k  # Add at most top_k extra chunks from routing
+                    if doc_results["ids"] and doc_results["ids"][0]:
+                        for j, cid in enumerate(doc_results["ids"][0]):
+                            if added >= max_routed_add:
+                                break
+                            if cid in existing_chunk_ids:
+                                continue
+                            meta = doc_results["metadatas"][0][j] if doc_results["metadatas"] else {}
+                            if meta.get("chunk_type") == "hypothetical_question":
+                                continue
+                            dist = doc_results["distances"][0][j] if doc_results["distances"] else 1.0
+                            sim = 1.0 - dist
+                            # Skip chunks with very low similarity even for routed docs
+                            if sim < 0.35:
+                                continue
+                            content = doc_results["documents"][0][j] if doc_results["documents"] else ""
+                            search_results.append(SearchResult(
+                                chunk_id=cid,
+                                document_id=doc_id,
+                                document_filename=meta.get("document_filename") or None,
+                                collection=meta.get("collection") or None,
+                                content=content,
+                                score=sim,
+                                similarity_score=sim,
+                                metadata={
+                                    "chunk_index": meta.get("chunk_index", 0),
+                                    "token_count": meta.get("token_count", 0),
+                                    "content_type": meta.get("content_type", ""),
+                                    "hypothetical_routed": True,
+                                },
+                                page_number=meta.get("page_number"),
+                                section_title=meta.get("section_title"),
+                            ))
+                            existing_chunk_ids.add(cid)
+                            added += 1
+                    if added > 0:
+                        print(f"[HYP ROUTING] Added {added} chunks from doc {doc_id[:12]}", file=sys.stderr, flush=True)
+                        logger.warning(
+                            "Hypothetical routing added chunks from document",
+                            doc_id=doc_id[:12],
+                            added=added,
+                        )
+                except Exception as e:
+                    logger.debug("Hypothetical doc routing failed", doc_id=doc_id, error=str(e))
+
+            # Re-sort by similarity score after adding routed chunks
+            search_results.sort(key=lambda r: r.similarity_score, reverse=True)
+
+        # Trim back — allow extra slots for hypothetical-routed chunks so they survive
+        # The downstream pipeline (hybrid retriever, RRF, verifier) handles final selection
+        routed_count = sum(1 for r in search_results if r.metadata.get("hypothetical_routed"))
+        search_results = search_results[:top_k + routed_count]
 
         # Filter out soft-deleted documents and private docs
         filtered_results = await self._filter_soft_deleted(search_results)
@@ -868,6 +1023,18 @@ class ChromaVectorStore:
         search_results = []
         query_lower = query.lower()
 
+        # Split query into meaningful terms for term-based matching
+        # (instead of requiring the entire query as a substring)
+        _KW_STOPWORDS = {
+            "the", "all", "and", "for", "are", "was", "that", "this", "with",
+            "from", "what", "which", "how", "does", "list", "name", "can", "has",
+            "been", "have", "their", "about", "into", "each", "some", "any",
+            "not", "but", "they", "its", "our", "who", "may", "also",
+        }
+        query_terms = [t for t in query_lower.split() if len(t) > 2 and t not in _KW_STOPWORDS]
+        if not query_terms:
+            query_terms = [t for t in query_lower.split() if len(t) > 1]  # fallback
+
         if results["ids"]:
             for i, chunk_id in enumerate(results["ids"]):
                 content = results["documents"][i] if results["documents"] else ""
@@ -877,28 +1044,47 @@ class ChromaVectorStore:
                 if metadata.get("chunk_type") == "hypothetical_question":
                     continue
 
-                # Simple substring match
-                if query_lower in content.lower():
-                    # Calculate a simple relevance score based on term frequency
-                    tf = content.lower().count(query_lower)
-                    score = tf / max(len(content.split()), 1)
+                content_lower = content.lower()
 
-                    search_results.append(SearchResult(
-                        chunk_id=chunk_id,
-                        document_id=metadata.get("document_id", ""),
-                        document_filename=metadata.get("document_filename") or None,
-                        collection=metadata.get("collection") or None,
-                        content=content,
-                        score=score,
-                        similarity_score=score,  # Use keyword relevance score for display
-                        metadata={
-                            "chunk_index": metadata.get("chunk_index", 0),
-                            "search_type": "keyword",
-                            **({"chunk_type": metadata["chunk_type"]} if "chunk_type" in metadata else {}),
-                        },
-                        page_number=metadata.get("page_number"),
-                        section_title=metadata.get("section_title"),
-                    ))
+                # Term-based matching: count how many query terms appear in the chunk
+                matching_terms = sum(1 for t in query_terms if t in content_lower)
+
+                # Document-filename matching: if query terms appear in the parent document's
+                # filename, give the chunk a base score. This helps surface chunks from
+                # clearly relevant documents (e.g., "Planetary Health Check" for "planetary boundaries").
+                doc_filename_lower = (metadata.get("document_filename") or "").lower()
+                filename_matches = sum(1 for t in query_terms if t in doc_filename_lower)
+                filename_score = 0.0
+                if filename_matches > 0 and matching_terms == 0:
+                    # Chunk content doesn't match but document title does
+                    filename_score = (filename_matches / len(query_terms)) * 0.15
+
+                if matching_terms == 0 and filename_score == 0:
+                    continue
+
+                # Score: coverage fraction × (1 + normalized term frequency)
+                term_coverage = matching_terms / len(query_terms)
+                total_tf = sum(content_lower.count(t) for t in query_terms if t in content_lower)
+                word_count = max(len(content.split()), 1)
+                score = term_coverage * (1.0 + total_tf / word_count) + filename_score
+
+                search_results.append(SearchResult(
+                    chunk_id=chunk_id,
+                    document_id=metadata.get("document_id", ""),
+                    document_filename=metadata.get("document_filename") or None,
+                    collection=metadata.get("collection") or None,
+                    content=content,
+                    score=score,
+                    similarity_score=score,
+                    metadata={
+                        "chunk_index": metadata.get("chunk_index", 0),
+                        "search_type": "keyword",
+                        "content_type": metadata.get("content_type", ""),
+                        **({"chunk_type": metadata["chunk_type"]} if "chunk_type" in metadata else {}),
+                    },
+                    page_number=metadata.get("page_number"),
+                    section_title=metadata.get("section_title"),
+                ))
 
         # Sort by score and limit
         search_results.sort(key=lambda x: x.score, reverse=True)
@@ -1153,6 +1339,56 @@ class ChromaVectorStore:
                 is_superadmin=is_superadmin,
             )
 
+        # NOTE: Hypothetical question routing now happens inside similarity_search().
+        # The vector_results already include document-routed chunks from hypothetical matches.
+
+        # Legacy hyp_doc_results for RRF scoring compatibility
+        hyp_doc_results = []
+        hyp_match_docs = getattr(self, "_hypothetical_match_docs", {})
+        if False and hyp_match_docs:  # Disabled: routing now in similarity_search
+            for doc_id, hyp_sim in hyp_match_docs.items():
+                try:
+                    doc_results = self._collection.query(
+                        query_embeddings=[query_embedding],
+                        n_results=top_k,
+                        where={"document_id": doc_id},
+                        include=["documents", "metadatas", "distances"],
+                    )
+                    if doc_results["ids"] and doc_results["ids"][0]:
+                        for i, cid in enumerate(doc_results["ids"][0]):
+                            meta = doc_results["metadatas"][0][i] if doc_results["metadatas"] else {}
+                            if meta.get("chunk_type") == "hypothetical_question":
+                                continue
+                            dist = doc_results["distances"][0][i] if doc_results["distances"] else 1.0
+                            sim = 1.0 - dist
+                            content = doc_results["documents"][0][i] if doc_results["documents"] else ""
+                            hyp_doc_results.append(SearchResult(
+                                chunk_id=cid,
+                                document_id=doc_id,
+                                document_filename=meta.get("document_filename") or None,
+                                collection=meta.get("collection") or None,
+                                content=content,
+                                score=sim,
+                                similarity_score=sim,
+                                metadata={
+                                    "chunk_index": meta.get("chunk_index", 0),
+                                    "token_count": meta.get("token_count", 0),
+                                    "content_type": meta.get("content_type", ""),
+                                    "hypothetical_routed": True,
+                                },
+                                page_number=meta.get("page_number"),
+                                section_title=meta.get("section_title"),
+                            ))
+                except Exception as e:
+                    logger.debug("Hypothetical doc routing failed", doc_id=doc_id, error=str(e))
+
+            if hyp_doc_results:
+                logger.info(
+                    "Hypothetical question routing fetched document chunks",
+                    chunk_count=len(hyp_doc_results),
+                    doc_count=len(hyp_match_docs),
+                )
+
         # Reciprocal Rank Fusion
         # k=30 amplifies differences between top ranks (vs k=60 which flattens them)
         # This helps when keyword search ranks the right content higher than vector search
@@ -1182,6 +1418,19 @@ class ChromaVectorStore:
                 # Keyword results don't have high similarity score - leave as-is
                 scores[result.chunk_id] = (rrf_score, result)
 
+        # Process hypothetical-question-routed chunks
+        # These are real content chunks from documents identified by hypothetical question matches.
+        # Weight them similarly to vector results since they come from high-confidence doc matches.
+        hyp_weight = vec_weight * 0.8  # Slightly lower than direct vector matches
+        for rank, result in enumerate(hyp_doc_results):
+            rrf_score = hyp_weight * (1.0 / (k + rank + 1))
+            if result.chunk_id in scores:
+                existing_rrf, existing_result = scores[result.chunk_id]
+                existing_result.similarity_score = max(existing_result.similarity_score, result.similarity_score)
+                scores[result.chunk_id] = (existing_rrf + rrf_score, existing_result)
+            else:
+                scores[result.chunk_id] = (rrf_score, result)
+
         # Process enhanced metadata results
         enhanced_doc_scores: Dict[str, float] = {}
         for rank, result in enumerate(enhanced_results):
@@ -1206,20 +1455,31 @@ class ChromaVectorStore:
 
         # Content-type penalty: demote glossary/reference/toc chunks that match
         # vocabulary but don't contain substantive answers
-        # Detection is heuristic based on content patterns
+        # Uses content_type metadata (from chunker) with heuristic fallback
+        CONTENT_TYPE_PENALTIES = {"glossary": 0.5, "toc": 0.2, "image_credit": 0.1, "copyright": 0.1}
         for chunk_id, (current_score, result) in list(scores.items()):
             content_lower = result.content.lower() if result.content else ""
             section_lower = (result.section_title or "").lower()
 
             penalty = 1.0  # No penalty by default
-            # Glossary/definition pages: short entries with many definitions
-            if any(kw in section_lower for kw in ("glossary", "definitions", "terminology", "abbreviations")):
+
+            # First: check content_type metadata (reliable, set by chunker)
+            content_type = result.metadata.get("content_type", "")
+            if content_type in CONTENT_TYPE_PENALTIES:
+                penalty = CONTENT_TYPE_PENALTIES[content_type]
+            # Fallback: heuristic-based detection from section titles and content patterns
+            elif any(kw in section_lower for kw in ("glossary", "definitions", "terminology", "abbreviations")):
                 penalty = 0.5
-            # Reference/citation pages
-            elif any(kw in section_lower for kw in ("references", "bibliography", "works cited")):
+            # Reference/citation pages (section title match)
+            elif any(kw in section_lower for kw in ("references", "bibliography", "works cited", "acknowledgement", "reviewer")):
                 penalty = 0.4
+            # Reference/citation pages (content pattern match)
             elif content_lower.count("et al.") > 2 or content_lower.count("doi:") > 1:
                 penalty = 0.5
+            # Dense person name lists (reviewers, contributors, acknowledgements)
+            # Detect by counting comma-separated names or lines with many proper nouns
+            elif _is_back_matter_content(content_lower):
+                penalty = 0.3
             # Table of contents
             elif "table of contents" in section_lower or "contents" == section_lower.strip():
                 penalty = 0.2
@@ -1246,11 +1506,12 @@ class ChromaVectorStore:
                 result.metadata["enhanced_boost"] = True
             final_results.append(result)
 
-        logger.debug(
+        logger.info(
             "Hybrid search completed (ChromaDB)",
             vector_count=len(vector_results),
             keyword_count=len(keyword_results),
             enhanced_count=len(enhanced_results),
+            hyp_routed_count=len(hyp_doc_results),
             final_count=len(final_results),
         )
 

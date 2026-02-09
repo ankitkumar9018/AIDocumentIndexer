@@ -68,8 +68,8 @@ class RefinerConfig:
     verification_independence: bool = True  # Verify questions independently
 
     # Model settings
-    refinement_model: str = "gpt-4o-mini"
-    refinement_provider: str = "openai"
+    refinement_model: Optional[str] = None
+    refinement_provider: Optional[str] = None
     temperature: float = 0.1
 
     # Strategy
@@ -285,18 +285,21 @@ class AnswerRefiner:
             return True
 
         try:
-            from backend.services.llm import LLMFactory
+            from backend.services.llm import LLMFactory, llm_config
+
+            _provider = self.config.refinement_provider or llm_config.default_provider
+            _model = self.config.refinement_model or llm_config.default_chat_model
 
             self._llm = LLMFactory.get_chat_model(
-                provider=self.config.refinement_provider,
-                model=self.config.refinement_model,
+                provider=_provider,
+                model=_model,
                 temperature=self.config.temperature,
                 max_tokens=2048,
             )
 
             logger.info(
                 "Answer refiner initialized",
-                model=self.config.refinement_model,
+                model=_model,
             )
 
             self._initialized = True

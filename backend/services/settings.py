@@ -42,6 +42,7 @@ class SettingCategory(str, Enum):
     AUDIO = "audio"  # TTS and audio configuration
     INGESTION = "ingestion"  # Knowledge graph and entity extraction settings
     SYSTEM = "system"  # System-wide configuration (custom instructions, language, etc.)
+    INFRASTRUCTURE = "infrastructure"  # Scaling & infrastructure configuration
 
 
 class ValueType(str, Enum):
@@ -3121,6 +3122,122 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         default_value=True,
         value_type=ValueType.BOOLEAN,
         description="Sync document tags to Knowledge Graph entities when tags change. Enables tag-based entity filtering in KG queries."
+    ),
+
+    # ==========================================================================
+    # Infrastructure / Scaling Settings
+    # ==========================================================================
+    SettingDefinition(
+        key="vector_store.backend",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="pgvector",
+        value_type=ValueType.STRING,
+        description="Vector store backend: pgvector (default, included), qdrant (1-50M scale), milvus (50M+ scale)"
+    ),
+    SettingDefinition(
+        key="vector_store.qdrant_url",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="localhost:6333",
+        value_type=ValueType.STRING,
+        description="Qdrant server URL (host:port). Used when vector_store.backend is qdrant."
+    ),
+    SettingDefinition(
+        key="vector_store.qdrant_api_key",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Qdrant Cloud API key. Leave empty for local/self-hosted Qdrant."
+    ),
+    SettingDefinition(
+        key="vector_store.qdrant_collection",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="documents",
+        value_type=ValueType.STRING,
+        description="Qdrant collection name for document embeddings."
+    ),
+    SettingDefinition(
+        key="vector_store.milvus_host",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="localhost",
+        value_type=ValueType.STRING,
+        description="Milvus server hostname. Used when vector_store.backend is milvus."
+    ),
+    SettingDefinition(
+        key="vector_store.milvus_port",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value=19530,
+        value_type=ValueType.NUMBER,
+        description="Milvus server port (default: 19530)."
+    ),
+    SettingDefinition(
+        key="vector_store.milvus_collection",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="documents",
+        value_type=ValueType.STRING,
+        description="Milvus collection name for document embeddings."
+    ),
+    SettingDefinition(
+        key="vector_store.milvus_user",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Milvus username (optional, for authenticated clusters)."
+    ),
+    SettingDefinition(
+        key="vector_store.milvus_password",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Milvus password (optional, for authenticated clusters)."
+    ),
+    SettingDefinition(
+        key="llm.inference_backend",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="ollama",
+        value_type=ValueType.STRING,
+        description="LLM inference backend: ollama (default), vllm (2-4x faster batch inference), openai, anthropic"
+    ),
+    SettingDefinition(
+        key="llm.vllm_api_base",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="http://localhost:8000/v1",
+        value_type=ValueType.STRING,
+        description="vLLM OpenAI-compatible API base URL."
+    ),
+    SettingDefinition(
+        key="llm.vllm_api_key",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="dummy",
+        value_type=ValueType.STRING,
+        description="vLLM API key (typically 'dummy' for local deployment)."
+    ),
+    SettingDefinition(
+        key="llm.vllm_model",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Model name loaded on the vLLM server (e.g. meta-llama/Meta-Llama-3-8B-Instruct)."
+    ),
+    SettingDefinition(
+        key="infrastructure.redis_url",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="redis://localhost:6379/0",
+        value_type=ValueType.STRING,
+        description="Redis connection URL for caching and task queue."
+    ),
+    SettingDefinition(
+        key="infrastructure.redis_password",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="Redis password (optional)."
+    ),
+    SettingDefinition(
+        key="infrastructure.scaling_profile",
+        category=SettingCategory.INFRASTRUCTURE,
+        default_value="development",
+        value_type=ValueType.STRING,
+        description="Active scaling profile: development (pgvector+ollama), production (qdrant+vllm+redis), high_scale (milvus+vllm+redis)"
     ),
 ]
 

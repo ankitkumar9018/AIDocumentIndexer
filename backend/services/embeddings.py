@@ -56,7 +56,7 @@ except ImportError:
 import ray
 
 from backend.processors.chunker import Chunk
-from backend.services.llm import LLMConfig
+from backend.services.llm import LLMConfig, llm_config
 
 logger = structlog.get_logger(__name__)
 
@@ -2073,9 +2073,9 @@ class EmbeddingModelSelector:
             selected_provider = fallback_provider
             selected_model = fallback_model
         else:
-            # Default to OpenAI if nothing else available
-            selected_provider = "openai"
-            selected_model = "text-embedding-3-small"
+            # Default to system-configured provider if nothing else available
+            selected_provider = llm_config.default_provider
+            selected_model = self.DEFAULT_MODELS.get(selected_provider, "nomic-embed-text")
 
         logger.info(
             "Auto-selected embedding model",
@@ -2280,7 +2280,7 @@ class EmbeddingService:
 
     def __init__(
         self,
-        provider: str = "openai",
+        provider: Optional[str] = None,
         model: Optional[str] = None,
         config: Optional[LLMConfig] = None,
     ):
@@ -2288,18 +2288,21 @@ class EmbeddingService:
         Initialize embedding service.
 
         Args:
-            provider: Embedding provider ("openai", "ollama", "huggingface", "auto")
+            provider: Embedding provider ("openai", "ollama", "huggingface", "auto", or None for default)
                      Use "auto" for Phase 76 automatic model selection based on content
             model: Specific model to use (defaults to provider's default)
             config: LLM configuration with API keys
         """
+        # Resolve provider from llm_config if not specified
+        provider = provider or llm_config.default_provider
+
         self._auto_select = provider == "auto"
         self._auto_selection_result: Optional[Dict[str, Any]] = None
 
-        # For "auto" mode, start with openai as default until content is analyzed
+        # For "auto" mode, start with system default until content is analyzed
         if self._auto_select:
-            self.provider = "openai"  # Will be updated on first embed
-            self.model = "text-embedding-3-small"
+            self.provider = llm_config.default_provider  # Will be updated on first embed
+            self.model = self.DEFAULT_MODELS.get(self.provider, "nomic-embed-text")
         else:
             self.provider = provider
             self.model = model or self.DEFAULT_MODELS.get(provider, "text-embedding-3-small")
@@ -2754,7 +2757,7 @@ class EmbeddingService:
 @ray.remote
 def embed_batch_ray(
     texts: List[str],
-    provider: str = "openai",
+    provider: Optional[str] = None,
     model: Optional[str] = None,
     config_dict: Optional[Dict] = None,
 ) -> List[List[float]]:
@@ -2766,6 +2769,7 @@ def embed_batch_ray(
     Phase 98: Added explicit cleanup to prevent memory leaks when tasks timeout.
     """
     import gc
+    provider = provider or llm_config.default_provider
     service = None
     try:
         # Reconstruct config from dict (Ray requires serializable objects)
@@ -2803,7 +2807,7 @@ class RayEmbeddingService:
 
     def __init__(
         self,
-        provider: str = "openai",
+        provider: Optional[str] = None,
         model: Optional[str] = None,
         config: Optional[LLMConfig] = None,
         num_workers: int = 4,
@@ -2813,12 +2817,13 @@ class RayEmbeddingService:
         Initialize Ray embedding service.
 
         Args:
-            provider: Embedding provider
+            provider: Embedding provider (defaults to llm_config.default_provider)
             model: Embedding model
             config: LLM configuration
             num_workers: Number of Ray workers to use
             batch_size_per_worker: Texts per worker batch
         """
+        provider = provider or llm_config.default_provider
         self.provider = provider
         self.model = model or EmbeddingService.DEFAULT_MODELS.get(provider)
         self.config = config or LLMConfig.from_env()
@@ -3703,7 +3708,7 @@ async def generate_embeddings_distributed(
             logger.warning(f"Distributed processor failed: {e}, falling back")
 
     # Fallback to RayEmbeddingService (handles Ray or concurrent.futures)
-    provider = os.getenv("EMBEDDING_PROVIDER", "openai")
+    provider = os.getenv("EMBEDDING_PROVIDER") or llm_config.default_provider
     service = RayEmbeddingService(provider=provider, model=model)
     embeddings = service.embed_texts_parallel(texts)
 
@@ -3717,7 +3722,7 @@ async def generate_embeddings_distributed(
 
 async def embed_documents_distributed(
     texts: List[str],
-    provider: str = "openai",
+    provider: Optional[str] = None,
     model: Optional[str] = None,
 ) -> List[List[float]]:
     """

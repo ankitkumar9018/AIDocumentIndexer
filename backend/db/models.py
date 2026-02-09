@@ -2035,6 +2035,8 @@ class MoodBoard(Base, UUIDMixin, TimestampMixin):
     themes: Mapped[Optional[list]] = mapped_column(JSONType())  # Extracted themes
     color_palette: Mapped[Optional[list]] = mapped_column(JSONType())  # Color palette
     style_tags: Mapped[Optional[List[str]]] = mapped_column(StringArrayType())
+    generated_suggestions: Mapped[Optional[dict]] = mapped_column(JSONType())
+    canvas_data: Mapped[Optional[dict]] = mapped_column(JSONType())  # ReactFlow nodes + viewport
 
     # Display
     thumbnail_url: Mapped[Optional[str]] = mapped_column(String(500))

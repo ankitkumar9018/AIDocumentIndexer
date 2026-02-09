@@ -6,14 +6,14 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from backend.api.auth import AuthenticatedUser, get_current_user
-from backend.core.logging import get_logger
+from backend.api.middleware.auth import AuthenticatedUser
+import structlog
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -63,12 +63,12 @@ class MemoryUpdateRequest(BaseModel):
 
 @router.get("", response_model=MemoryListResponse)
 async def list_memories(
+    user: AuthenticatedUser,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     memory_type: Optional[str] = Query(None, pattern="^(fact|preference|context|procedure|entity|relationship)$"),
     priority: Optional[str] = Query(None, pattern="^(critical|high|medium|low)$"),
     search: Optional[str] = Query(None, max_length=200),
-    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """List all global memories for the current user."""
     from backend.services.mem0_memory import get_memory_service, MemoryType
@@ -126,7 +126,7 @@ async def list_memories(
 
 @router.get("/stats", response_model=MemoryStatsResponse)
 async def get_memory_stats(
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """Get memory usage statistics."""
     from backend.services.mem0_memory import get_memory_service
@@ -149,7 +149,7 @@ async def get_memory_stats(
 
 @router.get("/export")
 async def export_memories(
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """Export all memories as JSON download."""
     from backend.services.mem0_memory import get_memory_service
@@ -182,7 +182,7 @@ async def export_memories(
 @router.get("/{memory_id}", response_model=MemoryResponse)
 async def get_memory(
     memory_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """Get a single memory by ID."""
     from backend.services.mem0_memory import get_memory_service
@@ -220,7 +220,7 @@ async def get_memory(
 async def update_memory(
     memory_id: str,
     request: MemoryUpdateRequest,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """Update a memory's content or priority."""
     from backend.services.mem0_memory import get_memory_service, MemoryPriority
@@ -266,7 +266,7 @@ async def update_memory(
 @router.delete("/{memory_id}")
 async def delete_memory(
     memory_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser,
 ):
     """Delete a single memory."""
     from backend.services.mem0_memory import get_memory_service
@@ -288,8 +288,8 @@ async def delete_memory(
 
 @router.delete("")
 async def clear_all_memories(
+    user: AuthenticatedUser,
     confirm: bool = Query(False, description="Must be true to actually clear"),
-    user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Clear all memories for the current user. Requires confirm=true."""
     if not confirm:

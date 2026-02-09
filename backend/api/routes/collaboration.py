@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 import structlog
 
 from backend.api.middleware.auth import AuthenticatedUser
+from backend.services.llm import llm_config
 from backend.services.collaboration import (
     CollaborationService,
     CollaborationSession,
@@ -36,8 +37,8 @@ router = APIRouter()
 
 class ModelConfigRequest(BaseModel):
     """Configuration for a specific model."""
-    provider: str = Field(default="openai", description="LLM provider (openai, ollama, anthropic)")
-    model: str = Field(default="gpt-4", description="Model name")
+    provider: Optional[str] = Field(default=None, description="LLM provider (auto-detected from settings if not specified)")
+    model: Optional[str] = Field(default=None, description="Model name (uses provider default if not specified)")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Temperature for generation")
     max_tokens: int = Field(default=2000, ge=100, le=8000, description="Max tokens to generate")
 
@@ -180,24 +181,26 @@ async def create_collaboration_session(
             detail=f"Invalid mode: {request.mode}. Valid modes: single, review, full, debate",
         )
 
-    # Build config
+    # Build config — use system default provider, not hardcoded "openai"
+    _default_provider = llm_config.default_provider
+
     generator_config = ModelConfig(
-        provider=request.generator.provider if request.generator else "openai",
-        model=request.generator.model if request.generator else "gpt-4",
+        provider=request.generator.provider if request.generator else _default_provider,
+        model=request.generator.model if request.generator else None,
         temperature=request.generator.temperature if request.generator else 0.7,
         max_tokens=request.generator.max_tokens if request.generator else 2000,
     )
 
     critic_config = ModelConfig(
-        provider=request.critic.provider if request.critic else "openai",
-        model=request.critic.model if request.critic else "gpt-4",
+        provider=request.critic.provider if request.critic else _default_provider,
+        model=request.critic.model if request.critic else None,
         temperature=request.critic.temperature if request.critic else 0.3,
         max_tokens=request.critic.max_tokens if request.critic else 2000,
     )
 
     synthesizer_config = ModelConfig(
-        provider=request.synthesizer.provider if request.synthesizer else "openai",
-        model=request.synthesizer.model if request.synthesizer else "gpt-4",
+        provider=request.synthesizer.provider if request.synthesizer else _default_provider,
+        model=request.synthesizer.model if request.synthesizer else None,
         temperature=request.synthesizer.temperature if request.synthesizer else 0.5,
         max_tokens=request.synthesizer.max_tokens if request.synthesizer else 2000,
     )
@@ -504,13 +507,13 @@ async def estimate_collaboration_cost(
     config = CollaborationConfig(
         mode=mode,
         generator=ModelConfig(
-            model=request.generator.model if request.generator else "gpt-4",
+            model=request.generator.model if request.generator else None,
         ),
         critic=ModelConfig(
-            model=request.critic.model if request.critic else "gpt-4",
+            model=request.critic.model if request.critic else None,
         ),
         synthesizer=ModelConfig(
-            model=request.synthesizer.model if request.synthesizer else "gpt-4",
+            model=request.synthesizer.model if request.synthesizer else None,
         ),
         max_iterations=request.max_iterations,
     )

@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import select, func, Integer, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import os
 import asyncio
 from datetime import datetime
@@ -716,7 +716,7 @@ class ProviderInfo(BaseModel):
 class EmbedTextRequest(BaseModel):
     """Request to embed text."""
     text: str
-    provider: str = "openai"
+    provider: Optional[str] = Field(None, description="Embedding provider (auto-detected from settings if not specified)")
 
 
 class EmbedTextResponse(BaseModel):
@@ -843,15 +843,20 @@ async def test_embedding(
     Useful for verifying provider configuration and comparing output dimensions.
     """
     try:
-        from backend.services.embeddings import EmbeddingService
+        from backend.services.embeddings import EmbeddingService, get_embedding_service
 
-        service = EmbeddingService(provider=request.provider)
+        # Resolve provider from settings if not specified
+        if request.provider:
+            service = EmbeddingService(provider=request.provider)
+        else:
+            service = get_embedding_service(provider=None, use_ray=False)
+
         embedding = service.embed_text(request.text)
 
         return EmbedTextResponse(
             embedding=embedding,
             dimensions=len(embedding),
-            provider=request.provider,
+            provider=service.provider,
             model=service.model,
         )
 

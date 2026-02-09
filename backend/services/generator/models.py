@@ -159,7 +159,7 @@ def _get_generation_setting(key: str, env_key: str, default: Any) -> Any:
 class GenerationConfig:
     """Configuration for document generation."""
     # LLM settings
-    model: str = "gpt-4"
+    model: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 4000
 

@@ -82,8 +82,8 @@ class TruLensConfig:
     database_prefix: str = "aidoc_"
 
     # Provider settings
-    feedback_provider: str = "openai"  # openai, litellm, huggingface
-    feedback_model: str = "gpt-4o-mini"
+    feedback_provider: Optional[str] = None  # openai, litellm, huggingface
+    feedback_model: Optional[str] = None
 
     # Evaluation settings
     enable_groundedness: bool = True
@@ -195,18 +195,23 @@ class TruLensManager:
 
             if HAS_TRULENS:
                 try:
+                    from backend.services.llm import llm_config
+
+                    _provider = self.config.feedback_provider or llm_config.default_provider
+                    _model = self.config.feedback_model or llm_config.default_chat_model
+
                     # Initialize TruLens
                     self._tru = Tru(database_url=self.config.database_url)
                     self._tru.reset_database()  # Clean start for demo
 
                     # Initialize feedback provider
-                    if self.config.feedback_provider == "openai":
+                    if _provider == "openai":
                         self._feedback_provider = TruLensOpenAI(
-                            model_engine=self.config.feedback_model
+                            model_engine=_model
                         )
-                    elif self.config.feedback_provider == "litellm":
+                    elif _provider == "litellm":
                         self._feedback_provider = TruLensLiteLLM(
-                            model_engine=self.config.feedback_model
+                            model_engine=_model
                         )
 
                     # Create feedback functions
@@ -215,7 +220,7 @@ class TruLensManager:
                     logger.info(
                         "TruLens initialized",
                         database=self.config.database_url,
-                        provider=self.config.feedback_provider,
+                        provider=_provider,
                     )
 
                 except Exception as e:

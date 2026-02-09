@@ -29,7 +29,7 @@ from backend.services.rag_evaluation import (
     format_metrics_report,
 )
 from backend.services.rag import get_rag_service
-from backend.services.llm import LLMFactory
+from backend.services.llm import LLMFactory, llm_config
 from backend.services.embeddings import get_embedding_service
 
 logger = structlog.get_logger(__name__)
@@ -153,8 +153,8 @@ async def _get_evaluator() -> RAGEvaluator:
     try:
         # Get LLM for evaluation
         llm = LLMFactory.get_chat_model(
-            provider="openai",
-            model="gpt-4o-mini",
+            provider=None,  # Use system-configured default provider
+            model=None,     # Use provider's default model
             temperature=0.0,
         )
     except Exception as e:

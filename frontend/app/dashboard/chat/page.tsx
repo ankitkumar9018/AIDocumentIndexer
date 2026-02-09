@@ -362,6 +362,8 @@ export default function ChatPage() {
   const [agentExecutionMode, setAgentExecutionMode] = useState<ExecutionMode>("agent");
   // Source mode: documents (RAG search) vs general (no document search)
   const [sourceMode, setSourceMode] = useState<"documents" | "general">("documents");
+  // Show/hide initial "Try asking" suggestions
+  const [showSuggestions, setShowSuggestions] = useState(true);
   // Agent mode: enable multi-agent orchestration (can be combined with either source mode)
   const [agentEnabled, setAgentEnabled] = useState(false);
   // Agent mode options - user-configurable settings for agent execution
@@ -627,6 +629,16 @@ export default function ChatPage() {
       const saved = localStorage.getItem("chat_enhance_query");
       if (saved !== null) {
         setEnhanceQuery(JSON.parse(saved));
+      }
+    }
+  }, []);
+
+  // Load intelligence level preference from localStorage
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("chat_intelligence_level");
+      if (saved && ["basic", "standard", "enhanced", "maximum"].includes(saved)) {
+        setIntelligenceLevel(saved as "basic" | "standard" | "enhanced" | "maximum");
       }
     }
   }, []);
@@ -1541,6 +1553,14 @@ export default function ChatPage() {
         top_k: topK || undefined,
         language: outputLanguage,
         skip_cache: true, // Force fresh response
+        // Carry through intelligence settings (were missing — caused regenerate to run at "basic" level)
+        intelligence_level: sourceMode === "documents" ? intelligenceLevel : undefined,
+        enable_extended_thinking: extendedThinkingEnabled && intelligenceLevel === "maximum",
+        thinking_level: extendedThinkingEnabled ? thinkingLevel : undefined,
+        enable_cot: chainOfThoughtEnabled,
+        enable_verification: selfVerificationEnabled,
+        enhance_query: enhanceQuery ?? undefined,
+        temperature_override: temperature ?? undefined,
       });
 
       // Transform sources
@@ -2172,11 +2192,26 @@ export default function ChatPage() {
 
                     {/* Suggested Follow-up Questions */}
                     {message.role === "assistant" && !message.isStreaming && message.suggestedQuestions && message.suggestedQuestions.length > 0 && (
-                      <div className="mt-3 pt-3 border-t border-muted">
-                        <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
-                          <Sparkles className="h-3 w-3" />
-                          Related questions
-                        </p>
+                      <div className="mt-3 pt-3 border-t border-muted relative">
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-xs text-muted-foreground flex items-center gap-1">
+                            <Sparkles className="h-3 w-3" />
+                            Related questions
+                          </p>
+                          <button
+                            onClick={() => {
+                              setMessages((prev) =>
+                                prev.map((m) =>
+                                  m.id === message.id ? { ...m, suggestedQuestions: [] } : m
+                                )
+                              );
+                            }}
+                            className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                            title="Dismiss"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
                         <div className="flex flex-wrap gap-2">
                           {message.suggestedQuestions.map((question, qIndex) => (
                             <Button
@@ -2230,8 +2265,15 @@ export default function ChatPage() {
           </ScrollArea>
 
           {/* Suggested Questions */}
-          {messages.length === 1 && (
-            <div className="p-4 border-t bg-muted/50">
+          {messages.length === 1 && showSuggestions && (
+            <div className="p-4 border-t bg-muted/50 relative">
+              <button
+                onClick={() => setShowSuggestions(false)}
+                className="absolute top-2 right-2 p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                title="Dismiss suggestions"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
               <p className="text-sm text-muted-foreground mb-2">Try asking:</p>
               <div className="flex flex-wrap gap-2">
                 {suggestedQuestions.map((question, idx) => (
@@ -2925,7 +2967,7 @@ export default function ChatPage() {
               {/* Intelligence Level */}
               <div className="space-y-2">
                 <Label className="text-sm font-medium">Level</Label>
-                <Select value={intelligenceLevel} onValueChange={(v) => setIntelligenceLevel(v as typeof intelligenceLevel)}>
+                <Select value={intelligenceLevel} onValueChange={(v) => { setIntelligenceLevel(v as typeof intelligenceLevel); if (typeof window !== "undefined") localStorage.setItem("chat_intelligence_level", v); }}>
                   <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="basic"><span className="flex items-center gap-2"><Zap className="h-3 w-3 text-gray-400" />Basic — Fast, standard RAG</span></SelectItem>

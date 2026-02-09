@@ -43,7 +43,7 @@ class SummarizationConfig:
             self.enabled = os.getenv("ENABLE_SUMMARIZATION", "true").lower() == "true"
 
     # Summary generation
-    model: str = "gpt-4o-mini"  # Cost-effective model
+    model: Optional[str] = None  # Resolved lazily from llm_config
     max_summary_tokens: int = 500
     temperature: float = 0.3  # Low temp for consistency
 
@@ -53,7 +53,7 @@ class SummarizationConfig:
     max_section_summary_tokens: int = 200
 
     # Provider config
-    provider: str = "openai"
+    provider: Optional[str] = None
 
 
 @dataclass
@@ -137,10 +137,13 @@ class DocumentSummarizer:
                     "Failed to get LLM from factory, using direct import",
                     error=str(e),
                 )
-                # Fallback to direct import
+                # Fallback to direct import with lazy resolution
+                from backend.services.llm import llm_config
                 from langchain_openai import ChatOpenAI
+
+                _model = self.config.model or llm_config.default_chat_model
                 self._llm = ChatOpenAI(
-                    model=self.config.model,
+                    model=_model,
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_summary_tokens,
                 )

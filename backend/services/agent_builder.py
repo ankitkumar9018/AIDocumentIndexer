@@ -117,8 +117,17 @@ class AgentConfig:
     voice_speed: float = 1.0
 
     # Model settings
-    model: str = "gpt-4o-mini"
-    fallback_model: str = "gpt-3.5-turbo"
+    model: Optional[str] = None
+    fallback_model: Optional[str] = None
+
+    def __post_init__(self):
+        """Resolve model defaults from llm_config if not explicitly set."""
+        if self.model is None or self.fallback_model is None:
+            from backend.services.llm import llm_config
+            if self.model is None:
+                self.model = llm_config.default_chat_model
+            if self.fallback_model is None:
+                self.fallback_model = llm_config.default_chat_model
 
 
 @dataclass

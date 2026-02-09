@@ -22,7 +22,7 @@ import time
 
 import structlog
 
-from backend.services.llm import LLMFactory
+from backend.services.llm import LLMFactory, llm_config
 from backend.core.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -146,10 +146,10 @@ EXPLANATION: [brief explanation]"""
     def __init__(self):
         """Initialize the ensemble voting service."""
         # Default models to use (can be overridden)
+        # Default to system-configured provider; ensemble can use multiple providers
+        _default = llm_config.default_provider
         self.default_models = [
-            {"provider": "openai", "model": "gpt-4o-mini"},
-            {"provider": "anthropic", "model": "claude-3-haiku-20240307"},
-            {"provider": "ollama", "model": "llama3.2"},
+            {"provider": _default, "model": None},  # System default
         ]
 
     async def query(

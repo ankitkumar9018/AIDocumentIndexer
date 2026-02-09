@@ -92,7 +92,9 @@ class Phase65Config:
     spell_max_edit_distance: int = 2
 
     # Semantic Cache
-    enable_semantic_cache: bool = True
+    # Disabled: stale cache entries return wrong answers when retrieval logic changes.
+    # The cache stores FULL responses and doesn't invalidate when documents/models change.
+    enable_semantic_cache: bool = False
     cache_similarity_threshold: float = 0.92
     cache_ttl_seconds: int = 300
     cache_max_entries: int = 1000
@@ -236,6 +238,7 @@ class Phase65Pipeline:
         self,
         query: str,
         embedding: Optional[List[float]] = None,
+        model_key: Optional[str] = None,
     ) -> Tuple[str, Optional[Any]]:
         """
         Preprocess query with spell correction and cache check.
@@ -243,6 +246,8 @@ class Phase65Pipeline:
         Args:
             query: Original query string
             embedding: Optional query embedding for semantic cache
+            model_key: Optional model+intelligence key for cache namespacing.
+                       Different models/intelligence levels get separate cache entries.
 
         Returns:
             Tuple of (processed_query, cached_result_or_None)
@@ -261,12 +266,13 @@ class Phase65Pipeline:
                 )
                 processed_query = correction.corrected
 
-        # Semantic cache check
+        # Semantic cache check — namespace by model to avoid cross-model cache hits
         cached_result = None
         if self._semantic_cache and self.config.enable_semantic_cache:
-            cached_result = await self._semantic_cache.get(processed_query, embedding)
+            cache_query = f"{model_key}::{processed_query}" if model_key else processed_query
+            cached_result = await self._semantic_cache.get(cache_query, embedding)
             if cached_result:
-                logger.debug("Semantic cache hit", query=processed_query[:50])
+                logger.debug("Semantic cache hit", query=processed_query[:50], model_key=model_key)
 
         return processed_query, cached_result
 
@@ -275,11 +281,14 @@ class Phase65Pipeline:
         query: str,
         result: Any,
         embedding: Optional[List[float]] = None,
+        model_key: Optional[str] = None,
     ) -> None:
         """Cache a query result for future semantic matching."""
         if self._semantic_cache and self.config.enable_semantic_cache:
+            # Namespace by model to prevent cross-model cache pollution
+            cache_query = f"{model_key}::{query}" if model_key else query
             await self._semantic_cache.set(
-                query,
+                cache_query,
                 result,
                 embedding,
                 self.config.cache_ttl_seconds,

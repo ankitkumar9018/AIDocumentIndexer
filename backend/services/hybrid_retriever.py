@@ -109,7 +109,7 @@ class HybridConfig:
 
     # Performance
     max_concurrent: int = 5
-    timeout_seconds: float = 10.0
+    timeout_seconds: float = 30.0  # 10s was too tight for local Ollama embeddings
 
 
 @dataclass(slots=True)
@@ -588,6 +588,9 @@ class HybridRetriever:
                 rerank_time = (time.time() - rerank_start) * 1000
             except Exception as e:
                 logger.warning("Reranking failed", error=str(e))
+
+        # Back-matter penalties are already applied in vectorstore_local.py hybrid_search()
+        # (content-type penalties at lines 1262-1298). No need to apply them again here.
 
         # Take final top_k
         final_results = fused[:final_top_k]

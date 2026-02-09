@@ -1359,6 +1359,22 @@ async def update_settings(
             session=db,
         )
 
+    # Invalidate caches if infrastructure settings changed
+    infra_keys_changed = [k for k in update.settings.keys() if k.startswith(("vector_store.", "llm.vllm_", "llm.inference_backend", "infrastructure."))]
+    if infra_keys_changed:
+        try:
+            from backend.services.vectorstore_factory import invalidate_vector_store_settings, VectorStoreFactory
+            invalidate_vector_store_settings()
+            VectorStoreFactory.clear_cache()
+        except Exception as e:
+            logger.warning("Failed to invalidate vector store caches", error=str(e))
+        try:
+            from backend.services.llm import invalidate_llm_infra_cache
+            invalidate_llm_infra_cache()
+        except Exception as e:
+            logger.warning("Failed to invalidate LLM infra caches", error=str(e))
+        logger.info("Invalidated infrastructure caches", changed_keys=infra_keys_changed)
+
     definitions = settings_service.get_setting_definitions()
 
     return SettingsResponse(
@@ -7987,9 +8003,9 @@ async def backfill_document_tags(
 # ── Backfill ChromaDB chunk metadata with document filenames ────────────
 @router.post("/backfill-chunk-metadata")
 async def backfill_chunk_metadata(
+    admin: AdminUser,
     dry_run: bool = True,
-    admin: AdminUser = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ):
     """
     Retroactively update ChromaDB chunk metadata with document_filename
@@ -8076,23 +8092,11 @@ async def backfill_chunk_metadata(
 
 @router.get("/storage/stats")
 async def get_storage_stats(
-    admin: AdminUser = Depends(require_admin),
+    admin: AdminUser,
     db: AsyncSession = Depends(get_async_session),
 ):
     """Get document storage breakdown — local vs external, by source type."""
-    from sqlalchemy import case, literal_column
-
-    # Query storage breakdown
-    results = await db.execute(
-        select(
-            Document.source_type,
-            func.coalesce(Document.is_stored_locally, True).label("is_local"),
-            func.count().label("doc_count"),
-            func.coalesce(func.sum(Document.file_size), 0).label("total_size"),
-        )
-        .group_by(Document.source_type, "is_local")
-    )
-    rows = results.all()
+    from backend.db.models import Document
 
     local_count = 0
     local_size = 0
@@ -8100,26 +8104,53 @@ async def get_storage_stats(
     external_size = 0
     by_source_type: dict = {}
 
-    for row in rows:
-        source_type = row.source_type or "local_upload"
-        is_local = row.is_local
-        count = row.doc_count
-        size = row.total_size or 0
+    try:
+        # Full query with source_type and is_stored_locally columns
+        results = await db.execute(
+            select(
+                Document.source_type,
+                func.coalesce(Document.is_stored_locally, True).label("is_local"),
+                func.count().label("doc_count"),
+                func.coalesce(func.sum(Document.file_size), 0).label("total_size"),
+            )
+            .group_by(Document.source_type, "is_local")
+        )
+        rows = results.all()
 
-        if is_local:
-            local_count += count
-            local_size += size
-        else:
-            external_count += count
-            external_size += size
+        for row in rows:
+            source_type = row.source_type or "local_upload"
+            is_local = row.is_local
+            count = row.doc_count
+            size = row.total_size or 0
 
-        if source_type not in by_source_type:
-            by_source_type[source_type] = {"count": 0, "size": 0, "external_count": 0}
+            if is_local:
+                local_count += count
+                local_size += size
+            else:
+                external_count += count
+                external_size += size
 
-        by_source_type[source_type]["count"] += count
-        by_source_type[source_type]["size"] += size
-        if not is_local:
-            by_source_type[source_type]["external_count"] += count
+            if source_type not in by_source_type:
+                by_source_type[source_type] = {"count": 0, "size": 0, "external_count": 0}
+
+            by_source_type[source_type]["count"] += count
+            by_source_type[source_type]["size"] += size
+            if not is_local:
+                by_source_type[source_type]["external_count"] += count
+
+    except Exception:
+        # Fallback: columns may not exist yet (migration pending)
+        await db.rollback()
+        results = await db.execute(
+            select(
+                func.count().label("doc_count"),
+                func.coalesce(func.sum(Document.file_size), 0).label("total_size"),
+            )
+        )
+        row = results.one()
+        local_count = row.doc_count
+        local_size = row.total_size or 0
+        by_source_type["local_upload"] = {"count": local_count, "size": local_size, "external_count": 0}
 
     return {
         "local_count": local_count,
@@ -8130,3 +8161,884 @@ async def get_storage_stats(
         "total_size_bytes": local_size + external_size,
         "by_source_type": by_source_type,
     }
+
+
+# =============================================================================
+# Infrastructure / Scaling Endpoints
+# =============================================================================
+
+INFRASTRUCTURE_PROFILES = {
+    "development": {
+        "name": "Development",
+        "description": "Local development — pgvector + Ollama, no Redis required",
+        "icon": "laptop",
+        "settings": {
+            "vector_store.backend": "pgvector",
+            "llm.inference_backend": "ollama",
+            "queue.celery_enabled": False,
+            "infrastructure.scaling_profile": "development",
+        },
+    },
+    "production": {
+        "name": "Production",
+        "description": "Production deployment — Qdrant + vLLM + Redis for 1-50M documents",
+        "icon": "server",
+        "settings": {
+            "vector_store.backend": "qdrant",
+            "llm.inference_backend": "vllm",
+            "queue.celery_enabled": True,
+            "infrastructure.scaling_profile": "production",
+        },
+    },
+    "high_scale": {
+        "name": "High Scale",
+        "description": "High-scale deployment — Milvus + vLLM + Redis for 50M+ documents",
+        "icon": "cloud",
+        "settings": {
+            "vector_store.backend": "milvus",
+            "llm.inference_backend": "vllm",
+            "queue.celery_enabled": True,
+            "infrastructure.scaling_profile": "high_scale",
+        },
+    },
+}
+
+
+class InfraTestRequest(BaseModel):
+    """Request to test infrastructure connectivity."""
+    backend: str  # "qdrant", "milvus", "vllm", "redis"
+    config: Dict[str, Any] = {}
+
+
+class InfraTestResponse(BaseModel):
+    """Response from infrastructure connectivity test."""
+    success: bool
+    backend: str
+    message: str
+    latency_ms: Optional[float] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+@router.post("/infrastructure/test", response_model=InfraTestResponse)
+async def test_infrastructure_connectivity(
+    request_body: InfraTestRequest,
+    admin: AdminUser,
+):
+    """Test connectivity to an infrastructure backend (qdrant, milvus, vllm, redis)."""
+    import time
+
+    backend = request_body.backend.lower()
+    config = request_body.config
+
+    if backend == "qdrant":
+        try:
+            from backend.services.vectorstore_qdrant import QdrantVectorStore, HAS_QDRANT
+            if not HAS_QDRANT:
+                return InfraTestResponse(
+                    success=False, backend=backend,
+                    message="qdrant-client not installed. Run: pip install qdrant-client",
+                )
+            url = config.get("url", "localhost:6333")
+            start = time.monotonic()
+            store = QdrantVectorStore(url=url, api_key=config.get("api_key", ""))
+            await store.initialize()
+            latency = (time.monotonic() - start) * 1000
+            return InfraTestResponse(
+                success=True, backend=backend,
+                message=f"Connected to Qdrant at {url}",
+                latency_ms=round(latency, 1),
+                details={"url": url},
+            )
+        except Exception as e:
+            return InfraTestResponse(
+                success=False, backend=backend,
+                message=f"Qdrant connection failed: {str(e)}",
+            )
+
+    elif backend == "milvus":
+        try:
+            from backend.services.vectorstore_milvus import MilvusVectorStore, HAS_MILVUS
+            if not HAS_MILVUS:
+                return InfraTestResponse(
+                    success=False, backend=backend,
+                    message="pymilvus not installed. Run: pip install pymilvus",
+                )
+            host = config.get("host", "localhost")
+            port = int(config.get("port", 19530))
+            start = time.monotonic()
+            store = MilvusVectorStore(host=host, port=port)
+            await store.initialize()
+            latency = (time.monotonic() - start) * 1000
+            return InfraTestResponse(
+                success=True, backend=backend,
+                message=f"Connected to Milvus at {host}:{port}",
+                latency_ms=round(latency, 1),
+                details={"host": host, "port": port},
+            )
+        except Exception as e:
+            return InfraTestResponse(
+                success=False, backend=backend,
+                message=f"Milvus connection failed: {str(e)}",
+            )
+
+    elif backend == "vllm":
+        try:
+            import httpx
+            api_base = config.get("api_base", "http://localhost:8000/v1")
+            api_key = config.get("api_key", "dummy")
+            start = time.monotonic()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{api_base}/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            latency = (time.monotonic() - start) * 1000
+            models = [m.get("id", "unknown") for m in data.get("data", [])]
+            return InfraTestResponse(
+                success=True, backend=backend,
+                message=f"Connected to vLLM at {api_base} ({len(models)} model(s))",
+                latency_ms=round(latency, 1),
+                details={"api_base": api_base, "models": models},
+            )
+        except Exception as e:
+            return InfraTestResponse(
+                success=False, backend=backend,
+                message=f"vLLM connection failed: {str(e)}",
+            )
+
+    elif backend == "redis":
+        try:
+            import redis.asyncio as aioredis
+            url = config.get("url", "redis://localhost:6379/0")
+            password = config.get("password") or None
+            start = time.monotonic()
+            client = aioredis.from_url(url, password=password, socket_connect_timeout=5)
+            pong = await client.ping()
+            info = await client.info("server")
+            latency = (time.monotonic() - start) * 1000
+            await client.aclose()
+            return InfraTestResponse(
+                success=True, backend=backend,
+                message=f"Connected to Redis at {url}",
+                latency_ms=round(latency, 1),
+                details={
+                    "url": url,
+                    "redis_version": info.get("redis_version", "unknown"),
+                },
+            )
+        except Exception as e:
+            return InfraTestResponse(
+                success=False, backend=backend,
+                message=f"Redis connection failed: {str(e)}",
+            )
+
+    else:
+        return InfraTestResponse(
+            success=False, backend=backend,
+            message=f"Unknown backend: {backend}. Supported: qdrant, milvus, vllm, redis",
+        )
+
+
+@router.get("/infrastructure/status")
+async def get_infrastructure_status(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get current infrastructure backend status."""
+    import time
+
+    settings_service = get_settings_service()
+
+    # Vector store status
+    vs_backend = await settings_service.get_setting("vector_store.backend") or "pgvector"
+    vs_connected = False
+    vs_details: Dict[str, Any] = {"backend": vs_backend}
+    vs_latency = None
+
+    if vs_backend == "pgvector":
+        try:
+            start = time.monotonic()
+            await db.execute(select(func.count()).select_from(User))
+            vs_latency = round((time.monotonic() - start) * 1000, 1)
+            vs_connected = True
+            vs_details["message"] = "PostgreSQL + pgvector active"
+        except Exception as e:
+            vs_details["message"] = f"Database error: {str(e)}"
+    elif vs_backend == "qdrant":
+        try:
+            from backend.services.vectorstore_qdrant import QdrantVectorStore, HAS_QDRANT
+            if HAS_QDRANT:
+                url = await settings_service.get_setting("vector_store.qdrant_url") or "localhost:6333"
+                start = time.monotonic()
+                store = QdrantVectorStore(url=url)
+                await store.initialize()
+                vs_latency = round((time.monotonic() - start) * 1000, 1)
+                vs_connected = True
+                vs_details["url"] = url
+            else:
+                vs_details["message"] = "qdrant-client not installed"
+        except Exception as e:
+            vs_details["message"] = f"Qdrant error: {str(e)}"
+    elif vs_backend == "milvus":
+        try:
+            from backend.services.vectorstore_milvus import MilvusVectorStore, HAS_MILVUS
+            if HAS_MILVUS:
+                host = await settings_service.get_setting("vector_store.milvus_host") or "localhost"
+                port = int(await settings_service.get_setting("vector_store.milvus_port") or 19530)
+                start = time.monotonic()
+                store = MilvusVectorStore(host=host, port=port)
+                await store.initialize()
+                vs_latency = round((time.monotonic() - start) * 1000, 1)
+                vs_connected = True
+                vs_details["host"] = host
+                vs_details["port"] = port
+            else:
+                vs_details["message"] = "pymilvus not installed"
+        except Exception as e:
+            vs_details["message"] = f"Milvus error: {str(e)}"
+
+    # LLM inference status
+    llm_backend = await settings_service.get_setting("llm.inference_backend") or "ollama"
+    llm_connected = False
+    llm_details: Dict[str, Any] = {"backend": llm_backend}
+    llm_latency = None
+
+    if llm_backend == "ollama":
+        try:
+            import httpx
+            ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            start = time.monotonic()
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{ollama_url}/api/tags")
+                if resp.status_code == 200:
+                    llm_connected = True
+                    models = resp.json().get("models", [])
+                    llm_details["models_count"] = len(models)
+            llm_latency = round((time.monotonic() - start) * 1000, 1)
+        except Exception:
+            llm_details["message"] = "Ollama not reachable"
+    elif llm_backend == "vllm":
+        try:
+            import httpx
+            api_base = await settings_service.get_setting("llm.vllm_api_base") or "http://localhost:8000/v1"
+            api_key = await settings_service.get_setting("llm.vllm_api_key") or "dummy"
+            start = time.monotonic()
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{api_base}/models", headers={"Authorization": f"Bearer {api_key}"})
+                if resp.status_code == 200:
+                    llm_connected = True
+                    models = [m.get("id") for m in resp.json().get("data", [])]
+                    llm_details["models"] = models
+            llm_latency = round((time.monotonic() - start) * 1000, 1)
+        except Exception:
+            llm_details["message"] = "vLLM not reachable"
+    elif llm_backend in ("openai", "anthropic"):
+        llm_connected = True
+        llm_details["message"] = f"Using cloud provider ({llm_backend})"
+
+    # Redis status
+    redis_connected = False
+    redis_details: Dict[str, Any] = {}
+    redis_latency = None
+    try:
+        from backend.services.redis_client import get_redis_client
+        client = await get_redis_client()
+        if client:
+            start = time.monotonic()
+            pong = await client.ping()
+            redis_latency = round((time.monotonic() - start) * 1000, 1)
+            redis_connected = bool(pong)
+    except Exception:
+        pass
+
+    celery_enabled = await settings_service.get_setting("queue.celery_enabled")
+
+    return {
+        "vector_store": {
+            "backend": vs_backend,
+            "connected": vs_connected,
+            "latency_ms": vs_latency,
+            "details": vs_details,
+        },
+        "llm_inference": {
+            "backend": llm_backend,
+            "connected": llm_connected,
+            "latency_ms": llm_latency,
+            "details": llm_details,
+        },
+        "redis": {
+            "connected": redis_connected,
+            "enabled": bool(celery_enabled),
+            "latency_ms": redis_latency,
+            "details": redis_details,
+        },
+        "active_profile": await settings_service.get_setting("infrastructure.scaling_profile") or "development",
+    }
+
+
+@router.get("/infrastructure/profiles")
+async def get_infrastructure_profiles(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Get available infrastructure scaling profiles."""
+    settings_service = get_settings_service()
+    active_profile = await settings_service.get_setting("infrastructure.scaling_profile") or "development"
+
+    profiles = []
+    for profile_id, profile_data in INFRASTRUCTURE_PROFILES.items():
+        profiles.append({
+            "id": profile_id,
+            "name": profile_data["name"],
+            "description": profile_data["description"],
+            "icon": profile_data["icon"],
+            "settings": profile_data["settings"],
+            "active": profile_id == active_profile,
+        })
+
+    return {"profiles": profiles}
+
+
+@router.post("/infrastructure/apply-profile")
+async def apply_infrastructure_profile(
+    admin: AdminUser,
+    profile_id: str = Query(..., description="Profile ID to apply"),
+    request: Request = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Apply a scaling profile, updating vector store, LLM, and queue settings."""
+    if profile_id not in INFRASTRUCTURE_PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown profile: {profile_id}. Available: {list(INFRASTRUCTURE_PROFILES.keys())}",
+        )
+
+    profile = INFRASTRUCTURE_PROFILES[profile_id]
+    profile_settings = profile["settings"]
+
+    settings_service = get_settings_service()
+    await settings_service.update_settings(profile_settings, db)
+
+    # Invalidate caches
+    try:
+        from backend.services.vectorstore_factory import invalidate_vector_store_settings, VectorStoreFactory
+        invalidate_vector_store_settings()
+        VectorStoreFactory.clear_cache()
+    except Exception as e:
+        logger.warning("Failed to invalidate caches after profile apply", error=str(e))
+
+    # Audit log
+    audit_service = get_audit_service()
+    await audit_service.log_admin_action(
+        action=AuditAction.SYSTEM_CONFIG_CHANGE,
+        admin_user_id=admin.user_id,
+        target_resource_type="infrastructure_profile",
+        changes={"profile": profile_id, "applied_settings": profile_settings},
+        ip_address=get_client_ip(request) if request else "unknown",
+        session=db,
+    )
+
+    logger.info("Applied infrastructure profile", profile=profile_id, settings=profile_settings)
+
+    return {
+        "message": f"Applied '{profile['name']}' profile",
+        "profile_id": profile_id,
+        "applied_settings": profile_settings,
+    }
+
+
+# =============================================================================
+# Chunk Cleanup
+# =============================================================================
+
+
+@router.post("/cleanup-chunks")
+async def cleanup_garbage_chunks(
+    request: Request,
+    admin: AdminUser,
+):
+    """
+    Clean up garbage chunks from the vector store and database.
+
+    Removes:
+    - Failed image description chunks (short, garbage content)
+    - Stock photo attribution chunks (Getty Images, Shutterstock, etc.)
+    """
+    import re
+    from backend.db.models import Chunk as ChunkModel
+    from backend.services.vectorstore_local import ChromaVectorStore
+    from backend.db.database import async_session_context
+
+    report = {"deleted_chunks": 0, "errors": []}
+
+    try:
+        async with async_session_context() as db:
+            # Get all chunks from DB
+            result = await db.execute(select(ChunkModel))
+            all_chunks = result.scalars().all()
+
+            # Patterns for garbage content
+            GARBAGE_PATTERNS = [
+                re.compile(r"getty\s+images", re.IGNORECASE),
+                re.compile(r"shutterstock", re.IGNORECASE),
+                re.compile(r"istock\s*photo", re.IGNORECASE),
+                re.compile(r"alamy", re.IGNORECASE),
+                re.compile(r"stock\s+photo", re.IGNORECASE),
+                re.compile(r"^\s*image\s*\d*\s*$", re.IGNORECASE),
+            ]
+
+            # Find garbage chunks
+            garbage_chunk_ids = []
+            for chunk in all_chunks:
+                content = chunk.content or ""
+                metadata = chunk.chunk_metadata or {}
+
+                # Check if it's a failed/garbage image description
+                is_image_chunk = metadata.get("chunk_type") == "image_description"
+                is_short = len(content.strip()) < 30
+                is_garbage_pattern = any(p.search(content) for p in GARBAGE_PATTERNS)
+
+                if is_image_chunk and (is_short or is_garbage_pattern):
+                    garbage_chunk_ids.append(str(chunk.id))
+                elif is_garbage_pattern and is_short:
+                    garbage_chunk_ids.append(str(chunk.id))
+
+            # Delete garbage chunks from ChromaDB
+            if garbage_chunk_ids:
+                try:
+                    vectorstore = ChromaVectorStore()
+                    collection = vectorstore._get_or_create_collection()
+                    for i in range(0, len(garbage_chunk_ids), 100):
+                        batch = garbage_chunk_ids[i:i + 100]
+                        try:
+                            collection.delete(ids=batch)
+                        except Exception as e:
+                            report["errors"].append(f"ChromaDB delete batch {i}: {str(e)}")
+                except Exception as e:
+                    report["errors"].append(f"ChromaDB connection: {str(e)}")
+
+                # Delete from DB
+                import uuid as _uuid_mod
+                from sqlalchemy import delete as sa_delete
+                garbage_uuids = [_uuid_mod.UUID(cid) for cid in garbage_chunk_ids]
+                await db.execute(
+                    sa_delete(ChunkModel).where(ChunkModel.id.in_(garbage_uuids))
+                )
+                report["deleted_chunks"] = len(garbage_chunk_ids)
+
+            await db.commit()
+
+    except Exception as e:
+        report["errors"].append(f"Cleanup failed: {str(e)}")
+        logger.error("Chunk cleanup failed", error=str(e))
+
+    logger.info("Chunk cleanup completed", deleted=report["deleted_chunks"], errors=len(report["errors"]))
+    return report
+
+
+# =============================================================================
+# Vector DB Diagnostics
+# =============================================================================
+
+
+class VectorDBQueryRequest(BaseModel):
+    """Request to query the vector database directly."""
+    query: str = Field(..., min_length=1, max_length=1000, description="Search query text")
+    search_type: str = Field("hybrid", description="Search type: vector, keyword, or hybrid")
+    top_k: int = Field(10, ge=1, le=50, description="Number of results to return")
+    document_id: Optional[str] = Field(None, description="Filter by document ID")
+
+
+@router.get("/vectordb/status")
+async def vectordb_status(
+    request: Request,
+    admin: AdminUser,
+):
+    """
+    Get comprehensive Vector DB status including collection info,
+    health, document breakdown, and metadata coverage.
+    """
+    from backend.services.vectorstore_local import ChromaVectorStore, get_chroma_vector_store
+
+    try:
+        vectorstore = get_chroma_vector_store()
+        collection = vectorstore._collection
+
+        # Basic stats
+        total_count = collection.count()
+
+        # Get all metadata for analysis
+        all_data = collection.get(include=["metadatas"])
+        metadatas = all_data.get("metadatas") or []
+
+        # Analyze metadata coverage
+        doc_ids = set()
+        content_types = {}
+        docs_with_chunks = {}
+        missing_filename = 0
+        missing_content_type = 0
+        chunks_by_page = {}
+
+        for m in metadatas:
+            if not m:
+                continue
+            doc_id = m.get("document_id", "unknown")
+            doc_ids.add(doc_id)
+
+            filename = m.get("document_filename", "")
+            if not filename:
+                missing_filename += 1
+
+            ct = m.get("content_type", "")
+            if not ct:
+                missing_content_type += 1
+            else:
+                content_types[ct] = content_types.get(ct, 0) + 1
+
+            docs_with_chunks[doc_id] = docs_with_chunks.get(doc_id, 0) + 1
+
+            page = m.get("page_number", 0)
+            chunks_by_page[page] = chunks_by_page.get(page, 0) + 1
+
+        # Health check
+        is_healthy = vectorstore._verify_health()
+
+        # HNSW config
+        hnsw_config = {
+            "space": collection.metadata.get("hnsw:space", "unknown"),
+            "search_ef": collection.metadata.get("hnsw:search_ef", "default"),
+            "construction_ef": collection.metadata.get("hnsw:construction_ef", "default"),
+            "M": collection.metadata.get("hnsw:M", "default"),
+        }
+
+        # Top documents by chunk count
+        top_docs = sorted(docs_with_chunks.items(), key=lambda x: x[1], reverse=True)[:20]
+
+        return {
+            "status": "healthy" if is_healthy else "unhealthy",
+            "backend": "chromadb",
+            "collection_name": collection.name,
+            "total_chunks": total_count,
+            "total_documents": len(doc_ids),
+            "hnsw_config": hnsw_config,
+            "persist_directory": vectorstore.chroma_config.persist_directory,
+            "metadata_coverage": {
+                "total_chunks": total_count,
+                "missing_filename": missing_filename,
+                "missing_content_type": missing_content_type,
+                "content_type_breakdown": content_types,
+            },
+            "documents": [
+                {"document_id": doc_id, "chunk_count": count}
+                for doc_id, count in top_docs
+            ],
+        }
+
+    except Exception as e:
+        logger.error("VectorDB status check failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"VectorDB status check failed: {str(e)}")
+
+
+@router.post("/vectordb/query")
+async def vectordb_query(
+    request: Request,
+    body: VectorDBQueryRequest,
+    admin: AdminUser,
+):
+    """
+    Query the vector database directly and return raw results with full metadata.
+    Useful for debugging retrieval quality issues.
+    """
+    from backend.services.vectorstore_local import ChromaVectorStore, get_chroma_vector_store
+    from backend.services.embeddings import get_embedding_service
+
+    try:
+        vectorstore = get_chroma_vector_store()
+
+        # Parse optional document_id filter
+        document_ids = [body.document_id] if body.document_id else None
+
+        results = []
+
+        if body.search_type in ("vector", "hybrid"):
+            # Generate embedding for the query
+            embedding_service = get_embedding_service()
+            # Handle both EmbeddingService and RayEmbeddingService (which wraps a local service)
+            if hasattr(embedding_service, 'embed_query'):
+                query_embedding = await embedding_service.embed_query(body.query)
+            elif hasattr(embedding_service, '_local_service'):
+                query_embedding = await embedding_service._local_service.embed_query(body.query)
+            else:
+                query_embedding = await embedding_service.embed_text_async(body.query)
+
+            if body.search_type == "vector":
+                search_results = await vectorstore.similarity_search(
+                    query_embedding=query_embedding,
+                    top_k=body.top_k,
+                    document_ids=document_ids,
+                    is_superadmin=True,
+                )
+            else:
+                search_results = await vectorstore.hybrid_search(
+                    query=body.query,
+                    query_embedding=query_embedding,
+                    top_k=body.top_k,
+                    is_superadmin=True,
+                )
+        elif body.search_type == "keyword":
+            search_results = await vectorstore.keyword_search(
+                query=body.query,
+                top_k=body.top_k,
+                document_ids=document_ids,
+                is_superadmin=True,
+            )
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid search_type: {body.search_type}")
+
+        for r in search_results:
+            results.append({
+                "chunk_id": r.chunk_id,
+                "document_id": r.document_id,
+                "document_filename": r.document_filename or "unknown",
+                "content": r.content[:500] if r.content else "",
+                "content_length": len(r.content) if r.content else 0,
+                "score": round(r.score, 4),
+                "similarity_score": round(r.similarity_score, 4),
+                "page_number": r.page_number,
+                "section_title": r.section_title,
+                "metadata": r.metadata,
+            })
+
+        return {
+            "query": body.query,
+            "search_type": body.search_type,
+            "top_k": body.top_k,
+            "result_count": len(results),
+            "results": results,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("VectorDB query failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"VectorDB query failed: {str(e)}")
+
+
+@router.get("/vectordb/documents/{document_id}/chunks")
+async def vectordb_document_chunks(
+    request: Request,
+    document_id: str,
+    admin: AdminUser,
+):
+    """
+    List all chunks for a specific document directly from ChromaDB.
+    Shows content, metadata, and embedding status.
+    """
+    from backend.services.vectorstore_local import get_chroma_vector_store
+
+    try:
+        vectorstore = get_chroma_vector_store()
+        collection = vectorstore._collection
+
+        # Query ChromaDB for all chunks of this document
+        results = collection.get(
+            where={"document_id": document_id},
+            include=["documents", "metadatas", "embeddings"],
+        )
+
+        chunks = []
+        ids = results.get("ids") or []
+        documents = results.get("documents") or []
+        metadatas = results.get("metadatas") or []
+        embeddings = results.get("embeddings") or []
+
+        for i, chunk_id in enumerate(ids):
+            content = documents[i] if i < len(documents) else ""
+            metadata = metadatas[i] if i < len(metadatas) else {}
+            embedding = embeddings[i] if i < len(embeddings) else None
+
+            has_embedding = bool(embedding and len(embedding) > 0 and any(v != 0.0 for v in embedding[:10]))
+            embedding_dim = len(embedding) if embedding else 0
+
+            chunks.append({
+                "chunk_id": chunk_id,
+                "content": content[:300] if content else "",
+                "content_length": len(content) if content else 0,
+                "page_number": metadata.get("page_number", 0),
+                "chunk_index": metadata.get("chunk_index", 0),
+                "section_title": metadata.get("section_title", ""),
+                "content_type": metadata.get("content_type", ""),
+                "token_count": metadata.get("token_count", 0),
+                "document_filename": metadata.get("document_filename", ""),
+                "has_embedding": has_embedding,
+                "embedding_dimensions": embedding_dim,
+            })
+
+        # Sort by chunk_index
+        chunks.sort(key=lambda x: x["chunk_index"])
+
+        return {
+            "document_id": document_id,
+            "total_chunks": len(chunks),
+            "chunks": chunks,
+        }
+
+    except Exception as e:
+        logger.error("VectorDB document chunks failed", error=str(e), document_id=document_id)
+        raise HTTPException(status_code=500, detail=f"Failed to get document chunks: {str(e)}")
+
+
+@router.post("/vectordb/repair")
+async def vectordb_repair(
+    request: Request,
+    admin: AdminUser,
+):
+    """
+    Run repair operations on the vector database:
+    - Backfill missing document_filename from DB
+    - Detect and report chunks with missing embeddings
+    - Detect and report garbage/back-matter chunks
+    """
+    from backend.services.vectorstore_local import get_chroma_vector_store, _is_back_matter_content
+    from backend.db.models import Document as DocumentModel, Chunk as ChunkModel
+    from backend.db.database import async_session_context
+
+    report = {
+        "filename_backfilled": 0,
+        "garbage_chunks_found": 0,
+        "back_matter_chunks_found": 0,
+        "missing_embeddings": 0,
+        "errors": [],
+        "garbage_chunk_ids": [],
+        "back_matter_chunk_ids": [],
+    }
+
+    try:
+        vectorstore = get_chroma_vector_store()
+        collection = vectorstore._collection
+
+        # Get all data from ChromaDB
+        all_data = collection.get(include=["documents", "metadatas", "embeddings"])
+        ids = all_data.get("ids") or []
+        documents = all_data.get("documents") or []
+        metadatas = all_data.get("metadatas") or []
+        embeddings = all_data.get("embeddings") or []
+
+        # Build doc_id -> filename map from DB
+        doc_filename_map = {}
+        async with async_session_context() as db:
+            result = await db.execute(
+                select(DocumentModel.id, DocumentModel.original_filename, DocumentModel.filename)
+            )
+            for row in result.all():
+                doc_filename_map[str(row[0])] = row[1] or row[2] or ""
+
+        # Scan all chunks
+        import re
+        GARBAGE_PATTERNS = [
+            re.compile(r"getty\s+images", re.IGNORECASE),
+            re.compile(r"shutterstock", re.IGNORECASE),
+            re.compile(r"istock\s*photo", re.IGNORECASE),
+            re.compile(r"alamy", re.IGNORECASE),
+            re.compile(r"stock\s+photo", re.IGNORECASE),
+        ]
+
+        ids_to_update_filename = []
+        new_metadatas = []
+
+        for i, chunk_id in enumerate(ids):
+            metadata = metadatas[i] if i < len(metadatas) else {}
+            content = documents[i] if i < len(documents) else ""
+            embedding = embeddings[i] if i < len(embeddings) else None
+
+            # Check missing filename
+            if not metadata.get("document_filename"):
+                doc_id = metadata.get("document_id", "")
+                filename = doc_filename_map.get(doc_id, "")
+                if filename:
+                    ids_to_update_filename.append(chunk_id)
+                    new_metadatas.append({**metadata, "document_filename": filename})
+                    report["filename_backfilled"] += 1
+
+            # Check missing embedding
+            if not embedding or len(embedding) == 0 or not any(v != 0.0 for v in embedding[:10]):
+                report["missing_embeddings"] += 1
+
+            # Check garbage content
+            content_lower = (content or "").lower().strip()
+            is_garbage = any(p.search(content_lower) for p in GARBAGE_PATTERNS) and len(content_lower) < 100
+            if is_garbage:
+                report["garbage_chunks_found"] += 1
+                report["garbage_chunk_ids"].append(chunk_id)
+
+            # Check back-matter content
+            if content_lower and _is_back_matter_content(content_lower):
+                report["back_matter_chunks_found"] += 1
+                report["back_matter_chunk_ids"].append(chunk_id)
+
+        # Apply filename backfill
+        if ids_to_update_filename:
+            try:
+                for j in range(0, len(ids_to_update_filename), 100):
+                    batch_ids = ids_to_update_filename[j:j + 100]
+                    batch_metas = new_metadatas[j:j + 100]
+                    collection.update(ids=batch_ids, metadatas=batch_metas)
+            except Exception as e:
+                report["errors"].append(f"Filename backfill failed: {str(e)}")
+
+        # Limit ID lists in response to avoid huge payloads
+        report["garbage_chunk_ids"] = report["garbage_chunk_ids"][:50]
+        report["back_matter_chunk_ids"] = report["back_matter_chunk_ids"][:50]
+
+    except Exception as e:
+        report["errors"].append(f"Repair scan failed: {str(e)}")
+        logger.error("VectorDB repair failed", error=str(e))
+
+    logger.info(
+        "VectorDB repair completed",
+        filename_backfilled=report["filename_backfilled"],
+        garbage=report["garbage_chunks_found"],
+        back_matter=report["back_matter_chunks_found"],
+    )
+    return report
+
+
+@router.delete("/vectordb/chunks/{chunk_id}")
+async def vectordb_delete_chunk(
+    request: Request,
+    chunk_id: str,
+    admin: AdminUser,
+):
+    """Delete a specific chunk from ChromaDB and the database."""
+    from backend.services.vectorstore_local import get_chroma_vector_store
+    from backend.db.models import Chunk as ChunkModel
+    from backend.db.database import async_session_context
+
+    try:
+        # Delete from ChromaDB
+        vectorstore = get_chroma_vector_store()
+        collection = vectorstore._collection
+        try:
+            collection.delete(ids=[chunk_id])
+        except Exception as e:
+            logger.warning("ChromaDB delete failed (chunk may not exist)", chunk_id=chunk_id, error=str(e))
+
+        # Delete from DB
+        import uuid as _uuid_mod
+        from sqlalchemy import delete as sa_delete
+        try:
+            async with async_session_context() as db:
+                await db.execute(
+                    sa_delete(ChunkModel).where(ChunkModel.id == _uuid_mod.UUID(chunk_id))
+                )
+                await db.commit()
+        except Exception as e:
+            logger.warning("DB chunk delete failed", chunk_id=chunk_id, error=str(e))
+
+        return {"message": f"Chunk {chunk_id} deleted", "chunk_id": chunk_id}
+
+    except Exception as e:
+        logger.error("Chunk deletion failed", chunk_id=chunk_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete chunk: {str(e)}")

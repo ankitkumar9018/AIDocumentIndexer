@@ -65,8 +65,8 @@ class CollaborationStatus(str, Enum):
 @dataclass
 class ModelConfig:
     """Configuration for a specific model in collaboration."""
-    provider: str = "openai"
-    model: str = "gpt-4"
+    provider: Optional[str] = None   # None = use system-configured default
+    model: Optional[str] = None      # None = use provider's default model
     temperature: float = 0.7
     max_tokens: int = 2000
 
@@ -77,13 +77,9 @@ class CollaborationConfig:
     mode: CollaborationMode = CollaborationMode.REVIEW
     generator: ModelConfig = field(default_factory=ModelConfig)
     critic: ModelConfig = field(default_factory=lambda: ModelConfig(
-        provider="openai",
-        model="gpt-4",
         temperature=0.3,  # Lower temperature for more focused critique
     ))
     synthesizer: ModelConfig = field(default_factory=lambda: ModelConfig(
-        provider="openai",
-        model="gpt-4",
         temperature=0.5,
     ))
     max_iterations: int = 2  # Max review-revise cycles

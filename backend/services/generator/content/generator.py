@@ -37,8 +37,43 @@ class ContentGenerator:
         self._llm = None
         self.config = config
 
-    async def _get_llm(self):
-        """Get the LLM instance for content generation."""
+    async def _get_llm(self, job: "GenerationJob" = None):
+        """Get the LLM instance for content generation.
+
+        If the job has provider_id/model overrides in metadata, creates a
+        dedicated LLM for that job instead of using the cached default.
+        """
+        provider_override = job.metadata.get("provider_id") if job and job.metadata else None
+        model_override = job.metadata.get("model") if job and job.metadata else None
+
+        if provider_override or model_override:
+            from backend.services.llm import LLMFactory, llm_config
+            from backend.services.llm_provider import LLMProviderService
+            provider_type = llm_config.default_provider
+            model_name = model_override
+
+            if provider_override:
+                try:
+                    from backend.db.database import async_session_context
+                    async with async_session_context() as session:
+                        provider = await LLMProviderService.get_provider(session, provider_override)
+                        if provider:
+                            provider_type = provider.provider_type
+                            if not model_name:
+                                model_name = provider.default_chat_model
+                except Exception as e:
+                    logger.warning(f"Could not resolve provider override {provider_override}: {e}")
+
+            logger.info(
+                "Using per-job LLM override for content generation",
+                provider=provider_type,
+                model=model_name,
+            )
+            return LLMFactory.get_chat_model(
+                provider=provider_type,
+                model=model_name,
+            )
+
         if self._llm is None:
             from backend.services.llm import EnhancedLLMFactory
             self._llm, _ = await EnhancedLLMFactory.get_chat_model_for_operation(
@@ -130,7 +165,7 @@ class ContentGenerator:
         )
 
         try:
-            llm = await self._get_llm()
+            llm = await self._get_llm(job)
 
             # PHASE 15: Apply model-specific enhancements for small models
             # Extract model name and enhance prompt if using small model
@@ -180,6 +215,18 @@ class ContentGenerator:
 
             # Filter out incomplete sentences (truncated bullets)
             content = filter_incomplete_sentences(content)
+
+            # Dual Mode: Combine RAG content with general AI knowledge
+            dual_mode = job.metadata.get("dual_mode", False) if job.metadata else False
+            if dual_mode and content and not content.startswith("[Content for"):
+                content = await self._apply_dual_mode(
+                    rag_content=content,
+                    job=job,
+                    section_title=section_title,
+                    section_description=section_description,
+                    llm=llm,
+                    invoke_kwargs=invoke_kwargs,
+                )
 
         except Exception as e:
             logger.error("Failed to generate section", error=str(e))
@@ -257,6 +304,80 @@ class ContentGenerator:
             approved=not require_approval,
             metadata=section_metadata if section_metadata else None,
         )
+
+    async def _apply_dual_mode(
+        self,
+        rag_content: str,
+        job: "GenerationJob",
+        section_title: str,
+        section_description: str,
+        llm,
+        invoke_kwargs: dict,
+    ) -> str:
+        """Combine RAG-based content with general AI knowledge.
+
+        Generates a second version of the content without document context,
+        then merges the two based on the blend strategy.
+        """
+        blend = job.metadata.get("dual_mode_blend", "merged") if job.metadata else "merged"
+
+        try:
+            # Generate general knowledge version (no RAG context)
+            general_prompt = (
+                f"Write content for a section titled \"{section_title}\".\n"
+                f"Description: {section_description}\n"
+                f"Document title: {job.title}\n\n"
+                f"Use your general knowledge to write comprehensive, informative content. "
+                f"Do not mention that you are an AI. Write in a professional tone."
+            )
+            general_response = await llm.ainvoke(general_prompt, **invoke_kwargs)
+            general_content = general_response.content
+
+            if not general_content or not general_content.strip():
+                return rag_content
+
+            # Merge based on blend strategy
+            if blend == "docs_first":
+                merge_prompt = (
+                    f"You have two versions of content for the section \"{section_title}\".\n\n"
+                    f"PRIMARY (from documents - prioritize this):\n{rag_content}\n\n"
+                    f"SUPPLEMENTARY (general knowledge - use to fill gaps):\n{general_content}\n\n"
+                    f"Create a final version that uses the document-based content as the foundation, "
+                    f"supplementing with general knowledge only where the documents lack detail. "
+                    f"Maintain the same format and style as the primary version. "
+                    f"Output ONLY the merged content, nothing else."
+                )
+            else:  # "merged"
+                merge_prompt = (
+                    f"You have two versions of content for the section \"{section_title}\".\n\n"
+                    f"VERSION A (from documents):\n{rag_content}\n\n"
+                    f"VERSION B (general knowledge):\n{general_content}\n\n"
+                    f"Synthesize both into one comprehensive section that combines the best of both. "
+                    f"Prioritize document-sourced facts but enrich with general knowledge for depth. "
+                    f"Maintain a consistent tone and format. "
+                    f"Output ONLY the merged content, nothing else."
+                )
+
+            merge_response = await llm.ainvoke(merge_prompt, **invoke_kwargs)
+            merged = merge_response.content
+
+            if merged and merged.strip():
+                logger.info(
+                    "Dual mode content merged",
+                    section=section_title[:50],
+                    blend=blend,
+                )
+                return filter_llm_metatext(merged)
+
+            return rag_content
+
+        except Exception as e:
+            logger.warning(
+                "Dual mode merge failed, using RAG content only",
+                section=section_title[:50],
+                error=str(e),
+            )
+            return rag_content
 
     async def generate_sections_parallel(
         self,

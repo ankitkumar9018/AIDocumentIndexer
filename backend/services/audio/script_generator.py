@@ -190,9 +190,12 @@ class ScriptGenerator(BaseService):
         session=None,
         organization_id=None,
         user_id=None,
-        llm_provider: str = "openai",
+        llm_provider: Optional[str] = None,
     ):
         super().__init__(session, organization_id, user_id)
+        if llm_provider is None:
+            from backend.services.llm import llm_config
+            llm_provider = llm_config.default_provider
         self.llm_provider = llm_provider
 
     def _calculate_target_duration(

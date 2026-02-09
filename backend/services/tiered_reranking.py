@@ -88,8 +88,8 @@ class RerankerConfig:
     colbert_model: str = "colbert-ir/colbertv2.0"
     cohere_model: str = "rerank-v3.5"      # Cohere rerank model
     voyage_model: str = "rerank-2"          # Voyage AI rerank model
-    llm_model: str = "gpt-4o-mini"
-    llm_provider: str = "openai"
+    llm_model: Optional[str] = None
+    llm_provider: Optional[str] = None
 
     # API reranker top_k
     cohere_top_k: int = 15                 # Candidates after Cohere
@@ -344,7 +344,7 @@ For each document, provide a relevance score from 0.0 to 1.0 where:
 Return JSON array of scores in order: [score1, score2, ...]
 Only return the JSON array, no explanation."""
 
-    def __init__(self, model: str = "gpt-4o-mini", provider: str = "openai"):
+    def __init__(self, model: Optional[str] = None, provider: Optional[str] = None):
         self.model = model
         self.provider = provider
         self._llm = None
@@ -355,8 +355,13 @@ Only return the JSON array, no explanation."""
             return True
 
         try:
-            from backend.services.llm import get_chat_model
-            self._llm = await get_chat_model(provider=self.provider, model=self.model)
+            from backend.services.llm import get_chat_model, llm_config
+
+            # Resolve provider/model defaults lazily
+            _provider = self.provider or llm_config.default_provider
+            _model = self.model or llm_config.default_chat_model
+
+            self._llm = await get_chat_model(provider=_provider, model=_model)
             self._initialized = True
             return True
         except Exception as e:

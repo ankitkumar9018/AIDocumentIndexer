@@ -84,10 +84,10 @@ class ExecutionMode(str, Enum):
 class RLMConfig:
     """Configuration for Recursive Language Model."""
     # Models
-    root_model: str = "gpt-4o"              # Main reasoning model
-    recursive_model: str = "gpt-4o-mini"    # For recursive calls (cheaper)
-    root_provider: str = "openai"
-    recursive_provider: str = "openai"
+    root_model: Optional[str] = None        # Main reasoning model
+    recursive_model: Optional[str] = None   # For recursive calls (cheaper)
+    root_provider: Optional[str] = None
+    recursive_provider: Optional[str] = None
 
     # Execution limits
     max_depth: int = 5                      # Max recursion depth
@@ -518,20 +518,26 @@ class RecursiveLMService:
             return True
 
         try:
-            from backend.services.llm import LLMFactory
+            from backend.services.llm import LLMFactory, llm_config
+
+            # Resolve provider/model defaults lazily
+            _root_provider = self.config.root_provider or llm_config.default_provider
+            _root_model = self.config.root_model or llm_config.default_chat_model
+            _recursive_provider = self.config.recursive_provider or llm_config.default_provider
+            _recursive_model = self.config.recursive_model or llm_config.default_chat_model
 
             # Initialize root model (for main reasoning)
             self._root_llm = LLMFactory.get_chat_model(
-                provider=self.config.root_provider,
-                model=self.config.root_model,
+                provider=_root_provider,
+                model=_root_model,
                 temperature=0.0,
                 max_tokens=4096,
             )
 
             # Initialize recursive model (for chunk processing)
             self._recursive_llm = LLMFactory.get_chat_model(
-                provider=self.config.recursive_provider,
-                model=self.config.recursive_model,
+                provider=_recursive_provider,
+                model=_recursive_model,
                 temperature=0.0,
                 max_tokens=2048,
             )

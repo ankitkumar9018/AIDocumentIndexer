@@ -303,6 +303,8 @@ class ChatResponse(BaseModel):
     suggested_questions: Optional[List[str]] = None
     # Context sufficiency check result (Phase 2 enhancement)
     context_sufficiency: Optional[ContextSufficiencyInfo] = None
+    # Timing
+    processing_time_ms: Optional[float] = None  # Server-side processing time in milliseconds
     # Parallel knowledge (dual mode) fields
     parallel_knowledge: bool = False  # Whether parallel mode was used
     general_answer: Optional[str] = None  # General knowledge answer (when parallel_knowledge=True)
@@ -852,7 +854,11 @@ async def create_chat_completion(
                 else:
                     combined_context = f"User preferences:\n{personalization_additions}"
 
-            # DEBUG: Log user context for RAG query troubleshooting
+            # DEBUG: Log full request parameters for RAG query troubleshooting
+            import sys
+            print(f"[CHAT DEBUG] intelligence_level={request.intelligence_level} skip_cache={request.skip_cache} "
+                  f"enable_cot={request.enable_cot} enable_verification={request.enable_verification} "
+                  f"message={request.message[:80]} top_k={request.top_k}", file=sys.stderr, flush=True)
             logger.info(
                 "RAG query user context",
                 user_id=user.user_id,
@@ -861,6 +867,8 @@ async def create_chat_completion(
                 access_tier_level=user.access_tier_level,
                 collection_filter=request.first_collection_filter,
                 folder_id=request.folder_id,
+                intelligence_level=request.intelligence_level,
+                skip_cache=request.skip_cache,
             )
 
             response = await rag_service.query(
@@ -1114,6 +1122,7 @@ async def create_chat_completion(
                 confidence_warning=response.confidence_warning if response.confidence_warning else None,
                 suggested_questions=response.suggested_questions if response.suggested_questions else None,
                 context_sufficiency=context_sufficiency_info,
+                processing_time_ms=response.processing_time_ms if hasattr(response, 'processing_time_ms') else None,
                 # Parallel knowledge fields
                 parallel_knowledge=bool(request.parallel_knowledge and general_answer),
                 general_answer=general_answer if request.parallel_knowledge else None,

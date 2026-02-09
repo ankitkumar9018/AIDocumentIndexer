@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, Suspense } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import {
@@ -19,7 +19,6 @@ import {
   RefreshCw,
   Plus,
   Trash2,
-  GripVertical,
   Image,
   AlertCircle,
   Filter,
@@ -63,6 +62,7 @@ import {
   useGetThemes,
   useSuggestTheme,
   useSpellCheckJob,
+  useLLMProviders,
 } from "@/lib/api";
 import type { ThemeInfo, StyleGuide, GenerationTemplate, TemplateSettings, GenerationSection, SpellCheckResponse, DocumentTemplateMetadata } from "@/lib/api";
 import { toast } from "sonner";
@@ -70,6 +70,7 @@ import { DocumentFilterPanel } from "@/components/chat/document-filter-panel";
 import { FolderSelector } from "@/components/folder-selector";
 import { SectionFeedbackDialog } from "@/components/generation";
 import { QueryEnhancementToggle } from "@/components/chat/query-enhancement-toggle";
+import { MoodboardCanvas } from "@/components/moodboard/MoodboardCanvas";
 
 type Step = "format" | "topic" | "outline" | "content" | "download";
 type OutputFormat = "docx" | "pptx" | "pdf" | "markdown" | "html" | "txt" | "xlsx" | "moodboard";
@@ -219,6 +220,22 @@ function CreatePageContent() {
   const [isCheckingSpelling, setIsCheckingSpelling] = useState(false);
   const spellCheckJob = useSpellCheckJob();
 
+  // LLM provider/model selection
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
+  const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
+  const [temperatureMode, setTemperatureMode] = useState<"auto" | "manual">("auto");
+  const [manualTemperature, setManualTemperature] = useState(0.7);
+
+  // Dual Mode (RAG + General)
+  const [dualModeEnabled, setDualModeEnabled] = useState(false);
+  const [dualModeBlend, setDualModeBlend] = useState<"merged" | "docs_first">("merged");
+
+  // Moodboard gallery
+  const [moodBoardTab, setMoodBoardTab] = useState<"create" | "gallery">("create");
+  const [savedMoodBoards, setSavedMoodBoards] = useState<any[]>([]);
+  const [isLoadingMoodBoards, setIsLoadingMoodBoards] = useState(false);
+  const [viewingMoodBoard, setViewingMoodBoard] = useState<any>(null);
+
   // Mood Board state
   const [moodBoardColors, setMoodBoardColors] = useState<string[]>(["#6366f1", "#8b5cf6", "#ec4899"]);
   const [moodBoardKeywords, setMoodBoardKeywords] = useState<string[]>([]);
@@ -227,11 +244,15 @@ function CreatePageContent() {
   const [moodBoardStyleNotes, setMoodBoardStyleNotes] = useState("");
   const [generatedMoodBoard, setGeneratedMoodBoard] = useState<any>(null);
   const [isGeneratingMoodBoard, setIsGeneratingMoodBoard] = useState(false);
+  const [multiLLMEnabled, setMultiLLMEnabled] = useState(false);
+  const [multiLLMProviders, setMultiLLMProviders] = useState<Array<{ provider_id: string; model: string }>>([]);
+  const [multiLLMStrategy, setMultiLLMStrategy] = useState<"best_of" | "merge">("merge");
 
   // Queries - only fetch when authenticated
   const { data: job, isLoading: jobLoading, isError: jobError, error: jobQueryError } = useGenerationJob(currentJobId || "");
   const { data: recentJobs } = useGenerationJobs();
   const { data: collectionsData, isLoading: isLoadingCollections, refetch: refetchCollections } = useCollections({ enabled: isAuthenticated });
+  const { data: providersData } = useLLMProviders({ enabled: isAuthenticated });
   const { data: themesData } = useGetThemes();
   const suggestTheme = useSuggestTheme();
 
@@ -363,6 +384,15 @@ function CreatePageContent() {
         colors: moodBoardColors,
         keywords: moodBoardKeywords,
         style_notes: moodBoardStyleNotes || undefined,
+        provider_id: selectedProviderId || undefined,
+        model: selectedModelName || undefined,
+        use_existing_docs: useExistingDocs,
+        collection_filters: useExistingDocs && styleCollections.length > 0 ? styleCollections : undefined,
+        dual_mode: useExistingDocs && dualModeEnabled,
+        multi_llm: multiLLMEnabled && multiLLMProviders.length > 1 ? {
+          providers: multiLLMProviders.map(p => ({ provider_id: p.provider_id, model: p.model })),
+          merge_strategy: multiLLMStrategy,
+        } : undefined,
       });
 
       const data = response.data as any;
@@ -606,6 +636,13 @@ function CreatePageContent() {
               include_style_subfolders: useExistingDocs ? includeStyleSubfolders : undefined,
               // Query Enhancement for source search
               enhance_query: enhanceQuery ?? undefined,
+              // LLM provider/model selection
+              provider_id: selectedProviderId || undefined,
+              model: selectedModelName || undefined,
+              temperature_override: temperatureMode === "manual" ? manualTemperature : undefined,
+              // Dual Mode (RAG + General)
+              dual_mode: useExistingDocs && dualModeEnabled ? true : undefined,
+              dual_mode_blend: useExistingDocs && dualModeEnabled ? dualModeBlend : undefined,
               // PPTX Template for visual styling
               template_pptx_id: selectedFormat === "pptx" && selectedPptxTemplate ? selectedPptxTemplate : undefined,
               // Vision Analysis (PPTX only) - per-document overrides
@@ -992,14 +1029,187 @@ function CreatePageContent() {
           {/* Step 2: Topic Input */}
           {currentStep === "topic" && selectedFormat === "moodboard" && (
             <div className="space-y-6 max-w-3xl">
-              <div>
+              <div className="flex items-center justify-between">
                 <h2 className="text-xl font-semibold flex items-center gap-2">
                   <Palette className="h-5 w-5" />
-                  Create Mood Board
+                  Mood Board
                 </h2>
+                <div className="flex items-center p-1 bg-muted rounded-lg">
+                  <Button
+                    variant={moodBoardTab === "create" ? "default" : "ghost"}
+                    size="sm"
+                    className="text-xs h-7"
+                    onClick={() => setMoodBoardTab("create")}
+                  >
+                    Create New
+                  </Button>
+                  <Button
+                    variant={moodBoardTab === "gallery" ? "default" : "ghost"}
+                    size="sm"
+                    className="text-xs h-7"
+                    onClick={async () => {
+                      setMoodBoardTab("gallery");
+                      setIsLoadingMoodBoards(true);
+                      try {
+                        const resp = await api.get("/moodboard/list?limit=50");
+                        setSavedMoodBoards((resp.data as any).mood_boards || []);
+                      } catch { /* ignore */ }
+                      setIsLoadingMoodBoards(false);
+                    }}
+                  >
+                    <Eye className="h-3 w-3 mr-1" />
+                    My Boards
+                  </Button>
+                </div>
+              </div>
+
+              {/* Gallery View */}
+              {moodBoardTab === "gallery" && (
+                <div className="space-y-4">
+                  {isLoadingMoodBoards ? (
+                    <div className="flex items-center justify-center p-8">
+                      <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                    </div>
+                  ) : savedMoodBoards.length === 0 ? (
+                    <div className="text-center p-8 text-muted-foreground">
+                      <Palette className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No saved mood boards yet.</p>
+                      <p className="text-xs">Create one and click Save to see it here.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                        {savedMoodBoards.map((board: any) => (
+                          <Card key={board.id} className="cursor-pointer hover:border-primary/50 transition-colors">
+                            <CardContent className="p-4 space-y-3">
+                              {/* Color swatches */}
+                              <div className="flex gap-1">
+                                {(board.color_palette || []).slice(0, 6).map((color: string, i: number) => (
+                                  <div
+                                    key={i}
+                                    className="h-6 flex-1 rounded"
+                                    style={{ backgroundColor: color }}
+                                  />
+                                ))}
+                              </div>
+                              <div>
+                                <p className="font-medium text-sm truncate">{board.name}</p>
+                                <p className="text-xs text-muted-foreground">
+                                  {(board.color_palette || []).length} colors
+                                  {(board.themes || []).length > 0 && <> &middot; {(board.themes || []).length} fonts</>}
+                                  {" "}&middot; {new Date(board.created_at).toLocaleDateString()}
+                                </p>
+                              </div>
+                              {(board.style_tags || []).length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {(board.style_tags || []).slice(0, 3).map((tag: string) => (
+                                    <span key={tag} className="px-1.5 py-0.5 rounded bg-primary/10 text-primary text-[10px]">{tag}</span>
+                                  ))}
+                                  {(board.style_tags || []).length > 3 && (
+                                    <span className="text-[10px] text-muted-foreground">+{(board.style_tags || []).length - 3}</span>
+                                  )}
+                                </div>
+                              )}
+                              <div className="flex gap-2">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="text-xs flex-1"
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    try {
+                                      const resp = await api.get(`/moodboard/${board.id}`);
+                                      setViewingMoodBoard(resp.data);
+                                    } catch {
+                                      setViewingMoodBoard(board);
+                                    }
+                                  }}
+                                >
+                                  <Eye className="h-3 w-3 mr-1" />
+                                  View
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="text-xs text-destructive hover:text-destructive"
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    try {
+                                      await api.delete(`/moodboard/${board.id}`);
+                                      setSavedMoodBoards(savedMoodBoards.filter((b: any) => b.id !== board.id));
+                                      toast.success("Mood board deleted");
+                                    } catch {
+                                      toast.error("Failed to delete");
+                                    }
+                                  }}
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </Button>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+
+                      {/* Moodboard Viewer — Infinite Canvas */}
+                      {viewingMoodBoard && (
+                        <MoodboardCanvas
+                          board={viewingMoodBoard}
+                          onClose={() => setViewingMoodBoard(null)}
+                          onBoardUpdate={(updated) => {
+                            setViewingMoodBoard(updated);
+                            setSavedMoodBoards((prev: any[]) => prev.map((b: any) => b.id === updated.id ? { ...b, ...updated } : b));
+                          }}
+                        />
+                      )}
+
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Create View */}
+              {moodBoardTab === "create" && (<>
+              <div>
                 <p className="text-muted-foreground">
                   Generate an AI-powered visual inspiration board for your design projects
                 </p>
+              </div>
+
+              {/* Style Presets */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Quick Start — Style Presets</Label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                  {([
+                    { name: "Modern Startup", colors: ["#0066ff", "#00c2ff", "#f0f4f8", "#1a1a2e", "#ffffff"], keywords: ["modern", "clean", "innovative", "tech"], desc: "Clean, tech-forward visual identity" },
+                    { name: "Luxury Brand", colors: ["#1c1c1c", "#c9a96e", "#f5f0eb", "#2d2d2d", "#8b7355"], keywords: ["elegant", "premium", "sophisticated", "refined"], desc: "Elevated, high-end aesthetic" },
+                    { name: "Nature & Eco", colors: ["#2d6a4f", "#95d5b2", "#fefae0", "#606c38", "#dda15e"], keywords: ["organic", "sustainable", "earthy", "natural"], desc: "Earthy tones, organic feel" },
+                    { name: "Creative Agency", colors: ["#ff006e", "#8338ec", "#3a86ff", "#ffbe0b", "#fb5607"], keywords: ["bold", "creative", "vibrant", "energetic"], desc: "Bold colors, high energy" },
+                    { name: "Corporate", colors: ["#003049", "#d62828", "#f8f9fa", "#264653", "#e9ecef"], keywords: ["professional", "trustworthy", "structured", "formal"], desc: "Professional, business-ready" },
+                    { name: "Pastel Soft", colors: ["#ffc8dd", "#bde0fe", "#cdb4db", "#a2d2ff", "#ffafcc"], keywords: ["soft", "gentle", "warm", "friendly"], desc: "Soft, approachable, warm tones" },
+                    { name: "Dark Minimal", colors: ["#121212", "#1e1e1e", "#bb86fc", "#03dac6", "#cf6679"], keywords: ["dark", "minimal", "modern", "sleek"], desc: "Dark mode, Material-inspired" },
+                    { name: "Academic", colors: ["#264653", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51"], keywords: ["scholarly", "analytical", "structured", "intellectual"], desc: "Research-focused, scholarly tone" },
+                  ] as const).map((preset) => (
+                    <button
+                      key={preset.name}
+                      onClick={() => {
+                        setTopic(preset.name);
+                        setContext(preset.desc);
+                        setMoodBoardColors([...preset.colors]);
+                        setMoodBoardKeywords([...preset.keywords]);
+                      }}
+                      className="text-left p-3 rounded-lg border hover:border-primary/50 transition-all group"
+                    >
+                      <div className="flex gap-0.5 h-4 rounded overflow-hidden mb-2">
+                        {preset.colors.map((c, i) => (
+                          <div key={i} className="flex-1" style={{ backgroundColor: c }} />
+                        ))}
+                      </div>
+                      <p className="text-xs font-medium group-hover:text-primary transition-colors">{preset.name}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-1">{preset.desc}</p>
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div className="space-y-6">
@@ -1158,6 +1368,271 @@ function CreatePageContent() {
                   />
                 </div>
 
+                {/* Learn from Existing Documents (Moodboard) */}
+                <div className="space-y-2">
+                  <div
+                    className={`flex items-center justify-between p-4 rounded-lg border cursor-pointer transition-colors ${
+                      useExistingDocs
+                        ? "bg-primary/5 border-primary/30"
+                        : "bg-muted/30 border-border hover:bg-muted/50"
+                    }`}
+                    onClick={() => setUseExistingDocs(!useExistingDocs)}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`p-2 rounded-lg ${useExistingDocs ? "bg-primary/10" : "bg-muted"}`}>
+                        <BookOpen className={`h-5 w-5 ${useExistingDocs ? "text-primary" : "text-muted-foreground"}`} />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium">Use Documents as Inspiration</p>
+                        <p className="text-xs text-muted-foreground">
+                          Reference your documents for themes, styles, and content direction
+                        </p>
+                      </div>
+                    </div>
+                    <div
+                      className={`w-11 h-6 rounded-full transition-colors flex items-center ${
+                        useExistingDocs ? "bg-primary justify-end" : "bg-muted-foreground/30 justify-start"
+                      }`}
+                    >
+                      <div className="w-5 h-5 bg-white rounded-full shadow-sm mx-0.5" />
+                    </div>
+                  </div>
+                  {useExistingDocs && (
+                    <div className="pl-4 space-y-3 mt-3">
+                      <div className="text-xs text-muted-foreground mb-2">
+                        <Sparkles className="h-3 w-3 inline mr-1" />
+                        AI will use selected documents to enrich mood board suggestions
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">Select source collections</label>
+                        <div className="flex flex-wrap gap-2">
+                          {(collectionsData?.collections || []).map((collection: { name: string; document_count: number }) => (
+                            <button
+                              key={collection.name}
+                              type="button"
+                              onClick={() => {
+                                if (styleCollections.includes(collection.name)) {
+                                  setStyleCollections(styleCollections.filter(c => c !== collection.name));
+                                } else {
+                                  setStyleCollections([...styleCollections, collection.name]);
+                                }
+                              }}
+                              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                                styleCollections.includes(collection.name)
+                                  ? "bg-primary text-primary-foreground"
+                                  : "bg-muted hover:bg-muted/80 text-muted-foreground"
+                              }`}
+                            >
+                              {collection.name} ({collection.document_count})
+                            </button>
+                          ))}
+                          {(collectionsData?.collections || []).length === 0 && (
+                            <p className="text-xs text-muted-foreground">No collections available.</p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Dual Mode Toggle */}
+                      <div
+                        className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-colors ${
+                          dualModeEnabled
+                            ? "bg-blue-500/5 border-blue-500/30"
+                            : "bg-muted/30 border-border hover:bg-muted/50"
+                        }`}
+                        onClick={() => setDualModeEnabled(!dualModeEnabled)}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`p-1.5 rounded-lg ${dualModeEnabled ? "bg-blue-500/10" : "bg-muted"}`}>
+                            <Sparkles className={`h-4 w-4 ${dualModeEnabled ? "text-blue-500" : "text-muted-foreground"}`} />
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">Dual Mode (Documents + General AI)</p>
+                            <p className="text-xs text-muted-foreground">
+                              Combine document knowledge with general AI for richer suggestions
+                            </p>
+                          </div>
+                        </div>
+                        <div
+                          className={`w-10 h-5 rounded-full transition-colors flex items-center ${
+                            dualModeEnabled ? "bg-blue-500 justify-end" : "bg-muted-foreground/30 justify-start"
+                          }`}
+                        >
+                          <div className="w-4 h-4 bg-white rounded-full shadow-sm mx-0.5" />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* LLM Configuration */}
+                <div className="space-y-3 p-4 rounded-lg border bg-muted/30">
+                  <div className="flex items-center gap-2">
+                    <Cog className="h-4 w-4 text-muted-foreground" />
+                    <Label className="text-sm font-medium">LLM Configuration</Label>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-muted-foreground">Provider</label>
+                      <select
+                        value={selectedProviderId || ""}
+                        onChange={(e) => {
+                          setSelectedProviderId(e.target.value || null);
+                          setSelectedModelName(null);
+                        }}
+                        className="w-full h-9 px-3 rounded-md border bg-background text-sm"
+                      >
+                        <option value="">System Default</option>
+                        {(providersData?.providers || []).filter((p: any) => p.is_active).map((p: any) => (
+                          <option key={p.id} value={p.id}>{p.name} ({p.provider_type})</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-muted-foreground">Model</label>
+                      <select
+                        value={selectedModelName || ""}
+                        onChange={(e) => setSelectedModelName(e.target.value || null)}
+                        className="w-full h-9 px-3 rounded-md border bg-background text-sm"
+                      >
+                        <option value="">Auto (provider default)</option>
+                        {selectedProviderId && (() => {
+                          const provider = (providersData?.providers || []).find((p: any) => p.id === selectedProviderId);
+                          if (provider?.default_chat_model) {
+                            return <option key={provider.default_chat_model} value={provider.default_chat_model}>{provider.default_chat_model}</option>;
+                          }
+                          return null;
+                        })()}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-muted-foreground">Temperature</label>
+                      <select
+                        value={temperatureMode}
+                        onChange={(e) => setTemperatureMode(e.target.value as "auto" | "manual")}
+                        className="h-7 px-2 rounded border bg-background text-xs"
+                      >
+                        <option value="auto">Auto (format-optimized)</option>
+                        <option value="manual">Manual</option>
+                      </select>
+                    </div>
+                    {temperatureMode === "manual" && (
+                      <div className="flex items-center gap-3">
+                        <Slider
+                          value={[manualTemperature]}
+                          onValueChange={([v]) => setManualTemperature(v)}
+                          min={0}
+                          max={1.5}
+                          step={0.05}
+                          className="flex-1"
+                        />
+                        <span className="text-xs font-mono w-8 text-right">{manualTemperature.toFixed(2)}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Multi-LLM Toggle */}
+                {(providersData?.providers || []).filter((p: any) => p.is_active).length > 1 && (
+                  <div className="space-y-3 p-4 rounded-lg border bg-muted/30">
+                    <div
+                      className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-colors ${
+                        multiLLMEnabled
+                          ? "bg-purple-500/5 border-purple-500/30"
+                          : "bg-muted/30 border-border hover:bg-muted/50"
+                      }`}
+                      onClick={() => {
+                        const next = !multiLLMEnabled;
+                        setMultiLLMEnabled(next);
+                        if (next && multiLLMProviders.length === 0) {
+                          const active = (providersData?.providers || []).filter((p: any) => p.is_active).slice(0, 2);
+                          setMultiLLMProviders(active.map((p: any) => ({ provider_id: p.id, model: p.default_chat_model || "" })));
+                        }
+                      }}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`p-1.5 rounded-lg ${multiLLMEnabled ? "bg-purple-500/10" : "bg-muted"}`}>
+                          <Sparkles className={`h-4 w-4 ${multiLLMEnabled ? "text-purple-500" : "text-muted-foreground"}`} />
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium">Multi-LLM Generation</p>
+                          <p className="text-xs text-muted-foreground">
+                            Combine ideas from multiple AI models for richer results
+                          </p>
+                        </div>
+                      </div>
+                      <div
+                        className={`w-10 h-5 rounded-full transition-colors flex items-center ${
+                          multiLLMEnabled ? "bg-purple-500 justify-end" : "bg-muted-foreground/30 justify-start"
+                        }`}
+                      >
+                        <div className="w-4 h-4 bg-white rounded-full shadow-sm mx-0.5" />
+                      </div>
+                    </div>
+
+                    {multiLLMEnabled && (
+                      <div className="space-y-3 pl-2">
+                        <div className="flex items-center gap-3">
+                          <label className="text-xs text-muted-foreground">Merge Strategy</label>
+                          <select
+                            value={multiLLMStrategy}
+                            onChange={(e) => setMultiLLMStrategy(e.target.value as "best_of" | "merge")}
+                            className="h-7 px-2 rounded border bg-background text-xs"
+                          >
+                            <option value="merge">Merge best parts</option>
+                            <option value="best_of">Pick best overall</option>
+                          </select>
+                        </div>
+
+                        {multiLLMProviders.map((mp, idx) => (
+                          <div key={idx} className="flex gap-2 items-center">
+                            <span className="text-xs text-muted-foreground w-4">{idx + 1}.</span>
+                            <select
+                              value={mp.provider_id}
+                              onChange={(e) => {
+                                const updated = [...multiLLMProviders];
+                                const prov = (providersData?.providers || []).find((p: any) => p.id === e.target.value);
+                                updated[idx] = { provider_id: e.target.value, model: prov?.default_chat_model || "" };
+                                setMultiLLMProviders(updated);
+                              }}
+                              className="flex-1 h-8 px-2 rounded border bg-background text-xs"
+                            >
+                              {(providersData?.providers || []).filter((p: any) => p.is_active).map((p: any) => (
+                                <option key={p.id} value={p.id}>{p.name}</option>
+                              ))}
+                            </select>
+                            {multiLLMProviders.length > 2 && (
+                              <button
+                                onClick={() => setMultiLLMProviders(multiLLMProviders.filter((_, i) => i !== idx))}
+                                className="text-xs text-red-400 hover:text-red-500"
+                              >
+                                Remove
+                              </button>
+                            )}
+                          </div>
+                        ))}
+
+                        {multiLLMProviders.length < 3 && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-xs"
+                            onClick={() => {
+                              const active = (providersData?.providers || []).filter((p: any) => p.is_active);
+                              if (active.length > 0) {
+                                setMultiLLMProviders([...multiLLMProviders, { provider_id: active[0].id, model: active[0].default_chat_model || "" }]);
+                              }
+                            }}
+                          >
+                            <Plus className="h-3 w-3 mr-1" /> Add Provider
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Generated Mood Board Result */}
                 {generatedMoodBoard && (
                   <div className="space-y-4 p-4 rounded-lg border bg-gradient-to-br from-primary/5 to-primary/10">
@@ -1213,9 +1688,69 @@ function CreatePageContent() {
                         <RefreshCw className="h-4 w-4 mr-2" />
                         Start Over
                       </Button>
-                      <Button size="sm">
+                      <Button
+                        size="sm"
+                        onClick={async () => {
+                          try {
+                            await api.post("/moodboard/save", {
+                              mood_board: {
+                                name: generatedMoodBoard.name,
+                                description: generatedMoodBoard.description,
+                                colors: generatedMoodBoard.colors || moodBoardColors,
+                                keywords: generatedMoodBoard.keywords || moodBoardKeywords,
+                                style_notes: generatedMoodBoard.styleNotes || moodBoardStyleNotes,
+                                generated_suggestions: {
+                                  typography: generatedMoodBoard.generatedSuggestions.typography,
+                                  additional_colors: generatedMoodBoard.generatedSuggestions.additionalColors,
+                                  mood_keywords: generatedMoodBoard.generatedSuggestions.moodKeywords,
+                                  inspiration_notes: generatedMoodBoard.generatedSuggestions.inspirationNotes,
+                                  design_direction: generatedMoodBoard.generatedSuggestions.designDirection,
+                                  color_psychology: generatedMoodBoard.generatedSuggestions.colorPsychology,
+                                },
+                              },
+                            });
+                            toast.success("Mood board saved!", { description: "You can view it from My Boards." });
+                          } catch (err: any) {
+                            toast.error(err.response?.data?.detail || "Failed to save mood board");
+                          }
+                        }}
+                      >
+                        <Save className="h-4 w-4 mr-2" />
+                        Save Mood Board
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          const sug = generatedMoodBoard.generatedSuggestions;
+                          const exportData = {
+                            name: generatedMoodBoard.name,
+                            description: generatedMoodBoard.description,
+                            color_palette: generatedMoodBoard.colors || moodBoardColors,
+                            style_tags: generatedMoodBoard.keywords || moodBoardKeywords,
+                            themes: sug?.typography || [],
+                            generated_suggestions: {
+                              typography: sug?.typography || [],
+                              additional_colors: sug?.additionalColors || [],
+                              mood_keywords: sug?.moodKeywords || [],
+                              inspiration_notes: sug?.inspirationNotes || "",
+                              design_direction: sug?.designDirection || "",
+                              color_psychology: sug?.colorPsychology || {},
+                            },
+                            created_at: generatedMoodBoard.createdAt,
+                            model_used: generatedMoodBoard.modelUsed,
+                          };
+                          const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `moodboard-${topic.replace(/\s+/g, "-").toLowerCase()}.json`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                      >
                         <Download className="h-4 w-4 mr-2" />
-                        Export Mood Board
+                        Export JSON
                       </Button>
                     </div>
                   </div>
@@ -1243,6 +1778,7 @@ function CreatePageContent() {
                   </Button>
                 )}
               </div>
+              </>)}
             </div>
           )}
 
@@ -1656,8 +2192,119 @@ function CreatePageContent() {
                           <div className="w-4 h-4 bg-white rounded-full shadow-sm mx-0.5" />
                         </div>
                       </div>
+
+                      {/* Dual Mode Toggle */}
+                      <div
+                        className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-colors ${
+                          dualModeEnabled
+                            ? "bg-blue-500/5 border-blue-500/30"
+                            : "bg-muted/30 border-border hover:bg-muted/50"
+                        }`}
+                        onClick={() => setDualModeEnabled(!dualModeEnabled)}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`p-1.5 rounded-lg ${dualModeEnabled ? "bg-blue-500/10" : "bg-muted"}`}>
+                            <Sparkles className={`h-4 w-4 ${dualModeEnabled ? "text-blue-500" : "text-muted-foreground"}`} />
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">Dual Mode (Documents + General AI)</p>
+                            <p className="text-xs text-muted-foreground">
+                              Combine document knowledge with general AI for richer content
+                            </p>
+                          </div>
+                        </div>
+                        <div
+                          className={`w-10 h-5 rounded-full transition-colors flex items-center ${
+                            dualModeEnabled ? "bg-blue-500 justify-end" : "bg-muted-foreground/30 justify-start"
+                          }`}
+                        >
+                          <div className="w-4 h-4 bg-white rounded-full shadow-sm mx-0.5" />
+                        </div>
+                      </div>
+                      {dualModeEnabled && (
+                        <div className="flex items-center gap-2 pl-2">
+                          <label className="text-xs text-muted-foreground">Blend mode:</label>
+                          <select
+                            value={dualModeBlend}
+                            onChange={(e) => setDualModeBlend(e.target.value as "merged" | "docs_first")}
+                            className="h-7 px-2 rounded border bg-background text-xs"
+                          >
+                            <option value="merged">Merged (AI synthesizes both sources)</option>
+                            <option value="docs_first">Documents First (supplement with AI)</option>
+                          </select>
+                        </div>
+                      )}
                     </div>
                   )}
+                </div>
+
+                {/* LLM Configuration */}
+                <div className="space-y-3 p-4 rounded-lg border bg-muted/30">
+                  <div className="flex items-center gap-2">
+                    <Cog className="h-4 w-4 text-muted-foreground" />
+                    <Label className="text-sm font-medium">LLM Configuration</Label>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-muted-foreground">Provider</label>
+                      <select
+                        value={selectedProviderId || ""}
+                        onChange={(e) => {
+                          setSelectedProviderId(e.target.value || null);
+                          setSelectedModelName(null);
+                        }}
+                        className="w-full h-9 px-3 rounded-md border bg-background text-sm"
+                      >
+                        <option value="">System Default</option>
+                        {(providersData?.providers || []).filter((p: any) => p.is_active).map((p: any) => (
+                          <option key={p.id} value={p.id}>{p.name} ({p.provider_type})</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-muted-foreground">Model</label>
+                      <select
+                        value={selectedModelName || ""}
+                        onChange={(e) => setSelectedModelName(e.target.value || null)}
+                        className="w-full h-9 px-3 rounded-md border bg-background text-sm"
+                      >
+                        <option value="">Auto (provider default)</option>
+                        {selectedProviderId && (() => {
+                          const provider = (providersData?.providers || []).find((p: any) => p.id === selectedProviderId);
+                          if (provider?.default_chat_model) {
+                            return <option key={provider.default_chat_model} value={provider.default_chat_model}>{provider.default_chat_model}</option>;
+                          }
+                          return null;
+                        })()}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-muted-foreground">Temperature</label>
+                      <select
+                        value={temperatureMode}
+                        onChange={(e) => setTemperatureMode(e.target.value as "auto" | "manual")}
+                        className="h-7 px-2 rounded border bg-background text-xs"
+                      >
+                        <option value="auto">Auto (format-optimized)</option>
+                        <option value="manual">Manual</option>
+                      </select>
+                    </div>
+                    {temperatureMode === "manual" && (
+                      <div className="flex items-center gap-3">
+                        <Slider
+                          value={[manualTemperature]}
+                          onValueChange={([v]) => setManualTemperature(v)}
+                          min={0}
+                          max={1.5}
+                          step={0.05}
+                          className="flex-1"
+                        />
+                        <span className="text-xs font-mono w-8 text-right">{manualTemperature.toFixed(2)}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* Theme Selector - Hidden when using PPTX template */}

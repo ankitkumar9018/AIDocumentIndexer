@@ -774,7 +774,14 @@ class VLMWorker:
         from openai import OpenAI
         self._client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         if not self.model:
-            self.model = "gpt-4o"
+            # Check settings first, then provider-specific default
+            try:
+                from backend.services.settings import get_settings_service
+                import asyncio
+                svc = get_settings_service()
+                self.model = asyncio.run(svc.get_setting("rag.vlm_model")) or "gpt-4o"
+            except Exception:
+                self.model = "gpt-4o"
         logger.info("Initialized OpenAI VLM", model=self.model)
 
     def _init_anthropic(self) -> None:
@@ -783,7 +790,14 @@ class VLMWorker:
         from anthropic import Anthropic
         self._client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         if not self.model:
-            self.model = "claude-3-haiku-20240307"
+            # Check settings first, then provider-specific default
+            try:
+                from backend.services.settings import get_settings_service
+                import asyncio
+                svc = get_settings_service()
+                self.model = asyncio.run(svc.get_setting("rag.vlm_model")) or "claude-3-haiku-20240307"
+            except Exception:
+                self.model = "claude-3-haiku-20240307"
         logger.info("Initialized Anthropic VLM", model=self.model)
 
     def analyze_image(

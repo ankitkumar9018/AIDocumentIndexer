@@ -18,7 +18,7 @@ import structlog
 
 from langchain_core.documents import Document
 
-from backend.services.llm import LLMFactory, LLMConfig
+from backend.services.llm import LLMFactory, LLMConfig, llm_config
 from backend.services.embeddings import compute_similarity, EmbeddingService
 
 logger = structlog.get_logger(__name__)
@@ -89,7 +89,7 @@ class VerifierConfig:
     medium_confidence_threshold: float = 0.5
 
     # LLM settings for verification
-    verification_model: str = "gpt-4o-mini"  # Cost-effective model
+    verification_model: Optional[str] = None  # Resolved from llm_config at runtime
     verification_temperature: float = 0.0  # Deterministic
 
 
@@ -187,9 +187,10 @@ Respond with ONLY a JSON object:
     def llm(self):
         """Get or create LLM for verification."""
         if self._llm is None:
+            _model = self.config.verification_model or llm_config.default_chat_model
             self._llm = LLMFactory.get_chat_model(
-                provider="openai",
-                model=self.config.verification_model,
+                provider=None,  # Use system-configured default provider
+                model=_model,
                 temperature=self.config.verification_temperature,
             )
         return self._llm

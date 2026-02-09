@@ -35,7 +35,7 @@ class SemanticCacheConfig:
     enabled: bool = False
     similarity_threshold: float = 0.95
     max_entries: int = 10000
-    embedding_provider: str = "openai"
+    embedding_provider: Optional[str] = None
 
 
 @dataclass
@@ -344,10 +344,10 @@ class ResponseCacheService:
             # Get embedding service if not provided
             if embedding_service is None:
                 try:
-                    import os
                     from backend.services.embeddings import get_embedding_service
-                    # Use configured provider from env, with openai as fallback
-                    default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+                    from backend.services.llm import llm_config
+                    # Use configured provider from llm_config
+                    default_provider = llm_config.default_provider
                     embedding_service = get_embedding_service(provider=default_provider, use_ray=False)
                 except ImportError as e:
                     logger.warning("Could not import embedding service", error=str(e))
@@ -519,7 +519,7 @@ class ResponseCacheService:
                 if embedding_service is None:
                     try:
                         from backend.services.embeddings import get_embedding_service
-                        embedding_service = get_embedding_service(provider="openai", use_ray=False)
+                        embedding_service = get_embedding_service(provider=None, use_ray=False)
                     except ImportError:
                         pass
 

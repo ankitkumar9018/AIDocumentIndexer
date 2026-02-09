@@ -2201,7 +2201,8 @@ class NodeExecutor:
         # Model settings
         model = config.get("model", "default")
         if model == "default":
-            model = "gpt-4o"  # Default model
+            from backend.services.llm import llm_config
+            model = llm_config.default_chat_model
 
         model_settings = {
             "model": model,

@@ -176,20 +176,17 @@ class UsageTracker(BaseService):
 
         db_record = LLMUsageLog(
             id=uuid.UUID(record_id),
-            organization_id=self._organization_id,
             user_id=self._user_id,
-            virtual_key_id=uuid.UUID(virtual_key_id) if virtual_key_id else None,
             model=model,
-            provider=provider,
-            endpoint=endpoint,
+            provider_type=provider,
+            operation_type=endpoint,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            cost_usd=cost,
-            latency_ms=latency_ms,
+            total_cost_usd=cost,
+            request_duration_ms=latency_ms,
             success=success,
             error_message=error_message,
-            metadata=metadata,
         )
 
         session.add(db_record)
@@ -232,11 +229,11 @@ class UsageTracker(BaseService):
             func.sum(LLMUsageLog.input_tokens).label("total_input_tokens"),
             func.sum(LLMUsageLog.output_tokens).label("total_output_tokens"),
             func.sum(LLMUsageLog.total_tokens).label("total_tokens"),
-            func.sum(LLMUsageLog.cost_usd).label("total_cost"),
-            func.avg(LLMUsageLog.latency_ms).label("avg_latency_ms"),
+            func.sum(LLMUsageLog.total_cost_usd).label("total_cost"),
+            func.avg(LLMUsageLog.request_duration_ms).label("avg_latency_ms"),
             func.sum(func.cast(LLMUsageLog.success, Integer)).label("successful_requests"),
         ).where(
-            LLMUsageLog.organization_id == self._organization_id,
+
             LLMUsageLog.created_at >= start_date,
             LLMUsageLog.created_at <= end_date,
         )
@@ -276,9 +273,9 @@ class UsageTracker(BaseService):
             LLMUsageLog.model,
             func.count(LLMUsageLog.id).label("requests"),
             func.sum(LLMUsageLog.total_tokens).label("tokens"),
-            func.sum(LLMUsageLog.cost_usd).label("cost"),
+            func.sum(LLMUsageLog.total_cost_usd).label("cost"),
         ).where(
-            LLMUsageLog.organization_id == self._organization_id,
+
             LLMUsageLog.created_at >= start_date,
             LLMUsageLog.created_at <= end_date,
         ).group_by(LLMUsageLog.model)
@@ -296,19 +293,19 @@ class UsageTracker(BaseService):
 
         # Get breakdown by provider
         provider_query = select(
-            LLMUsageLog.provider,
+            LLMUsageLog.provider_type,
             func.count(LLMUsageLog.id).label("requests"),
-            func.sum(LLMUsageLog.cost_usd).label("cost"),
+            func.sum(LLMUsageLog.total_cost_usd).label("cost"),
         ).where(
-            LLMUsageLog.organization_id == self._organization_id,
+
             LLMUsageLog.created_at >= start_date,
             LLMUsageLog.created_at <= end_date,
-        ).group_by(LLMUsageLog.provider)
+        ).group_by(LLMUsageLog.provider_type)
 
         provider_result = await session.execute(provider_query)
         stats["by_provider"] = [
             {
-                "provider": r.provider,
+                "provider": r.provider_type,
                 "requests": r.requests,
                 "cost_usd": round(float(r.cost or 0), 4),
             }
@@ -341,9 +338,9 @@ class UsageTracker(BaseService):
             func.date(LLMUsageLog.created_at).label("date"),
             func.count(LLMUsageLog.id).label("requests"),
             func.sum(LLMUsageLog.total_tokens).label("tokens"),
-            func.sum(LLMUsageLog.cost_usd).label("cost"),
+            func.sum(LLMUsageLog.total_cost_usd).label("cost"),
         ).where(
-            LLMUsageLog.organization_id == self._organization_id,
+
             LLMUsageLog.created_at >= start_date,
         ).group_by(
             func.date(LLMUsageLog.created_at)
@@ -390,15 +387,15 @@ class UsageTracker(BaseService):
             LLMUsageLog.user_id,
             func.count(LLMUsageLog.id).label("requests"),
             func.sum(LLMUsageLog.total_tokens).label("tokens"),
-            func.sum(LLMUsageLog.cost_usd).label("cost"),
+            func.sum(LLMUsageLog.total_cost_usd).label("cost"),
         ).where(
-            LLMUsageLog.organization_id == self._organization_id,
+
             LLMUsageLog.created_at >= start_date,
             LLMUsageLog.user_id != None,
         ).group_by(
             LLMUsageLog.user_id
         ).order_by(
-            func.sum(LLMUsageLog.cost_usd).desc()
+            func.sum(LLMUsageLog.total_cost_usd).desc()
         ).limit(limit)
 
         result = await session.execute(query)
@@ -442,9 +439,7 @@ class UsageTracker(BaseService):
         session = await self.get_session()
         from backend.db.models import LLMUsageLog
 
-        query = select(LLMUsageLog).where(
-            LLMUsageLog.organization_id == self._organization_id
-        )
+        query = select(LLMUsageLog)
 
         if user_id:
             query = query.where(LLMUsageLog.user_id == uuid.UUID(user_id))
@@ -460,20 +455,20 @@ class UsageTracker(BaseService):
         return [
             UsageRecord(
                 id=str(r.id),
-                organization_id=str(r.organization_id),
+                organization_id=str(self._organization_id) if self._organization_id else "",
                 user_id=str(r.user_id) if r.user_id else None,
-                virtual_key_id=str(r.virtual_key_id) if r.virtual_key_id else None,
+                virtual_key_id=None,
                 model=r.model,
-                provider=r.provider,
-                endpoint=r.endpoint,
+                provider=r.provider_type,
+                endpoint=r.operation_type,
                 input_tokens=r.input_tokens,
                 output_tokens=r.output_tokens,
                 total_tokens=r.total_tokens,
-                cost_usd=float(r.cost_usd),
-                latency_ms=r.latency_ms,
+                cost_usd=float(r.total_cost_usd or 0),
+                latency_ms=r.request_duration_ms or 0,
                 success=r.success,
                 error_message=r.error_message,
-                metadata=r.metadata or {},
+                metadata={},
                 created_at=r.created_at,
             )
             for r in db_records
@@ -500,7 +495,7 @@ class UsageTracker(BaseService):
         from backend.db.models import LLMUsageLog
 
         query = select(LLMUsageLog).where(
-            LLMUsageLog.organization_id == self._organization_id,
+
             LLMUsageLog.created_at >= start_date,
             LLMUsageLog.created_at <= end_date,
         ).order_by(LLMUsageLog.created_at)
@@ -513,13 +508,13 @@ class UsageTracker(BaseService):
                 "id": str(r.id),
                 "created_at": r.created_at.isoformat(),
                 "model": r.model,
-                "provider": r.provider,
-                "endpoint": r.endpoint,
+                "provider": r.provider_type,
+                "endpoint": r.operation_type,
                 "input_tokens": r.input_tokens,
                 "output_tokens": r.output_tokens,
                 "total_tokens": r.total_tokens,
-                "cost_usd": float(r.cost_usd),
-                "latency_ms": r.latency_ms,
+                "cost_usd": float(r.total_cost_usd or 0),
+                "latency_ms": r.request_duration_ms or 0,
                 "success": r.success,
                 "error_message": r.error_message,
                 "user_id": str(r.user_id) if r.user_id else None,

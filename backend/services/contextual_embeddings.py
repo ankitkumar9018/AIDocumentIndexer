@@ -47,8 +47,8 @@ class ContextualConfig:
     context_provider: str = "anthropic"
 
     # Fallback to OpenAI if Anthropic not available
-    fallback_model: str = "gpt-4o-mini"
-    fallback_provider: str = "openai"
+    fallback_model: Optional[str] = None
+    fallback_provider: Optional[str] = None
 
     # Context generation settings
     max_document_preview: int = 2000  # Chars of document to include
@@ -207,7 +207,7 @@ class ContextualEmbeddingService:
             return True
 
         try:
-            from backend.services.llm import LLMFactory
+            from backend.services.llm import LLMFactory, llm_config
 
             # Try primary provider first
             try:
@@ -223,15 +223,17 @@ class ContextualEmbeddingService:
                     model=self.config.context_model,
                 )
             except Exception as e:
+                _fallback_provider = self.config.fallback_provider or llm_config.default_provider
+                _fallback_model = self.config.fallback_model or llm_config.default_chat_model
                 logger.warning(
                     "Primary context model failed, using fallback",
                     primary=self.config.context_model,
-                    fallback=self.config.fallback_model,
+                    fallback=_fallback_model,
                     error=str(e),
                 )
                 self._llm = LLMFactory.get_chat_model(
-                    provider=self.config.fallback_provider,
-                    model=self.config.fallback_model,
+                    provider=_fallback_provider,
+                    model=_fallback_model,
                     temperature=self.config.temperature,
                     max_tokens=200,
                 )

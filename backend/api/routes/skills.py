@@ -15,7 +15,7 @@ from sqlalchemy import select, func, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
-from backend.services.llm import LLMFactory
+from backend.services.llm import LLMFactory, llm_config
 from backend.services.llm_provider import LLMProviderService
 from backend.core.config import settings
 from backend.db.database import get_async_session
@@ -549,16 +549,16 @@ async def execute_skill(
     db.add(execution)
     await db.flush()
 
-    # Get provider configuration
-    provider_type = "openai"
-    model_name = request.model or "gpt-4o"
+    # Get provider configuration — use system default, not hardcoded "openai"
+    provider_type = llm_config.default_provider
+    model_name = request.model or None
 
     if request.provider_id:
         try:
             provider = await LLMProviderService.get_provider(db, request.provider_id)
             if provider:
                 provider_type = provider.provider_type
-                model_name = request.model or provider.default_chat_model or "gpt-4o"
+                model_name = request.model or provider.default_chat_model
         except Exception as e:
             logger.warning(f"Could not load provider {request.provider_id}: {e}")
 

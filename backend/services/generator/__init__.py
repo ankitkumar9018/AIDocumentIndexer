@@ -284,10 +284,11 @@ class DocumentGenerationService:
 
         try:
             from backend.services.llm import LLMConfigManager
-            llm_config = await LLMConfigManager.get_config_for_operation("generation")
-            job.metadata["llm_model"] = f"{llm_config.provider_type}/{llm_config.model}"
+            _llm_cfg = await LLMConfigManager.get_config_for_operation("generation")
+            job.metadata["llm_model"] = f"{_llm_cfg.provider_type}/{_llm_cfg.model}"
         except Exception:
-            job.metadata["llm_model"] = self.config.model
+            from backend.services.llm import llm_config as _global_llm_config
+            job.metadata["llm_model"] = self.config.model or _global_llm_config.default_chat_model
 
         self._jobs[job_id] = job
 

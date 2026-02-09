@@ -63,8 +63,8 @@ class GraphRAGConfig:
     """Configuration for GraphRAG enhancements."""
     # Extraction settings
     extraction_mode: ExtractionMode = ExtractionMode.HYBRID
-    llm_model: str = "gpt-4o-mini"
-    llm_provider: str = "openai"
+    llm_model: Optional[str] = None
+    llm_provider: Optional[str] = None
 
     # Community detection
     enable_community_detection: bool = True
@@ -475,10 +475,15 @@ class KGGenExtractor:
             return
 
         try:
-            from backend.services.llm import get_chat_model
+            from backend.services.llm import get_chat_model, llm_config
+
+            # Resolve provider/model defaults lazily
+            _provider = self.config.llm_provider or llm_config.default_provider
+            _model = self.config.llm_model or llm_config.default_chat_model
+
             self._llm = await get_chat_model(
-                provider=self.config.llm_provider,
-                model=self.config.llm_model,
+                provider=_provider,
+                model=_model,
             )
         except Exception as e:
             logger.warning("LLM not available for extraction", error=str(e))

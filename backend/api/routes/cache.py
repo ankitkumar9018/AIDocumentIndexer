@@ -477,7 +477,20 @@ async def clear_all_caches(
     except Exception as e:
         results["generative_cache"] = {"error": str(e), "success": False}
 
-    # 5. Force garbage collection
+    # 5. Clear Phase 65 Semantic Cache (spell correction + query cache)
+    try:
+        from backend.services.phase65_integration import get_phase65_pipeline_sync
+        p65 = get_phase65_pipeline_sync()
+        if p65 and p65._semantic_cache:
+            count = await p65._semantic_cache.clear()
+            results["phase65_semantic_cache"] = {"cleared": count, "success": True}
+            total_cleared += count
+        else:
+            results["phase65_semantic_cache"] = {"cleared": 0, "success": True}
+    except Exception as e:
+        results["phase65_semantic_cache"] = {"error": str(e), "success": False}
+
+    # 6. Force garbage collection
     import gc
     gc.collect()
 

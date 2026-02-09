@@ -18,14 +18,17 @@ const nextConfig = {
   },
 
   async rewrites() {
+    // Strip /api/v1 suffix if present to get the base backend URL
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    const backendBase = apiUrl.replace(/\/api\/v1\/?$/, '');
     return [
       {
         source: '/api/backend/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/:path*`,
+        destination: `${backendBase}/:path*`,
       },
       {
         source: '/api/v1/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/:path*`,
+        destination: `${backendBase}/api/v1/:path*`,
       },
     ];
   },

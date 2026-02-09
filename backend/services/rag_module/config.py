@@ -43,7 +43,7 @@ class RAGConfig:
         # Query expansion settings (optional, improves recall by 8-12%)
         enable_query_expansion: bool = None,  # Read from env if not set
         query_expansion_count: int = None,  # Number of query variations
-        query_expansion_model: str = "gpt-4o-mini",  # Cost-effective model
+        query_expansion_model: Optional[str] = None,  # Resolved from llm_config at runtime
 
         # Verification settings (Self-RAG)
         enable_verification: bool = None,  # Read from env if not set

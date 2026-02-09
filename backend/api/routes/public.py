@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
-from backend.services.llm import LLMFactory
+from backend.services.llm import LLMFactory, llm_config
 from backend.core.config import settings
 from backend.db.database import get_async_session
 from backend.db.models import (
@@ -263,8 +263,8 @@ async def execute_public_skill(
     # Execute with LLM
     try:
         llm = LLMFactory.get_chat_model(
-            provider="openai",
-            model="gpt-4o-mini",  # Use cost-effective model for public
+            provider=None,  # Use system-configured default provider
+            model=None,     # Use provider's default model
             temperature=0.7,
             max_tokens=2048,
         )
@@ -286,8 +286,8 @@ async def execute_public_skill(
         execution.status = SkillExecutionStatus.COMPLETED.value
         execution.output = {"result": output} if not isinstance(output, dict) else output
         execution.execution_time_ms = execution_time
-        execution.model_used = "gpt-4o-mini"
-        execution.provider_used = "openai"
+        execution.model_used = llm_config.default_chat_model
+        execution.provider_used = llm_config.default_provider
 
         # Update skill stats
         skill.use_count += 1

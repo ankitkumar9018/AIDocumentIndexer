@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { TabsContent } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -8,12 +8,20 @@ import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Cpu, Thermometer, MessageSquare, Clock, Shield, RefreshCw, Loader2, Info,
-  ChevronDown, ChevronUp, Layers, Check, X, HardDrive,
+  ChevronDown, ChevronUp, Layers, Check, X, HardDrive, Settings2, Save, RotateCcw,
 } from "lucide-react";
+import { toast } from "sonner";
 import type { LLMProvider } from "@/lib/api/client";
-import { useOllamaContextLength, useModelContextRecommendations } from "@/lib/api/hooks";
+import {
+  useOllamaContextLength,
+  useModelContextRecommendations,
+  useLLMOperations,
+  useSetLLMOperationConfig,
+  useDeleteLLMOperationConfig,
+} from "@/lib/api/hooks";
 
 interface ModelsTabProps {
   ModelConfigurationSection: React.ComponentType<{ providers: LLMProvider[] }>;
@@ -445,6 +453,328 @@ export function ModelsTab({ ModelConfigurationSection, providers, localSettings,
           </div>
         </CardContent>
       </Card>
+      {/* Per-Operation Model Configuration */}
+      <OperationModelConfigSection providers={providers} />
     </TabsContent>
+  );
+}
+
+// =============================================================================
+// Operation-Specific Model Configuration Section
+// =============================================================================
+
+const OPERATION_LABELS: Record<string, { label: string; description: string; defaultTemp: number | null }> = {
+  chat: { label: "Chat", description: "Conversational responses", defaultTemp: 0.7 },
+  rag: { label: "RAG", description: "Retrieval-augmented generation", defaultTemp: 0.3 },
+  doc_generation: { label: "Doc Generation", description: "Document generation tasks", defaultTemp: 0.5 },
+  summarization: { label: "Summarization", description: "Text summarization", defaultTemp: 0.3 },
+  embeddings: { label: "Embeddings", description: "Vector embeddings", defaultTemp: null },
+  agent: { label: "Agent", description: "Autonomous agent tasks", defaultTemp: 0.5 },
+};
+
+interface OperationRowState {
+  provider_id: string;
+  model_override: string;
+  temperature_override: string;
+  max_tokens_override: string;
+  fallback_provider_id: string;
+}
+
+function OperationModelConfigSection({ providers }: { providers: LLMProvider[] }) {
+  const { data: opsData, isLoading: opsLoading } = useLLMOperations();
+  const setOpConfig = useSetLLMOperationConfig();
+  const deleteOpConfig = useDeleteLLMOperationConfig();
+
+  // Local state for each operation row (keyed by operation_type)
+  const [rowState, setRowState] = useState<Record<string, OperationRowState>>({});
+  const [initialized, setInitialized] = useState(false);
+
+  const activeProviders = providers.filter((p) => p.is_active);
+
+  // Build the valid operations list from API or fallback to our known set
+  const validOperations = opsData?.valid_operations ?? Object.keys(OPERATION_LABELS);
+
+  // Initialize local row state from fetched data
+  useEffect(() => {
+    if (!opsData || initialized) return;
+    const initial: Record<string, OperationRowState> = {};
+    for (const op of validOperations) {
+      const existing = opsData.operations.find((o) => o.operation_type === op);
+      initial[op] = {
+        provider_id: existing?.provider_id ?? "",
+        model_override: existing?.model_override ?? "",
+        temperature_override: existing?.temperature_override != null ? String(existing.temperature_override) : "",
+        max_tokens_override: existing?.max_tokens_override != null ? String(existing.max_tokens_override) : "",
+        fallback_provider_id: existing?.fallback_provider_id ?? "",
+      };
+    }
+    setRowState(initial);
+    setInitialized(true);
+  }, [opsData, validOperations, initialized]);
+
+  // Re-initialize when opsData changes after a mutation
+  const reinitRow = useCallback((op: string, data: { provider_id?: string | null; model_override?: string | null; temperature_override?: number | null; max_tokens_override?: number | null; fallback_provider_id?: string | null } | null) => {
+    setRowState((prev) => ({
+      ...prev,
+      [op]: {
+        provider_id: data?.provider_id ?? "",
+        model_override: data?.model_override ?? "",
+        temperature_override: data?.temperature_override != null ? String(data.temperature_override) : "",
+        max_tokens_override: data?.max_tokens_override != null ? String(data.max_tokens_override) : "",
+        fallback_provider_id: data?.fallback_provider_id ?? "",
+      },
+    }));
+  }, []);
+
+  const updateRow = useCallback((op: string, field: keyof OperationRowState, value: string) => {
+    setRowState((prev) => ({
+      ...prev,
+      [op]: { ...prev[op], [field]: value },
+    }));
+  }, []);
+
+  const handleSave = useCallback(async (op: string) => {
+    const row = rowState[op];
+    if (!row) return;
+
+    const data: Record<string, unknown> = {};
+    if (row.provider_id) data.provider_id = row.provider_id;
+    if (row.model_override) data.model_override = row.model_override;
+    if (row.temperature_override !== "") {
+      const t = parseFloat(row.temperature_override);
+      if (!isNaN(t)) data.temperature_override = t;
+    }
+    if (row.max_tokens_override !== "") {
+      const m = parseInt(row.max_tokens_override);
+      if (!isNaN(m)) data.max_tokens_override = m;
+    }
+    if (row.fallback_provider_id) data.fallback_provider_id = row.fallback_provider_id;
+
+    try {
+      const result = await setOpConfig.mutateAsync({ operationType: op, data });
+      reinitRow(op, result);
+      toast.success(`Saved ${OPERATION_LABELS[op]?.label ?? op} configuration`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast.error(`Failed to save: ${msg}`);
+    }
+  }, [rowState, setOpConfig, reinitRow]);
+
+  const handleReset = useCallback(async (op: string) => {
+    try {
+      await deleteOpConfig.mutateAsync(op);
+      reinitRow(op, null);
+      toast.success(`Reset ${OPERATION_LABELS[op]?.label ?? op} to system defaults`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast.error(`Failed to reset: ${msg}`);
+    }
+  }, [deleteOpConfig, reinitRow]);
+
+  const hasExistingConfig = useCallback((op: string) => {
+    return opsData?.operations.some((o) => o.operation_type === op) ?? false;
+  }, [opsData]);
+
+  const rowIsDirty = useCallback((op: string) => {
+    const row = rowState[op];
+    if (!row) return false;
+    const existing = opsData?.operations.find((o) => o.operation_type === op);
+    if (!existing) {
+      // No saved config -- dirty if any field is non-empty
+      return !!(row.provider_id || row.model_override || row.temperature_override || row.max_tokens_override || row.fallback_provider_id);
+    }
+    return (
+      (row.provider_id || "") !== (existing.provider_id || "") ||
+      (row.model_override || "") !== (existing.model_override || "") ||
+      (row.temperature_override || "") !== (existing.temperature_override != null ? String(existing.temperature_override) : "") ||
+      (row.max_tokens_override || "") !== (existing.max_tokens_override != null ? String(existing.max_tokens_override) : "") ||
+      (row.fallback_provider_id || "") !== (existing.fallback_provider_id || "")
+    );
+  }, [rowState, opsData]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-lg flex items-center gap-2">
+          <Settings2 className="h-5 w-5" />
+          Operation-Specific Model Configuration
+        </CardTitle>
+        <CardDescription>
+          Configure different models for different operations. Overrides global defaults for specific tasks.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {opsLoading ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground py-8 justify-center">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading operation configurations...
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {/* Table Header */}
+            <div className="grid grid-cols-[140px_1fr_1fr_100px_100px_1fr_auto] gap-3 px-3 py-2 text-[11px] text-muted-foreground font-medium uppercase tracking-wider border-b">
+              <span>Operation</span>
+              <span>Provider</span>
+              <span>Model</span>
+              <span>Temperature</span>
+              <span>Max Tokens</span>
+              <span>Fallback</span>
+              <span>Actions</span>
+            </div>
+
+            {/* Operation Rows */}
+            {validOperations.map((op) => {
+              const meta = OPERATION_LABELS[op] ?? { label: op, description: "", defaultTemp: 0.7 };
+              const row = rowState[op];
+              if (!row) return null;
+              const isConfigured = hasExistingConfig(op);
+              const dirty = rowIsDirty(op);
+              const saving = setOpConfig.isPending;
+              const deleting = deleteOpConfig.isPending;
+
+              return (
+                <div
+                  key={op}
+                  className="grid grid-cols-[140px_1fr_1fr_100px_100px_1fr_auto] gap-3 px-3 py-2.5 rounded-md hover:bg-muted/50 items-center border-b last:border-0"
+                >
+                  {/* Operation label */}
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-sm font-medium">{meta.label}</span>
+                      {isConfigured && (
+                        <Badge variant="default" className="text-[9px] px-1 py-0">custom</Badge>
+                      )}
+                    </div>
+                    {meta.description && (
+                      <span className="text-[10px] text-muted-foreground">{meta.description}</span>
+                    )}
+                  </div>
+
+                  {/* Provider select */}
+                  <Select
+                    value={row.provider_id || "__default__"}
+                    onValueChange={(v) => updateRow(op, "provider_id", v === "__default__" ? "" : v)}
+                  >
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder="System Default" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">System Default</SelectItem>
+                      {activeProviders.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {p.name}{p.is_default ? " (default)" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  {/* Model override input */}
+                  <Input
+                    type="text"
+                    placeholder="Provider default"
+                    value={row.model_override}
+                    onChange={(e) => updateRow(op, "model_override", e.target.value)}
+                    className="h-8 text-xs"
+                  />
+
+                  {/* Temperature input */}
+                  {meta.defaultTemp !== null ? (
+                    <Input
+                      type="number"
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      placeholder={String(meta.defaultTemp)}
+                      value={row.temperature_override}
+                      onChange={(e) => updateRow(op, "temperature_override", e.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  ) : (
+                    <div className="flex items-center justify-center text-xs text-muted-foreground">
+                      --
+                    </div>
+                  )}
+
+                  {/* Max tokens input */}
+                  <Input
+                    type="number"
+                    min={256}
+                    max={16384}
+                    step={256}
+                    placeholder="Default"
+                    value={row.max_tokens_override}
+                    onChange={(e) => updateRow(op, "max_tokens_override", e.target.value)}
+                    className="h-8 text-xs"
+                  />
+
+                  {/* Fallback provider select */}
+                  <Select
+                    value={row.fallback_provider_id || "__none__"}
+                    onValueChange={(v) => updateRow(op, "fallback_provider_id", v === "__none__" ? "" : v)}
+                  >
+                    <SelectTrigger className="h-8 text-xs">
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">None</SelectItem>
+                      {activeProviders.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {p.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-1">
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant={dirty ? "default" : "outline"}
+                            size="sm"
+                            className="h-7 w-7 p-0"
+                            disabled={!dirty || saving}
+                            onClick={() => handleSave(op)}
+                          >
+                            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Save override</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 w-7 p-0"
+                            disabled={!isConfigured || deleting}
+                            onClick={() => handleReset(op)}
+                          >
+                            {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Reset to system default</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Info footer */}
+            <div className="flex items-center gap-2 text-xs text-muted-foreground px-3 pt-3">
+              <Info className="h-3 w-3 flex-shrink-0" />
+              <span>
+                Overrides apply to specific operation types. Leave fields empty to use system defaults.
+                Use &quot;Reset&quot; to remove all overrides for an operation.
+              </span>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

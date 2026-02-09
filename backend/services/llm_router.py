@@ -81,10 +81,10 @@ class ServiceLLMConfig:
     service_name: str
     operation_name: Optional[str] = None
 
-    # Provider and model
-    provider_type: str = "openai"
+    # Provider and model (None = use system-configured default from settings)
+    provider_type: Optional[str] = None
     provider_id: Optional[str] = None
-    model_name: str = "gpt-4o"
+    model_name: Optional[str] = None
 
     # Parameters
     temperature: float = 0.7
@@ -913,8 +913,8 @@ class LLMRouter:
             ),
             "embeddings": ServiceLLMConfig(
                 service_name="embeddings",
-                provider_type="openai",
-                model_name="text-embedding-3-small",
+                provider_type=llm_config.default_provider,
+                model_name=None,  # Use provider's default embedding model
                 allow_user_override=False,
             ),
         }
@@ -1049,19 +1049,21 @@ class LLMRouter:
                     required_level=service_config.min_access_level,
                     user_level=access.access_level,
                 )
-                # Fall back to a basic model
+                # Fall back to a basic model using system default
                 return ResolvedModel(
-                    provider_type="openai",
-                    model_name="gpt-4o-mini",
+                    provider_type=llm_config.default_provider,
+                    model_name=llm_config.default_chat_model,
                     temperature=service_config.temperature,
                     max_tokens=min(service_config.max_tokens, 4096),
                     source="access_restricted",
                 )
 
-        # Start with service default
+        # Start with service default, resolving None to system defaults
+        _provider = service_config.provider_type or llm_config.default_provider
+        _model = service_config.model_name or llm_config.default_chat_model
         resolved = ResolvedModel(
-            provider_type=service_config.provider_type,
-            model_name=service_config.model_name,
+            provider_type=_provider,
+            model_name=_model,
             temperature=service_config.temperature,
             max_tokens=service_config.max_tokens,
             source="service_config",

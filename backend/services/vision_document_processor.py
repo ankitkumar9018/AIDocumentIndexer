@@ -654,8 +654,19 @@ class TableExtractor:
             client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
             base64_image = base64.b64encode(image_data).decode("utf-8")
 
+            # Read vision model from settings, fall back to provider default
+            _vision_model = "claude-3-5-sonnet-20241022"
+            try:
+                from backend.services.settings import get_settings_service
+                _svc = get_settings_service()
+                _db_model = await _svc.get_setting("rag.vlm_model")
+                if _db_model:
+                    _vision_model = _db_model
+            except Exception:
+                pass
+
             response = await client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model=_vision_model,
                 max_tokens=4096,
                 messages=[
                     {

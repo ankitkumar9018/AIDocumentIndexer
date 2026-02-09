@@ -188,12 +188,30 @@ class CreateJobRequest(BaseModel):
         default=None,
         description="Vision model for slide review. 'auto' uses the system default."
     )
+    # LLM provider/model selection
+    provider_id: Optional[str] = Field(
+        default=None,
+        description="LLM provider ID override for this job"
+    )
+    model: Optional[str] = Field(
+        default=None,
+        description="Model name override for this job"
+    )
     # Phase 15 LLM Optimization - Advanced per-document overrides
     temperature_override: Optional[float] = Field(
         default=None,
         ge=0.0,
         le=1.0,
         description="Override content generation temperature for this document (0.0-1.0). None = use system default/optimized temperature."
+    )
+    # Dual Mode (RAG + General AI)
+    dual_mode: bool = Field(
+        default=False,
+        description="Combine document knowledge with general AI for richer content"
+    )
+    dual_mode_blend: str = Field(
+        default="merged",
+        description="Dual mode blend strategy: merged or docs_first"
     )
 
     @property
@@ -549,6 +567,17 @@ async def create_generation_job(
         # Use original_filename (the actual uploaded name) over filename (UUID storage name)
         if doc:
             metadata["template_pptx_filename"] = doc.original_filename or doc.filename or os.path.basename(template_path)
+
+    # Store LLM provider/model selection
+    if request.provider_id:
+        metadata["provider_id"] = request.provider_id
+    if request.model:
+        metadata["model"] = request.model
+
+    # Store dual mode settings
+    if request.dual_mode:
+        metadata["dual_mode"] = True
+        metadata["dual_mode_blend"] = request.dual_mode_blend
 
     # Store user email for notes/metadata display
     metadata["user_email"] = user.email

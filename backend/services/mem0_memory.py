@@ -77,8 +77,8 @@ class MemoryConfig:
     """Configuration for Mem0-style memory."""
     # Storage settings
     vector_store: str = "chromadb"  # chromadb, pgvector, redis
-    embedding_model: str = "text-embedding-3-small"
-    embedding_provider: str = "openai"
+    embedding_model: Optional[str] = None
+    embedding_provider: Optional[str] = None
 
     # Retrieval settings
     top_k: int = 10                # Top memories to retrieve

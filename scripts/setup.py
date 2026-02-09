@@ -1188,10 +1188,10 @@ def start_services(project_root: Path, deps: Dict) -> bool:
     # Wait for services to start (backend may take longer due to Ray initialization)
     logger.info("Waiting for services to initialize...")
 
-    # Check services with retry (backend can take 30-60s with Ray)
+    # Check services with retry (backend can take 60-90s with service registry + table checks)
     backend_running = False
     frontend_running = False
-    max_retries = 12  # 12 * 5s = 60s max wait
+    max_retries = 24  # 24 * 5s = 120s max wait
     for i in range(max_retries):
         time.sleep(5)
         if not backend_running:
@@ -1370,21 +1370,39 @@ def stop_all_services(deps: Dict) -> Dict[str, bool]:
             logger.debug(f"{service} was not running on port {port}")
             results[service] = True  # Not an error if it wasn't running
 
-    # Stop Celery workers by process name
+    # Stop Celery workers — use SIGKILL to ensure all instances die
     system = get_platform()
     if system != 'windows':
-        code, _, _ = run_command(['pkill', '-f', 'celery.*worker'], check=False)
-        if code == 0:
-            logger.info("Stopped Celery workers")
+        run_command(['pkill', '-9', '-f', 'celery'], check=False)
+        logger.info("Stopped all Celery processes")
         results['celery'] = True
 
-    # Stop Ray processes
-    code, _, _ = run_command(['pkill', '-f', 'ray::'], check=False)
-    if code == 0:
-        logger.info("Stopped Ray processes")
-    code, _, _ = run_command(['pkill', '-f', 'raylet'], check=False)
-    code, _, _ = run_command(['pkill', '-f', 'gcs_server'], check=False)
+    # Stop Ray gracefully first, then force-kill stragglers
+    run_command(['ray', 'stop', '--force'], check=False)
+    time.sleep(2)
+    for ray_pattern in ['ray::', 'raylet', 'gcs_server', 'ray.dashboard', 'ray._private']:
+        run_command(['pkill', '-9', '-f', ray_pattern], check=False)
+    logger.info("Stopped all Ray processes")
+
+    # Clean Ray temporary directory (accumulates GBs of stale session data)
+    ray_temp = Path(os.path.expanduser("~")) / ".ray_temp"
+    if ray_temp.exists():
+        import shutil
+        try:
+            shutil.rmtree(ray_temp, ignore_errors=True)
+            logger.info("Cleaned Ray temporary directory (~/.ray_temp)")
+        except Exception as e:
+            logger.warning(f"Could not clean Ray temp dir: {e}")
     results['ray'] = True
+
+    # Delete stale 0-byte database files from old code versions
+    data_dir = Path(__file__).resolve().parent.parent / 'backend' / 'data'
+    if data_dir.exists():
+        for stale_db in ['aidoc.db', 'aidocumentindexer.db']:
+            stale_path = data_dir / stale_db
+            if stale_path.exists() and stale_path.stat().st_size == 0:
+                stale_path.unlink()
+                logger.info(f"Deleted stale empty database: {stale_db}")
 
     # Phase 98: Kill orphaned processes that may leak memory
     if system != 'windows':

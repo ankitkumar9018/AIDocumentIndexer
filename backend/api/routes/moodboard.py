@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
@@ -18,7 +18,9 @@ import json
 from uuid import UUID
 from sqlalchemy import select, func, and_
 
-from backend.services.llm import LLMFactory
+import asyncio
+
+from backend.services.llm import LLMFactory, llm_config
 from backend.services.llm_provider import LLMProviderService
 from backend.core.config import settings
 from backend.db.database import get_async_session
@@ -34,6 +36,20 @@ router = APIRouter()
 # Pydantic Models
 # =============================================================================
 
+class MultiLLMConfig(BaseModel):
+    """Configuration for multi-LLM generation."""
+    providers: List[Dict[str, str]] = Field(
+        ...,
+        description="List of {provider_id, model} pairs",
+        min_length=1,
+        max_length=3,
+    )
+    merge_strategy: str = Field(
+        default="best_of",
+        description="How to combine: 'best_of' or 'merge'"
+    )
+
+
 class MoodBoardGenerateRequest(BaseModel):
     """Request to generate a mood board."""
     name: str = Field(..., description="Mood board name")
@@ -43,16 +59,199 @@ class MoodBoardGenerateRequest(BaseModel):
     style_notes: Optional[str] = Field(None, description="Additional style notes")
     provider_id: Optional[str] = Field(None, description="LLM provider ID to use")
     model: Optional[str] = Field(None, description="Model name to use")
+    # Document inspiration
+    use_existing_docs: bool = Field(default=False, description="Use documents as inspiration")
+    collection_filters: Optional[List[str]] = Field(None, description="Filter collections for doc inspiration")
+    folder_id: Optional[str] = Field(None, description="Folder scope for doc inspiration")
+    include_subfolders: bool = Field(default=False, description="Include subfolders")
+    max_doc_sources: int = Field(default=5, ge=1, le=20, description="Max documents to use")
+    # Dual mode
+    dual_mode: bool = Field(default=False, description="Combine docs + general AI")
+    # Multi-LLM
+    multi_llm: Optional[MultiLLMConfig] = Field(None, description="Multi-LLM config")
 
 
 class GeneratedSuggestions(BaseModel):
     """AI-generated suggestions for the mood board."""
-    typography: List[str] = Field(default_factory=list, description="Suggested fonts")
-    additional_colors: List[str] = Field(default_factory=list, description="Complementary colors")
+    typography: List[Any] = Field(default_factory=list, description="Fonts — strings or {font, role, rationale, sample_text}")
+    additional_colors: List[Any] = Field(default_factory=list, description="Colors — strings or {hex, role, name}")
     mood_keywords: List[str] = Field(default_factory=list, description="Additional mood keywords")
-    inspiration_notes: str = Field(..., description="AI-generated inspiration notes")
+    inspiration_notes: str = Field(default="", description="AI-generated inspiration notes")
     design_direction: Optional[str] = Field(None, description="Design direction suggestions")
-    color_psychology: Optional[Dict[str, str]] = Field(None, description="Color psychology insights")
+    color_psychology: Optional[Dict[str, Any]] = Field(None, description="Color psychology insights")
+    visual_narrative: Optional[str] = Field(None, description="Vivid creative brief")
+    design_system: Optional[Dict[str, str]] = Field(None, description="Design system notes")
+    anti_patterns: Optional[List[str]] = Field(None, description="What to avoid")
+    image_search_terms: Optional[List[str]] = Field(None, description="Unsplash-style image search terms")
+
+
+def _normalize_suggestions(raw: dict) -> dict:
+    """Normalize the new rich prompt format into a backward-compatible structure."""
+    normalized = dict(raw)
+
+    # Typography: [{font, role, rationale}] → keep as-is but also provide flat list
+    typo = raw.get("typography", [])
+    if typo and isinstance(typo[0], dict):
+        normalized["typography"] = typo
+        normalized["_typography_flat"] = [t.get("font", t.get("name", "")) for t in typo]
+    else:
+        normalized["_typography_flat"] = typo
+
+    # Colors: [{hex, role, name}] → keep as-is but also provide flat list
+    colors = raw.get("additional_colors", [])
+    if colors and isinstance(colors[0], dict):
+        normalized["additional_colors"] = colors
+        normalized["_colors_flat"] = [c.get("hex", c.get("color", "")) for c in colors]
+    else:
+        normalized["_colors_flat"] = colors
+
+    # Color psychology: {"#hex": {"meaning":..., "pair_with":...}} → flatten for old format
+    psych = raw.get("color_psychology", {})
+    flat_psych = {}
+    for hex_val, info in psych.items():
+        if isinstance(info, dict):
+            flat_psych[hex_val] = info.get("meaning", str(info))
+        else:
+            flat_psych[hex_val] = str(info)
+    normalized["_color_psychology_flat"] = flat_psych
+
+    # Visual narrative → inspiration_notes backward compat
+    if raw.get("visual_narrative") and not raw.get("inspiration_notes"):
+        normalized["inspiration_notes"] = raw["visual_narrative"]
+
+    # Pass through image_search_terms
+    if raw.get("image_search_terms"):
+        normalized["image_search_terms"] = raw["image_search_terms"]
+
+    return normalized
+
+
+async def _call_single_llm(
+    provider_type: str,
+    model_name: Optional[str],
+    prompt: str,
+) -> Optional[dict]:
+    """Call a single LLM and parse its JSON response. Returns None on failure."""
+    try:
+        llm = LLMFactory.get_chat_model(
+            provider=provider_type,
+            model=model_name,
+            temperature=0.8,
+            max_tokens=2048,
+        )
+        response = await llm.ainvoke(prompt)
+        output = response.content.strip()
+        if output.startswith("```json"):
+            output = output[7:]
+        if output.startswith("```"):
+            output = output[3:]
+        if output.endswith("```"):
+            output = output[:-3]
+        return json.loads(output.strip())
+    except Exception as e:
+        logger.warning("Multi-LLM call failed", provider=provider_type, model=model_name, error=str(e))
+        return None
+
+
+def _score_suggestion(data: dict) -> int:
+    """Score how complete a suggestion dict is (more fields = higher)."""
+    score = 0
+    for key in ("typography", "additional_colors", "mood_keywords"):
+        val = data.get(key, [])
+        score += len(val) if isinstance(val, list) else 0
+    for key in ("visual_narrative", "inspiration_notes", "design_direction"):
+        val = data.get(key)
+        score += len(val) if isinstance(val, str) and val else 0
+    if data.get("color_psychology"):
+        score += len(data["color_psychology"]) * 10
+    if data.get("design_system"):
+        score += len(data["design_system"]) * 5
+    if data.get("anti_patterns"):
+        score += len(data["anti_patterns"]) * 5
+    return score
+
+
+def _merge_suggestions(results: list[dict]) -> dict:
+    """Merge multiple LLM suggestion dicts, picking the best parts from each."""
+    if len(results) == 1:
+        return results[0]
+
+    merged: dict = {}
+
+    # Typography: pick the set with richest rationale
+    best_typo = max(results, key=lambda r: sum(
+        len(t.get("rationale", "")) if isinstance(t, dict) else 0
+        for t in r.get("typography", [])
+    ))
+    merged["typography"] = best_typo.get("typography", [])
+
+    # Colors: pick the set with most named colors
+    best_colors = max(results, key=lambda r: sum(
+        1 for c in r.get("additional_colors", []) if isinstance(c, dict) and c.get("name")
+    ))
+    merged["additional_colors"] = best_colors.get("additional_colors", [])
+
+    # Keywords: union from all, deduplicated
+    all_kw: list[str] = []
+    seen_kw: set[str] = set()
+    for r in results:
+        for kw in r.get("mood_keywords", []):
+            low = kw.lower()
+            if low not in seen_kw:
+                seen_kw.add(low)
+                all_kw.append(kw)
+    merged["mood_keywords"] = all_kw[:8]
+
+    # Visual narrative: pick longest
+    merged["visual_narrative"] = max(
+        (r.get("visual_narrative", "") or "" for r in results), key=len
+    )
+
+    # Inspiration notes: pick longest
+    merged["inspiration_notes"] = max(
+        (r.get("inspiration_notes", "") or "" for r in results), key=len
+    )
+
+    # Design direction: pick longest
+    merged["design_direction"] = max(
+        (r.get("design_direction", "") or "" for r in results), key=len
+    ) or None
+
+    # Color psychology: merge all entries
+    psych: dict = {}
+    for r in results:
+        for hex_val, info in (r.get("color_psychology") or {}).items():
+            if hex_val not in psych:
+                psych[hex_val] = info
+    merged["color_psychology"] = psych or None
+
+    # Design system: pick the one with most keys
+    best_ds = max(results, key=lambda r: len(r.get("design_system") or {}))
+    merged["design_system"] = best_ds.get("design_system")
+
+    # Anti-patterns: union, deduplicated
+    all_ap: list[str] = []
+    seen_ap: set[str] = set()
+    for r in results:
+        for ap in r.get("anti_patterns") or []:
+            low = ap.lower()
+            if low not in seen_ap:
+                seen_ap.add(low)
+                all_ap.append(ap)
+    merged["anti_patterns"] = all_ap[:5] or None
+
+    # Image search terms: union, deduplicated
+    all_img: list[str] = []
+    seen_img: set[str] = set()
+    for r in results:
+        for term in r.get("image_search_terms") or []:
+            low = term.lower()
+            if low not in seen_img:
+                seen_img.add(low)
+                all_img.append(term)
+    merged["image_search_terms"] = all_img[:4] or None
+
+    return merged
 
 
 class MoodBoardGenerateResponse(BaseModel):
@@ -77,38 +276,61 @@ class MoodBoardSaveRequest(BaseModel):
 # Mood Board Generation Prompt
 # =============================================================================
 
-MOODBOARD_PROMPT = """You are an expert visual designer and brand strategist. Based on the following mood board inputs, generate creative suggestions to enhance the visual direction.
+MOODBOARD_PROMPT = """You are an elite creative director with deep expertise in visual design, brand strategy, color theory, and typography. Build a comprehensive mood board specification.
 
-**Mood Board Name:** {name}
-**Description/Concept:** {description}
-**Color Palette:** {colors}
+**Project:** {name}
+**Concept:** {description}
+**Existing Palette:** {colors}
 **Style Keywords:** {keywords}
-**Additional Notes:** {style_notes}
+**Brief:** {style_notes}
 
-Analyze the inputs and provide:
+Be specific, bold, and opinionated. Reference real design movements and concrete visual references. No generic advice.
 
-1. **Typography Suggestions**: 3 font families that complement the mood (mix of serif, sans-serif, display fonts as appropriate)
+Provide:
 
-2. **Complementary Colors**: 3 additional hex colors that enhance the existing palette
+1. **Typography** (3 fonts): Specific Google Fonts that work as a hierarchy. For each, explain WHY it fits (e.g. "Playfair Display — high-contrast serifs evoke editorial luxury"). Include heading, body, and accent roles. For each font, also provide a short evocative sample headline (3-6 words) that showcases the font's personality.
 
-3. **Mood Keywords**: 3-5 additional mood/style descriptors that align with the concept
+2. **Extended Palette** (3-4 colors): Complementary hex colors with purpose. Specify each color's role (accent, background, text, highlight) and give it a descriptive name.
 
-4. **Inspiration Notes**: A 2-3 sentence description of the overall aesthetic direction, including what emotions it evokes and what industries/use cases it would suit
+3. **Mood Keywords** (5-7): Go beyond surface adjectives. Use evocative, synesthetic descriptors (e.g. "hand-thrown ceramic warmth" not "warm", "brutalist concrete grid" not "structured").
 
-5. **Design Direction**: Specific guidance on visual elements like shapes, textures, imagery styles
+4. **Visual Narrative** (3-4 sentences): A vivid creative brief referencing specific textures, photographic styles, spatial qualities, and cultural touchstones.
 
-6. **Color Psychology**: Brief insight into what each main color communicates
+5. **Design System**: Corner radius style, shadow approach, layout density, imagery style (photo vs illustration, saturated vs muted), iconography style.
 
-Respond ONLY with a valid JSON object in this exact format:
+6. **Color Psychology**: For each color (existing + new), describe emotional effect AND suggest a pairing partner with context.
+
+7. **Anti-patterns** (2-3): What to explicitly avoid with this aesthetic.
+
+8. **Image Search Terms** (3-4): Unsplash-style search keywords for finding reference imagery that matches this mood (e.g. "minimalist architecture fog", "hand-dyed indigo textile closeup").
+
+Respond ONLY with valid JSON:
 {{
-  "typography": ["Font1", "Font2", "Font3"],
-  "additional_colors": ["#hexcode1", "#hexcode2", "#hexcode3"],
-  "mood_keywords": ["keyword1", "keyword2", "keyword3"],
-  "inspiration_notes": "Your 2-3 sentence aesthetic description",
-  "design_direction": "Specific guidance on visual elements",
+  "typography": [
+    {{"font": "Font Name", "role": "heading", "rationale": "why this font", "sample_text": "Short Evocative Headline"}},
+    {{"font": "Font Name", "role": "body", "rationale": "why", "sample_text": "Words That Flow"}},
+    {{"font": "Font Name", "role": "accent", "rationale": "why", "sample_text": "Bold Statement"}}
+  ],
+  "additional_colors": [
+    {{"hex": "#hexcode", "role": "accent", "name": "Descriptive Name"}},
+    {{"hex": "#hexcode", "role": "background", "name": "Descriptive Name"}}
+  ],
+  "mood_keywords": ["evocative keyword 1", "evocative keyword 2"],
+  "visual_narrative": "3-4 sentence vivid creative brief",
+  "design_system": {{
+    "corner_radius": "description",
+    "shadows": "description",
+    "layout_density": "description",
+    "imagery_style": "description",
+    "iconography": "description"
+  }},
   "color_psychology": {{
-    "#hexcode": "what this color communicates"
-  }}
+    "#hexcode": {{"meaning": "emotional effect", "pair_with": "#hexcode2", "pair_context": "why this pairing"}}
+  }},
+  "anti_patterns": ["avoid this", "avoid that"],
+  "image_search_terms": ["evocative search term 1", "evocative search term 2", "evocative search term 3"],
+  "inspiration_notes": "same as visual_narrative for backward compat",
+  "design_direction": "1-2 sentence summary of design system notes"
 }}"""
 
 
@@ -136,16 +358,16 @@ async def generate_mood_board(
         keywords_count=len(request.keywords),
     )
 
-    # Get provider configuration
-    provider_type = "openai"
-    model_name = request.model or "gpt-4o"
+    # Get provider configuration — use system default, not hardcoded "openai"
+    provider_type = llm_config.default_provider
+    model_name = request.model or None
 
     if request.provider_id:
         try:
             provider = await LLMProviderService.get_provider(db, request.provider_id)
             if provider:
                 provider_type = provider.provider_type
-                model_name = request.model or provider.default_chat_model or "gpt-4o"
+                model_name = request.model or provider.default_chat_model
         except Exception as e:
             logger.warning(f"Could not load provider {request.provider_id}: {e}")
 
@@ -161,43 +383,88 @@ async def generate_mood_board(
         style_notes=request.style_notes or "None provided",
     )
 
-    # Get LLM and execute
-    try:
-        llm = LLMFactory.get_chat_model(
-            provider=provider_type,
-            model=model_name,
-            temperature=0.8,  # Slightly higher for creativity
-            max_tokens=2048,
-        )
-
-        response = await llm.ainvoke(formatted_prompt)
-        output = response.content
-
-        # Parse JSON response
+    # Add document context if "Use Docs as Inspiration" is enabled
+    if request.use_existing_docs:
         try:
-            # Clean up the response if needed
-            output_clean = output.strip()
-            if output_clean.startswith("```json"):
-                output_clean = output_clean[7:]
-            if output_clean.startswith("```"):
-                output_clean = output_clean[3:]
-            if output_clean.endswith("```"):
-                output_clean = output_clean[:-3]
+            from backend.services.rag import get_rag_service
+            rag = await get_rag_service()
+            search_query = f"{request.name} {' '.join(request.keywords or [])} design style theme"
+            results = await rag.search(
+                query=search_query,
+                collection_filters=request.collection_filters,
+                folder_id=request.folder_id,
+                include_subfolders=request.include_subfolders,
+                top_k=request.max_doc_sources,
+            )
+            if results and hasattr(results, "chunks") and results.chunks:
+                doc_snippets = "\n---\n".join([c.content[:500] for c in results.chunks[:request.max_doc_sources]])
+                formatted_prompt += f"\n\nDocument Context (use these as inspiration for design direction, themes, and content):\n{doc_snippets}"
+                logger.info("Added document context to moodboard prompt", num_chunks=len(results.chunks))
+        except Exception as e:
+            logger.warning("Failed to fetch document context for moodboard", error=str(e))
 
-            suggestions_data = json.loads(output_clean.strip())
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse LLM response as JSON: {e}")
-            # Provide fallback suggestions
-            suggestions_data = {
-                "typography": ["Inter", "Playfair Display", "Space Grotesk"],
-                "additional_colors": ["#f97316", "#22c55e", "#0ea5e9"],
-                "mood_keywords": ["modern", "elegant", "sophisticated"],
-                "inspiration_notes": f"Based on the {request.name} concept with {keywords_str} aesthetic, this mood board suggests a contemporary direction with the provided color palette.",
-                "design_direction": "Focus on clean lines and balanced compositions.",
-                "color_psychology": {},
-            }
+    # Get LLM(s) and execute
+    try:
+        models_used: list[str] = []
 
-        # Build response
+        if request.multi_llm and len(request.multi_llm.providers) > 1:
+            # ── Multi-LLM: call providers in parallel ──
+            provider_configs: list[tuple[str, Optional[str]]] = []
+            for p in request.multi_llm.providers:
+                p_type = llm_config.default_provider
+                p_model = p.get("model")
+                if p.get("provider_id"):
+                    try:
+                        prov = await LLMProviderService.get_provider(db, p["provider_id"])
+                        if prov:
+                            p_type = prov.provider_type
+                            p_model = p_model or prov.default_chat_model
+                    except Exception:
+                        pass
+                provider_configs.append((p_type, p_model))
+
+            logger.info("Multi-LLM moodboard generation", providers=len(provider_configs),
+                        strategy=request.multi_llm.merge_strategy)
+
+            raw_results = await asyncio.gather(
+                *[_call_single_llm(pt, pm, formatted_prompt) for pt, pm in provider_configs],
+                return_exceptions=True,
+            )
+
+            valid_results = [r for r in raw_results if isinstance(r, dict)]
+            models_used = [f"{pt}/{pm}" for (pt, pm), r in zip(provider_configs, raw_results)
+                           if isinstance(r, dict)]
+
+            if not valid_results:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="All LLM providers failed to generate suggestions",
+                )
+
+            if request.multi_llm.merge_strategy == "merge":
+                suggestions_data = _merge_suggestions(valid_results)
+            else:
+                # best_of: pick the most complete response
+                suggestions_data = max(valid_results, key=_score_suggestion)
+
+        else:
+            # ── Single LLM call ──
+            result = await _call_single_llm(provider_type, model_name, formatted_prompt)
+            if result is None:
+                # Fallback
+                result = {
+                    "typography": ["Inter", "Playfair Display", "Space Grotesk"],
+                    "additional_colors": ["#f97316", "#22c55e", "#0ea5e9"],
+                    "mood_keywords": ["modern", "elegant", "sophisticated"],
+                    "inspiration_notes": f"Based on the {request.name} concept with {keywords_str} aesthetic, this mood board suggests a contemporary direction with the provided color palette.",
+                    "design_direction": "Focus on clean lines and balanced compositions.",
+                    "color_psychology": {},
+                }
+            suggestions_data = result
+            models_used = [f"{provider_type}/{model_name}"]
+
+        # Normalize and build response
+        suggestions_data = _normalize_suggestions(suggestions_data)
         suggestions = GeneratedSuggestions(
             typography=suggestions_data.get("typography", ["Inter", "Roboto", "Open Sans"]),
             additional_colors=suggestions_data.get("additional_colors", ["#f97316", "#22c55e", "#0ea5e9"]),
@@ -205,6 +472,10 @@ async def generate_mood_board(
             inspiration_notes=suggestions_data.get("inspiration_notes", "A sophisticated visual direction."),
             design_direction=suggestions_data.get("design_direction"),
             color_psychology=suggestions_data.get("color_psychology"),
+            visual_narrative=suggestions_data.get("visual_narrative"),
+            design_system=suggestions_data.get("design_system"),
+            anti_patterns=suggestions_data.get("anti_patterns"),
+            image_search_terms=suggestions_data.get("image_search_terms"),
         )
 
         board_id = str(uuid4())
@@ -212,7 +483,7 @@ async def generate_mood_board(
         logger.info(
             "Mood board generated successfully",
             board_id=board_id,
-            model=model_name,
+            models=models_used,
         )
 
         return MoodBoardGenerateResponse(
@@ -224,7 +495,7 @@ async def generate_mood_board(
             style_notes=request.style_notes,
             generated_suggestions=suggestions,
             created_at=datetime.utcnow().isoformat(),
-            model_used=f"{provider_type}/{model_name}",
+            model_used=" + ".join(models_used),
         )
 
     except Exception as e:
@@ -265,13 +536,25 @@ async def save_mood_board(
 
     # Extract generated suggestions if present
     suggestions = board_data.get("generated_suggestions", {})
+    if suggestions:
+        suggestions = _normalize_suggestions(suggestions)
+
     color_palette = board_data.get("colors", [])
-    if suggestions.get("additional_colors"):
+    if suggestions.get("_colors_flat"):
+        existing = {c.lower() for c in color_palette}
+        new_colors = [c for c in suggestions["_colors_flat"] if c.lower() not in existing]
+        color_palette = color_palette + new_colors[:max(0, 8 - len(color_palette))]
+    elif suggestions.get("additional_colors"):
         color_palette = color_palette + suggestions.get("additional_colors", [])
 
     style_tags = board_data.get("keywords", [])
     if suggestions.get("mood_keywords"):
-        style_tags = style_tags + suggestions.get("mood_keywords", [])
+        existing = {k.lower() for k in style_tags}
+        new_kw = [k for k in suggestions["mood_keywords"] if k.lower() not in existing]
+        style_tags = style_tags + new_kw
+
+    # Extract flat font names from rich typography
+    themes = suggestions.get("_typography_flat", suggestions.get("typography", []))
 
     # Create the MoodBoard record
     mood_board = MoodBoard(
@@ -280,10 +563,12 @@ async def save_mood_board(
         description=description,
         prompt=prompt,
         status=MoodBoardStatus.COMPLETED.value,
-        images=[],  # User can add images later
-        themes=suggestions.get("typography", []),
+        images=[],
+        themes=themes,
         color_palette=color_palette,
         style_tags=style_tags,
+        generated_suggestions=suggestions,
+        canvas_data=board_data.get("canvas_data"),
         is_public=False,
     )
 
@@ -340,6 +625,8 @@ async def list_mood_boards(
                 "prompt": b.prompt,
                 "status": b.status,
                 "thumbnail_url": b.thumbnail_url,
+                "color_palette": b.color_palette or [],
+                "themes": b.themes or [],
                 "style_tags": b.style_tags or [],
                 "created_at": b.created_at.isoformat(),
             }
@@ -389,11 +676,295 @@ async def get_mood_board(
         "themes": board.themes or [],
         "color_palette": board.color_palette or [],
         "style_tags": board.style_tags or [],
+        "generated_suggestions": board.generated_suggestions or {},
+        "canvas_data": board.canvas_data,
         "thumbnail_url": board.thumbnail_url,
         "is_public": board.is_public,
         "created_at": board.created_at.isoformat(),
         "updated_at": board.updated_at.isoformat(),
     }
+
+
+class MoodBoardUpdateRequest(BaseModel):
+    """Request to update a mood board."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    color_palette: Optional[List[str]] = None
+    themes: Optional[List[str]] = None
+    style_tags: Optional[List[str]] = None
+    generated_suggestions: Optional[Dict[str, Any]] = None
+    canvas_data: Optional[Dict[str, Any]] = None
+
+
+@router.patch("/{board_id}")
+async def update_mood_board(
+    board_id: str,
+    request: MoodBoardUpdateRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Update a mood board's editable fields.
+    """
+    try:
+        board_uuid = UUID(board_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid mood board ID")
+
+    result = await db.execute(
+        select(MoodBoard).where(
+            MoodBoard.id == board_uuid,
+            MoodBoard.user_id == user.user_id,
+        )
+    )
+    board = result.scalar_one_or_none()
+
+    if not board:
+        raise HTTPException(status_code=404, detail="Mood board not found")
+
+    # Apply updates
+    if request.name is not None:
+        board.name = request.name
+    if request.description is not None:
+        board.description = request.description
+    if request.color_palette is not None:
+        board.color_palette = request.color_palette
+    if request.themes is not None:
+        board.themes = request.themes
+    if request.style_tags is not None:
+        board.style_tags = request.style_tags
+    if request.generated_suggestions is not None:
+        board.generated_suggestions = request.generated_suggestions
+    if request.canvas_data is not None:
+        board.canvas_data = request.canvas_data
+
+    await db.commit()
+    await db.refresh(board)
+
+    logger.info("Mood board updated", board_id=board_id, user_id=user.user_id)
+
+    return {
+        "id": str(board.id),
+        "name": board.name,
+        "description": board.description,
+        "prompt": board.prompt,
+        "status": board.status,
+        "images": board.images or [],
+        "themes": board.themes or [],
+        "color_palette": board.color_palette or [],
+        "style_tags": board.style_tags or [],
+        "generated_suggestions": board.generated_suggestions or {},
+        "canvas_data": board.canvas_data,
+        "thumbnail_url": board.thumbnail_url,
+        "is_public": board.is_public,
+        "created_at": board.created_at.isoformat(),
+        "updated_at": board.updated_at.isoformat(),
+    }
+
+
+class CanvasUpdateRequest(BaseModel):
+    """Lightweight request for auto-saving canvas positions."""
+    canvas_data: Dict[str, Any]
+
+
+@router.put("/{board_id}/canvas")
+async def update_canvas(
+    board_id: str,
+    request: CanvasUpdateRequest,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Quick-save canvas layout without touching other fields. Designed for auto-save."""
+    try:
+        board_uuid = UUID(board_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid mood board ID")
+
+    result = await db.execute(
+        select(MoodBoard).where(
+            MoodBoard.id == board_uuid,
+            MoodBoard.user_id == user.user_id,
+        )
+    )
+    board = result.scalar_one_or_none()
+    if not board:
+        raise HTTPException(status_code=404, detail="Mood board not found")
+
+    board.canvas_data = request.canvas_data
+    await db.commit()
+
+    return {"saved": True, "board_id": board_id}
+
+
+@router.post("/document-preview")
+async def preview_documents(
+    user: AuthenticatedUser,
+    name: str = "",
+    keywords: List[str] = Query(default=[]),
+    collection_filters: Optional[List[str]] = Query(default=None),
+    folder_id: Optional[str] = None,
+    include_subfolders: bool = False,
+    max_sources: int = Query(default=5, ge=1, le=20),
+):
+    """Preview which documents will be used as inspiration before generating."""
+    try:
+        from backend.services.rag import get_rag_service
+        rag = await get_rag_service()
+        search_query = f"{name} {' '.join(keywords)} design style theme"
+        results = await rag.search(
+            query=search_query,
+            collection_filters=collection_filters,
+            folder_id=folder_id,
+            include_subfolders=include_subfolders,
+            top_k=max_sources,
+        )
+        docs = []
+        if results and hasattr(results, "chunks") and results.chunks:
+            for c in results.chunks[:max_sources]:
+                docs.append({
+                    "title": c.metadata.get("source", c.metadata.get("document_name", "Unknown")),
+                    "snippet": c.content[:300],
+                    "score": round(getattr(c, "score", 0.0), 3),
+                    "doc_id": c.metadata.get("document_id", ""),
+                })
+        return {"documents": docs, "total_found": len(docs)}
+    except Exception as e:
+        logger.error("Document preview failed", error=str(e))
+        return {"documents": [], "total_found": 0, "error": str(e)}
+
+
+@router.post("/{board_id}/enhance")
+async def enhance_mood_board(
+    board_id: str,
+    user: AuthenticatedUser,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Generate/regenerate AI suggestions for an existing mood board.
+    Useful for boards created before the generated_suggestions feature,
+    or to refresh suggestions with a new LLM call.
+    """
+    try:
+        board_uuid = UUID(board_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid mood board ID")
+
+    result = await db.execute(
+        select(MoodBoard).where(
+            MoodBoard.id == board_uuid,
+            MoodBoard.user_id == user.user_id,
+        )
+    )
+    board = result.scalar_one_or_none()
+
+    if not board:
+        raise HTTPException(status_code=404, detail="Mood board not found")
+
+    # Build prompt from existing board data
+    colors_str = ", ".join(board.color_palette or []) or "Not specified"
+    keywords_str = ", ".join(board.style_tags or []) or "Not specified"
+
+    formatted_prompt = MOODBOARD_PROMPT.format(
+        name=board.name,
+        description=board.description or "Not specified",
+        colors=colors_str,
+        keywords=keywords_str,
+        style_notes="Enhance this existing mood board with rich design insights",
+    )
+
+    # Get LLM and generate
+    provider_type = llm_config.default_provider
+    model_name = None
+
+    try:
+        llm = LLMFactory.get_chat_model(
+            provider=provider_type,
+            model=model_name,
+            temperature=0.8,
+            max_tokens=2048,
+        )
+
+        response = await llm.ainvoke(formatted_prompt)
+        output = response.content
+
+        # Parse JSON response
+        output_clean = output.strip()
+        if output_clean.startswith("```json"):
+            output_clean = output_clean[7:]
+        if output_clean.startswith("```"):
+            output_clean = output_clean[3:]
+        if output_clean.endswith("```"):
+            output_clean = output_clean[:-3]
+
+        try:
+            suggestions_data = json.loads(output_clean.strip())
+        except json.JSONDecodeError:
+            suggestions_data = {
+                "typography": board.themes or ["Inter", "Playfair Display", "Space Grotesk"],
+                "additional_colors": ["#f97316", "#22c55e", "#0ea5e9"],
+                "mood_keywords": ["modern", "elegant", "sophisticated"],
+                "inspiration_notes": f"A visual exploration of the {board.name} concept, blending {keywords_str} aesthetics.",
+                "design_direction": "Focus on clean lines and balanced compositions with the existing palette.",
+                "color_psychology": {},
+            }
+
+        # Normalize the new format
+        suggestions_data = _normalize_suggestions(suggestions_data)
+
+        # Update the board
+        board.generated_suggestions = suggestions_data
+
+        # Also update themes if they were empty
+        if not board.themes and suggestions_data.get("_typography_flat"):
+            board.themes = suggestions_data["_typography_flat"]
+        elif not board.themes and suggestions_data.get("typography"):
+            board.themes = suggestions_data["typography"]
+
+        # Add extra colors (cap at 8 total, case-insensitive dedup)
+        extra_colors = suggestions_data.get("_colors_flat", []) or suggestions_data.get("additional_colors", [])
+        if extra_colors and board.color_palette:
+            existing = {c.lower() for c in board.color_palette}
+            new_colors = [c for c in extra_colors if isinstance(c, str) and c.lower() not in existing]
+            remaining = 8 - len(board.color_palette)
+            if new_colors and remaining > 0:
+                board.color_palette = board.color_palette + new_colors[:remaining]
+
+        # Add keywords (case-insensitive dedup)
+        if suggestions_data.get("mood_keywords") and board.style_tags:
+            existing = {k.lower() for k in board.style_tags}
+            new_kw = [k for k in suggestions_data["mood_keywords"] if k.lower() not in existing]
+            if new_kw:
+                board.style_tags = board.style_tags + new_kw
+
+        await db.commit()
+        await db.refresh(board)
+
+        logger.info("Mood board enhanced", board_id=board_id, user_id=user.user_id)
+
+        return {
+            "id": str(board.id),
+            "name": board.name,
+            "description": board.description,
+            "prompt": board.prompt,
+            "status": board.status,
+            "images": board.images or [],
+            "themes": board.themes or [],
+            "color_palette": board.color_palette or [],
+            "style_tags": board.style_tags or [],
+            "generated_suggestions": board.generated_suggestions or {},
+            "canvas_data": board.canvas_data,
+            "thumbnail_url": board.thumbnail_url,
+            "is_public": board.is_public,
+            "created_at": board.created_at.isoformat(),
+            "updated_at": board.updated_at.isoformat(),
+        }
+
+    except Exception as e:
+        logger.error("Mood board enhancement failed", board_id=board_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Enhancement failed: {str(e)}"
+        )
 
 
 @router.delete("/{board_id}")

@@ -709,8 +709,25 @@ class DocumentPipeline:
                     max_images = await settings_svc.get_setting("rag.max_images_per_document") or 50
                     images_to_chunk = extracted.extracted_images[:max_images] if max_images > 0 else extracted.extracted_images
 
+                    # Patterns for garbage image captions (stock photo attributions, etc.)
+                    import re
+                    _GARBAGE_CAPTION_PATTERNS = [
+                        re.compile(r"getty\s+images", re.IGNORECASE),
+                        re.compile(r"shutterstock", re.IGNORECASE),
+                        re.compile(r"istock\s*photo", re.IGNORECASE),
+                        re.compile(r"alamy", re.IGNORECASE),
+                        re.compile(r"stock\s+photo", re.IGNORECASE),
+                    ]
+
                     for i, (img, caption) in enumerate(zip(images_to_chunk, image_captions)):
                         if caption and caption.strip():
+                            caption_stripped = caption.strip()
+                            # Skip garbage captions: too short or stock photo attributions
+                            if len(caption_stripped) < 30:
+                                continue
+                            if any(p.search(caption_stripped) for p in _GARBAGE_CAPTION_PATTERNS):
+                                continue
+
                             page_info = f" on page {img.page_number}" if img.page_number else ""
                             image_content = f"[IMAGE{page_info}]: {caption}"
 
@@ -825,8 +842,9 @@ class DocumentPipeline:
                     # Convert to standard Chunk format
                     chunks = [
                         Chunk(
-                            text=fc.text,
-                            metadata={**result.metadata, "chunk_index": i, "fast_chunked": True},
+                            content=fc.content,
+                            chunk_index=i,
+                            metadata={**result.metadata, **(fc.metadata or {}), "chunk_index": i, "fast_chunked": True},
                             document_id=document_id,
                         )
                         for i, fc in enumerate(fast_chunks)
@@ -1453,6 +1471,8 @@ class DocumentPipeline:
                     # Estimate token count: ~4 chars per token for English text
                     "token_count": getattr(embedding, 'token_count', None) or len(chunk.content) // 4,
                     "char_count": len(chunk.content),
+                    # Pass through chunk metadata (contains content_type from chunker)
+                    "metadata": chunk.metadata,
                 })
 
             # Add to vector store with multi-tenant metadata

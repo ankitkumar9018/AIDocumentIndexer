@@ -110,7 +110,7 @@ class QueryExpansionConfig:
     expansion_count: int = 2  # Default: generate 2 additional variations
 
     # Model settings
-    model: str = "gpt-4o-mini"  # Cost-effective model
+    model: Optional[str] = None  # Resolved lazily from llm_config
     temperature: float = 0.7  # Higher temp for more diverse variations
     max_tokens: int = 200
 
@@ -125,7 +125,7 @@ class QueryExpansionConfig:
     multi_query_count: int = 3  # Number of perspective variations
 
     # Provider config
-    provider: str = "openai"
+    provider: Optional[str] = None
 
     # Caching (Phase 69: Enhanced with TTL and size limits)
     cache_expansions: bool = True  # Cache expanded queries to avoid re-processing
@@ -285,10 +285,13 @@ class QueryExpander:
                     "Failed to get LLM from factory, using direct import",
                     error=str(e),
                 )
-                # Fallback to direct import
+                # Fallback to direct import with lazy resolution
+                from backend.services.llm import llm_config
                 from langchain_openai import ChatOpenAI
+
+                _model = self.config.model or llm_config.default_chat_model
                 self._llm = ChatOpenAI(
-                    model=self.config.model,
+                    model=_model,
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
                 )
