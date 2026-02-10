@@ -158,7 +158,7 @@ class DOCXGenerator(BaseFormatGenerator):
                     image_service = get_image_generator(image_config)
 
                     sections_data = [
-                        (section.title, section.revised_content or section.content)
+                        (section.title, section.revised_content if section.revised_content and section.revised_content.strip() else section.content)
                         for section in job.sections
                     ]
                     images = await image_service.generate_batch(
@@ -205,7 +205,7 @@ class DOCXGenerator(BaseFormatGenerator):
 
             # Subtitle
             doc.add_paragraph()
-            if job.outline:
+            if job.outline and job.outline.description:
                 desc_para = doc.add_paragraph()
                 desc_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 desc_run = desc_para.add_run(job.outline.description)
@@ -355,13 +355,18 @@ class DOCXGenerator(BaseFormatGenerator):
 
             # ========== CONTENT SECTIONS ==========
             for idx, section in enumerate(job.sections):
+                # Validate title
+                if not section.title or not section.title.strip():
+                    logger.warning(f"Section {idx + 1} has empty title, using default", section_idx=idx)
+                    section.title = f"Section {idx + 1}"
+
                 # ========== PRE-RENDER REVIEW & FIX (Optional) ==========
                 if section_reviewer:
                     try:
                         section_spec = {
                             "heading": section.title or f"Section {idx + 1}",
                             "heading_level": 1,
-                            "paragraphs": [{"text": section.revised_content or section.content or ""}],
+                            "paragraphs": [{"text": (section.revised_content if section.revised_content and section.revised_content.strip() else section.content) or ""}],
                             "bullet_points": [],
                             "font_heading": heading_font,
                             "font_body": body_font,
@@ -405,7 +410,11 @@ class DOCXGenerator(BaseFormatGenerator):
 
                 add_bookmark_to_paragraph(heading, f"section_{idx + 1}")
 
-                content = section.revised_content or section.content
+                content = section.revised_content if section.revised_content and section.revised_content.strip() else section.content
+                if not content or not content.strip():
+                    logger.warning("Section has empty content, adding placeholder",
+                                   section_idx=idx, title=section.title[:50] if section.title else "No title")
+                    content = "Content not available for this section."
 
                 # Chart detection
                 rendered_as_chart = False
@@ -694,7 +703,7 @@ class DOCXGenerator(BaseFormatGenerator):
                         add_source_reference(source)
 
             # Save document
-            output_path = os.path.join(config.output_dir, f"{filename}.docx")
+            output_path = os.path.join(config.output_dir, filename)
             doc.save(output_path)
 
             logger.info("DOCX generated", path=output_path)

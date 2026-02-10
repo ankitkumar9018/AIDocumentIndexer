@@ -31,11 +31,18 @@ function ColorSwatchNodeBase({ id, data, selected }: NodeProps<Node<ColorSwatchD
         </span>
       )}
 
-      {/* Hex label + psychology */}
-      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/30 to-transparent p-3 opacity-0 group-hover:opacity-100 transition-opacity">
+      {/* Hex label + psychology + pairing */}
+      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/40 to-transparent p-3 opacity-0 group-hover:opacity-100 transition-opacity">
         <span className="text-xs font-mono text-white/90 drop-shadow-sm">{data.color}</span>
         {data.label && <span className="text-[10px] text-white/70 block">{data.label}</span>}
         {data.psychology && <span className="text-[9px] text-white/50 block mt-0.5 italic">{data.psychology}</span>}
+        {data.pairWith && (
+          <span className="text-[9px] text-white/40 block mt-1">
+            Pairs with{" "}
+            <span className="font-mono" style={{ color: data.pairWith }}>{data.pairWith}</span>
+            {data.pairContext && <span className="italic"> — {data.pairContext}</span>}
+          </span>
+        )}
       </div>
 
       {/* Color picker overlay */}

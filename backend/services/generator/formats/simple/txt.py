@@ -11,7 +11,7 @@ import structlog
 
 from ..base import BaseFormatGenerator
 from ..factory import register_generator
-from ...models import OutputFormat
+from ...models import OutputFormat, GenerationConfig
 
 if TYPE_CHECKING:
     from ...models import GenerationJob
@@ -54,19 +54,10 @@ class TXTGenerator(BaseFormatGenerator):
         Returns:
             Path to the generated text file
         """
-        # Plain text generation - similar to markdown but without formatting
-        from backend.services.generator import get_generation_service
-
-        service = get_generation_service()
-
-        # Use markdown generator as base, but strip markdown
-        # Or implement simple text generation
-        from ...config import GenerationConfig
+        from ...utils import strip_markdown
 
         config = GenerationConfig()
-        output_dir = config.output_dir
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, filename)
+        output_path = os.path.join(config.output_dir, filename)
 
         # Build plain text content
         lines = []
@@ -75,8 +66,9 @@ class TXTGenerator(BaseFormatGenerator):
         lines.append("=" * 60)
         lines.append("")
 
-        if job.description:
-            lines.append(job.description)
+        # Use outline description (consistent with HTML/Markdown generators)
+        if job.outline and job.outline.description:
+            lines.append(strip_markdown(job.outline.description))
             lines.append("")
 
         lines.append("-" * 60)
@@ -86,15 +78,23 @@ class TXTGenerator(BaseFormatGenerator):
             lines.append(f"  {i}. {section.title}")
         lines.append("")
 
-        for section in job.sections:
+        for section_idx, section in enumerate(job.sections):
+            # Validate title
+            if not section.title or not section.title.strip():
+                logger.warning(f"Section {section_idx + 1} has empty title, using default", section_idx=section_idx)
+                section.title = f"Section {section_idx + 1}"
+
             lines.append("-" * 60)
             lines.append(section.title.upper())
             lines.append("-" * 60)
             lines.append("")
 
             # Get content, strip any markdown
-            from ...utils import strip_markdown
-            content = section.revised_content or section.content
+            content = section.revised_content if section.revised_content and section.revised_content.strip() else section.content
+            if not content or not content.strip():
+                logger.warning("Section has empty content, adding placeholder",
+                               title=section.title[:50] if section.title else "No title")
+                content = "Content not available for this section."
             content = strip_markdown(content)
             lines.append(content)
             lines.append("")
@@ -154,5 +154,5 @@ class TXTGenerator(BaseFormatGenerator):
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
 
-        logger.info(f"Generated plain text document: {output_path}")
+        logger.info("Plain text generated", path=output_path)
         return output_path

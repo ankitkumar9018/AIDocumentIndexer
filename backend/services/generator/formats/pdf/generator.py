@@ -105,7 +105,7 @@ class PDFGenerator(BaseFormatGenerator):
                     image_service = get_image_generator(image_config)
 
                     sections_data = [
-                        (section.title, section.revised_content or section.content)
+                        (section.title, section.revised_content if section.revised_content and section.revised_content.strip() else section.content)
                         for section in job.sections
                     ]
                     images = await image_service.generate_batch(
@@ -169,7 +169,7 @@ class PDFGenerator(BaseFormatGenerator):
             TEXT_COLOR = HexColor(theme["text"])
             LIGHT_GRAY = HexColor(theme["light_gray"])
 
-            output_path = os.path.join(config.output_dir, f"{filename}.pdf")
+            output_path = os.path.join(config.output_dir, filename)
 
             # Page number callback
             def add_page_number(canvas, doc, font=body_font):
@@ -284,7 +284,7 @@ class PDFGenerator(BaseFormatGenerator):
             story.append(Spacer(1, 0.3*inch))
 
             # Description
-            if job.outline:
+            if job.outline and job.outline.description:
                 story.append(Paragraph(job.outline.description, cover_subtitle_style))
 
             story.append(Spacer(1, 2*inch))
@@ -337,11 +337,20 @@ class PDFGenerator(BaseFormatGenerator):
 
             # ========== CONTENT SECTIONS ==========
             for idx, section in enumerate(job.sections):
+                # Validate title
+                if not section.title or not section.title.strip():
+                    logger.warning(f"Section {idx + 1} has empty title, using default", section_idx=idx)
+                    section.title = f"Section {idx + 1}"
+
                 # Section heading with bookmark anchor
                 heading_text = f'<a name="section_{idx + 1}"/>{idx + 1}. {section.title}'
                 story.append(Paragraph(heading_text, heading_style))
 
-                content = section.revised_content or section.content
+                content = section.revised_content if section.revised_content and section.revised_content.strip() else section.content
+                if not content or not content.strip():
+                    logger.warning("Section has empty content, adding placeholder",
+                                   section_idx=idx, title=section.title[:50] if section.title else "No title")
+                    content = "Content not available for this section."
 
                 # Chart detection
                 rendered_as_chart = False
@@ -519,24 +528,29 @@ class PDFGenerator(BaseFormatGenerator):
                         else:
                             location_info = f" (Page {source.page_number})"
 
-                    # Add usage description if available
+                    # Add usage description if available (escape for ReportLab markup)
                     usage_info = ""
                     if hasattr(source, 'usage_description') and source.usage_description:
-                        usage_info = f" — {source.usage_description}"
+                        safe_desc = source.usage_description.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        usage_info = f" — {safe_desc}"
 
-                    # Check for hyperlink
+                    # Check for hyperlink (validate URL scheme)
                     hyperlink_url = None
                     if hasattr(source, 'document_url') and source.document_url:
-                        hyperlink_url = source.document_url
+                        url = source.document_url
+                        if url.startswith(('http://', 'https://', 'file://')):
+                            hyperlink_url = url
                     elif hasattr(source, 'document_path') and source.document_path:
                         import urllib.parse
                         hyperlink_url = f"file://{urllib.parse.quote(source.document_path)}"
 
-                    ref_text = f"• {doc_name}{location_info}{usage_info}"
+                    # Escape doc_name for ReportLab markup
+                    safe_doc_name = doc_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    ref_text = f"• {safe_doc_name}{location_info}{usage_info}"
 
                     # Add hyperlink if available (PDF supports hyperlinks via <link> tag)
                     if hyperlink_url:
-                        ref_text = f'• <link href="{hyperlink_url}"><u>{doc_name}</u></link>{location_info}{usage_info}'
+                        ref_text = f'• <link href="{hyperlink_url}"><u>{safe_doc_name}</u></link>{location_info}{usage_info}'
 
                     ref_style = ParagraphStyle(
                         'RefStyle',

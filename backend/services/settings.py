@@ -1300,6 +1300,20 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         description="Include source citations in generated documents"
     ),
     SettingDefinition(
+        key="generation.dual_mode",
+        category=SettingCategory.GENERATION,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Enable dual mode: combine document knowledge with general AI knowledge for richer content"
+    ),
+    SettingDefinition(
+        key="generation.dual_mode_blend",
+        category=SettingCategory.GENERATION,
+        default_value="docs_first",
+        value_type=ValueType.STRING,
+        description="Dual mode blend strategy: 'docs_first' (documents primary, AI fills gaps) or 'merged' (equal blend)"
+    ),
+    SettingDefinition(
         key="generation.auto_charts",
         category=SettingCategory.GENERATION,
         default_value=False,

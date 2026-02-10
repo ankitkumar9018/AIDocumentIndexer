@@ -223,6 +223,18 @@ class GenerationConfig:
         )
     )
 
+    # Dual mode settings - combine document knowledge with general AI knowledge
+    dual_mode: bool = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.dual_mode", "GENERATION_DUAL_MODE", False
+        )
+    )
+    dual_mode_blend: str = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.dual_mode_blend", "GENERATION_DUAL_MODE_BLEND", "docs_first"
+        )
+    )
+
     # Workflow settings
     require_outline_approval: bool = True
     require_section_planning_review: bool = True  # Show section plans for review before generation
@@ -281,6 +293,13 @@ class GenerationConfig:
     template_vision_model: str = field(
         default_factory=lambda: _get_generation_setting(
             "generation.template_vision_model", "GENERATION_TEMPLATE_VISION_MODEL", "auto"
+        )
+    )
+
+    # Presentation density for PPTX: "minimal" (5-5-5 rule), "standard", "detailed"
+    presentation_density: str = field(
+        default_factory=lambda: _get_generation_setting(
+            "generation.presentation_density", "GENERATION_PRESENTATION_DENSITY", "standard"
         )
     )
 

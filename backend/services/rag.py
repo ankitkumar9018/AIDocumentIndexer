@@ -1588,14 +1588,56 @@ class RAGService:
             ]
 
         # Format results for agent consumption
+        # First pass: collect doc_ids that need name resolution from DB
+        # Note: ChromaDB may store literal "unknown" as document_filename — treat as missing
+        _UNKNOWN_NAMES = {"unknown", "unknown document", ""}
+        unknown_doc_ids = set()
+        for doc, score in retrieved_docs:
+            _fn = (doc.metadata.get("document_filename") or "").strip()
+            _dn = (doc.metadata.get("document_name") or "").strip()
+            _src = (doc.metadata.get("source") or "").strip()
+            doc_name = (
+                (_fn if _fn.lower() not in _UNKNOWN_NAMES else "") or
+                (_dn if _dn.lower() not in _UNKNOWN_NAMES else "") or
+                (_src if _src.lower() not in _UNKNOWN_NAMES else "")
+            )
+            if not doc_name:
+                did = doc.metadata.get("document_id")
+                if did:
+                    unknown_doc_ids.add(str(did))
+
+        # Batch lookup document names from DB for chunks missing filename metadata
+        doc_name_map: Dict[str, str] = {}
+        if unknown_doc_ids:
+            try:
+                from backend.db.models import Document as DBDocument
+                from backend.db.session import async_session_context
+                async with async_session_context() as db:
+                    from sqlalchemy import select
+                    stmt = select(DBDocument.id, DBDocument.original_filename, DBDocument.filename).where(
+                        DBDocument.id.in_(list(unknown_doc_ids))
+                    )
+                    db_result = await db.execute(stmt)
+                    for row in db_result.fetchall():
+                        resolved_name = row[1] or row[2]
+                        if resolved_name:
+                            doc_name_map[str(row[0])] = resolved_name
+                logger.debug(f"Resolved {len(doc_name_map)}/{len(unknown_doc_ids)} unknown doc names from DB")
+            except Exception as e:
+                logger.debug(f"DB lookup for unknown doc names failed (non-critical): {e}")
+
         results = []
         for doc, score in retrieved_docs:
             # Get document name with proper fallback chain
-            # Custom vectorstore sets "document_name", others may use "document_filename" or "source"
+            # Treat "unknown" as missing so DB lookup takes over
+            _fn = (doc.metadata.get("document_filename") or "").strip()
+            _dn = (doc.metadata.get("document_name") or "").strip()
+            _src = (doc.metadata.get("source") or "").strip()
             doc_name = (
-                doc.metadata.get("document_filename") or
-                doc.metadata.get("document_name") or
-                doc.metadata.get("source") or
+                (_fn if _fn.lower() not in _UNKNOWN_NAMES else "") or
+                (_dn if _dn.lower() not in _UNKNOWN_NAMES else "") or
+                (_src if _src.lower() not in _UNKNOWN_NAMES else "") or
+                doc_name_map.get(str(doc.metadata.get("document_id", ""))) or
                 "Unknown Document"
             )
             # Use similarity_score (0-1) for display, fallback to RRF score if not available
@@ -3547,7 +3589,7 @@ class RAGService:
 
                     if new_retrieved_docs and len(new_retrieved_docs) > 0:
                         # Convert to Source objects using _format_context
-                        _, new_sources = self._format_context(new_retrieved_docs, include_collection_context)
+                        _, new_sources = self._format_context(new_retrieved_docs, include_collection_context, document_name_map=document_name_map)
 
                         if new_sources:
                             # Calculate new confidence from similarity scores
@@ -3557,7 +3599,7 @@ class RAGService:
                                 sources = new_sources
                                 confidence_score = new_confidence
                                 # Regenerate context with new sources
-                                context, _ = self._format_context(new_retrieved_docs, include_collection_context)
+                                context, _ = self._format_context(new_retrieved_docs, include_collection_context, document_name_map=document_name_map)
                                 logger.info(
                                     "CRAG re-search improved results",
                                     new_source_count=len(sources),
@@ -3879,7 +3921,20 @@ class RAGService:
                 after=len(retrieved_docs),
             )
 
-        context, sources = self._format_context(retrieved_docs, include_collection_context)
+        # Load document names from DB for streaming path (same as non-streaming)
+        _stream_doc_name_map = None
+        _stream_doc_ids = list({
+            doc.metadata.get("document_id")
+            for doc, _ in retrieved_docs
+            if doc.metadata and doc.metadata.get("document_id")
+        })
+        if _stream_doc_ids:
+            try:
+                _stream_doc_name_map = await self._load_document_names(_stream_doc_ids)
+            except Exception:
+                pass
+
+        context, sources = self._format_context(retrieved_docs, include_collection_context, document_name_map=_stream_doc_name_map)
 
         # Build prompt with language instruction
         # Support "auto" mode: respond in the same language as the question
@@ -4360,15 +4415,38 @@ class RAGService:
                 confidence_level="low",
             )
 
+        # Load document names from DB for aggregation path
+        _agg_doc_name_map = None
+        _agg_doc_ids = list({
+            doc.metadata.get("document_id")
+            for doc, _ in retrieved_docs
+            if doc.metadata and doc.metadata.get("document_id")
+        })
+        if _agg_doc_ids:
+            try:
+                _agg_doc_name_map = await self._load_document_names(_agg_doc_ids)
+            except Exception:
+                pass
+
         # Convert retrieved docs to format expected by structured extractor
+        _UNKNOWN_NAMES_AGG = {"unknown", "unknown document", ""}
         chunks = []
         for doc, score in retrieved_docs:
+            _fn = (doc.metadata.get("document_filename") or "").strip()
+            _dn = (doc.metadata.get("document_name") or "").strip()
+            _did = doc.metadata.get("document_id", "")
+            _resolved_name = (
+                (_fn if _fn.lower() not in _UNKNOWN_NAMES_AGG else "") or
+                (_dn if _dn.lower() not in _UNKNOWN_NAMES_AGG else "") or
+                (_agg_doc_name_map.get(_did) if _agg_doc_name_map and _did else None) or
+                "Unknown"
+            )
             chunks.append({
                 "content": doc.page_content,
                 "chunk_id": doc.metadata.get("chunk_id"),
                 "metadata": {
-                    "document_name": doc.metadata.get("document_filename") or doc.metadata.get("document_name", "Unknown"),
-                    "document_id": doc.metadata.get("document_id"),
+                    "document_name": _resolved_name,
+                    "document_id": _did,
                     "page_number": doc.metadata.get("page_number"),
                     "similarity_score": score,
                 },
@@ -4411,7 +4489,7 @@ class RAGService:
             )
 
             # Format sources from retrieved docs
-            _, sources = self._format_context(retrieved_docs, include_collection_context=True)
+            _, sources = self._format_context(retrieved_docs, include_collection_context=True, document_name_map=_agg_doc_name_map)
 
             processing_time_ms = (time.time() - start_time) * 1000
 
@@ -6326,6 +6404,8 @@ class RAGService:
         Batch-load document filenames for a list of document IDs.
         Used as fallback when ChromaDB metadata lacks document_name.
 
+        Prefers original_filename (human-readable) over filename (UUID-based storage name).
+
         Returns:
             Dict mapping document_id -> filename string.
         """
@@ -6334,15 +6414,15 @@ class RAGService:
         try:
             async with async_session_context() as db:
                 result = await db.execute(
-                    select(DBDocument.id, DBDocument.filename).where(
+                    select(DBDocument.id, DBDocument.original_filename, DBDocument.filename).where(
                         DBDocument.id.in_(document_ids)
                     )
                 )
                 rows = result.all()
                 return {
-                    str(row.id): row.filename
+                    str(row.id): row.original_filename or row.filename
                     for row in rows
-                    if row.filename
+                    if row.original_filename or row.filename
                 }
         except Exception as e:
             logger.warning(
@@ -6413,12 +6493,17 @@ class RAGService:
 
             source_num += 1
 
-            # Build context entry - check document_name first (set by custom vectorstore)
-            # Fallback chain: metadata.document_name → metadata.document_filename → DB lookup → generic
+            # Build context entry - check metadata fields, then DB lookup, then generic fallback
+            # Note: ChromaDB may store literal "unknown" as document_filename — treat that as missing
             doc_id = metadata.get("document_id", "")
+            _raw_filename = metadata.get("document_filename") or ""
+            _raw_docname = metadata.get("document_name") or ""
+            _meta_name = (
+                (_raw_filename if _raw_filename.lower() not in ("unknown", "") else "")
+                or (_raw_docname if _raw_docname.lower() not in ("unknown", "") else "")
+            )
             doc_name = (
-                metadata.get("document_filename")
-                or metadata.get("document_name")
+                _meta_name
                 or (document_name_map.get(doc_id) if document_name_map and doc_id else None)
                 or f"Document {doc_id[:8] if doc_id else 'unknown'}"
             )

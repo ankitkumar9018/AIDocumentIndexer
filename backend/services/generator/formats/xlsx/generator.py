@@ -51,7 +51,8 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'__([^_]+)__', r'\1', text)
     text = re.sub(r'_([^_]+)_', r'\1', text)
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-    text = re.sub(r'```[^`]*```', '', text, flags=re.DOTALL)
+    # Remove triple-backtick markers but KEEP content between them
+    text = re.sub(r'```\w*\n?', '', text)
     text = re.sub(r'`([^`]+)`', r'\1', text)
     return text
 
@@ -146,7 +147,7 @@ class XLSXGenerator(BaseFormatGenerator):
 
             # Summary data
             summary_data = [
-                ("Description", job.outline.description if job.outline else ""),
+                ("Description", (job.outline.description or "") if job.outline else ""),
                 ("Status", job.status.value),
                 ("Created", job.created_at.strftime("%Y-%m-%d %H:%M")),
                 ("Completed", job.completed_at.strftime("%Y-%m-%d %H:%M") if job.completed_at else "In Progress"),
@@ -199,7 +200,7 @@ class XLSXGenerator(BaseFormatGenerator):
                             "cells": [
                                 section.order,
                                 section.title,
-                                strip_markdown(section.revised_content or section.content or ""),
+                                strip_markdown((section.revised_content if section.revised_content and section.revised_content.strip() else section.content) or ""),
                                 "Yes" if section.approved else "No",
                                 section.feedback or ""
                             ]
@@ -223,8 +224,20 @@ class XLSXGenerator(BaseFormatGenerator):
 
             # Content rows
             for i, section in enumerate(job.sections, start=2):
-                content = section.revised_content or section.content
+                # Validate title
+                if not section.title or not section.title.strip():
+                    logger.warning(f"Section {i - 1} has empty title, using default", section_idx=i - 2)
+                    section.title = f"Section {i - 1}"
+
+                content = section.revised_content if section.revised_content and section.revised_content.strip() else section.content
+                if not content or not content.strip():
+                    logger.warning("Section has empty content, adding placeholder",
+                                   title=section.title[:50] if section.title else "No title")
+                    content = "Content not available for this section."
                 content = strip_markdown(content) if content else ""
+                # Truncate to stay within Excel cell limit (32767 chars)
+                if len(content) > 32000:
+                    content = content[:32000] + "... [truncated]"
 
                 ws_content.cell(row=i, column=1, value=section.order).border = thin_border
                 ws_content.cell(row=i, column=2, value=section.title).border = thin_border
@@ -239,7 +252,46 @@ class XLSXGenerator(BaseFormatGenerator):
             ws_content.column_dimensions['D'].width = 12
             ws_content.column_dimensions['E'].width = 40
 
-            # ========== Sheet 3: Sources ==========
+            # ========== Sheet 3: Key Points (structured per-bullet rows) ==========
+            ws_points = wb.create_sheet("Key Points")
+
+            point_headers = ["Section", "Point #", "Key Point"]
+            for col, header in enumerate(point_headers, start=1):
+                cell = ws_points.cell(row=1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+                cell.border = thin_border
+
+            point_row = 2
+            for section in job.sections:
+                section_content = strip_markdown((section.revised_content if section.revised_content and section.revised_content.strip() else section.content) or "")
+                # Extract bullet points from content
+                bullets = []
+                for line in section_content.split('\n'):
+                    stripped = line.strip()
+                    if stripped and stripped[0] in '-\u2022*' and len(stripped) > 2:
+                        bullets.append(stripped.lstrip('-\u2022* ').strip())
+
+                if not bullets:
+                    # No bullets detected — split by non-empty lines
+                    bullets = [s.strip() for s in section_content.split('\n') if s.strip()]
+
+                for j, bullet in enumerate(bullets, 1):
+                    if not bullet:
+                        continue
+                    ws_points.cell(row=point_row, column=1, value=section.title).border = thin_border
+                    ws_points.cell(row=point_row, column=2, value=j).border = thin_border
+                    point_cell = ws_points.cell(row=point_row, column=3, value=bullet)
+                    point_cell.border = thin_border
+                    point_cell.alignment = cell_alignment
+                    point_row += 1
+
+            ws_points.column_dimensions['A'].width = 25
+            ws_points.column_dimensions['B'].width = 10
+            ws_points.column_dimensions['C'].width = 80
+
+            # ========== Sheet 4: Sources ==========
             if include_sources and job.sources_used:
                 ws_sources = wb.create_sheet("Sources")
 
@@ -315,7 +367,7 @@ class XLSXGenerator(BaseFormatGenerator):
                 ws_sources.column_dimensions['G'].width = 60
 
             # Save workbook
-            output_path = os.path.join(config.output_dir, f"{filename}.xlsx")
+            output_path = os.path.join(config.output_dir, filename)
             wb.save(output_path)
 
             logger.info("XLSX generated", path=output_path)

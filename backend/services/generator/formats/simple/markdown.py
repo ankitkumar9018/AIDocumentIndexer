@@ -6,6 +6,7 @@ Full implementation - no delegation to old generator.py.
 """
 
 import os
+import re
 from typing import Optional, TYPE_CHECKING
 
 import structlog
@@ -18,6 +19,33 @@ if TYPE_CHECKING:
     from ...template_analyzer import TemplateAnalysis
 
 logger = structlog.get_logger(__name__)
+
+
+def _normalize_markdown_content(content: str) -> str:
+    """Normalize LLM output to proper Markdown syntax.
+
+    Converts non-standard bullet characters (•, ◦) to standard
+    Markdown list markers (- ) and ensures proper indentation.
+    """
+    if not content:
+        return ""
+
+    lines = content.split('\n')
+    normalized = []
+    for line in lines:
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+
+        # Convert • bullets to - bullets
+        if stripped.startswith('\u2022 '):
+            normalized.append(' ' * indent + '- ' + stripped[2:])
+        # Convert ◦ sub-bullets to indented - bullets
+        elif stripped.startswith('\u25e6 '):
+            normalized.append('  - ' + stripped[2:])
+        else:
+            normalized.append(line)
+
+    return '\n'.join(normalized)
 
 
 @register_generator(OutputFormat.MARKDOWN)
@@ -69,7 +97,7 @@ class MarkdownGenerator(BaseFormatGenerator):
         lines.append("")
 
         # Description
-        if job.outline:
+        if job.outline and job.outline.description:
             lines.append(job.outline.description)
             lines.append("")
 
@@ -78,15 +106,26 @@ class MarkdownGenerator(BaseFormatGenerator):
             lines.append("## Table of Contents")
             lines.append("")
             for section in job.sections:
-                anchor = section.title.lower().replace(" ", "-")
+                # GitHub-flavored Markdown anchor: lowercase, strip non-word chars, spaces to dashes
+                anchor = re.sub(r'[^\w\s-]', '', section.title.lower()).replace(" ", "-")
                 lines.append(f"- [{section.title}](#{anchor})")
             lines.append("")
 
         # Content sections
-        for section in job.sections:
+        for section_idx, section in enumerate(job.sections):
+            # Validate title
+            if not section.title or not section.title.strip():
+                logger.warning(f"Section {section_idx + 1} has empty title, using default", section_idx=section_idx)
+                section.title = f"Section {section_idx + 1}"
+
             lines.append(f"## {section.title}")
             lines.append("")
-            content = section.revised_content or section.content
+            content = section.revised_content if section.revised_content and section.revised_content.strip() else section.content
+            if not content or not content.strip():
+                logger.warning("Section has empty content, adding placeholder",
+                               title=section.title[:50] if section.title else "No title")
+                content = "Content not available for this section."
+            content = _normalize_markdown_content(content)
             lines.append(content)
             lines.append("")
 
@@ -132,7 +171,8 @@ class MarkdownGenerator(BaseFormatGenerator):
                 if hasattr(source, 'document_url') and source.document_url:
                     hyperlink = source.document_url
                 elif hasattr(source, 'document_path') and source.document_path:
-                    hyperlink = f"file://{source.document_path}"
+                    import urllib.parse
+                    hyperlink = f"file://{urllib.parse.quote(source.document_path)}"
 
                 if hyperlink:
                     return f"- [{doc_name}]({hyperlink}){location_info}{usage_info}"
@@ -162,7 +202,7 @@ class MarkdownGenerator(BaseFormatGenerator):
                     lines.append(format_source(source))
 
         # Save file
-        output_path = os.path.join(config.output_dir, f"{filename}.md")
+        output_path = os.path.join(config.output_dir, filename)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
 

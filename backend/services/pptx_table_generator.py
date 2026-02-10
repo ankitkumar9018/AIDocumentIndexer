@@ -252,17 +252,34 @@ class PPTXTableGenerator:
 
     @staticmethod
     def _parse_key_value_pairs(lines: List[str]) -> Optional[List[List[str]]]:
-        """Parse key: value pairs into a 2-column table."""
+        """Parse key: value pairs into a 2-column table.
+
+        Guards against matching bullet prose that incidentally contains colons
+        by validating key/value lengths and requiring a high ratio of KV lines.
+        """
         pairs = []
         kv_pattern = re.compile(r'^([^:]+):\s*(.+)$')
 
+        total_non_empty = sum(1 for line in lines if line.strip())
+
         for line in lines:
-            line = line.strip()
+            line = line.strip().lstrip('-*•● ').strip()
             match = kv_pattern.match(line)
             if match:
-                pairs.append([match.group(1).strip(), match.group(2).strip()])
+                key = match.group(1).strip()
+                value = match.group(2).strip()
+                # Reject keys that are too long (real keys are short labels)
+                if len(key.split()) > 4:
+                    continue
+                # Reject values that are too long (sentence continuations)
+                if len(value.split()) > 15:
+                    continue
+                pairs.append([key, value])
 
-        if len(pairs) >= 3:  # At least 3 key-value pairs
+        # Require at least 3 KV pairs AND >50% of lines must be KV pairs
+        if len(pairs) >= 3:
+            if total_non_empty > 0 and len(pairs) / total_non_empty < 0.5:
+                return None  # Less than half are KV pairs → not a real table
             return [["Attribute", "Value"]] + pairs
         return None
 

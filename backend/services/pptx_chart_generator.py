@@ -375,11 +375,46 @@ class PPTXNativeChartGenerator:
                 logger.debug(f"Could not add data labels to series: {e}")
 
     @staticmethod
+    def _shorten_label(label: str, max_words: int = 3) -> str:
+        """Shorten a chart label by stripping trailing function words and truncating.
+
+        Examples:
+            "Biodiversity loss has accelerated by" -> "Biodiversity Loss"
+            "Ocean acidification has increased by" -> "Ocean Acidification"
+            "Soil moisture" -> "Soil Moisture" (unchanged)
+            "Total revenue for the quarter" -> "Total Revenue"
+        """
+        TRAILING_STOP = {
+            'has', 'have', 'had', 'by', 'of', 'the', 'is', 'are', 'was', 'were',
+            'been', 'in', 'at', 'to', 'for', 'with', 'from', 'on', 'a', 'an',
+            'and', 'or', 'that', 'which', 'about', 'its', 'their', 'this',
+            'increased', 'decreased', 'accelerated', 'reached', 'reported',
+            'showed', 'experienced', 'affected', 'observed',
+        }
+        words = label.split()
+        if not words:
+            return label
+        # Strip trailing function words
+        while len(words) > 1 and words[-1].lower() in TRAILING_STOP:
+            words.pop()
+        # Truncate to max_words
+        words = words[:max_words]
+        # Second pass after truncation
+        while len(words) > 1 and words[-1].lower() in TRAILING_STOP:
+            words.pop()
+        # Title-case, preserving all-caps acronyms (GDP, CO2)
+        return ' '.join(
+            w if (w.isupper() and len(w) >= 2) else w.capitalize()
+            for w in words
+        )
+
+    @staticmethod
     def detect_chartable_data(text: str) -> Optional["ChartDataStructure"]:
         """
         Detect and extract chartable data from text.
 
         Supports:
+        - Inline multi-point data (e.g., "Mumbai (40%), Bangkok (35%), Jakarta (32%)")
         - Numeric lists with labels
         - Percentage data
         - Time series data
@@ -393,12 +428,17 @@ class PPTXNativeChartGenerator:
         """
         lines = text.strip().split('\n')
 
-        # Try pattern matching for numeric data
+        # 1. Try inline multi-point extraction first (cleanest labels from LLM output)
+        inline_data = PPTXNativeChartGenerator._extract_inline_data_patterns(lines)
+        if inline_data:
+            return inline_data
+
+        # 2. Try per-line numeric patterns (with label shortening)
         numeric_data = PPTXNativeChartGenerator._extract_numeric_patterns(lines)
         if numeric_data:
             return numeric_data
 
-        # Try percentage data
+        # 3. Try per-line percentage patterns (with label shortening)
         percentage_data = PPTXNativeChartGenerator._extract_percentage_patterns(lines)
         if percentage_data:
             return percentage_data
@@ -406,26 +446,120 @@ class PPTXNativeChartGenerator:
         return None
 
     @staticmethod
+    def _extract_inline_data_patterns(lines: List[str]) -> Optional["ChartDataStructure"]:
+        """Extract multiple data points from a single line.
+
+        Handles LLM output formats like:
+          - "Mumbai (40%), Bangkok (35%), Jakarta (32%)"
+          - "Q1 (500), Q2 (620), Q3 (710)"
+          - "North America: 35%, Europe: 28%, Asia: 22%"
+          - "Cities: Mumbai (40%), Bangkok (35%), Jakarta (32%)"
+        """
+        # Pattern A: Name (XX%) — inline percentage in parentheses
+        pattern_pct_parens = re.compile(
+            r'([A-Z][A-Za-z0-9]+(?:\s[A-Za-z0-9]+){0,3})\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)'
+        )
+        # Pattern B: Name: XX% — inline percentage after colon
+        pattern_colon_pct = re.compile(
+            r'([A-Z][A-Za-z0-9]+(?:\s[A-Za-z0-9]+){0,3})\s*:\s*(\d+(?:\.\d+)?)\s*%'
+        )
+        # Pattern C: Name (number) — inline numeric in parentheses
+        pattern_num_parens = re.compile(
+            r'([A-Z][A-Za-z0-9]+(?:\s[A-Za-z0-9]+){0,3})\s*\(\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*\)'
+        )
+        # Pattern D: Name: number — inline numeric after colon
+        pattern_colon_num = re.compile(
+            r'([A-Z][A-Za-z0-9]+(?:\s[A-Za-z0-9]+){0,3})\s*:\s*\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?=[,;)\s]|$)'
+        )
+
+        best_result = None
+        best_count = 0
+
+        for line in lines:
+            clean_line = line.strip().lstrip('-*•● ').strip()
+            if len(clean_line) < 15:
+                continue
+
+            for pattern, is_percentage in [
+                (pattern_pct_parens, True),
+                (pattern_colon_pct, True),
+                (pattern_num_parens, False),
+                (pattern_colon_num, False),
+            ]:
+                matches = pattern.findall(clean_line)
+                if len(matches) >= 3 and len(matches) > best_count:
+                    data_points = []
+                    for label_raw, value_raw in matches:
+                        label = PPTXNativeChartGenerator._shorten_label(
+                            label_raw.strip(), max_words=3
+                        )
+                        value_str = value_raw.replace(',', '')
+                        try:
+                            value = float(value_str)
+                            data_points.append((label, value))
+                        except ValueError:
+                            continue
+
+                    if len(data_points) >= 3:
+                        # Guard against citation years (non-percentage only)
+                        if not is_percentage and all(1900 <= v <= 2099 for _, v in data_points):
+                            continue
+
+                        categories = [dp[0] for dp in data_points]
+                        values = [dp[1] for dp in data_points]
+
+                        suggested_type = None
+                        if is_percentage:
+                            total = sum(values)
+                            suggested_type = ChartType.PIE if 80 <= total <= 120 else None
+
+                        best_result = ChartDataStructure(
+                            categories=categories,
+                            series=[SeriesData(
+                                name="Percentage" if is_percentage else "Values",
+                                values=values,
+                            )],
+                            suggested_type=suggested_type,
+                        )
+                        best_count = len(data_points)
+
+        return best_result
+
+    @staticmethod
     def _extract_numeric_patterns(lines: List[str]) -> Optional["ChartDataStructure"]:
         """
         Extract numeric patterns like "Category: 100" or "Category - 100".
+
+        Uses label shortening to produce chart-friendly labels from prose-style bullets.
         """
         data_points = []
 
         # Pattern: "Label: number" or "Label - number" or "Label (number)"
+        # The 4th pattern is tighter than before: max 60-char label, no sentence punctuation
         patterns = [
             re.compile(r'^([^:\d]+):\s*([\d,\.]+)\s*$'),
             re.compile(r'^([^-\d]+)\s*-\s*([\d,\.]+)\s*$'),
             re.compile(r'^([^\(\d]+)\s*\(([\d,\.]+)\)\s*$'),
-            re.compile(r'^(.+?)[\s:]+\$?([\d,\.]+)%?$'),
+            re.compile(r'^([^.!?]{1,60})[\s:]+\$?([\d,\.]+)%?\s*$'),
         ]
 
         for line in lines:
             line = line.strip()
+            # Strip bullet markers before matching
+            clean_line = line.lstrip('-*•● ').strip()
             for pattern in patterns:
-                match = pattern.match(line)
+                match = pattern.match(clean_line)
                 if match:
-                    label = match.group(1).strip()
+                    label = match.group(1).strip().rstrip(':- ')
+                    # Reject labels that are clearly full sentences (>10 words)
+                    if len(label.split()) > 10:
+                        continue
+                    # Reject labels longer than 60 chars (raw)
+                    if len(label) > 60:
+                        continue
+                    # Shorten long labels to chart-friendly form
+                    if len(label.split()) > 3:
+                        label = PPTXNativeChartGenerator._shorten_label(label, max_words=3)
                     value_str = match.group(2).replace(',', '')
                     try:
                         value = float(value_str)
@@ -445,29 +579,43 @@ class PPTXNativeChartGenerator:
 
     @staticmethod
     def _extract_percentage_patterns(lines: List[str]) -> Optional["ChartDataStructure"]:
-        """Extract percentage data for pie charts."""
+        """Extract percentage data for pie charts.
+
+        Uses label shortening to produce chart-friendly labels from prose-style bullets.
+        Only suggests PIE chart if values plausibly sum to ~100.
+        """
         data_points = []
 
         # Pattern: "Label: XX%" or "Label - XX%"
         pattern = re.compile(r'^([^:\d%]+)[:\-\s]+([\d\.]+)\s*%')
 
         for line in lines:
-            match = pattern.match(line.strip())
+            clean_line = line.strip().lstrip('-*•● ').strip()
+            match = pattern.match(clean_line)
             if match:
                 label = match.group(1).strip()
+                # Reject labels that are clearly full sentences (>10 words)
+                if len(label.split()) > 10 or len(label) > 60:
+                    continue
+                # Shorten long labels to chart-friendly form
+                if len(label.split()) > 3:
+                    label = PPTXNativeChartGenerator._shorten_label(label, max_words=3)
                 try:
                     value = float(match.group(2))
                     data_points.append((label, value))
                 except ValueError:
                     continue
 
-        if len(data_points) >= 2:
+        if len(data_points) >= 3:
             categories = [dp[0] for dp in data_points]
             values = [dp[1] for dp in data_points]
+            # Only suggest PIE if values plausibly sum to ~100
+            total = sum(values)
+            suggested_type = ChartType.PIE if 80 <= total <= 120 else None
             return ChartDataStructure(
                 categories=categories,
                 series=[SeriesData(name="Percentage", values=values)],
-                suggested_type=ChartType.PIE,
+                suggested_type=suggested_type,
             )
         return None
 
@@ -558,6 +706,28 @@ class PPTXNativeChartGenerator:
 
         # Should have at least 3 data points
         return numeric_lines >= 3
+
+    @staticmethod
+    def validate_chart_data(data: "ChartDataStructure") -> bool:
+        """Validate that chart data is meaningful, not extracted from prose.
+
+        Rejects data where category labels look like full sentences
+        (indicating the chart detector matched bullet prose, not real data).
+        """
+        if not data or not data.categories or not data.series:
+            return False
+        # Reject if fewer than 3 data points
+        if len(data.categories) < 3:
+            return False
+        # Reject if average category label is too long (prose, not labels)
+        avg_label_len = sum(len(c) for c in data.categories) / len(data.categories)
+        if avg_label_len > 40:
+            return False
+        # Reject if any category has too many words (full sentence)
+        for cat in data.categories:
+            if len(cat.split()) > 8:
+                return False
+        return True
 
 
 class SeriesData:

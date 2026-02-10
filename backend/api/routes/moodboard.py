@@ -383,6 +383,10 @@ async def generate_mood_board(
         style_notes=request.style_notes or "None provided",
     )
 
+    # Ensure LLM generates color psychology for ALL palette colors, not just new ones
+    if request.colors:
+        formatted_prompt += f"\n\nIMPORTANT: Your color_psychology object MUST include entries for ALL of these existing palette colors: {colors_str} — plus any new colors you propose in additional_colors."
+
     # Add document context if "Use Docs as Inspiration" is enabled
     if request.use_existing_docs:
         try:
@@ -465,6 +469,14 @@ async def generate_mood_board(
 
         # Normalize and build response
         suggestions_data = _normalize_suggestions(suggestions_data)
+
+        # Post-process: ensure all palette colors have psychology entries
+        psych = suggestions_data.get("color_psychology") or {}
+        for color in (request.colors or []):
+            if color and color not in psych:
+                psych[color] = {"meaning": "User-selected palette color", "pair_with": None, "pair_context": None}
+        suggestions_data["color_psychology"] = psych if psych else None
+
         suggestions = GeneratedSuggestions(
             typography=suggestions_data.get("typography", ["Inter", "Roboto", "Open Sans"]),
             additional_colors=suggestions_data.get("additional_colors", ["#f97316", "#22c55e", "#0ea5e9"]),
@@ -913,6 +925,9 @@ async def enhance_mood_board(
 
         # Update the board
         board.generated_suggestions = suggestions_data
+        # Clear canvas_data so frontend re-runs autoLayoutMoodboard() with new suggestions
+        # (old canvas persists outdated titles, missing sticky notes, floating blocks)
+        board.canvas_data = None
 
         # Also update themes if they were empty
         if not board.themes and suggestions_data.get("_typography_flat"):

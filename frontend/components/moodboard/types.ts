@@ -27,6 +27,7 @@ export interface TextBlockData extends Record<string, unknown> {
   title: string;
   content: string;
   variant: "inspiration" | "direction" | "system" | "anti-patterns" | "custom";
+  width?: number;
 }
 
 export interface TagCloudData extends Record<string, unknown> {

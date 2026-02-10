@@ -479,23 +479,27 @@ Generate the outline for "{title}" with SPECIFIC, NON-GENERIC titles now:"""
                 section["description"] = f"Content covering {section['title'].lower()}. "
 
         # Ensure we have the requested number of sections
-        topic_words = title.split()[:3] if title else ["Document"]
-        topic_prefix = " ".join(topic_words)
+        # Extract a short topic phrase from the title for topic-aware fallbacks
+        topic = title.split(":")[0].strip() if title else "the Topic"
+        # Trim to a reasonable length
+        if len(topic) > 40:
+            topic_words = topic.split()[:5]
+            topic = " ".join(topic_words)
 
         while len(sections) < target_sections:
             section_num = len(sections) + 1
             fallback_titles = [
-                f"Key Findings and Insights",
-                f"Analysis and Recommendations",
-                f"Implementation Approach",
-                f"Strategic Considerations",
-                f"Supporting Details",
-                f"Additional Context",
+                (f"Key Findings on {topic}", f"Important findings and insights related to {topic}"),
+                (f"Analysis of {topic}", f"Detailed analysis and recommendations for {topic}"),
+                (f"Implementation for {topic}", f"How to implement approaches for {topic}"),
+                (f"Strategic Considerations", f"Strategic factors and considerations for {topic}"),
+                (f"Supporting Details", f"Additional supporting details for {topic}"),
+                (f"Additional Context", f"Extra context and background for {topic}"),
             ]
-            fallback_title = fallback_titles[min(section_num - 1, len(fallback_titles) - 1)]
+            idx = min(section_num - 1, len(fallback_titles) - 1)
             sections.append({
-                "title": f"{fallback_title} for {topic_prefix}",
-                "description": f"Detailed content covering {fallback_title.lower()}",
+                "title": fallback_titles[idx][0],
+                "description": fallback_titles[idx][1],
             })
 
         return sections, target_sections
@@ -506,17 +510,26 @@ Generate the outline for "{title}" with SPECIFIC, NON-GENERIC titles now:"""
         description: str,
         num_sections: Optional[int],
     ) -> "DocumentOutline":
-        """Create a fallback outline when LLM generation fails."""
+        """Create a fallback outline when LLM generation fails.
+
+        Uses topic-aware titles derived from the document title so that
+        fallback outlines are contextually relevant rather than generic.
+        """
         from ..models import DocumentOutline
+
+        # Extract a short topic phrase from the title
+        topic = title.split(":")[0].strip() if title else "the Topic"
+        if len(topic) > 40:
+            topic = " ".join(topic.split()[:5])
 
         fallback_count = num_sections if num_sections is not None else 5
         fallback_section_templates = [
-            ("Background and Context", f"Overview and background information about {title}"),
-            ("Key Analysis and Findings", f"Main analysis and findings related to {title}"),
-            ("Strategic Recommendations", f"Recommendations and action items for {title}"),
-            ("Implementation Details", f"How to implement the strategies for {title}"),
-            ("Conclusion and Next Steps", f"Summary and suggested next steps for {title}"),
-            ("Supporting Information", f"Additional details and references for {title}"),
+            (f"Introduction to {topic}", f"Overview and background of {title}"),
+            (f"Current State of {topic}", f"Analysis of the current landscape for {title}"),
+            (f"Key Challenges in {topic}", f"Challenges and issues related to {title}"),
+            (f"Strategies for {topic}", f"Recommended approaches for {title}"),
+            (f"Conclusion & Next Steps", f"Summary and action items for {title}"),
+            (f"Additional Resources", f"Supporting details and references for {title}"),
         ]
 
         return DocumentOutline(

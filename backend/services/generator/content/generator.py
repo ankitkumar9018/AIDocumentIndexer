@@ -166,6 +166,9 @@ class ContentGenerator:
             language_instruction=language_instruction,
         )
 
+        # Initialize section metadata early (dual mode may populate before quality review)
+        section_metadata = {}
+
         try:
             llm = await self._get_llm(job)
 
@@ -219,24 +222,46 @@ class ContentGenerator:
             content = filter_incomplete_sentences(content)
 
             # Dual Mode: Combine RAG content with general AI knowledge
-            dual_mode = job.metadata.get("dual_mode", False) if job.metadata else False
+            # Per-job override > global setting > False
+            config_dual_mode = self.config.dual_mode if self.config else False
+            dual_mode = job.metadata.get("dual_mode", config_dual_mode) if job.metadata else config_dual_mode
             if dual_mode and content and not content.startswith("[Content for"):
-                content = await self._apply_dual_mode(
+                content, dual_metadata = await self._apply_dual_mode(
                     rag_content=content,
                     job=job,
                     section_title=section_title,
                     section_description=section_description,
                     llm=llm,
                     invoke_kwargs=invoke_kwargs,
+                    format_instructions=format_instructions,
+                    language_instruction=language_instruction,
                 )
+                if dual_metadata:
+                    section_metadata.update(dual_metadata)
+            else:
+                # Label content source for non-dual mode
+                has_sources = sources and len(sources) > 0
+                section_metadata["content_source"] = "rag_only" if has_sources else "no_sources"
 
         except Exception as e:
-            logger.error("Failed to generate section", error=str(e))
-            content = f"[Content for {section_title} - generation failed]"
+            logger.warning("First LLM attempt failed, retrying", error=str(e))
+            try:
+                # Retry with the original (non-enhanced) prompt
+                llm = await self._get_llm(job)
+                response = await llm.ainvoke(prompt)
+                content = response.content
+                section_metadata["content_source"] = "rag_retry"
+            except Exception as retry_err:
+                logger.error("LLM generation failed after retry", error=str(retry_err))
+                # Graceful fallback: use section description as content
+                content = self._build_fallback_content(
+                    section_title, section_description, job
+                )
+                section_metadata["content_source"] = "fallback"
+                section_metadata["generation_error"] = str(e)[:200]
 
         # Quality scoring and optional auto-regeneration
         quality_report = None
-        section_metadata = {}
 
         # Check if quality review is enabled
         enable_quality = False
@@ -293,6 +318,10 @@ class ContentGenerator:
             section_metadata["quality_summary"] = quality_report.summary
             section_metadata["needs_revision"] = quality_report.needs_revision
 
+        # Bullet quality check for PPTX output
+        if job.output_format and str(job.output_format).lower() in ("pptx", "outputformat.pptx"):
+            self._check_bullet_quality(content, section_title)
+
         require_approval = False
         if self.config:
             require_approval = self.config.require_section_approval
@@ -315,28 +344,38 @@ class ContentGenerator:
         section_description: str,
         llm,
         invoke_kwargs: dict,
-    ) -> str:
+        format_instructions: str = "",
+        language_instruction: str = "",
+    ) -> tuple:
         """Combine RAG-based content with general AI knowledge.
 
         Generates a second version of the content without document context,
         then merges the two based on the blend strategy.
+
+        Returns:
+            Tuple of (merged_content, metadata_dict) where metadata_dict contains
+            dual mode provenance info (blend strategy, content lengths, etc.)
         """
-        blend = job.metadata.get("dual_mode_blend", "merged") if job.metadata else "merged"
+        config_blend = self.config.dual_mode_blend if self.config else "docs_first"
+        blend = job.metadata.get("dual_mode_blend", config_blend) if job.metadata else config_blend
 
         try:
             # Generate general knowledge version (no RAG context)
+            # Include format instructions so the output matches the expected format
             general_prompt = (
                 f"Write content for a section titled \"{section_title}\".\n"
                 f"Description: {section_description}\n"
                 f"Document title: {job.title}\n\n"
                 f"Use your general knowledge to write comprehensive, informative content. "
-                f"Do not mention that you are an AI. Write in a professional tone."
+                f"Do not mention that you are an AI. Write in a professional tone.\n\n"
+                f"{format_instructions}\n"
+                f"{language_instruction}"
             )
             general_response = await llm.ainvoke(general_prompt, **invoke_kwargs)
             general_content = general_response.content
 
             if not general_content or not general_content.strip():
-                return rag_content
+                return rag_content, {"content_source": "rag_only"}
 
             # Merge based on blend strategy
             if blend == "docs_first":
@@ -347,7 +386,8 @@ class ContentGenerator:
                     f"Create a final version that uses the document-based content as the foundation, "
                     f"supplementing with general knowledge only where the documents lack detail. "
                     f"Maintain the same format and style as the primary version. "
-                    f"Output ONLY the merged content, nothing else."
+                    f"Output ONLY the merged content, nothing else.\n\n"
+                    f"{format_instructions}"
                 )
             else:  # "merged"
                 merge_prompt = (
@@ -357,11 +397,21 @@ class ContentGenerator:
                     f"Synthesize both into one comprehensive section that combines the best of both. "
                     f"Prioritize document-sourced facts but enrich with general knowledge for depth. "
                     f"Maintain a consistent tone and format. "
-                    f"Output ONLY the merged content, nothing else."
+                    f"Output ONLY the merged content, nothing else.\n\n"
+                    f"{format_instructions}"
                 )
 
             merge_response = await llm.ainvoke(merge_prompt, **invoke_kwargs)
             merged = merge_response.content
+
+            dual_metadata = {
+                "content_source": f"dual_{blend}",
+                "dual_mode_used": True,
+                "blend_strategy": blend,
+                "rag_content_length": len(rag_content),
+                "general_content_length": len(general_content),
+                "merged_content_length": len(merged) if merged else 0,
+            }
 
             if merged and merged.strip():
                 logger.info(
@@ -369,9 +419,9 @@ class ContentGenerator:
                     section=section_title[:50],
                     blend=blend,
                 )
-                return filter_llm_metatext(merged)
+                return filter_llm_metatext(merged), dual_metadata
 
-            return rag_content
+            return rag_content, {"content_source": "rag_only"}
 
         except Exception as e:
             logger.warning(
@@ -379,7 +429,27 @@ class ContentGenerator:
                 section=section_title[:50],
                 error=str(e),
             )
-            return rag_content
+            return rag_content, {"content_source": "rag_only", "dual_mode_failed": True}
+
+    def _build_fallback_content(
+        self,
+        section_title: str,
+        section_description: str,
+        job: "GenerationJob",
+    ) -> str:
+        """Build minimal readable content when LLM generation fails entirely.
+
+        Returns format-appropriate content using the section description
+        instead of a corruption marker like '[Content for X - generation failed]'.
+        """
+        from ..models import OutputFormat
+
+        desc = section_description.strip() if section_description else section_title
+        if job.output_format == OutputFormat.PPTX:
+            # PPTX needs bullet format
+            return f"\u2022 {desc}"
+        else:
+            return desc
 
     async def generate_sections_parallel(
         self,
@@ -600,6 +670,36 @@ class ContentGenerator:
                 )
 
             # Convert RAG search results to SourceReference objects with CONTENT usage type
+            # Collect doc_ids that need name resolution from DB
+            _UNKNOWN_NAMES = {"unknown", "unknown document", ""}
+            _doc_ids_needing_names = set()
+            for result in results:
+                _rn = (result.get("document_name") or "").strip()
+                if _rn.lower() in _UNKNOWN_NAMES:
+                    _did = (result.get("metadata") or {}).get("document_id")
+                    if _did:
+                        _doc_ids_needing_names.add(str(_did))
+
+            # Batch DB lookup for missing document names
+            _gen_doc_name_map = {}
+            if _doc_ids_needing_names:
+                try:
+                    from backend.db.models import Document as DBDocument
+                    from backend.db.session import async_session_context
+                    from sqlalchemy import select
+                    async with async_session_context() as db:
+                        stmt = select(DBDocument.id, DBDocument.original_filename, DBDocument.filename).where(
+                            DBDocument.id.in_(list(_doc_ids_needing_names))
+                        )
+                        db_result = await db.execute(stmt)
+                        for row in db_result.fetchall():
+                            resolved = row[1] or row[2]  # original_filename preferred
+                            if resolved:
+                                _gen_doc_name_map[str(row[0])] = resolved
+                    logger.debug(f"Generator: resolved {len(_gen_doc_name_map)}/{len(_doc_ids_needing_names)} doc names from DB")
+                except Exception as e:
+                    logger.debug(f"Generator: DB name lookup failed (non-critical): {e}")
+
             source_refs = []
             for result in results:
                 metadata = result.get("metadata", {})
@@ -614,9 +714,18 @@ class ContentGenerator:
                 # Get LLM-assigned usage description if available
                 usage_desc = result.get("usage_description") or f"Content for: {section_title[:50]}"
 
+                # Resolve document name — filter "unknown" strings and use DB fallback
+                _raw_name = (result.get("document_name") or "").strip()
+                _doc_id = metadata.get("document_id", result.get("chunk_id", ""))
+                _resolved_name = (
+                    (_raw_name if _raw_name.lower() not in _UNKNOWN_NAMES else "")
+                    or _gen_doc_name_map.get(str(_doc_id))
+                    or f"Document {str(_doc_id)[:8]}"
+                )
+
                 source_ref = SourceReference(
-                    document_id=metadata.get("document_id", result.get("chunk_id", "")),
-                    document_name=result.get("document_name", "Unknown"),
+                    document_id=_doc_id,
+                    document_name=_resolved_name,
                     chunk_id=result.get("chunk_id"),
                     page_number=page_num,
                     relevance_score=result.get("score", 0.0),
@@ -763,10 +872,15 @@ If no documents are relevant: {{"selected_indices": [], "reasoning": {{}}, "reje
                 # Convert chunks to search result format
                 results = []
                 for chunk in graph_context.chunks:
-                    # Get document info
+                    # Get document info - prefer original_filename (human-readable) over filename (UUID-based)
                     doc_name = "Unknown"
                     if chunk.document:
-                        doc_name = chunk.document.filename or chunk.document.title or "Unknown"
+                        doc_name = (
+                            getattr(chunk.document, 'original_filename', None)
+                            or chunk.document.title
+                            or chunk.document.filename
+                            or "Unknown"
+                        )
 
                     results.append({
                         "content": chunk.content,
@@ -793,13 +907,20 @@ If no documents are relevant: {{"selected_indices": [], "reasoning": {{}}, "reje
             return []
 
     def _build_source_context(self, sources: Optional[List["SourceReference"]]) -> str:
-        """Build context from sources."""
+        """Build context from sources with document attribution.
+
+        Includes document names and page numbers so the LLM can
+        attribute claims to specific sources in the generated content.
+        """
         if not sources:
             return ""
 
-        context = "Use the following information:\n\n"
-        for source in sources:
-            context += f"- {source.snippet}\n\n"
+        context = "Use the following information from source documents:\n\n"
+        for i, source in enumerate(sources, 1):
+            doc_label = source.document_name or source.document_id or "Source"
+            if source.page_number:
+                doc_label += f" (p.{source.page_number})"
+            context += f"[{i}] {doc_label}:\n{source.snippet}\n\n"
         return context
 
     def _get_format_instructions(
@@ -830,8 +951,58 @@ If no documents are relevant: {{"selected_indices": [], "reasoning": {{}}, "reje
         elif output_format == OutputFormat.XLSX:
             return self._get_xlsx_instructions(template_analysis)
 
+        elif output_format == OutputFormat.HTML:
+            return self._get_html_instructions(template_analysis, section_order, total_sections)
+
+        elif output_format == OutputFormat.MARKDOWN:
+            return self._get_markdown_instructions(template_analysis, section_order, total_sections)
+
+        elif output_format == OutputFormat.TXT:
+            return self._get_txt_instructions(template_analysis)
+
         else:
             return self._get_default_instructions(template_analysis)
+
+    # Vague bullet patterns that indicate low-quality content
+    VAGUE_BULLET_PATTERNS = [
+        re.compile(r'^(enhances?|improves?|provides?|offers?|enables?|facilitates?)\s+(the\s+)?(experience|performance|efficiency|engagement|productivity)', re.IGNORECASE),
+        re.compile(r'^(various|multiple|several|different)\s+(aspects?|elements?|factors?|components?|features?)', re.IGNORECASE),
+        re.compile(r'plays?\s+a\s+(key|critical|vital|important|crucial)\s+role', re.IGNORECASE),
+        re.compile(r'is\s+(essential|crucial|important|key|vital)\s+(for|to|in)', re.IGNORECASE),
+        re.compile(r'^(helps?\s+(to\s+)?(drive|improve|enhance|boost|increase))\s+(overall|better|greater)', re.IGNORECASE),
+        re.compile(r'^(ensures?|supports?|leverages?)\s+(the\s+)?(effective|efficient|optimal|seamless)', re.IGNORECASE),
+    ]
+
+    def _check_bullet_quality(self, content: str, section_title: str) -> None:
+        """Log warnings if generated bullets contain vague patterns.
+
+        Args:
+            content: The generated bullet content to check
+            section_title: Title of the section for logging context
+        """
+        if not content:
+            return
+
+        lines = [l.strip().lstrip('•◦-* ').strip() for l in content.split('\n') if l.strip()]
+        if not lines:
+            return
+
+        vague_count = 0
+        for line in lines:
+            for pattern in self.VAGUE_BULLET_PATTERNS:
+                if pattern.search(line):
+                    vague_count += 1
+                    break
+
+        ratio = vague_count / len(lines) if lines else 0
+        if ratio > 0.5:
+            logger.warning(
+                "High vagueness detected in generated bullets",
+                section=section_title[:50],
+                vague_count=vague_count,
+                total_bullets=len(lines),
+                ratio=f"{ratio:.0%}",
+            )
 
     def _get_pptx_instructions(
         self,
@@ -849,9 +1020,20 @@ If no documents are relevant: {{"selected_indices": [], "reasoning": {{}}, "reje
             slide_constraints: Optional per-slide constraints from TemplateLayoutLearner
                 Contains: title_constraints, content_constraints, layout, avoid_zones
         """
-        # Priority: slide_constraints > template_analysis > defaults
-        max_bullets = 7
-        max_bullet_chars = 120  # PHASE 11: Increased from 70 to allow complete sentences
+        # Density-based defaults: minimal (5-5-5 rule), standard, detailed
+        from ..models import GenerationConfig as _GC
+        density = _GC().presentation_density
+
+        if density == "minimal":
+            max_bullets = 5
+            max_bullet_chars = 60
+        elif density == "detailed":
+            max_bullets = 9
+            max_bullet_chars = 150
+        else:  # standard
+            max_bullets = 7
+            max_bullet_chars = 120  # PHASE 11: Increased from 70 to allow complete sentences
+
         max_title_chars = 50
         layout_type = "content"
 
@@ -1077,15 +1259,145 @@ CONSTRAINTS:
             max_cell_chars = getattr(template_analysis.constraints, 'cell_max_chars', 256)
 
         return f"""FORMAT REQUIREMENTS FOR SPREADSHEET:
-- Write concise, data-oriented content
-- Use short sentences that fit in cells (max {max_cell_chars} chars per cell)
+- Write content as a BULLETED LIST of key data points
+- Each bullet on its own line, starting with "- "
+- Focus on quantifiable, structured information
+- Include numbers, percentages, dates, and metrics when available
+- Each point should be self-contained (max {max_cell_chars} chars)
+- Target 5-10 key data points per section
 - NO markdown formatting (no **, no ##, no _)
-- Focus on quantifiable information
-- Use clear, structured points
-- Each point on a new line
-- Target 5-10 key points
-- Avoid long paragraphs
-- Format data for easy column/row organization"""
+- NO prose paragraphs — use concise bullet points only
+- Example format:
+  - Revenue grew 25% YoY to $4.2M in Q3 2025
+  - Customer acquisition cost decreased from $45 to $32
+  - Market share expanded to 18% in North America"""
+
+    def _get_html_instructions(
+        self,
+        template_analysis: Optional["TemplateAnalysis"],
+        section_order: int,
+        total_sections: int,
+    ) -> str:
+        """Get HTML-specific instructions with position awareness."""
+        max_heading_chars = 80
+        target_words = "200-400"
+
+        if template_analysis and template_analysis.constraints:
+            max_heading_chars = template_analysis.constraints.heading_max_chars
+
+        # Adjust based on section position
+        section_guidance = ""
+        if section_order == 0:
+            section_guidance = """
+SECTION TYPE: INTRODUCTION
+- Set the context and introduce the topic
+- Keep paragraphs focused and engaging
+- 2-3 paragraphs is ideal"""
+            target_words = "150-250"
+        elif section_order >= total_sections - 1:
+            section_guidance = """
+SECTION TYPE: CONCLUSION
+- Summarize key findings and provide recommendations
+- Focus on actionable takeaways
+- 2-3 concise paragraphs"""
+            target_words = "150-250"
+        else:
+            section_guidance = """
+SECTION TYPE: BODY CONTENT
+- Provide detailed analysis and information
+- Include relevant examples and data
+- 3-5 well-structured paragraphs"""
+            target_words = "250-400"
+
+        return f"""FORMAT REQUIREMENTS FOR HTML DOCUMENT:
+{section_guidance}
+
+FORMATTING RULES:
+- Write well-structured prose with clear topic sentences
+- Use **bold** for key terms (will be converted to HTML tags)
+- Use *italic* for emphasis (will be converted to HTML tags)
+- Use "- " or "• " bullets for lists (will be converted to <ul>/<li>)
+- Use "## " for sub-headings within a section (will be converted to <h3>)
+- Separate paragraphs with blank lines
+- Include specific details: names, numbers, percentages, dates
+- Target {target_words} words per section
+
+CRITICAL OUTPUT RULES:
+1. Start DIRECTLY with the content - NO introductory text like "Here is..."
+2. Do NOT include closing remarks like "In conclusion..."
+3. ONLY output the section content itself
+
+CONSTRAINTS:
+- Sub-headings: max {max_heading_chars} characters
+- Keep paragraphs under 150 words each for readability"""
+
+    def _get_markdown_instructions(
+        self,
+        template_analysis: Optional["TemplateAnalysis"],
+        section_order: int,
+        total_sections: int,
+    ) -> str:
+        """Get Markdown-specific instructions with position awareness."""
+        target_words = "200-400"
+
+        # Adjust based on section position
+        section_guidance = ""
+        if section_order == 0:
+            section_guidance = """
+SECTION TYPE: INTRODUCTION
+- Set the context and introduce the topic
+- 2-3 focused paragraphs"""
+            target_words = "150-250"
+        elif section_order >= total_sections - 1:
+            section_guidance = """
+SECTION TYPE: CONCLUSION
+- Summarize key findings and provide recommendations
+- 2-3 concise paragraphs"""
+            target_words = "150-250"
+        else:
+            section_guidance = """
+SECTION TYPE: BODY CONTENT
+- Provide detailed analysis and information
+- 3-5 well-structured paragraphs"""
+            target_words = "250-400"
+
+        return f"""FORMAT REQUIREMENTS FOR MARKDOWN DOCUMENT:
+{section_guidance}
+
+MARKDOWN FORMATTING RULES:
+- Use standard Markdown syntax throughout
+- Use "- " for bullet lists (NOT "•" or "* ")
+- Use "  - " (2-space indent) for nested bullets
+- Use "## " for sub-headings, "### " for sub-sub-headings
+- Use **bold** for key terms and *italic* for emphasis
+- Separate paragraphs with a blank line
+- Include specific details: names, numbers, percentages, dates
+- Target {target_words} words per section
+
+CRITICAL OUTPUT RULES:
+1. Start DIRECTLY with the content - NO introductory text
+2. Do NOT include closing remarks
+3. ONLY output the section content itself"""
+
+    def _get_txt_instructions(
+        self,
+        template_analysis: Optional["TemplateAnalysis"],
+    ) -> str:
+        """Get plain text-specific instructions."""
+        return """FORMAT REQUIREMENTS FOR PLAIN TEXT:
+- Write clear, well-structured prose paragraphs
+- NO formatting markers of any kind (no **, no ##, no _, no markdown)
+- Use simple dashes "- " for any lists
+- Keep paragraphs short (3-5 sentences each)
+- Separate paragraphs with a blank line
+- Include specific details: names, numbers, percentages, dates
+- Target 200-350 words per section
+- Write in a professional, readable tone
+
+CRITICAL OUTPUT RULES:
+1. Start DIRECTLY with the content - NO introductory text
+2. Do NOT include closing remarks
+3. ONLY output the section content itself"""
 
     def _get_default_instructions(
         self,

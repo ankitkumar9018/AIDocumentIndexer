@@ -161,22 +161,46 @@ def validate_language_purity(content: str, target_language: str = "en") -> tuple
     foreign_word_patterns = []
 
     if target_language == "en":
-        # German words that commonly leak into English output
         foreign_word_patterns = [
-            r'\bAUFGABENSTELLUNG\b',  # German: task assignment
-            r'\bENTWICKLUNG\b',  # German: development
-            r'\bEINER\b',  # German: a/an
-            r'\bDIE\b(?!\s+(Hard|Way|Out))',  # German: the (but not "Die Hard", etc.)
-            r'\bDAS\b',  # German: the/it
-            r'\bUND\b',  # German: and
-            r'\bMIT\b(?!\s)',  # German: with
-            r'\bFÜR\b',  # German: for
-            r'\bZUM\b',  # German: to the
-            r'\bZUR\b',  # German: to the
-            r'\bKONZEPT\b',  # German: concept
-            r'\bSTRATEGIE\b(?!s?\b)',  # German: strategy (but allow English "strategies")
-            r'\bMARKE\b',  # German: brand
-            r'\bKAMPAGNE\b',  # German: campaign (German spelling)
+            # German words that commonly leak into English output
+            r'\bAUFGABENSTELLUNG\b',  # task assignment
+            r'\bENTWICKLUNG\b',  # development
+            r'\bEINER\b',  # a/an
+            r'\bDIE\b(?!\s+(Hard|Way|Out))',  # the (but not "Die Hard", etc.)
+            r'\bDAS\b',  # the/it
+            r'\bUND\b',  # and
+            r'\bMIT\b(?!\s)',  # with
+            r'\bFÜR\b',  # for
+            r'\bZUM\b',  # to the
+            r'\bZUR\b',  # to the
+            r'\bKONZEPT\b',  # concept
+            r'\bSTRATEGIE\b(?!s?\b)',  # strategy (allow English "strategies")
+            r'\bMARKE\b',  # brand
+            r'\bKAMPAGNE\b',  # campaign
+            r'\bBEREICH\b',  # area/domain
+            r'\bERGEBNIS\b',  # result
+            r'\bANFORDERUNG\b',  # requirement
+            # French words that commonly leak into English output
+            r'\bLES\b(?!\s+(Paul|Mis))',  # the (but not "Les Paul", "Les Mis")
+            r'\bDES\b(?!\s)',  # of the
+            r'\bPOUR\b',  # for
+            r'\bDANS\b',  # in
+            r'\bAVEC\b',  # with
+            r'\bENTREPRISE\b',  # enterprise/company
+            r'\bDÉVELOPPEMENT\b',  # development
+            r'\bSTRATÉGIE\b',  # strategy
+            r'\bOBJECTIF\b(?!e)',  # objective (not English "objective")
+            r'\bRÉSULTAT\b',  # result
+            # Spanish words that commonly leak into English output
+            r'\bLOS\b(?!\s+Angeles)',  # the (but not "Los Angeles")
+            r'\bDEL\b(?!\s)',  # of the
+            r'\bPARA\b',  # for
+            r'\bCON\b(?!\s)',  # with
+            r'\bEMPRESA\b',  # company
+            r'\bDESARROLLO\b',  # development
+            r'\bESTRATEGIA\b',  # strategy
+            r'\bOBJETIVO\b',  # objective
+            r'\bRESULTADO\b',  # result
         ]
 
     lines = content.split('\n')

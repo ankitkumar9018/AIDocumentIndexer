@@ -272,6 +272,8 @@ class SectionResponse(BaseModel):
     description: Optional[str] = None
     generation_approved: bool = True
     skipped: bool = False
+    # Generation metadata (content source, quality scores, etc.)
+    metadata: Optional[dict] = None
 
 
 class OutlineResponse(BaseModel):
@@ -352,6 +354,7 @@ def job_to_response(job: GenerationJob) -> JobResponse:
             description=getattr(s, 'description', None),
             generation_approved=getattr(s, 'generation_approved', True),
             skipped=getattr(s, 'skipped', False),
+            metadata=getattr(s, 'metadata', None),
         )
         for s in job.sections
     ]

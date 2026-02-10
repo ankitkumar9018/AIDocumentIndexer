@@ -411,6 +411,10 @@ function CreatePageContent() {
           inspirationNotes: data.generated_suggestions.inspiration_notes,
           designDirection: data.generated_suggestions.design_direction,
           colorPsychology: data.generated_suggestions.color_psychology,
+          visualNarrative: data.generated_suggestions.visual_narrative,
+          designSystem: data.generated_suggestions.design_system,
+          antiPatterns: data.generated_suggestions.anti_patterns,
+          imageSearchTerms: data.generated_suggestions.image_search_terms,
         },
         createdAt: data.created_at,
         modelUsed: data.model_used,
@@ -1706,6 +1710,10 @@ function CreatePageContent() {
                                   inspiration_notes: generatedMoodBoard.generatedSuggestions.inspirationNotes,
                                   design_direction: generatedMoodBoard.generatedSuggestions.designDirection,
                                   color_psychology: generatedMoodBoard.generatedSuggestions.colorPsychology,
+                                  visual_narrative: generatedMoodBoard.generatedSuggestions.visualNarrative,
+                                  design_system: generatedMoodBoard.generatedSuggestions.designSystem,
+                                  anti_patterns: generatedMoodBoard.generatedSuggestions.antiPatterns,
+                                  image_search_terms: generatedMoodBoard.generatedSuggestions.imageSearchTerms,
                                 },
                               },
                             });
@@ -1736,6 +1744,10 @@ function CreatePageContent() {
                               inspiration_notes: sug?.inspirationNotes || "",
                               design_direction: sug?.designDirection || "",
                               color_psychology: sug?.colorPsychology || {},
+                              visual_narrative: sug?.visualNarrative || "",
+                              design_system: sug?.designSystem || {},
+                              anti_patterns: sug?.antiPatterns || [],
+                              image_search_terms: sug?.imageSearchTerms || [],
                             },
                             created_at: generatedMoodBoard.createdAt,
                             model_used: generatedMoodBoard.modelUsed,
@@ -3486,6 +3498,34 @@ function CreatePageContent() {
                               <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
                                 {section.content.slice(0, 200)}...
                               </p>
+                              {/* Content source + source doc badges */}
+                              <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                                {section.metadata?.content_source && (
+                                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                                    section.metadata.content_source === 'rag_only'
+                                      ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                                      : section.metadata.content_source === 'no_sources'
+                                      ? 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                                      : section.metadata.content_source === 'fallback'
+                                      ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300'
+                                      : section.metadata.content_source?.toString().startsWith('dual_')
+                                      ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
+                                      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                                  }`}>
+                                    {section.metadata.content_source === 'rag_only' ? 'Docs'
+                                      : section.metadata.content_source === 'no_sources' ? 'AI Only'
+                                      : section.metadata.content_source === 'fallback' ? 'Fallback'
+                                      : section.metadata.content_source === 'dual_merged' ? 'Docs + AI'
+                                      : section.metadata.content_source === 'dual_docs_first' ? 'Docs Primary'
+                                      : String(section.metadata.content_source)}
+                                  </span>
+                                )}
+                                {section.sources && section.sources.length > 0 && (
+                                  <span className="text-[10px] text-muted-foreground">
+                                    {section.sources.length} source{section.sources.length !== 1 ? 's' : ''}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                             <div className="flex items-center gap-2 ml-4">
                               {section.metadata?.quality_score !== undefined && (

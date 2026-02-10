@@ -3345,13 +3345,10 @@ class PPTXGenerator(BaseFormatGenerator):
                 """
                 from pptx.enum.shapes import PP_PLACEHOLDER
 
-                # PHASE 12 FIX: Always position footer at very bottom of slide
-                # This prevents overlap with template branding bars that may extend into footer area
-                # Standard slide height is 5.625" (5143500 EMU), footer at 5.45" gives 0.175" margin
-                footer_y = prs.slide_height - Inches(0.20)  # 0.20" from absolute bottom
-                logger.debug(f"Footer position: y={footer_y / 914400:.2f}in (slide height={prs.slide_height / 914400:.2f}in)")
-
+                # Position footer so bottom edge stays within slide bounds
                 footer_height = Inches(0.25)
+                footer_y = prs.slide_height - footer_height - Inches(0.02)  # 0.02" margin from bottom
+                logger.debug(f"Footer position: y={footer_y / 914400:.2f}in (slide height={prs.slide_height / 914400:.2f}in)")
                 footer_font_size = Pt(9)  # Enterprise standard: 8-10pt for footers
 
                 # Try to use template placeholders when template styling is enabled
@@ -3499,6 +3496,23 @@ class PPTXGenerator(BaseFormatGenerator):
             p.line_spacing = 1.2  # 120% line spacing
             p.space_after = Pt(4)
 
+            # Target audience subtitle (if available from outline)
+            target_audience = getattr(job.outline, 'target_audience', None) if job.outline else None
+            if target_audience:
+                audience_box = slide.shapes.add_textbox(
+                    scaled_inches(0.8, "w"), scaled_inches(5.0, "h"),
+                    content_width, scaled_inches(0.5, "h")
+                )
+                tf = audience_box.text_frame
+                tf.word_wrap = True
+                tf.auto_size = MSO_AUTO_SIZE.NONE
+                p = tf.paragraphs[0]
+                p.text = sanitize_text(f"Prepared for: {target_audience}")
+                apply_font_to_paragraph(p, body_font)
+                p.font.size = Pt(14)
+                p.font.italic = True
+                apply_color_to_paragraph(p, title_text_color)
+
             # Date
             generation_date = datetime.now()
             date_box = slide.shapes.add_textbox(
@@ -3602,6 +3616,21 @@ Total sections: {len(job.sections)}
                 else:
                     content_text_color = get_text_color_for_background(is_content_slide=True)
 
+                # Add accent underline below TOC title for visual separation
+                if use_template_styling:
+                    try:
+                        toc_accent_color = get_template_accent_color(1)
+                        toc_underline = slide.shapes.add_shape(
+                            MSO_SHAPE.RECTANGLE,
+                            scaled_inches(0.6, "w"), scaled_inches(1.5, "h"),
+                            scaled_inches(3.0, "w"), Inches(0.03)
+                        )
+                        toc_underline.fill.solid()
+                        toc_underline.fill.fore_color.rgb = toc_accent_color
+                        toc_underline.line.fill.background()
+                    except Exception as toc_accent_err:
+                        logger.debug(f"Could not add TOC accent underline: {toc_accent_err}")
+
                 first_toc_used = False
                 for idx, section in enumerate(job.sections):
                     if first_toc_used:
@@ -3634,12 +3663,30 @@ Total sections: {len(job.sections)}
                     title_run = p.add_run()
                     title_run.text = f"  {section_title}"
                     title_run.font.size = Pt(20)
+                    title_run.font.bold = True
                     if not use_template_styling:
                         title_run.font.color.rgb = content_text_color
                         if body_font:
                             title_run.font.name = body_font
 
-                    p.space_after = Pt(12)
+                    p.space_after = Pt(4)
+
+                    # Add section description if available (from outline generation)
+                    desc = section.description if hasattr(section, 'description') and section.description else None
+                    if desc and len(desc.strip()) > 10:
+                        desc_p = tf.add_paragraph()
+                        desc_text = sanitize_text(desc)[:100]
+                        desc_run = desc_p.add_run()
+                        desc_run.text = f"     {desc_text}"
+                        desc_run.font.size = Pt(12)
+                        desc_run.font.italic = True
+                        if use_template_styling:
+                            desc_run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+                        else:
+                            desc_run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+                        desc_p.space_after = Pt(10)
+                    else:
+                        p.space_after = Pt(12)
 
                     toc_paragraphs.append(p)
                     toc_section_indices.append(idx)
@@ -3761,6 +3808,8 @@ Example BAD takeaways (NEVER write these):
                         if line and (line.startswith('•') or line.startswith('-') or line.startswith('*')):
                             # Remove bullet prefix and clean
                             bullet_text = re.sub(r'^[•\-\*]\s*', '', line).strip()
+                            # Strip any markdown formatting (bold, italic, etc.)
+                            bullet_text = strip_markdown(bullet_text)
                             if bullet_text and len(bullet_text) > 10:  # Skip trivial bullets
                                 # Use ensure_complete_thought for smart truncation
                                 if len(bullet_text) > 70:
@@ -3776,6 +3825,17 @@ Example BAD takeaways (NEVER write these):
 
                     # Limit to 5 key takeaways
                     exec_bullets = exec_bullets[:5]
+
+                    # Detect generic placeholder bullets from LLM (e.g., "Key Takeaway", "Action")
+                    # Small models sometimes return template text instead of real content
+                    if exec_bullets:
+                        generic_phrases = {"key takeaway", "action", "key insight", "main point", "takeaway", "action item"}
+                        all_generic = all(
+                            any(g in b.lower() for g in generic_phrases) for b in exec_bullets
+                        )
+                        if all_generic:
+                            logger.warning("Executive summary bullets are generic placeholders, falling back to section titles")
+                            exec_bullets = [sanitize_text(s.title)[:65] for s in job.sections[:5] if s.title]
 
                 except Exception as e:
                     logger.warning(f"Could not generate executive summary via LLM: {e}")
@@ -3872,6 +3932,31 @@ Presenter guidance:
                         title=section.title[:50] if section.title else "No title",
                     )
                     section.content = "• Content not available for this section"
+
+                # ========== CONTENT ANALYSIS FOR LAYOUT RECOMMENDATIONS ==========
+                content_for_analysis = (section.revised_content or section.content or "").lower()
+                if content_for_analysis:
+                    has_comparison = any(w in content_for_analysis for w in ['vs ', 'versus ', 'compared to ', 'difference between '])
+                    has_process = any(w in content_for_analysis for w in ['step 1', 'step 2', 'first,', 'then,', 'finally,', 'phase 1', 'phase 2'])
+                    has_statistics = bool(re.search(r'\d+%|\$[\d,.]+|\d+\.\d+[xX]', content_for_analysis))
+                    if has_comparison:
+                        logger.info(
+                            "Content analysis: comparison detected, two-column layout recommended",
+                            section=section.title[:50],
+                            section_idx=section_idx + 1,
+                        )
+                    if has_process:
+                        logger.info(
+                            "Content analysis: process/steps detected, timeline layout recommended",
+                            section=section.title[:50],
+                            section_idx=section_idx + 1,
+                        )
+                    if has_statistics:
+                        logger.info(
+                            "Content analysis: statistics detected, chart visualization recommended",
+                            section=section.title[:50],
+                            section_idx=section_idx + 1,
+                        )
 
                 # ========== PRE-RENDER REVIEW & FIX (Optional) ==========
                 if slide_reviewer:
@@ -4205,16 +4290,18 @@ Presenter guidance:
 
                 section.rendered_content = content
 
-                # Auto chart/table detection
+                # Auto chart/table detection — charts take priority over images
+                # When charts are enabled, try chart detection FIRST regardless of image availability
+                # If a chart/table is detected, skip the image for this slide
                 rendered_as_chart = False
                 rendered_as_table = False
 
-                if auto_charts_enabled and not has_image:
+                if auto_charts_enabled:
                     try:
                         from backend.services.pptx_chart_generator import PPTXNativeChartGenerator, create_chart_generator
 
                         chart_data = PPTXNativeChartGenerator.detect_chartable_data(content)
-                        if chart_data:
+                        if chart_data and PPTXNativeChartGenerator.validate_chart_data(chart_data):
                             theme_colors = {
                                 'primary': theme['primary'],
                                 'secondary': theme['secondary'],
@@ -4236,14 +4323,29 @@ Presenter guidance:
                                 show_legend=len(chart_data.series) > 1,
                             )
                             rendered_as_chart = True
+                            logger.info(f"Rendered chart on slide {current_slide} (type={suggested_type})")
+                            # Preserve content as speaker notes so slide info isn't lost
+                            try:
+                                notes_slide = slide.notes_slide
+                                notes_tf = notes_slide.notes_text_frame
+                                notes_tf.text = f"Slide content:\n{content[:800]}"
+                            except Exception:
+                                pass
                     except Exception as e:
                         logger.warning(f"Chart detection failed: {e}")
 
-                if auto_charts_enabled and not rendered_as_chart and not has_image:
+                if auto_charts_enabled and not rendered_as_chart:
                     try:
                         from backend.services.pptx_table_generator import PPTXTableGenerator
 
                         table_data = PPTXTableGenerator.detect_tabular_content(content)
+                        # Validate table data: reject if cells are too long (prose, not tabular)
+                        if table_data and len(table_data) >= 2 and len(table_data[0]) >= 2:
+                            total_cells = sum(len(row) for row in table_data)
+                            avg_cell_len = sum(len(cell) for row in table_data for cell in row) / max(1, total_cells)
+                            if avg_cell_len > 60:
+                                logger.debug(f"Table rejected: avg cell length {avg_cell_len:.0f} > 60 (prose, not tabular)")
+                                table_data = None
                         if table_data and len(table_data) >= 2 and len(table_data[0]) >= 2:
                             theme_colors = {
                                 'primary': theme['primary'],
@@ -4263,6 +4365,7 @@ Presenter guidance:
                                 font_size=12 if len(table_data) > 8 else 14,
                             )
                             rendered_as_table = True
+                            logger.info(f"Rendered table on slide {current_slide}")
                     except Exception as e:
                         logger.warning(f"Table detection failed: {e}")
 
@@ -4270,6 +4373,9 @@ Presenter guidance:
                 if rendered_as_chart or rendered_as_table:
                     add_footer(slide, current_slide, total_slides)
                     continue
+
+                # If chart/table was rendered, don't show image (chart takes priority)
+                effective_has_image = has_image and not rendered_as_chart and not rendered_as_table
 
                 # Content layout
                 slide_content_width = prs.slide_width.inches - 1.6
@@ -4283,20 +4389,24 @@ Presenter guidance:
                 # This accounts for the underline height (0.04") plus breathing room
                 content_top = title_box_bottom + Inches(0.35)  # Increased from 0.15" to 0.35"
 
-                if has_image:
+                # Cap content height so it never extends into the footer zone
+                footer_zone_top = prs.slide_height - Inches(0.45)  # Reserve 0.45" for footer
+                max_content_height = footer_zone_top - content_top
+
+                if effective_has_image:
                     image_pos = layout_config.get("image_position", "right")
-                    content_height = scaled_inches(4.8, "h")
+                    content_height = min(scaled_inches(4.8, "h"), max_content_height)
 
                     if layout_key == "two_column":
                         content_width = Inches(slide_content_width * 0.48)
                         content_left = scaled_inches(0.8, "w")
                         image_left = scaled_inches(7.2, "w")
                         image_width = scaled_inches(5.5, "w")
-                        content_height = scaled_inches(5.0, "h")
+                        content_height = min(scaled_inches(5.0, "h"), max_content_height)
                     elif layout_key == "image_focused":
                         content_width = Inches(slide_content_width)
                         content_left = scaled_inches(0.8, "w")
-                        content_height = scaled_inches(2.0, "h")
+                        content_height = min(scaled_inches(2.0, "h"), max_content_height)
                         image_left = scaled_inches(2.5, "w")
                         image_width = scaled_inches(8.0, "w")
                     elif layout_key == "minimal":
@@ -4304,13 +4414,13 @@ Presenter guidance:
                         content_left = scaled_inches(0.6, "w")
                         image_left = scaled_inches(7.2, "w")
                         image_width = scaled_inches(5.3, "w")
-                        content_height = scaled_inches(5.0, "h")
+                        content_height = min(scaled_inches(5.0, "h"), max_content_height)
                     else:  # standard
                         content_width = scaled_inches(6.0, "w")
                         content_left = scaled_inches(0.6, "w")
                         image_left = scaled_inches(7.0, "w")
                         image_width = scaled_inches(5.5, "w")
-                        content_height = scaled_inches(5.0, "h")
+                        content_height = min(scaled_inches(5.0, "h"), max_content_height)
 
                     content_box = slide.shapes.add_textbox(
                         content_left, content_top,
@@ -4336,7 +4446,7 @@ Presenter guidance:
 
                     content_box = slide.shapes.add_textbox(
                         content_left, content_top,  # Use same content_top as image branch
-                        content_width, scaled_inches(4.8, "h")
+                        content_width, min(scaled_inches(4.8, "h"), max_content_height)
                     )
 
                 tf = content_box.text_frame
@@ -4989,19 +5099,45 @@ Presenter guidance:
 
                 add_footer(slide, current_slide, total_slides)
 
-            # ========== POST-PROCESSING: ADD TOC HYPERLINKS ==========
+            # ========== POST-PROCESSING: ADD TOC HYPERLINKS & PAGE NUMBERS ==========
             if config.include_toc and toc_paragraphs and content_slides_by_section:
                 try:
+                    # Calculate slide numbers for each section
+                    # Title slide = 1, TOC = 2, Exec Summary = 3, then content slides
+                    base_slide_offset = 1  # 1-indexed
+                    if config.include_toc:
+                        base_slide_offset += 1
+                    if config.include_executive_summary:
+                        base_slide_offset += 1
+                    base_slide_offset += 1  # Title slide
+
                     for toc_idx, (toc_para, section_idx) in enumerate(zip(toc_paragraphs, toc_section_indices)):
                         if section_idx in content_slides_by_section:
                             target_slide = content_slides_by_section[section_idx]
                             toc_text = toc_para.text
 
+                            # Calculate the slide number for this section
+                            slide_number = base_slide_offset + section_idx
+
                             toc_para.clear()
+
+                            # Number run with accent color
+                            number_run = toc_para.add_run()
+                            number_run.text = f"{section_idx + 1}."
+                            number_run.font.size = Pt(20)
+                            number_run.font.bold = True
+                            if use_template_styling:
+                                apply_accent_to_run(number_run, accent_num=1)
+                            else:
+                                number_run.font.color.rgb = ACCENT_COLOR
+
+                            # Title run with hyperlink
+                            title_text = toc_text.lstrip('0123456789. ')  # Remove existing number prefix
                             run = toc_para.add_run()
-                            run.text = toc_text
+                            run.text = f"  {title_text}"
                             run.font.name = body_font
                             run.font.size = Pt(20)
+                            run.font.bold = True
                             run.font.color.rgb = content_text_color
                             run.font.underline = False
 
@@ -5013,7 +5149,15 @@ Presenter guidance:
                             except Exception as link_err:
                                 logger.debug(f"Could not add hyperlink: {link_err}")
 
-                    logger.info("Added TOC hyperlinks", count=len(toc_paragraphs))
+                            # Add page number indicator
+                            page_run = toc_para.add_run()
+                            page_run.text = f"  —  {slide_number}"
+                            page_run.font.size = Pt(14)
+                            page_run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+                            if body_font:
+                                page_run.font.name = body_font
+
+                    logger.info("Added TOC hyperlinks and page numbers", count=len(toc_paragraphs))
                 except Exception as e:
                     logger.warning(f"Failed to add TOC hyperlinks: {e}")
 

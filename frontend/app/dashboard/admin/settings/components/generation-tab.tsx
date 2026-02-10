@@ -121,6 +121,50 @@ export function GenerationTab({
             </div>
           </div>
 
+          {/* Dual Mode / Content Source Settings */}
+          <div className="space-y-4 pt-4 border-t">
+            <h4 className="text-sm font-medium flex items-center gap-2">
+              <Brain className="h-4 w-4" />
+              Content Sources
+            </h4>
+            <p className="text-sm text-muted-foreground">
+              Control how AI uses your documents vs general knowledge when generating content
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <p className="font-medium">Dual Mode</p>
+                  <p className="text-sm text-muted-foreground">
+                    Combine document knowledge with general AI knowledge
+                  </p>
+                </div>
+                <Switch
+                  checked={localSettings["generation.dual_mode"] as boolean ?? false}
+                  onCheckedChange={(checked) => handleSettingChange("generation.dual_mode", checked)}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Blend Strategy</label>
+                <Select
+                  value={localSettings["generation.dual_mode_blend"] as string || "docs_first"}
+                  onValueChange={(value) => handleSettingChange("generation.dual_mode_blend", value)}
+                  disabled={!(localSettings["generation.dual_mode"] as boolean)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="docs_first">Documents Primary</SelectItem>
+                    <SelectItem value="merged">Equal Blend</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  &ldquo;Documents Primary&rdquo; uses docs as base, AI fills gaps. &ldquo;Equal Blend&rdquo; merges both equally.
+                </p>
+              </div>
+            </div>
+          </div>
+
           {/* Quality Review Settings */}
           <div className="space-y-4 pt-4 border-t">
             <h4 className="text-sm font-medium flex items-center gap-2">
