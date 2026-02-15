@@ -91,7 +91,25 @@ class SchemaLinker:
         text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
         # Split on underscores, hyphens, spaces, and other non-alphanumeric
         tokens = re.split(r'[_\-\s,./]+', text.lower())
-        return {t for t in tokens if len(t) > 1}
+        base = {t for t in tokens if len(t) > 1}
+        return self._expand_stems(base)
+
+    @staticmethod
+    def _expand_stems(tokens: Set[str]) -> Set[str]:
+        """Add plural/singular variants for better matching."""
+        expanded = set(tokens)
+        for t in tokens:
+            if t in STOP_WORDS or t in SQL_INTENT_WORDS:
+                continue
+            if t.endswith('ies'):
+                expanded.add(t[:-3] + 'y')   # categories -> category
+            elif t.endswith('ses') or t.endswith('xes') or t.endswith('zes'):
+                expanded.add(t[:-2])           # addresses -> address
+            elif t.endswith('s') and not t.endswith('ss'):
+                expanded.add(t[:-1])           # users -> user
+            else:
+                expanded.add(t + 's')          # user -> users
+        return expanded
 
     def link_by_keywords(self, question: str) -> Dict[str, float]:
         """
@@ -104,6 +122,12 @@ class SchemaLinker:
         if not question_tokens:
             return {}
 
+        # Build a set of table names (lowercased) for exact-match bonus
+        table_name_variants: Dict[str, str] = {}
+        for table in self.schema.tables:
+            for variant in self._tokenize(table.name):
+                table_name_variants[variant] = table.name
+
         scores: Dict[str, float] = {}
         for table_name, table_keywords in self._table_keywords.items():
             if not table_keywords:
@@ -114,6 +138,20 @@ class SchemaLinker:
             if overlap:
                 # Jaccard-like score weighted toward question coverage
                 score = len(overlap) / len(question_tokens)
+
+                # Bonus: if question token matches the table name itself
+                name_tokens = self._tokenize(table_name)
+                name_overlap = question_tokens & name_tokens
+                if name_overlap:
+                    score += 0.2
+
+                # Extra bonus: exact table name match (e.g. "user" matches "User")
+                # Penalize compound names like "CommunityUser" vs simple "User"
+                table_lower = table_name.lower()
+                table_stems = self._expand_stems({table_lower})
+                if question_tokens & table_stems:
+                    score += 0.3  # "user"/"users" matches "User" exactly
+
                 scores[table_name] = min(score, 1.0)
 
         return scores
