@@ -864,7 +864,10 @@ class BaseAgent(ABC):
     async def invoke_llm(
         self,
         messages: List[Any],
-        record: bool = True
+        record: bool = True,
+        temperature_override: Optional[float] = None,
+        intelligence_level: Optional[str] = None,
+        enable_cot: bool = False,
     ) -> tuple[str, int, int]:
         """
         Invoke LLM with messages and optionally record the step.
@@ -873,10 +876,14 @@ class BaseAgent(ABC):
         - Enhances system prompt with model-specific base instructions for small models
         - Preserves user's custom prompts (they take precedence)
         - Adds foundational behavioral hints for better small model performance
+        - Injects intelligence grounding and CoT for large models (same gating as chat pipeline)
 
         Args:
             messages: LangChain messages to send
             record: Whether to record in trajectory
+            temperature_override: Optional per-request temperature override
+            intelligence_level: Optional intelligence level (basic/standard/enhanced/maximum)
+            enable_cot: Whether to inject chain-of-thought reasoning instruction
 
         Returns:
             Tuple of (response_text, input_tokens, output_tokens)
@@ -891,7 +898,41 @@ class BaseAgent(ABC):
             # This preserves user's custom prompts while adding foundational hints for small models
             enhanced_messages = self._enhance_messages_for_model(messages, llm)
 
-            response = await llm.ainvoke(enhanced_messages)
+            # Intelligence grounding and CoT — only for large models (same gating as chat pipeline)
+            if intelligence_level or enable_cot:
+                model_name = getattr(llm, "model", None) or getattr(llm, "model_name", None)
+                try:
+                    from backend.services.session_memory import get_model_tier
+                    _tier = get_model_tier(model_name) if model_name else {"tier": "small"}
+                    is_small_model = _tier["tier"] in ("tiny", "small")
+                except Exception:
+                    is_small_model = True  # Safe fallback: skip for unknown models
+
+                if not is_small_model:
+                    additions = []
+                    if intelligence_level:
+                        from backend.services.rag_module.prompts import get_intelligence_grounding
+                        grounding = get_intelligence_grounding(intelligence_level)
+                        if grounding:
+                            additions.append(grounding)
+                    if enable_cot:
+                        additions.append("Think through this step by step before answering.")
+
+                    if additions:
+                        addendum = "\n".join(additions)
+                        for i, msg in enumerate(enhanced_messages):
+                            if isinstance(msg, SystemMessage):
+                                enhanced_messages[i] = SystemMessage(
+                                    content=f"{msg.content}\n{addendum}"
+                                )
+                                break
+
+            # Apply temperature override if provided
+            invoke_kwargs = {}
+            if temperature_override is not None:
+                invoke_kwargs["temperature"] = temperature_override
+
+            response = await llm.ainvoke(enhanced_messages, **invoke_kwargs)
 
             # Extract response text
             if hasattr(response, "content"):

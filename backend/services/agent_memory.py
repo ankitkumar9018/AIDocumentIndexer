@@ -517,7 +517,7 @@ class RecallMemory:
         # Generate embedding if service available
         if self._embedding_service:
             try:
-                embedding = await self._embedding_service.embed_text(content)
+                embedding = self._embedding_service.embed_text(content)
                 entry.embedding = embedding
             except Exception as e:
                 logger.warning(f"Failed to generate embedding: {e}")
@@ -598,7 +598,7 @@ class RecallMemory:
         # If we have embedding service, do semantic search
         if self._embedding_service:
             try:
-                query_embedding = await self._embedding_service.embed_text(query)
+                query_embedding = self._embedding_service.embed_text(query)
 
                 # Score by cosine similarity
                 scored = []

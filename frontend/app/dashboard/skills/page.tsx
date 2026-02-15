@@ -519,7 +519,7 @@ function SkillDetailDialog({
   }, [defaultProvider]);
 
   // Initialize default values when skill changes
-  useState(() => {
+  useEffect(() => {
     if (skill) {
       const defaults: Record<string, any> = {};
       skill.inputs.forEach((input) => {
@@ -529,7 +529,7 @@ function SkillDetailDialog({
       });
       setInputValues(defaults);
     }
-  });
+  }, [skill]);
 
   if (!skill) return null;
 

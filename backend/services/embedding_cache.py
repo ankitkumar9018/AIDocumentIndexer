@@ -225,7 +225,7 @@ class CachedEmbeddingService:
 
         # Compute missing embeddings
         missing_texts = [texts[i] for i in missing]
-        new_embeddings = await self.embedding_service.embed_texts(missing_texts, **kwargs)
+        new_embeddings = self.embedding_service.embed_texts(missing_texts, **kwargs)
 
         # Cache new embeddings
         await self.cache.set_many(missing_texts, new_embeddings)

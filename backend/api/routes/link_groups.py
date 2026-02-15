@@ -562,7 +562,8 @@ async def list_saved_links(
         query = query.where(SavedLink.group_id == _to_uuid(group_id))
 
     if search:
-        search_pattern = f"%{search}%"
+        safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        search_pattern = f"%{safe}%"
         query = query.where(
             or_(
                 SavedLink.url.ilike(search_pattern),

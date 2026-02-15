@@ -345,7 +345,7 @@ class EntityStandardizer:
         """Initialize embedding service for similarity."""
         try:
             from backend.services.embeddings import get_embedding_service
-            self._embedding_service = await get_embedding_service()
+            self._embedding_service = get_embedding_service()
         except Exception as e:
             logger.warning("Embedding service not available for standardization", error=str(e))
 
@@ -481,7 +481,7 @@ class KGGenExtractor:
             _provider = self.config.llm_provider or llm_config.default_provider
             _model = self.config.llm_model or llm_config.default_chat_model
 
-            self._llm = await get_chat_model(
+            self._llm = get_chat_model(
                 provider=_provider,
                 model=_model,
             )

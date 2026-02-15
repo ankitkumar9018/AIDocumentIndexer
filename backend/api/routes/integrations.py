@@ -189,7 +189,7 @@ async def find_integration_path(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown feature: {str(e)}",
+            detail="Unknown feature",
         )
 
     service = get_synergy_service()

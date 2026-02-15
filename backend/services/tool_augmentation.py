@@ -155,14 +155,17 @@ class CalculatorTool:
 
     def _safe_eval(self, expression: str) -> Union[int, float]:
         """Safely evaluate a mathematical expression."""
-        # Replace function names with their Python equivalents
+        import re
+
+        # Replace function names with their Python equivalents using word boundaries
+        # to avoid corrupting substrings (e.g., "e" in "exp", "pi" in "spiral")
         for func_name in self.SAFE_FUNCTIONS:
             if callable(self.SAFE_FUNCTIONS[func_name]):
-                # Check if it's a constant (takes no args)
                 if func_name in ['pi', 'e']:
-                    expression = expression.replace(func_name, str(self.SAFE_FUNCTIONS[func_name]()))
+                    replacement = str(self.SAFE_FUNCTIONS[func_name]())
                 else:
-                    expression = expression.replace(func_name, f'__{func_name}__')
+                    replacement = f'__{func_name}__'
+                expression = re.sub(r'\b' + re.escape(func_name) + r'\b', replacement, expression)
 
         # Build safe namespace
         safe_dict = {
@@ -228,7 +231,7 @@ class CodeExecutorTool:
                         execution_time_ms=int((time.time() - start_time) * 1000),
                     )
 
-            # Check for dangerous patterns
+            # Check for dangerous patterns (including sandbox escape via type hierarchy)
             dangerous_patterns = [
                 r'exec\s*\(',
                 r'eval\s*\(',
@@ -238,6 +241,17 @@ class CodeExecutorTool:
                 r'compile\s*\(',
                 r'globals\s*\(',
                 r'locals\s*\(',
+                r'__class__',
+                r'__bases__',
+                r'__subclasses__',
+                r'__globals__',
+                r'__init__\s*\.\s*__',
+                r'__mro__',
+                r'__dict__',
+                r'__module__',
+                r'getattr\s*\(',
+                r'setattr\s*\(',
+                r'delattr\s*\(',
             ]
 
             for pattern in dangerous_patterns:
@@ -282,10 +296,30 @@ class CodeExecutorTool:
                 execution_time_ms=int((time.time() - start_time) * 1000),
             )
 
+    @staticmethod
+    def _validate_code_ast(code: str) -> None:
+        """Validate code AST to block sandbox escape attempts."""
+        import ast
+
+        tree = ast.parse(code)
+        _FORBIDDEN_NAMES = frozenset({
+            'exec', 'eval', 'compile', 'open', 'getattr', 'setattr',
+            'delattr', 'globals', 'locals', 'vars', 'dir', 'type',
+            'object', '__import__', 'breakpoint', 'exit', 'quit',
+        })
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr.startswith('_'):
+                raise ValueError(f"Access to private attribute '{node.attr}' is forbidden")
+            if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
+                raise ValueError(f"Use of '{node.id}' is forbidden")
+
     async def _execute_sandboxed(self, code: str, timeout: float) -> str:
-        """Execute code in a sandboxed subprocess."""
+        """Execute code in a sandboxed environment with timeout."""
         import io
         import contextlib
+
+        # AST validation to block sandbox escape (MRO traversal, __import__, etc.)
+        self._validate_code_ast(code)
 
         # Create a restricted execution environment
         safe_globals = {
@@ -314,22 +348,27 @@ class CodeExecutorTool:
                 'any': any,
                 'all': all,
                 'isinstance': isinstance,
-                'type': type,
                 'True': True,
                 'False': False,
                 'None': None,
             }
         }
 
-        # Capture output
-        output_buffer = io.StringIO()
-
-        try:
+        def _run_code():
+            output_buffer = io.StringIO()
             with contextlib.redirect_stdout(output_buffer):
                 exec(code, safe_globals)
-
             return output_buffer.getvalue()
 
+        try:
+            loop = asyncio.get_running_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, _run_code),
+                timeout=timeout or 10.0,
+            )
+            return result
+        except asyncio.TimeoutError:
+            return "Error: Code execution timed out"
         except Exception as e:
             return f"Error: {str(e)}"
 

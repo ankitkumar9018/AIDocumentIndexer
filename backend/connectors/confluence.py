@@ -124,6 +124,18 @@ class ConfluenceConnector:
             print(f"Page: {page.title}")
     """
 
+    @staticmethod
+    def _validate_cql_filter(cql: str) -> str:
+        """Validate CQL filter to prevent injection."""
+        dangerous = re.compile(r'\b(ORDER\s+BY|LIMIT|OFFSET)\b', re.IGNORECASE)
+        if dangerous.search(cql):
+            raise ValueError("CQL filter cannot contain ORDER BY, LIMIT, or OFFSET")
+        if cql.count('"') % 2 != 0:
+            raise ValueError("CQL filter has unbalanced quotes")
+        if len(cql) > 1000:
+            raise ValueError("CQL filter too long")
+        return cql
+
     def __init__(self, config: ConfluenceConnectorConfig):
         self.config = config
         self._client: Optional[httpx.AsyncClient] = None
@@ -174,7 +186,7 @@ class ConfluenceConnector:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
-            logger.error(f"Confluence API error {e.response.status_code}: {e.response.text}")
+            logger.error(f"Confluence API error {e.response.status_code}")
             return None
         except Exception as e:
             logger.error(f"Confluence request error: {e}")
@@ -256,8 +268,13 @@ class ConfluenceConnector:
         cql_parts = ["type=page"]
 
         if space_key:
+            if not re.match(r'^[A-Za-z0-9_~-]+$', space_key):
+                raise ValueError(f"Invalid space key format: {space_key}")
             cql_parts.append(f"space={space_key}")
         elif self.config.space_keys:
+            for sk in self.config.space_keys:
+                if not re.match(r'^[A-Za-z0-9_~-]+$', sk):
+                    raise ValueError(f"Invalid space key format: {sk}")
             spaces = " OR ".join(f"space={s}" for s in self.config.space_keys)
             cql_parts.append(f"({spaces})")
 
@@ -266,7 +283,7 @@ class ConfluenceConnector:
             cql_parts.append(f"lastModified >= \"{date_str}\"")
 
         if self.config.cql_filter:
-            cql_parts.append(self.config.cql_filter)
+            cql_parts.append(self._validate_cql_filter(self.config.cql_filter))
 
         cql = " AND ".join(cql_parts)
         cql += " ORDER BY lastModified DESC"
@@ -464,9 +481,12 @@ class ConfluenceConnector:
         Yields:
             Matching ConfluencePage objects
         """
-        cql = f'type=page AND (title~"{query}" OR text~"{query}")'
+        safe_query = query.replace('\\', '\\\\').replace('"', '\\"')
+        cql = f'type=page AND (title~"{safe_query}" OR text~"{safe_query}")'
 
         if space_key:
+            if not re.match(r'^[A-Za-z0-9_~-]+$', space_key):
+                raise ValueError(f"Invalid space key format: {space_key}")
             cql += f" AND space={space_key}"
         elif self.config.space_keys:
             spaces = " OR ".join(f"space={s}" for s in self.config.space_keys)

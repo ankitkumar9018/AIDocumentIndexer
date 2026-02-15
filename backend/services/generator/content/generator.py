@@ -192,9 +192,46 @@ class ContentGenerator:
                         else:
                             enhanced_prompt.append(msg)
 
+            # Intelligence grounding, CoT, and verification — same gating as chat pipeline
+            # Only inject for large models; small models get confused by meta-instructions
+            _intelligence_level = job.metadata.get("intelligence_level") if job.metadata else None
+            _enable_cot = job.metadata.get("enable_cot", False) if job.metadata else False
+            _enable_verification = job.metadata.get("enable_verification", False) if job.metadata else False
+
+            if (_intelligence_level or _enable_cot or _enable_verification) and model_name:
+                try:
+                    from backend.services.session_memory import get_model_tier
+                    _tier = get_model_tier(model_name)
+                    _is_small = _tier["tier"] in ("tiny", "small")
+                except Exception:
+                    _is_small = True  # Safe fallback
+
+                if not _is_small:
+                    _additions = []
+                    if _intelligence_level:
+                        from backend.services.rag_module.prompts import get_intelligence_grounding
+                        _grounding = get_intelligence_grounding(_intelligence_level)
+                        if _grounding:
+                            _additions.append(_grounding)
+                    if _enable_cot:
+                        _additions.append("Think through this step by step before writing. Consider what information from the sources is most relevant.")
+                    if _enable_verification:
+                        _additions.append("VERIFY: Every claim must be traceable to the provided sources. If a fact cannot be found in the sources, either omit it or clearly mark it as general knowledge.")
+
+                    if _additions:
+                        _addendum = "\n".join(_additions)
+                        if isinstance(enhanced_prompt, str):
+                            enhanced_prompt = f"{_addendum}\n\n{enhanced_prompt}"
+                        elif isinstance(enhanced_prompt, list):
+                            from langchain_core.messages import SystemMessage as _SM
+                            for _i, _msg in enumerate(enhanced_prompt):
+                                if isinstance(_msg, _SM):
+                                    enhanced_prompt[_i] = _SM(content=f"{_msg.content}\n{_addendum}")
+                                    break
+
             # Phase 15 LLM Optimization - apply temperature override if specified
             invoke_kwargs = {}
-            if "temperature_override" in job.metadata:
+            if job.metadata and "temperature_override" in job.metadata:
                 invoke_kwargs["temperature"] = job.metadata["temperature_override"]
 
             response = await llm.ainvoke(enhanced_prompt, **invoke_kwargs)
@@ -248,7 +285,7 @@ class ContentGenerator:
             try:
                 # Retry with the original (non-enhanced) prompt
                 llm = await self._get_llm(job)
-                response = await llm.ainvoke(prompt)
+                response = await llm.ainvoke(prompt, **invoke_kwargs)
                 content = response.content
                 section_metadata["content_source"] = "rag_retry"
             except Exception as retry_err:
@@ -582,8 +619,26 @@ class ContentGenerator:
             use_smart_filter = job.metadata.get("smart_source_filter", True) if job.metadata else True
             use_knowledge_graph = job.metadata.get("use_knowledge_graph", True) if job.metadata else True
 
-            # Retrieve more candidates for LLM to filter (unless user set a limit)
-            initial_limit = user_source_limit if user_source_limit else 15
+            # Extract intelligence features from job metadata (parity with chat pipeline)
+            _enhance_query = job.metadata.get("enhance_query") if job.metadata else None
+            _skip_cache = job.metadata.get("skip_cache", False) if job.metadata else False
+            _intelligence_level = job.metadata.get("intelligence_level") if job.metadata else None
+            _folder_id = job.metadata.get("folder_id") if job.metadata else None
+            _include_subfolders = job.metadata.get("include_subfolders", True) if job.metadata else True
+
+            # Intelligence-based source limit adjustment
+            _INTELLIGENCE_SOURCE_LIMIT = {
+                "basic": 10,
+                "standard": 15,
+                "enhanced": 20,
+                "maximum": 25,
+            }
+            if user_source_limit:
+                initial_limit = user_source_limit
+            elif _intelligence_level:
+                initial_limit = _INTELLIGENCE_SOURCE_LIMIT.get(_intelligence_level, 15)
+            else:
+                initial_limit = 15
 
             # Try to enhance search with knowledge graph for entity-based retrieval
             results = []
@@ -615,6 +670,12 @@ class ContentGenerator:
                 limit=initial_limit,
                 collection_filter=collection_filter,
                 exclude_chunk_ids=exclude_chunk_ids,
+                enhance_query=_enhance_query,
+                skip_cache=_skip_cache,
+                intelligence_level=_intelligence_level,
+                folder_id=_folder_id,
+                include_subfolders=_include_subfolders,
+                skip_score_gap_filter=True,  # Generator has its own LLM-based smart filtering
             )
             logger.info(
                 "Vector search completed",
@@ -645,6 +706,10 @@ class ContentGenerator:
                         query=section_query,
                         limit=initial_limit,
                         collection_filter=None,  # No filter
+                        enhance_query=_enhance_query,
+                        skip_cache=_skip_cache,
+                        intelligence_level=_intelligence_level,
+                        skip_score_gap_filter=True,
                     )
                     if fallback_results:
                         logger.info(

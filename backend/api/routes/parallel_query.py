@@ -222,7 +222,7 @@ async def parallel_query(
         logger.error("Parallel query failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Parallel query failed: {str(e)}"
+            detail="Parallel query failed"
         )
 
 

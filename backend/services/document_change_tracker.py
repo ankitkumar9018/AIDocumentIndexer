@@ -361,7 +361,7 @@ class DocumentChangeTracker:
             # Generate embeddings for new/modified chunks
             if chunks_to_embed:
                 texts = [content for _, content in chunks_to_embed]
-                embeddings = await embedding_service.embed_texts(texts)
+                embeddings = embedding_service.embed_texts(texts)
 
                 for (chunk, _), embedding in zip(chunks_to_embed, embeddings):
                     chunk.embedding = embedding

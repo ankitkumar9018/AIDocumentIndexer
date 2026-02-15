@@ -576,11 +576,17 @@ class DocumentGenerationService:
             if not job.sources_used:
                 job.sources_used = []
 
-            existing_ids = {s.document_id for s in job.sources_used}
+            def _style_key(src):
+                pn = getattr(src, 'page_number', None)
+                pn = int(pn) if pn is not None else None
+                return (str(src.document_name or src.document_id), pn)
+
+            existing_keys = {_style_key(s) for s in job.sources_used}
             for source in style_sources:
-                if source.document_id not in existing_ids:
+                key = _style_key(source)
+                if key not in existing_keys:
                     job.sources_used.append(source)
-                    existing_ids.add(source.document_id)
+                    existing_keys.add(key)
 
             _logger.info(
                 "Style learned from existing documents",
@@ -882,14 +888,21 @@ If no documents are good style references: {{"selected_indices": [], "reasoning"
         job.sections = sections
 
         # Aggregate all sources from sections for the sources slide
+        # Dedup by (document_name, page_number) — normalize types to avoid int/str mismatches
+        def _source_key(src):
+            pn = getattr(src, 'page_number', None)
+            pn = int(pn) if pn is not None else None
+            return (str(src.document_name or src.document_id), pn)
+
         all_sources = []
-        seen_doc_ids = set()
+        seen_source_keys = set()
         for section in sections:
             if section.sources:
                 for source in section.sources:
-                    if source.document_id not in seen_doc_ids:
+                    key = _source_key(source)
+                    if key not in seen_source_keys:
                         all_sources.append(source)
-                        seen_doc_ids.add(source.document_id)
+                        seen_source_keys.add(key)
 
         _logger.info(
             "Aggregated sources from sections",
@@ -902,11 +915,12 @@ If no documents are good style references: {{"selected_indices": [], "reasoning"
         if not job.sources_used:
             job.sources_used = []
 
-        existing_ids = {s.document_id for s in job.sources_used}
+        existing_keys = {_source_key(s) for s in job.sources_used}
         for source in all_sources:
-            if source.document_id not in existing_ids:
+            key = _source_key(source)
+            if key not in existing_keys:
                 job.sources_used.append(source)
-                existing_ids.add(source.document_id)
+                existing_keys.add(key)
 
         _logger.info(
             "Final sources for job",

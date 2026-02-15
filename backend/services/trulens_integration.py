@@ -182,6 +182,7 @@ class TruLensManager:
         self._experiments: Dict[str, ExperimentConfig] = {}
         self._records: Dict[str, List[EvaluationRecord]] = {}
         self._initialized = False
+        self._trulens_available = HAS_TRULENS
         self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
@@ -225,7 +226,7 @@ class TruLensManager:
 
                 except Exception as e:
                     logger.warning(f"TruLens initialization failed: {e}")
-                    HAS_TRULENS = False
+                    self._trulens_available = False
 
             self._initialized = True
 
@@ -640,7 +641,7 @@ Respond with only a number between 0 and 1."""
             response = await self.llm.ainvoke(prompt)
             content = response.content if hasattr(response, 'content') else str(response)
             return float(content.strip())
-        except:
+        except Exception:
             return 0.5
 
     async def evaluate_groundedness(
@@ -674,7 +675,7 @@ Respond with only a number between 0 and 1."""
             response = await self.llm.ainvoke(prompt)
             content = response.content if hasattr(response, 'content') else str(response)
             return float(content.strip())
-        except:
+        except Exception:
             return 0.5
 
     async def evaluate_all(

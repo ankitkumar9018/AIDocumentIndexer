@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 import os
+import re
 import shutil
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
 from backend.db.database import get_async_session, async_session_context
-from backend.api.middleware.auth import AuthenticatedUser
+from backend.api.middleware.auth import AuthenticatedUser, get_org_filter
 from backend.services.generator import (
     DocumentGenerationService,
     GenerationJob,
@@ -164,6 +165,24 @@ class CreateJobRequest(BaseModel):
     enhance_query: Optional[bool] = Field(
         default=None,
         description="Enable query enhancement (expansion + HyDE) for source search. None = use admin default."
+    )
+    # Intelligence features for source retrieval and content generation (parity with chat pipeline)
+    intelligence_level: Optional[str] = Field(
+        default=None,
+        pattern="^(basic|standard|enhanced|maximum)$",
+        description="Intelligence level: basic (fast), standard, enhanced (deeper retrieval), maximum (most thorough, stronger grounding)"
+    )
+    enable_cot: bool = Field(
+        default=False,
+        description="Enable chain-of-thought reasoning for content generation"
+    )
+    enable_verification: bool = Field(
+        default=False,
+        description="Enable source-verification of generated content (verify claims against retrieved sources)"
+    )
+    skip_cache: bool = Field(
+        default=False,
+        description="Skip retrieval cache for fresh source search results"
     )
     # PPTX Template - use an existing PPTX as a visual template
     template_pptx_id: Optional[str] = Field(
@@ -535,6 +554,16 @@ async def create_generation_job(
     if request.enhance_query is not None:
         metadata["enhance_query"] = request.enhance_query
 
+    # Store intelligence features (parity with chat pipeline)
+    if request.intelligence_level:
+        metadata["intelligence_level"] = request.intelligence_level
+    if request.enable_cot:
+        metadata["enable_cot"] = True
+    if request.enable_verification:
+        metadata["enable_verification"] = True
+    if request.skip_cache:
+        metadata["skip_cache"] = True
+
     # Store vision analysis preferences (for PPTX only) - per-document overrides
     if request.enable_template_vision_analysis is not None:
         metadata["enable_template_vision_analysis"] = request.enable_template_vision_analysis
@@ -554,6 +583,9 @@ async def create_generation_job(
         template_path = None
         async with async_session_context() as session:
             query = select(Document).where(Document.id == request.template_pptx_id)
+            org_id = get_org_filter(user)
+            if org_id:
+                query = query.where(Document.organization_id == org_id)
             result = await session.execute(query)
             doc = result.scalar_one_or_none()
             if doc and doc.file_path and os.path.exists(doc.file_path):
@@ -646,9 +678,10 @@ async def get_generation_job(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -683,9 +716,10 @@ async def generate_outline(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -713,9 +747,10 @@ async def generate_outline(
         await service.generate_outline(job_id, num_sections=effective_num_sections)
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Generation operation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
     return job_to_response(job)
@@ -739,9 +774,10 @@ async def approve_outline(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -755,9 +791,10 @@ async def approve_outline(
         mods = modifications.model_dump(exclude_none=True) if modifications else None
         job = await service.approve_outline(job_id, modifications=mods)
     except ValueError as e:
+        logger.warning("Generation operation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
     return job_to_response(job)
@@ -787,9 +824,10 @@ async def approve_section_plans(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -813,9 +851,10 @@ async def approve_section_plans(
             ]
         job = await service.approve_section_plans(job_id, section_approvals=section_approvals)
     except ValueError as e:
+        logger.warning("Generation operation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
     return job_to_response(job)
@@ -838,9 +877,10 @@ async def generate_content(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -853,9 +893,10 @@ async def generate_content(
     try:
         job = await service.generate_content(job_id)
     except ValueError as e:
+        logger.warning("Generation operation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
     except Exception as e:
         logger.error("Content generation failed", job_id=job_id, error=str(e))
@@ -892,9 +933,10 @@ async def provide_section_feedback(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -913,9 +955,10 @@ async def provide_section_feedback(
         )
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Generation operation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
     return job_to_response(job)
@@ -937,9 +980,10 @@ async def revise_section(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -953,9 +997,10 @@ async def revise_section(
         await service.revise_section(job_id=job_id, section_id=section_id)
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Generation operation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
     return job_to_response(job)
@@ -978,9 +1023,10 @@ async def download_generated_document(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -993,9 +1039,10 @@ async def download_generated_document(
     try:
         file_bytes, filename, content_type = await service.get_output_file(job_id)
     except ValueError as e:
+        logger.warning("Generation operation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
     return StreamingResponse(
@@ -1029,9 +1076,10 @@ async def get_preview_metadata(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -1070,9 +1118,10 @@ async def get_preview_page(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -1132,9 +1181,10 @@ async def get_preview_page(
             )
 
     except PreviewError as e:
+        logger.error("Preview generation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Failed to generate preview",
         )
 
 
@@ -1155,9 +1205,10 @@ async def get_all_slide_previews(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -1183,9 +1234,10 @@ async def get_all_slide_previews(
         slides = await preview_service.generate_pptx_all_slides(job_id)
         return {"slides": slides, "count": len(slides)}
     except PreviewError as e:
+        logger.error("Preview generation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Failed to generate preview",
         )
 
 
@@ -1206,9 +1258,10 @@ async def get_thumbnail(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -1233,9 +1286,10 @@ async def get_thumbnail(
             media_type=content_type,
         )
     except PreviewError as e:
+        logger.error("Preview generation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Failed to generate preview",
         )
 
 
@@ -1254,9 +1308,10 @@ async def cancel_generation_job(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -1269,9 +1324,10 @@ async def cancel_generation_job(
     try:
         await service.cancel_job(job_id)
     except ValueError as e:
+        logger.warning("Generation operation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
     return {"message": "Job cancelled", "job_id": job_id}
@@ -1716,9 +1772,10 @@ async def check_job_spelling(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -1873,7 +1930,7 @@ async def upload_pptx_template(
         logger.error("Failed to analyze template", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to analyze PPTX template: {str(e)}"
+            detail="Failed to analyze PPTX template"
         )
 
 
@@ -1931,7 +1988,15 @@ async def delete_pptx_template(
     user: AuthenticatedUser,
 ) -> dict:
     """Delete a PPTX template."""
+    # Validate template_id to prevent path traversal
+    if not re.match(r'^[a-zA-Z0-9_-]+$', template_id):
+        raise HTTPException(status_code=400, detail="Invalid template ID")
+
     template_path = os.path.join("storage", "templates", "pptx", f"{template_id}.pptx")
+    resolved = os.path.realpath(template_path)
+    expected_dir = os.path.realpath(os.path.join("storage", "templates", "pptx"))
+    if not resolved.startswith(expected_dir + os.sep) and resolved != expected_dir:
+        raise HTTPException(status_code=400, detail="Invalid template ID")
 
     if not os.path.exists(template_path):
         raise HTTPException(
@@ -2177,9 +2242,10 @@ async def verify_document(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -2228,7 +2294,7 @@ async def verify_document(
         logger.error("Document verification failed", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Verification failed: {str(e)}",
+            detail="Verification failed",
         )
 
 
@@ -2255,9 +2321,10 @@ async def repair_document(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -2326,7 +2393,7 @@ async def repair_document(
         logger.error("Document repair failed", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Repair failed: {str(e)}",
+            detail="Repair failed",
         )
 
 
@@ -2364,9 +2431,10 @@ async def handle_verification_action(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership
@@ -2387,15 +2455,16 @@ async def handle_verification_action(
         return job_to_response(job)
 
     except ValueError as e:
+        logger.warning("Generation operation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
     except Exception as e:
         logger.error("Verification action failed", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Action failed: {str(e)}",
+            detail="Action failed",
         )
 
 
@@ -2414,9 +2483,10 @@ async def get_verification_status(
     try:
         job = await service.get_job(job_id)
     except ValueError as e:
+        logger.warning("Job not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Job not found",
         )
 
     # Verify ownership

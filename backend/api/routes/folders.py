@@ -117,10 +117,11 @@ async def create_folder(
 
         # Get user's access tier level
         user_tier_level = current_user.get("access_tier_level", 1)
+        org_id = current_user.get("organization_id")
 
         # If creating in a parent folder, check access
         if request.parent_folder_id:
-            parent = await folder_service.get_folder_by_id(request.parent_folder_id)
+            parent = await folder_service.get_folder_by_id(request.parent_folder_id, organization_id=org_id)
             if not parent:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -132,7 +133,6 @@ async def create_folder(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="No access to parent folder"
                 )
-
         folder = await folder_service.create_folder(
             name=request.name,
             parent_folder_id=request.parent_folder_id,
@@ -142,6 +142,7 @@ async def create_folder(
             description=request.description,
             color=request.color,
             tags=request.tags,
+            organization_id=org_id,
         )
 
         return FolderResponse(
@@ -160,7 +161,8 @@ async def create_folder(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        logger.warning("Folder creation validation failed", error=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid folder data")
     except Exception as e:
         logger.error("Error creating folder", error=str(e))
         raise HTTPException(
@@ -185,10 +187,12 @@ async def list_folders(
         folder_service = get_folder_service()
         user_tier_level = current_user.get("access_tier_level", 1)
 
+        org_id = current_user.get("organization_id")
         folders = await folder_service.list_folders(
             parent_folder_id=parent_id,
             user_tier_level=user_tier_level,
             include_document_count=include_document_count,
+            organization_id=org_id,
         )
 
         return [FolderResponse(**f) for f in folders]
@@ -228,11 +232,13 @@ async def get_folder_tree(
             if row is not None:
                 use_folder_permissions_only = row
 
+        org_id = current_user.get("organization_id")
         tree = await folder_service.get_folder_tree(
             user_tier_level=user_tier_level,
             root_folder_id=root_folder_id,
             user_id=user_id,
             use_folder_permissions_only=use_folder_permissions_only,
+            organization_id=org_id,
         )
 
         return tree
@@ -255,7 +261,8 @@ async def get_folder(
         folder_service = get_folder_service()
         user_tier_level = current_user.get("access_tier_level", 1)
 
-        folder = await folder_service.get_folder_by_id(folder_id)
+        org_id = current_user.get("organization_id")
+        folder = await folder_service.get_folder_by_id(folder_id, organization_id=org_id)
         if not folder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -332,7 +339,8 @@ async def update_folder(
         user_id = current_user.get("sub")
 
         # Check access
-        folder = await folder_service.get_folder_by_id(folder_id)
+        org_id = current_user.get("organization_id")
+        folder = await folder_service.get_folder_by_id(folder_id, organization_id=org_id)
         if not folder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -376,7 +384,8 @@ async def update_folder(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        logger.warning("Folder update validation failed", error=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid folder data")
     except HTTPException:
         raise
     except Exception as e:
@@ -405,7 +414,8 @@ async def delete_folder(
         user_id = current_user.get("sub")
 
         # Check access
-        folder = await folder_service.get_folder_by_id(folder_id)
+        org_id = current_user.get("organization_id")
+        folder = await folder_service.get_folder_by_id(folder_id, organization_id=org_id)
         if not folder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -425,6 +435,7 @@ async def delete_folder(
             folder_id=folder_id,
             recursive=recursive,
             user_tier_level=user_tier_level,
+            organization_id=org_id,
         )
 
         if not deleted:
@@ -436,9 +447,11 @@ async def delete_folder(
         return {"message": "Folder deleted successfully", "folder_id": folder_id}
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        logger.warning("Folder delete validation failed", error=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid folder operation")
     except PermissionError as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+        logger.warning("Folder delete permission denied", error=str(e))
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
     except HTTPException:
         raise
     except Exception as e:
@@ -466,7 +479,8 @@ async def move_folder(
         user_tier_level = current_user.get("access_tier_level", 1)
 
         # Check source folder access
-        folder = await folder_service.get_folder_by_id(folder_id)
+        org_id = current_user.get("organization_id")
+        folder = await folder_service.get_folder_by_id(folder_id, organization_id=org_id)
         if not folder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -484,6 +498,7 @@ async def move_folder(
             folder_id=folder_id,
             new_parent_id=request.new_parent_id,
             user_tier_level=user_tier_level,
+            organization_id=org_id,
         )
 
         if not moved:
@@ -508,9 +523,11 @@ async def move_folder(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        logger.warning("Folder move validation failed", error=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid folder operation")
     except PermissionError as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+        logger.warning("Folder move permission denied", error=str(e))
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
     except HTTPException:
         raise
     except Exception as e:
@@ -542,9 +559,10 @@ async def list_folder_documents(
     try:
         folder_service = get_folder_service()
         user_tier_level = current_user.get("access_tier_level", 1)
+        org_id = current_user.get("organization_id")
 
         # Check folder access
-        folder = await folder_service.get_folder_by_id(folder_id)
+        folder = await folder_service.get_folder_by_id(folder_id, organization_id=org_id)
         if not folder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -675,9 +693,10 @@ async def get_folder_permissions(
         folder_service = get_folder_service()
         user_tier_level = current_user.get("access_tier_level", 1)
         user_id = current_user.get("sub")
+        org_id = current_user.get("organization_id")
 
-        # Check folder exists
-        folder = await folder_service.get_folder_by_id(folder_id)
+        # Check folder exists (scoped to organization)
+        folder = await folder_service.get_folder_by_id(folder_id, organization_id=org_id)
         if not folder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -724,9 +743,10 @@ async def grant_folder_permission(
         folder_service = get_folder_service()
         user_tier_level = current_user.get("access_tier_level", 1)
         granting_user_id = current_user.get("sub")
+        org_id = current_user.get("organization_id")
 
-        # Check folder exists
-        folder = await folder_service.get_folder_by_id(folder_id)
+        # Check folder exists (scoped to organization)
+        folder = await folder_service.get_folder_by_id(folder_id, organization_id=org_id)
         if not folder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -806,9 +826,10 @@ async def revoke_folder_permission(
         folder_service = get_folder_service()
         user_tier_level = current_user.get("access_tier_level", 1)
         revoking_user_id = current_user.get("sub")
+        org_id = current_user.get("organization_id")
 
-        # Check folder exists
-        folder = await folder_service.get_folder_by_id(folder_id)
+        # Check folder exists (scoped to organization)
+        folder = await folder_service.get_folder_by_id(folder_id, organization_id=org_id)
         if not folder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

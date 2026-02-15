@@ -99,7 +99,7 @@ async def get_cache_stats(
         )
     except Exception as e:
         logger.error("Failed to get cache stats", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get cache stats: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get cache stats")
 
 
 @router.get("/config", response_model=CacheConfigResponse)
@@ -130,7 +130,7 @@ async def get_cache_config(
         )
     except Exception as e:
         logger.error("Failed to get cache config", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get cache config: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get cache config")
 
 
 @router.post("/invalidate")
@@ -160,7 +160,7 @@ async def invalidate_cache_entry(
         }
     except Exception as e:
         logger.error("Failed to invalidate cache", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to invalidate: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to invalidate cache entry")
 
 
 @router.post("/clear", response_model=ClearCacheResponse)
@@ -186,11 +186,11 @@ async def clear_cache(
         )
     except Exception as e:
         logger.error("Failed to clear cache", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to clear cache: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to clear cache")
 
 
 @router.get("/tiers")
-async def list_cache_tiers() -> Dict[str, Any]:
+async def list_cache_tiers(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """
     List available cache tiers and their descriptions.
     """
@@ -226,7 +226,7 @@ async def list_cache_tiers() -> Dict[str, Any]:
 
 
 @router.get("/health")
-async def cache_health() -> Dict[str, Any]:
+async def cache_health(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Check cache service health."""
     try:
         cache = await get_generative_cache()

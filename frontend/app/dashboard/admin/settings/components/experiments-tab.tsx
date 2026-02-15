@@ -24,8 +24,7 @@ import {
   Shield,
   Brain,
 } from "lucide-react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
+import { api } from "@/lib/api";
 
 interface Experiment {
   name: string;
@@ -119,14 +118,9 @@ export function ExperimentsTab() {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(`${API_BASE}/experiments/`, {
-        credentials: "include",
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (data.experiments) {
-          setExperiments(data.experiments);
-        }
+      const { data } = await api.get<{ experiments?: Experiment[] }>("/experiments/");
+      if (data.experiments) {
+        setExperiments(data.experiments);
       }
     } catch {
       // Use defaults if API not available
@@ -142,19 +136,10 @@ export function ExperimentsTab() {
   const toggleExperiment = async (name: string, enabled: boolean) => {
     setToggling(name);
     try {
-      const response = await fetch(`${API_BASE}/experiments/${name}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ enabled }),
-      });
-      if (response.ok) {
-        setExperiments((prev) =>
-          prev.map((e) => (e.name === name ? { ...e, enabled } : e))
-        );
-      } else {
-        setError(`Failed to toggle ${name}`);
-      }
+      await api.put(`/experiments/${name}`, { enabled });
+      setExperiments((prev) =>
+        prev.map((e) => (e.name === name ? { ...e, enabled } : e))
+      );
     } catch {
       setError(`Failed to toggle ${name}`);
     } finally {

@@ -11,6 +11,7 @@
  */
 
 import { useState, useCallback } from "react";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -98,21 +99,11 @@ export function NaturalLanguageQueryInterface() {
     setClarifications([]);
 
     try {
-      const response = await fetch("/api/v1/database/nl-query", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question,
-          visualization_type: chartType !== "auto" ? chartType : undefined,
-          context: Object.keys(clarificationAnswers).length > 0 ? clarificationAnswers : undefined,
-        }),
+      const { data: result } = await api.post<QueryResult & { status?: string; questions?: ClarificationQuestion[] }>("/database/nl-query", {
+        question,
+        visualization_type: chartType !== "auto" ? chartType : undefined,
+        context: Object.keys(clarificationAnswers).length > 0 ? clarificationAnswers : undefined,
       });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.detail || "Query failed");
-      }
 
       // Check if clarification needed
       if (result.status === "clarification_needed") {
@@ -129,7 +120,7 @@ export function NaturalLanguageQueryInterface() {
           {
             id: Date.now().toString(),
             question,
-            sql: result.sql,
+            sql: result.sql!,
             timestamp: new Date(),
             success: !result.error,
           },
@@ -150,17 +141,7 @@ export function NaturalLanguageQueryInterface() {
     setIsQuerying(true);
 
     try {
-      const response = await fetch("/api/v1/database/execute-sql", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sql }),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.detail || "SQL execution failed");
-      }
+      const { data: result } = await api.post<QueryResult>("/database/execute-sql", { sql });
 
       setQueryResult(result);
       toast.success("SQL executed successfully");

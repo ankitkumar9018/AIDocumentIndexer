@@ -171,20 +171,31 @@ async def stream_agentic_query(
     from backend.services.agentic_rag import get_agentic_rag_service
 
     async def generate():
-        rag_service = RAGService()
-        agentic_service = get_agentic_rag_service(rag_service)
+        import structlog
+        logger = structlog.get_logger(__name__)
+        try:
+            rag_service = RAGService()
+            agentic_service = get_agentic_rag_service(rag_service)
 
-        async for update in agentic_service.process_query_stream(
-            query=request.query,
-            collection_filter=request.collection_filter,
-            access_tier=user.access_tier_level,
-            user_id=user.user_id,
-        ):
-            yield f"data: {json.dumps(update)}\n\n"
+            async for update in agentic_service.process_query_stream(
+                query=request.query,
+                collection_filter=request.collection_filter,
+                access_tier=user.access_tier_level,
+                user_id=user.user_id,
+            ):
+                yield f"data: {json.dumps(update)}\n\n"
+            yield "data: {\"type\": \"stream_end\"}\n\n"
+        except Exception as e:
+            logger.error("Agentic streaming error", error=str(e))
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Agentic streaming error'})}\n\n"
 
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
     )
 
 

@@ -12,6 +12,7 @@ an environment variable.
 import os
 import base64
 import hashlib
+from pathlib import Path
 from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -45,14 +46,25 @@ def _get_encryption_key() -> bytes:
             hashlib.sha256(secret_key.encode()).digest()
         )
 
-    # Development fallback (NOT SECURE)
-    logger.warning(
-        "No ENCRYPTION_KEY or SECRET_KEY set. Using development default. "
-        "SET ENCRYPTION_KEY IN PRODUCTION!"
-    )
-    return base64.urlsafe_b64encode(
-        hashlib.sha256(b"development-only-key-change-in-production").digest()
-    )
+    # Require explicit key in production
+    dev_mode = os.getenv("DEV_MODE", "false").lower() in ("true", "1", "yes")
+    if not dev_mode:
+        raise RuntimeError(
+            "ENCRYPTION_KEY or SECRET_KEY must be set in production. "
+            "Generate one with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+        )
+
+    # Dev mode: generate and persist a random key per installation
+    logger.warning("No ENCRYPTION_KEY or SECRET_KEY set. Using auto-generated dev key.")
+    dev_key_dir = Path.home() / ".aidocumentindexer"
+    dev_key_file = dev_key_dir / "dev_encryption.key"
+    if dev_key_file.exists():
+        return dev_key_file.read_bytes()
+    dev_key_dir.mkdir(exist_ok=True, mode=0o700)
+    key = Fernet.generate_key()
+    dev_key_file.write_bytes(key)
+    os.chmod(dev_key_file, 0o600)
+    return key
 
 
 # Global Fernet instance
@@ -86,7 +98,7 @@ def encrypt_value(plaintext: str) -> str:
         return encrypted.decode()
     except Exception as e:
         logger.error("Encryption failed", error=str(e))
-        raise ValueError(f"Encryption failed: {e}")
+        raise ValueError(f"Encryption failed: {e}") from e
 
 
 def decrypt_value(encrypted: str) -> str:
@@ -108,10 +120,10 @@ def decrypt_value(encrypted: str) -> str:
         return decrypted.decode()
     except InvalidToken:
         logger.error("Decryption failed - invalid token or key mismatch")
-        raise ValueError("Decryption failed - invalid token or key mismatch")
+        raise ValueError("Decryption failed - invalid token or key mismatch") from None
     except Exception as e:
         logger.error("Decryption failed", error=str(e))
-        raise ValueError(f"Decryption failed: {e}")
+        raise ValueError(f"Decryption failed: {e}") from e
 
 
 def mask_api_key(api_key: str, visible_chars: int = 4) -> str:

@@ -530,7 +530,7 @@ async def browse_resources(
     connector_id: uuid.UUID,
     folder_id: Optional[str] = Query(default=None, description="Folder ID to browse"),
     page_token: Optional[str] = Query(default=None),
-    page_size: int = Query(default=50, le=100),
+    page_size: int = Query(default=50, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
     organization_id: uuid.UUID = Depends(get_current_organization_id),
     current_user: dict = Depends(get_current_user),

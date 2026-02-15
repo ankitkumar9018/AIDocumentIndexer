@@ -155,7 +155,7 @@ class SlideEditRequest(BaseModel):
 @router.post("/sessions", response_model=CreateReviewSessionResponse)
 async def create_review_session(
     request: CreateReviewSessionRequest,
-    # user: AuthenticatedUser = Depends(),  # Uncomment for auth
+    user: AuthenticatedUser,
 ):
     """
     Create a new content review session.
@@ -191,38 +191,38 @@ async def create_review_session(
     except ValidationError as e:
         # Pydantic validation errors → 400 Bad Request
         logger.warning("Validation error creating review session", error=str(e))
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid content structure: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid content structure")
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         # True server errors → 500
         logger.error("Failed to create review session", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create review session")
 
 
 @router.get("/sessions/{session_id}/status", response_model=ReviewStatusResponse)
-async def get_review_status(session_id: str):
+async def get_review_status(session_id: str, user: AuthenticatedUser):
     """Get the current status of a review session."""
     service = get_review_service()
-    status = service.get_review_status(session_id)
+    review_status = service.get_review_status(session_id)
 
-    if "error" in status:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=status["error"])
+    if "error" in review_status:
+        raise HTTPException(status_code=404, detail=review_status["error"])
 
     return ReviewStatusResponse(
         session_id=session_id,
-        content_type=status["content_type"],
-        total_items=status["progress"]["total"],
-        reviewed_items=status["progress"]["reviewed"],
-        approved_items=status["progress"]["approved"],
-        progress_percent=status["progress"]["progress_percent"],
-        can_render=status["can_render"],
-        status_breakdown=status["status_breakdown"]
+        content_type=review_status["content_type"],
+        total_items=review_status["progress"]["total"],
+        reviewed_items=review_status["progress"]["reviewed"],
+        approved_items=review_status["progress"]["approved"],
+        progress_percent=review_status["progress"]["progress_percent"],
+        can_render=review_status["can_render"],
+        status_breakdown=review_status["status_breakdown"]
     )
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_review_session(session_id: str):
+async def delete_review_session(session_id: str, user: AuthenticatedUser):
     """Delete a review session."""
     service = get_review_service()
     if service.delete_session(session_id):
@@ -235,7 +235,7 @@ async def delete_review_session(session_id: str):
 # =============================================================================
 
 @router.get("/sessions/{session_id}/items")
-async def list_all_items(session_id: str):
+async def list_all_items(session_id: str, user: AuthenticatedUser):
     """
     Get preview of all content items in the session.
 
@@ -255,7 +255,7 @@ async def list_all_items(session_id: str):
 
 
 @router.get("/sessions/{session_id}/items/{item_id}")
-async def get_item_detail(session_id: str, item_id: str):
+async def get_item_detail(session_id: str, item_id: str, user: AuthenticatedUser):
     """
     Get detailed content for a specific item.
 
@@ -278,7 +278,8 @@ async def get_item_detail(session_id: str, item_id: str):
 async def edit_item(
     session_id: str,
     item_id: str,
-    request: EditContentRequest
+    request: EditContentRequest,
+    user: AuthenticatedUser,
 ):
     """
     Edit a content item.
@@ -331,7 +332,8 @@ async def edit_item(
 async def update_slide(
     session_id: str,
     item_id: str,
-    request: SlideEditRequest
+    request: SlideEditRequest,
+    user: AuthenticatedUser,
 ):
     """
     Update a slide with new content directly.
@@ -384,7 +386,7 @@ async def update_slide(
 
 
 @router.post("/sessions/{session_id}/approve/{item_id}")
-async def approve_item(session_id: str, item_id: str):
+async def approve_item(session_id: str, item_id: str, user: AuthenticatedUser):
     """Quick approve a single item."""
     service = get_review_service()
 
@@ -408,7 +410,7 @@ async def approve_item(session_id: str, item_id: str):
 
 
 @router.post("/sessions/{session_id}/batch-approve")
-async def batch_approve(session_id: str, request: BatchApproveRequest):
+async def batch_approve(session_id: str, request: BatchApproveRequest, user: AuthenticatedUser):
     """Approve multiple items at once."""
     service = get_review_service()
     result = service.batch_approve(session_id, request.item_ids)
@@ -420,7 +422,7 @@ async def batch_approve(session_id: str, request: BatchApproveRequest):
 
 
 @router.post("/sessions/{session_id}/approve-all")
-async def approve_all_items(session_id: str):
+async def approve_all_items(session_id: str, user: AuthenticatedUser):
     """Approve all remaining items and mark session as ready for rendering."""
     service = get_review_service()
     result = service.approve_all(session_id)
@@ -436,7 +438,7 @@ async def approve_all_items(session_id: str):
 # =============================================================================
 
 @router.get("/sessions/{session_id}/approved-content")
-async def get_approved_content(session_id: str):
+async def get_approved_content(session_id: str, user: AuthenticatedUser):
     """
     Get the approved content ready for document rendering.
 
@@ -446,14 +448,14 @@ async def get_approved_content(session_id: str):
     service = get_review_service()
 
     # Check if all items are approved
-    status = service.get_review_status(session_id)
-    if "error" in status:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=status["error"])
+    review_status = service.get_review_status(session_id)
+    if "error" in review_status:
+        raise HTTPException(status_code=404, detail=review_status["error"])
 
-    if not status.get("can_render"):
+    if not review_status.get("can_render"):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Not all items approved. Progress: {status['progress']['approved']}/{status['progress']['total']}"
+            status_code=400,
+            detail=f"Not all items approved. Progress: {review_status['progress']['approved']}/{review_status['progress']['total']}"
         )
 
     # Get the approved content
@@ -471,7 +473,7 @@ async def get_approved_content(session_id: str):
 
 
 @router.get("/sessions/{session_id}/export")
-async def export_content(session_id: str, force: bool = False):
+async def export_content(session_id: str, user: AuthenticatedUser, force: bool = False):
     """
     Export content regardless of approval status.
 

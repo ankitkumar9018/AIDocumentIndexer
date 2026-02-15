@@ -48,6 +48,44 @@ UNHEALTHY_LATENCY_MS = 5000  # Latency above this = unhealthy
 
 
 # =============================================================================
+# SSRF Protection
+# =============================================================================
+
+
+def _is_safe_health_check_url(url: str) -> bool:
+    """Validate that a health check URL doesn't target internal/private networks."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        blocked = {"metadata.google.internal", "metadata.gcp.internal", "169.254.169.254"}
+        if hostname in blocked:
+            return False
+
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        except ValueError:
+            try:
+                resolved_ip = ipaddress.ip_address(socket.gethostbyname(hostname))
+                if resolved_ip.is_private or resolved_ip.is_loopback or resolved_ip.is_link_local or resolved_ip.is_reserved:
+                    return False
+            except socket.gaierror:
+                pass
+
+        return True
+    except Exception:
+        return False
+
+
+# =============================================================================
 # Data Classes
 # =============================================================================
 
@@ -198,6 +236,16 @@ class ProviderHealthChecker:
             if provider.provider_type == "ollama":
                 import httpx
                 base_url = provider.api_base_url or llm_config.ollama_host
+                # SSRF protection: validate user-provided URLs don't target internal networks
+                if provider.api_base_url and not _is_safe_health_check_url(base_url):
+                    return HealthCheckResult(
+                        provider_id=str(provider.id),
+                        provider_type=provider.provider_type,
+                        provider_name=provider.name,
+                        is_healthy=False,
+                        status=ProviderHealthStatus.UNHEALTHY.value,
+                        error_message="URL blocked: targets private/internal network",
+                    )
                 async with httpx.AsyncClient(timeout=HEALTH_CHECK_TIMEOUT_SECONDS) as client:
                     response = await client.get(f"{base_url}/api/tags")
                     if response.status_code == 200:
@@ -360,7 +408,8 @@ class ProviderHealthChecker:
                 checked_at=result.checked_at,
             )
             db.add(log_entry)
-            await db.commit()
+            # Note: commit deferred to _update_health_cache to keep both
+            # log + cache update in one transaction for consistency.
 
         except Exception as e:
             logger.error("Failed to log health check", error=str(e))
@@ -639,7 +688,8 @@ class ProviderHealthChecker:
                 if cache.circuit_open:
                     if cache.circuit_open_until and datetime.utcnow() < cache.circuit_open_until:
                         return False
-                    # Circuit timeout expired, allow retry
+                    # Circuit timeout expired — half-open state, allow retry
+                    return True
 
                 return cache.is_healthy
 

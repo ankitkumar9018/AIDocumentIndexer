@@ -18,7 +18,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -184,9 +184,14 @@ async def get_job_status(
     _admin = Depends(require_role(["admin"])),
 ):
     """Get status of a DSPy optimization job."""
+    try:
+        parsed_id = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+
     result = await db.execute(
         select(DSPyOptimizationJob).where(
-            DSPyOptimizationJob.id == uuid.UUID(job_id)
+            DSPyOptimizationJob.id == parsed_id
         )
     )
     job = result.scalar_one_or_none()
@@ -212,7 +217,7 @@ async def get_job_status(
 @router.get("/jobs")
 async def list_jobs(
     signature: Optional[str] = None,
-    limit: int = 20,
+    limit: int = Query(default=20, ge=1, le=500),
     db: AsyncSession = Depends(get_session),
     _admin=Depends(require_role(["admin"])),
 ):
@@ -251,7 +256,7 @@ async def list_examples(
     signature: Optional[str] = None,
     source: Optional[str] = None,
     active_only: bool = True,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
     db: AsyncSession = Depends(get_session),
     _admin=Depends(require_role(["admin"])),
 ):
@@ -324,9 +329,14 @@ async def delete_example(
     _admin=Depends(require_role(["admin"])),
 ):
     """Delete (deactivate) a training example."""
+    try:
+        parsed_id = uuid.UUID(example_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid example ID format")
+
     result = await db.execute(
         select(DSPyTrainingExample).where(
-            DSPyTrainingExample.id == uuid.UUID(example_id)
+            DSPyTrainingExample.id == parsed_id
         )
     )
     example = result.scalar_one_or_none()
@@ -374,9 +384,14 @@ async def deploy_optimization(
 
     Creates a new prompt version via PromptVersionManager for A/B testing.
     """
+    try:
+        parsed_id = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+
     result = await db.execute(
         select(DSPyOptimizationJob).where(
-            DSPyOptimizationJob.id == uuid.UUID(job_id)
+            DSPyOptimizationJob.id == parsed_id
         )
     )
     job = result.scalar_one_or_none()
@@ -437,4 +452,4 @@ async def deploy_optimization(
         raise
     except Exception as e:
         logger.error("Deployment failed", error=str(e), job_id=job_id)
-        raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Deployment failed")

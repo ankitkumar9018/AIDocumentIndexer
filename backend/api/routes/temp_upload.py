@@ -7,6 +7,7 @@ chat with documents before deciding to save them permanently.
 """
 
 import os
+import shutil
 import tempfile
 from typing import Optional, List
 from uuid import UUID
@@ -152,9 +153,14 @@ async def upload_temp_document(
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No filename provided")
 
+    # Sanitize filename to prevent path traversal
+    safe_filename = os.path.basename(file.filename)
+    if not safe_filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
+
     # Save to temp file
     temp_dir = tempfile.mkdtemp(prefix="temp_upload_")
-    temp_path = os.path.join(temp_dir, file.filename)
+    temp_path = os.path.join(temp_dir, safe_filename)
 
     try:
         with open(temp_path, "wb") as f:
@@ -190,7 +196,10 @@ async def upload_temp_document(
         raise
     except Exception as e:
         logger.error("Upload failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Upload failed: {str(e)}")
+        # Clean up temp directory on error
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Upload failed")
 
 
 @router.delete("/sessions/{session_id}/documents/{doc_id}")

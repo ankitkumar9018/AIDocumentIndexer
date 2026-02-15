@@ -11,8 +11,11 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+import structlog
 
 from backend.api.middleware.auth import get_current_user, require_admin
+
+logger = structlog.get_logger(__name__)
 from backend.db.database import get_async_session
 from backend.services.watcher_db import (
     get_watcher_service_db,
@@ -177,9 +180,10 @@ async def start_watcher(
         watcher.start()
         return {"message": "File watcher started successfully", "status": "running"}
     except Exception as e:
+        logger.error("Failed to start file watcher", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start file watcher: {str(e)}",
+            detail="Failed to start file watcher",
         )
 
 
@@ -201,9 +205,10 @@ async def stop_watcher(
         watcher.stop()
         return {"message": "File watcher stopped successfully", "status": "stopped"}
     except Exception as e:
+        logger.error("Failed to stop file watcher", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to stop file watcher: {str(e)}",
+            detail="Failed to stop file watcher",
         )
 
 
@@ -288,14 +293,16 @@ async def add_watch_directory(
         )
         return watch_dir_to_response(watch_dir)
     except ValueError as e:
+        logger.warning("Invalid watch directory request", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid watch directory configuration",
         )
     except Exception as e:
+        logger.error("Failed to add watch directory", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to add watch directory: {str(e)}",
+            detail="Failed to add watch directory",
         )
 
 
@@ -369,14 +376,16 @@ async def scan_directory(
             files=[e.file_name for e in events[:100]],  # Limit to first 100 for response
         )
     except ValueError as e:
+        logger.warning("Watch directory not found", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Watch directory not found",
         )
     except Exception as e:
+        logger.error("Failed to scan directory", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to scan directory: {str(e)}",
+            detail="Failed to scan directory",
         )
 
 
@@ -454,9 +463,10 @@ async def get_queued_events(
 
         return [file_event_to_response(e) for e in events]
     except Exception as e:
+        logger.error("Failed to get events", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get events: {str(e)}",
+            detail="Failed to get events",
         )
 
 
@@ -502,9 +512,10 @@ async def clear_processed_events(
             "events_remaining": remaining_count,
         }
     except Exception as e:
+        logger.error("Failed to clear events", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to clear events: {str(e)}",
+            detail="Failed to clear events",
         )
 
 
@@ -552,7 +563,8 @@ async def retry_failed_event(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("Failed to retry event", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retry event: {str(e)}",
+            detail="Failed to retry event",
         )

@@ -141,7 +141,7 @@ export function VectorDBTab() {
   const [repairLoading, setRepairLoading] = useState(false);
 
   const getHeaders = useCallback(() => ({
-    "Authorization": accessToken ? `Bearer ${accessToken}` : "Bearer dev-token",
+    "Authorization": `Bearer ${accessToken || ""}`,
     "Content-Type": "application/json",
   }), [accessToken]);
 
@@ -243,22 +243,18 @@ export function VectorDBTab() {
       if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
       toast.success(`Chunk ${chunkId.slice(0, 8)}... deleted`);
 
-      // Remove from local state
-      if (docChunks) {
-        setDocChunks(docChunks.filter(c => c.chunk_id !== chunkId));
-        setDocChunksTotal(prev => prev - 1);
-      }
-      if (queryResults) {
-        setQueryResults({
-          ...queryResults,
-          results: queryResults.results.filter(r => r.chunk_id !== chunkId),
-          result_count: queryResults.result_count - 1,
-        });
-      }
+      // Remove from local state (functional updaters to avoid stale closures on rapid deletes)
+      setDocChunks(prev => prev ? prev.filter(c => c.chunk_id !== chunkId) : prev);
+      setDocChunksTotal(prev => prev - 1);
+      setQueryResults(prev => prev ? {
+        ...prev,
+        results: prev.results.filter(r => r.chunk_id !== chunkId),
+        result_count: prev.result_count - 1,
+      } : prev);
     } catch (e: any) {
       toast.error(`Delete failed: ${e.message}`);
     }
-  }, [getHeaders, docChunks, queryResults]);
+  }, [getHeaders]);
 
   const toggleResultExpanded = (index: number) => {
     setExpandedResults(prev => {

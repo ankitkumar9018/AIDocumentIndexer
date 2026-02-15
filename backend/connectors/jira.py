@@ -132,6 +132,18 @@ class JiraConnector:
             print(f"Issue: {issue.key} - {issue.summary}")
     """
 
+    @staticmethod
+    def _validate_jql(jql: str) -> str:
+        """Validate JQL to prevent injection."""
+        dangerous = re.compile(r'\b(ORDER\s+BY|LIMIT|OFFSET)\b', re.IGNORECASE)
+        if dangerous.search(jql):
+            raise ValueError("JQL cannot contain ORDER BY, LIMIT, or OFFSET")
+        if jql.count('"') % 2 != 0:
+            raise ValueError("JQL has unbalanced quotes")
+        if len(jql) > 1000:
+            raise ValueError("JQL too long")
+        return jql
+
     def __init__(self, config: JiraConnectorConfig):
         self.config = config
         self._client: Optional[httpx.AsyncClient] = None
@@ -182,7 +194,7 @@ class JiraConnector:
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
-            logger.error(f"Jira API error {e.response.status_code}: {e.response.text}")
+            logger.error(f"Jira API error {e.response.status_code}")
             return None
         except Exception as e:
             logger.error(f"Jira request error: {e}")
@@ -277,21 +289,32 @@ class JiraConnector:
 
         # Build JQL query
         if jql:
-            full_jql = jql
+            full_jql = self._validate_jql(jql)
         else:
             jql_parts = []
 
             if project_key:
+                if not re.match(r'^[A-Za-z][A-Za-z0-9_-]{0,49}$', project_key):
+                    raise ValueError(f"Invalid project key format: {project_key}")
                 jql_parts.append(f"project = {project_key}")
             elif self.config.project_keys:
+                for pk in self.config.project_keys:
+                    if not re.match(r'^[A-Za-z][A-Za-z0-9_-]{0,49}$', pk):
+                        raise ValueError(f"Invalid project key format: {pk}")
                 projects = ", ".join(self.config.project_keys)
                 jql_parts.append(f"project IN ({projects})")
 
             if self.config.issue_types:
+                for t in self.config.issue_types:
+                    if not re.match(r'^[A-Za-z][A-Za-z0-9 _-]{0,49}$', t):
+                        raise ValueError(f"Invalid issue type format: {t}")
                 types = ", ".join(f'"{t}"' for t in self.config.issue_types)
                 jql_parts.append(f"issuetype IN ({types})")
 
             if self.config.statuses:
+                for s in self.config.statuses:
+                    if not re.match(r'^[A-Za-z][A-Za-z0-9 _-]{0,49}$', s):
+                        raise ValueError(f"Invalid status format: {s}")
                 statuses = ", ".join(f'"{s}"' for s in self.config.statuses)
                 jql_parts.append(f"status IN ({statuses})")
 
@@ -300,7 +323,7 @@ class JiraConnector:
                 jql_parts.append(f'updated >= "{date_str}"')
 
             if self.config.jql_filter:
-                jql_parts.append(f"({self.config.jql_filter})")
+                jql_parts.append(f"({self._validate_jql(self.config.jql_filter)})")
 
             full_jql = " AND ".join(jql_parts) if jql_parts else ""
             full_jql += " ORDER BY updated DESC"
@@ -593,15 +616,19 @@ class JiraConnector:
         Yields:
             Matching JiraIssue objects
         """
-        jql = f'text ~ "{query}"'
+        safe_query = query.replace('\\', '\\\\').replace('"', '\\"')
+        jql = f'text ~ "{safe_query}"'
 
         if project_key:
+            if not re.match(r'^[A-Za-z][A-Za-z0-9_-]{0,49}$', project_key):
+                raise ValueError(f"Invalid project key format: {project_key}")
             jql += f" AND project = {project_key}"
         elif self.config.project_keys:
             projects = ", ".join(self.config.project_keys)
             jql += f" AND project IN ({projects})"
 
-        jql += " ORDER BY updated DESC"
+        # Note: ORDER BY removed — _validate_jql() rejects it, and Jira
+        # returns text-search results sorted by relevance by default.
 
         count = 0
         async for issue in self.fetch_issues(jql=jql, max_issues=limit):

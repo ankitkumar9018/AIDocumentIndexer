@@ -20,6 +20,7 @@ Endpoints:
 import os
 from datetime import datetime, timedelta
 from typing import List, Optional
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, Form, status
@@ -256,8 +257,14 @@ async def initiate_sso_login(
             detail="SSO configuration is disabled",
         )
 
-    # Default redirect URI
-    if not redirect_uri:
+    # Validate and default redirect URI
+    if redirect_uri:
+        parsed = urlparse(redirect_uri)
+        base_parsed = urlparse(sso_service.base_url)
+        # Block external redirects — only allow same-origin or relative paths
+        if parsed.scheme and parsed.netloc and parsed.netloc != base_parsed.netloc:
+            redirect_uri = f"{sso_service.base_url}/dashboard"
+    else:
         redirect_uri = f"{sso_service.base_url}/dashboard"
 
     try:
@@ -284,7 +291,7 @@ async def initiate_sso_login(
         logger.error("SSO login failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to initiate SSO login: {str(e)}",
+            detail="Failed to initiate SSO login",
         )
 
 
@@ -363,7 +370,7 @@ async def saml_assertion_consumer_service(
         logger.warning("SAML validation error", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="SAML validation failed",
         )
     except Exception as e:
         logger.error("SAML ACS error", error=str(e))
@@ -438,7 +445,7 @@ async def oidc_callback(
         logger.warning("OIDC validation error", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="OIDC validation failed",
         )
     except Exception as e:
         logger.error("OIDC callback error", error=str(e))

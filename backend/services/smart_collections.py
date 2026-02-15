@@ -427,7 +427,8 @@ class SmartCollectionsService:
                     continue
 
                 docs2 = set(c2.document_ids)
-                overlap = len(docs1 & docs2) / min(len(docs1), len(docs2))
+                min_len = min(len(docs1), len(docs2))
+                overlap = len(docs1 & docs2) / min_len if min_len > 0 else 0.0
 
                 # Merge if >50% overlap
                 if overlap > 0.5:

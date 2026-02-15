@@ -455,7 +455,7 @@ class GenerativeCache:
 
         try:
             from backend.services.embeddings import get_embedding_service
-            self._embedding_service = await get_embedding_service()
+            self._embedding_service = get_embedding_service()
 
             # Phase 70: Build FAISS index from existing entries
             if HAS_FAISS:
@@ -810,8 +810,7 @@ class GenerativeCache:
 
     async def _get_embedding(self, text: str) -> List[float]:
         """Get embedding for text."""
-        result = await self._embedding_service.embed_text(text)
-        return result.embedding
+        return self._embedding_service.embed_text(text)
 
     def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
         """Compute cosine similarity."""
@@ -917,6 +916,7 @@ class GenerativeCache:
 # =============================================================================
 
 _generative_cache: Optional[GenerativeCache] = None
+_generative_cache_lock = asyncio.Lock()
 
 
 async def get_generative_cache(
@@ -933,8 +933,14 @@ async def get_generative_cache(
     """
     global _generative_cache
 
-    if _generative_cache is None:
-        _generative_cache = GenerativeCache(config)
-        await _generative_cache.initialize()
+    if _generative_cache is not None:
+        return _generative_cache
+
+    async with _generative_cache_lock:
+        if _generative_cache is not None:
+            return _generative_cache
+        cache = GenerativeCache(config)
+        await cache.initialize()
+        _generative_cache = cache
 
     return _generative_cache

@@ -299,8 +299,8 @@ class TeamsActivityHandler:
                     max_results=5,
                 )
 
-                answer = result.get("response", "I couldn't find an answer to your question.")
-                sources = result.get("sources", [])
+                answer = result.content if result.content else "I couldn't find an answer to your question."
+                sources = [{"title": s.title, "score": s.score} for s in result.sources] if result.sources else []
 
                 return answer, sources
 

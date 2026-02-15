@@ -271,7 +271,7 @@ async def _run_embedding_backfill(job_id: str, batch_size: int = 50):
                 for chunk in chunks:
                     try:
                         # Generate embedding
-                        embedding = await embedding_service.embed_text(chunk.content)
+                        embedding = embedding_service.embed_text(chunk.content)
                         chunk.embedding = embedding
                         chunk.has_embedding = True  # Track for UI consistency
                         processed += 1
@@ -357,7 +357,7 @@ async def _run_document_embedding_generation(job_id: str, document_id: str):
             for chunk in chunks:
                 try:
                     # Generate embedding
-                    embedding = await embedding_service.embed_text(chunk.content)
+                    embedding = embedding_service.embed_text(chunk.content)
                     chunk.embedding = embedding
                     chunk.has_embedding = True  # Track for UI consistency
                     processed += 1
@@ -523,7 +523,7 @@ async def get_embedding_stats(
         logger.error("Failed to get embedding stats", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve embedding statistics: {str(e)}"
+            detail="Failed to retrieve embedding statistics"
         )
 
 
@@ -861,20 +861,22 @@ async def test_embedding(
         )
 
     except ImportError as e:
+        logger.warning("Provider dependencies missing", provider=request.provider, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Provider '{request.provider}' dependencies not installed: {str(e)}"
+            detail=f"Provider '{request.provider}' dependencies not installed"
         )
     except ValueError as e:
+        logger.warning("Provider configuration error", provider=request.provider, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Provider configuration error: {str(e)}"
+            detail="Provider configuration error"
         )
     except Exception as e:
         logger.error("Embedding test failed", provider=request.provider, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Embedding generation failed: {str(e)}"
+            detail="Embedding generation failed"
         )
 
 

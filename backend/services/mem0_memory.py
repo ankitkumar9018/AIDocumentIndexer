@@ -555,7 +555,7 @@ class Mem0MemoryService:
 
         try:
             from backend.services.embeddings import get_embedding_service
-            self._embedding_service = await get_embedding_service()
+            self._embedding_service = get_embedding_service()
             self._initialized = True
             logger.info("Mem0MemoryService initialized")
             return True
@@ -605,8 +605,7 @@ class Mem0MemoryService:
         # Generate embedding
         embedding = None
         if not self.config.lazy_embedding and self._embedding_service:
-            result = await self._embedding_service.embed_text(content)
-            embedding = result.embedding
+            embedding = self._embedding_service.embed_text(content)
 
         # Create memory
         memory = Memory(
@@ -679,8 +678,7 @@ class Mem0MemoryService:
 
         # Vector search
         if self._embedding_service:
-            query_result = await self._embedding_service.embed_text(query)
-            query_embedding = query_result.embedding
+            query_embedding = self._embedding_service.embed_text(query)
 
             vector_results = await self._store.search_by_vector(
                 embedding=query_embedding,

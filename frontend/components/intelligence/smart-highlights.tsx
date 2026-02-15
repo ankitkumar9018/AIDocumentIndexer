@@ -24,6 +24,7 @@ import {
   Clock,
   Brain
 } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface Highlight {
   id: string;
@@ -99,16 +100,8 @@ export function SmartHighlights({ documentId }: SmartHighlightsProps) {
 
     setIsAnalyzing(true);
     try {
-      const response = await fetch("/api/v1/intelligence/highlights/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_id: documentId }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setAnalysis(data);
-      }
+      const { data } = await api.post<DocumentAnalysis>("/intelligence/highlights/analyze", { document_id: documentId });
+      setAnalysis(data);
     } catch (error) {
       console.error("Analysis failed:", error);
     } finally {

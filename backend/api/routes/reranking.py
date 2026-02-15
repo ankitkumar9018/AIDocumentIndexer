@@ -8,9 +8,11 @@ API endpoints for tiered reranking pipeline.
 from typing import Dict, Any, List, Optional
 from enum import Enum
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 import structlog
+
+from backend.api.deps import get_current_user
 
 from backend.services.tiered_reranking import (
     get_tiered_reranker,
@@ -109,7 +111,7 @@ class AnalyzeQueryResponse(BaseModel):
 # =============================================================================
 
 @router.post("/rerank", response_model=RerankResponse)
-async def rerank_candidates(request: RerankRequest) -> RerankResponse:
+async def rerank_candidates(request: RerankRequest, user: dict = Depends(get_current_user)) -> RerankResponse:
     """
     Rerank candidates using the tiered reranking pipeline.
 
@@ -191,11 +193,11 @@ async def rerank_candidates(request: RerankRequest) -> RerankResponse:
 
     except Exception as e:
         logger.error("Reranking failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Reranking failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Reranking failed")
 
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_reranker_config() -> ConfigResponse:
+async def get_reranker_config(user: dict = Depends(get_current_user)) -> ConfigResponse:
     """Get current reranker configuration."""
     try:
         reranker = await get_tiered_reranker()
@@ -215,11 +217,11 @@ async def get_reranker_config() -> ConfigResponse:
         )
     except Exception as e:
         logger.error("Failed to get config", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get reranker config")
 
 
 @router.post("/analyze-query", response_model=AnalyzeQueryResponse)
-async def analyze_query(query: str) -> AnalyzeQueryResponse:
+async def analyze_query(query: str, user: dict = Depends(get_current_user)) -> AnalyzeQueryResponse:
     """
     Analyze query complexity and get recommended stages.
 
@@ -245,11 +247,11 @@ async def analyze_query(query: str) -> AnalyzeQueryResponse:
         )
     except Exception as e:
         logger.error("Query analysis failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Query analysis failed")
 
 
 @router.get("/stages")
-async def list_stages() -> Dict[str, Any]:
+async def list_stages(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """List available reranking stages with descriptions."""
     return {
         "stages": [

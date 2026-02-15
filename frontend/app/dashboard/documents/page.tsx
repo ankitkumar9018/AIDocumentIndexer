@@ -540,11 +540,19 @@ export default function DocumentsPage() {
   };
 
   const handleDeleteSelected = async () => {
+    let failed = 0;
     for (const id of selectedDocuments) {
-      await deleteDocument.mutateAsync({ id, hardDelete: false });
+      try {
+        await deleteDocument.mutateAsync({ id, hardDelete: false });
+      } catch {
+        failed++;
+      }
     }
     setSelectedDocuments(new Set());
     refetch();
+    if (failed > 0) {
+      toast.error(`Failed to delete ${failed} document(s)`);
+    }
   };
 
   const handleSort = (field: string) => {
@@ -775,7 +783,7 @@ export default function DocumentsPage() {
         auto_tag: autoTagEnabled,
       });
       toast.success("Document enhancement complete", {
-        description: result.message || `Enhanced ${result.successful} of ${result.total} documents. Estimated cost: $${result.estimated_cost_usd.toFixed(4)}`,
+        description: result.message || `Enhanced ${result.successful} of ${result.total} documents. Estimated cost: $${(result.estimated_cost_usd ?? 0).toFixed(4)}`,
       });
       setSelectedDocuments(new Set());
       refetch();
@@ -797,7 +805,7 @@ export default function DocumentsPage() {
         auto_tag: autoTagEnabled,
       });
       toast.success("Document enhancement complete", {
-        description: result.message || `Enhanced ${result.successful} of ${result.total} documents. Estimated cost: $${result.estimated_cost_usd.toFixed(4)}`,
+        description: result.message || `Enhanced ${result.successful} of ${result.total} documents. Estimated cost: $${(result.estimated_cost_usd ?? 0).toFixed(4)}`,
       });
       refetch();
     } catch (error) {

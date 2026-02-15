@@ -6,6 +6,8 @@ Public endpoints for published Skills and Workflows that can be accessed
 without authentication. These are used for embedding and external integrations.
 """
 
+import hashlib
+import hmac
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from uuid import UUID, uuid4
@@ -36,16 +38,59 @@ router = APIRouter()
 
 
 # =============================================================================
+# Password Hashing Helpers (scrypt with SHA256 legacy fallback)
+# =============================================================================
+
+def _hash_share_password(password: str) -> str:
+    """Hash a password using scrypt with random salt."""
+    import hashlib
+    import os
+    salt = os.urandom(16)
+    hash_bytes = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
+    return f"scrypt:{salt.hex()}:{hash_bytes.hex()}"
+
+
+def _verify_share_password(provided: str, stored_hash: str) -> bool:
+    """Verify a password against stored hash. Supports scrypt and legacy SHA256."""
+    import hashlib
+    if stored_hash.startswith("scrypt:"):
+        # New scrypt format: scrypt:salt_hex:hash_hex
+        parts = stored_hash.split(":")
+        if len(parts) != 3:
+            return False
+        _, salt_hex, hash_hex = parts
+        salt = bytes.fromhex(salt_hex)
+        computed = hashlib.scrypt(provided.encode(), salt=salt, n=16384, r=8, p=1).hex()
+        return computed == hash_hex
+    else:
+        # Legacy SHA256 format (backward-compatible)
+        return hashlib.sha256(provided.encode()).hexdigest() == stored_hash
+
+
+# =============================================================================
 # Rate Limiting (Simple in-memory for now)
 # =============================================================================
 
 _rate_limit_cache: Dict[str, List[datetime]] = {}
+_cache_last_cleanup: float = 0.0
 
 
 def check_rate_limit(key: str, limit: int = 100, window_seconds: int = 60) -> bool:
     """Check if request is within rate limit. Returns True if allowed."""
+    global _cache_last_cleanup
     now = datetime.utcnow()
-    window_start = now.timestamp() - window_seconds
+    now_ts = now.timestamp()
+    window_start = now_ts - window_seconds
+
+    # Periodic cleanup of stale keys (every 5 minutes)
+    if now_ts - _cache_last_cleanup > 300:
+        stale_keys = [
+            k for k, v in _rate_limit_cache.items()
+            if not v or all(ts.timestamp() <= window_start for ts in v)
+        ]
+        for k in stale_keys:
+            del _rate_limit_cache[k]
+        _cache_last_cleanup = now_ts
 
     if key not in _rate_limit_cache:
         _rate_limit_cache[key] = []
@@ -64,18 +109,28 @@ def check_rate_limit(key: str, limit: int = 100, window_seconds: int = 60) -> bo
 
 
 def check_cors(request: Request, allowed_domains: List[str]) -> bool:
-    """Check if request origin is allowed."""
+    """Check if request origin is allowed using exact domain matching."""
+    from urllib.parse import urlparse
+
     if "*" in allowed_domains:
         return True
 
     origin = request.headers.get("origin", "")
-    referer = request.headers.get("referer", "")
+    if not origin:
+        return True  # Allow direct API calls (no origin header)
+
+    try:
+        parsed = urlparse(origin)
+        origin_host = parsed.hostname or ""
+    except Exception:
+        return False
 
     for domain in allowed_domains:
-        if domain in origin or domain in referer:
+        # Exact match or subdomain match (e.g., "sub.example.com" matches "example.com")
+        if origin_host == domain or origin_host.endswith(f".{domain}"):
             return True
 
-    return not origin and not referer  # Allow direct API calls
+    return False
 
 
 # =============================================================================
@@ -193,7 +248,18 @@ async def execute_public_skill(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="API key required",
             )
-        # TODO: Implement API key validation
+        stored_hash = config.get("api_key_hash")
+        if not stored_hash:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="API key not configured",
+            )
+        provided_hash = hashlib.sha256(execute_request.api_key.encode()).hexdigest()
+        if not hmac.compare_digest(provided_hash, stored_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+            )
 
     # Check rate limit
     rate_limit = config.get("rate_limit", 100)
@@ -277,7 +343,7 @@ async def execute_public_skill(
             try:
                 import json
                 output = json.loads(output)
-            except:
+            except (json.JSONDecodeError, ValueError):
                 pass
 
         execution_time = int((datetime.utcnow() - start_time).total_seconds() * 1000)
@@ -320,7 +386,7 @@ async def execute_public_skill(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Execution failed: {str(e)}",
+            detail="Skill execution failed",
         )
 
 
@@ -437,6 +503,18 @@ async def execute_public_workflow(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="API key required",
             )
+        stored_hash = config.get("api_key_hash")
+        if not stored_hash:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="API key not configured",
+            )
+        provided_hash = hashlib.sha256(execute_request.api_key.encode()).hexdigest()
+        if not hmac.compare_digest(provided_hash, stored_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+            )
 
     # Check rate limit
     rate_limit = config.get("rate_limit", 100)
@@ -474,7 +552,7 @@ async def execute_public_workflow(
         logger.error("Public workflow execution failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Workflow execution failed: {str(e)}",
+            detail="Workflow execution failed",
         )
 
 
@@ -664,10 +742,8 @@ async def verify_shared_workflow_password(
     if not password_hash:
         return {"verified": True}
 
-    # Verify password
-    provided_hash = hashlib.sha256(verify_request.password.encode()).hexdigest()
-
-    if provided_hash != password_hash:
+    # Verify password (supports scrypt + legacy SHA256)
+    if not _verify_share_password(verify_request.password, password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid password",
@@ -736,8 +812,7 @@ async def execute_shared_workflow(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Password required",
             )
-        provided_hash = hashlib.sha256(execute_request.password.encode()).hexdigest()
-        if provided_hash != password_hash:
+        if not _verify_share_password(execute_request.password, password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid password",
@@ -793,7 +868,7 @@ async def execute_shared_workflow(
         logger.error("Shared workflow execution failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Execution failed: {str(e)}",
+            detail="Execution failed",
         )
 
 

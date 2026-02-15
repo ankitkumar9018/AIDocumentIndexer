@@ -28,10 +28,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import structlog
+
 from backend.api.deps import get_current_user, get_async_session, get_current_organization_id
 from backend.db.models import AudioOverviewFormat, AudioOverviewStatus
 from backend.services.audio import AudioOverviewService
 from backend.services.audio.tts_service import TTSProvider
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -275,12 +279,12 @@ async def list_audio_overviews(
         try:
             filters["status"] = AudioOverviewStatus(status)
         except ValueError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid status: {status}")
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
     if format:
         try:
             filters["format"] = AudioOverviewFormat(format)
         except ValueError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid format: {format}")
+            raise HTTPException(status_code=400, detail=f"Invalid format: {format}")
 
     if document_id:
         # Use document-specific listing
@@ -398,8 +402,16 @@ async def generate_audio_overview_stream(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio overview not found")
 
     async def generate():
-        async for event in service.generate_overview_streaming(uuid.UUID(overview_id)):
-            yield f"data: {json.dumps(event)}\n\n"
+        # Use fresh session inside generator (request-scoped session is closed after return)
+        from backend.db.database import async_session_context
+        async with async_session_context() as fresh_session:
+            svc = AudioOverviewService(
+                session=fresh_session,
+                organization_id=organization_id,
+                user_id=current_user.get("sub"),
+            )
+            async for event in svc.generate_overview_streaming(uuid.UUID(overview_id)):
+                yield f"data: {json.dumps(event)}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -509,7 +521,7 @@ async def serve_audio_file(
     file_path = storage_path / filename
 
     if not file_path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Audio file not found: {file_path}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio file not found")
 
     # Validate file is within storage path (security)
     try:
@@ -840,7 +852,8 @@ async def list_coqui_models(
         return models
 
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to list models: {str(e)}")
+        logger.error("Failed to list TTS models", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list models")
 
 
 @router.post("/settings/tts/coqui/models/download", response_model=CoquiModelActionResponse)
@@ -881,12 +894,22 @@ async def delete_coqui_model(
     current_user: dict = Depends(get_current_user),
 ):
     """Delete a downloaded Coqui TTS model."""
+    import re
     import shutil
     from pathlib import Path
 
     try:
+        # Validate model name to prevent path traversal
+        if not re.match(r'^[a-zA-Z0-9_\-./]+$', model_name) or '..' in model_name:
+            raise HTTPException(status_code=400, detail="Invalid model name")
+
         tts_home = Path.home() / ".local" / "share" / "tts"
         model_path = tts_home / model_name.replace("/", "--")
+
+        # Verify resolved path stays within tts_home
+        resolved = model_path.resolve()
+        if not resolved.is_relative_to(tts_home.resolve()):
+            raise HTTPException(status_code=400, detail="Invalid model name")
 
         if not model_path.exists():
             return CoquiModelActionResponse(
@@ -1084,7 +1107,8 @@ async def ultra_fast_tts_synthesize(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"TTS synthesis failed: {str(e)}")
+        logger.error("TTS synthesis failed", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="TTS synthesis failed")
 
 
 @router.post("/ultra-fast/stream")

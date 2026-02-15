@@ -9,10 +9,12 @@ from typing import Dict, Any, List, Optional
 from enum import Enum
 import base64
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import structlog
+
+from backend.api.deps import get_current_user
 
 from backend.services.vision_document_processor import (
     VisionDocumentProcessor,
@@ -141,6 +143,7 @@ async def process_image(
     document_type: Optional[str] = Form(None, description="Document type hint"),
     extract_tables: bool = Form(True, description="Extract tables"),
     extract_structured: bool = Form(True, description="Extract structured data"),
+    user: dict = Depends(get_current_user),
 ):
     """
     Process an image file with OCR and optional structured extraction.
@@ -232,11 +235,11 @@ async def process_image(
 
     except Exception as e:
         logger.error("Image processing failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Processing failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Processing failed")
 
 
 @router.post("/process-base64", response_model=VisionResultResponse)
-async def process_base64_image(request: ProcessBase64Request):
+async def process_base64_image(request: ProcessBase64Request, user: dict = Depends(get_current_user)):
     """
     Process a base64-encoded image.
 
@@ -301,12 +304,13 @@ async def process_base64_image(request: ProcessBase64Request):
         raise
     except Exception as e:
         logger.error("Base64 image processing failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Processing failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Processing failed")
 
 
 @router.post("/extract-invoice", response_model=InvoiceExtractResponse)
 async def extract_invoice(
     file: UploadFile = File(..., description="Invoice/receipt image"),
+    user: dict = Depends(get_current_user),
 ):
     """
     Extract structured data from an invoice or receipt.
@@ -343,12 +347,13 @@ async def extract_invoice(
 
     except Exception as e:
         logger.error("Invoice extraction failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Extraction failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Extraction failed")
 
 
 @router.post("/extract-tables")
 async def extract_tables(
     file: UploadFile = File(..., description="Image with tables"),
+    user: dict = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
     Extract tables from an image.
@@ -378,11 +383,11 @@ async def extract_tables(
 
     except Exception as e:
         logger.error("Table extraction failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Extraction failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Extraction failed")
 
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_vision_config():
+async def get_vision_config(user: dict = Depends(get_current_user)):
     """Get current vision processor configuration."""
     processor = get_processor()
     config = processor.config
@@ -401,7 +406,7 @@ async def get_vision_config():
 
 
 @router.get("/engines")
-async def list_ocr_engines() -> Dict[str, Any]:
+async def list_ocr_engines(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """List available OCR engines with benchmarks."""
     return {
         "engines": [
@@ -480,6 +485,7 @@ async def process_with_mistral_ocr(
     file: UploadFile = File(..., description="Document to process"),
     extract_tables: bool = Form(True, description="Extract tables"),
     extract_images: bool = Form(False, description="Extract images"),
+    user: dict = Depends(get_current_user),
 ):
     """
     Process document using Mistral OCR 3.
@@ -530,16 +536,16 @@ async def process_with_mistral_ocr(
             processing_time_ms=result.processing_time_ms,
         )
 
-    except ValueError as e:
+    except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid input",
         )
     except Exception as e:
         logger.error("Mistral OCR processing failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Processing failed: {str(e)}",
+            detail="Processing failed",
         )
 
 

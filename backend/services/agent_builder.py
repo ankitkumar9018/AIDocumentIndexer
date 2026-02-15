@@ -634,7 +634,6 @@ class AgentBuilder:
                     logger.warning(f"RAG query failed, falling back to LLM only: {rag_error}")
 
             # Build LLM messages
-            from langchain_openai import ChatOpenAI
             from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
             # Build system prompt with RAG context and memory if available
@@ -660,8 +659,9 @@ Knowledge Base Context:
 
             messages = [SystemMessage(content=system_content)]
 
-            # Add history (last 10 messages)
-            for msg in history[-10:]:
+            # Add history (previous messages only, excluding the current one which
+            # was already appended to history by send_message before calling us)
+            for msg in history[-11:-1]:
                 if msg.role == "user":
                     messages.append(HumanMessage(content=msg.content))
                 else:
@@ -670,11 +670,20 @@ Knowledge Base Context:
             # Add current message
             messages.append(HumanMessage(content=message))
 
-            # Generate response with LLM
-            llm = ChatOpenAI(
-                model=agent.config.model,
-                temperature=agent.config.temperature,
-            )
+            # Generate response with LLM (use factory for provider-agnostic model creation)
+            try:
+                from backend.services.llm import LLMFactory
+                llm = LLMFactory.get_chat_model(
+                    model=agent.config.model,
+                    temperature=agent.config.temperature,
+                )
+            except Exception as llm_err:
+                logger.warning(f"Factory failed for agent LLM, using direct OpenAI: {llm_err}")
+                from langchain_openai import ChatOpenAI
+                llm = ChatOpenAI(
+                    model=agent.config.model,
+                    temperature=agent.config.temperature,
+                )
 
             response = await llm.ainvoke(messages)
 
@@ -814,15 +823,15 @@ Knowledge Base Context:
 <script>
 (function() {{
   var w = document.createElement('script');
-  w.src = '{api_base}/widget/agent.js';
+  w.src = {json.dumps(f'{api_base}/widget/agent.js')};
   w.async = true;
   w.onload = function() {{
     AIAgent.init({{
-      agentId: '{agent_id}',
-      position: '{widget.position.value}',
-      primaryColor: '{widget.primary_color}',
-      backgroundColor: '{widget.background_color}',
-      greeting: '{widget.greeting_message}',
+      agentId: {json.dumps(agent_id)},
+      position: {json.dumps(widget.position.value)},
+      primaryColor: {json.dumps(widget.primary_color)},
+      backgroundColor: {json.dumps(widget.background_color)},
+      greeting: {json.dumps(widget.greeting_message)},
       enableVoice: {str(widget.enable_voice_output).lower()},
       enableFeedback: {str(widget.enable_feedback).lower()},
     }});

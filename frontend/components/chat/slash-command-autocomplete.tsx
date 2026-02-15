@@ -47,7 +47,7 @@ async function fetchCommands(): Promise<SlashCommand[]> {
       `${API_BASE_URL}/chat/commands/list`,
       {
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("authToken") || ""}`,
+          Authorization: `Bearer ${localStorage.getItem("auth_token") || ""}`,
         },
       }
     );

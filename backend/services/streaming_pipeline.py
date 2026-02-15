@@ -503,7 +503,7 @@ class StreamingIngestionService:
             from backend.services.embeddings import EmbeddingService
 
             service = EmbeddingService()
-            embeddings = await service.embed_texts(texts)
+            embeddings = service.embed_texts(texts)
             return embeddings
 
         except Exception as e:

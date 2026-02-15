@@ -356,10 +356,19 @@ class CostLimitChecker:
             db, user_id, tier_level
         )
 
-        cost_limit.current_daily_usage_usd += cost_usd
-        cost_limit.current_monthly_usage_usd += cost_usd
-
+        # Use SQL-level atomic increment to prevent lost updates from concurrent requests
+        await db.execute(
+            update(UserCostLimit)
+            .where(UserCostLimit.id == cost_limit.id)
+            .values(
+                current_daily_usage_usd=UserCostLimit.current_daily_usage_usd + cost_usd,
+                current_monthly_usage_usd=UserCostLimit.current_monthly_usage_usd + cost_usd,
+            )
+        )
         await db.flush()
+
+        # Refresh to get updated values for alert threshold checking
+        await db.refresh(cost_limit)
 
         # Check and create alerts
         await self._check_and_create_alerts(db, cost_limit)

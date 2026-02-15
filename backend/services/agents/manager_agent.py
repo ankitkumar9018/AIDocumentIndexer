@@ -35,6 +35,7 @@ from backend.services.agents.agent_base import (
     FallbackStrategy,
     PromptTemplate,
     TrajectoryStep,
+    _get_language_instruction,
 )
 
 logger = structlog.get_logger(__name__)
@@ -626,6 +627,11 @@ class ManagerAgent(BaseAgent):
         # Track results for dependent steps
         step_results: Dict[str, AgentResult] = {}
 
+        # Pass original user request to workers so research agents can search
+        # with the actual query, not the LLM-rewritten task description
+        context = context or {}
+        context["user_request"] = plan.user_request
+
         while True:
             # Get steps ready to execute
             ready_steps = plan.get_ready_steps()
@@ -909,7 +915,7 @@ class ManagerAgent(BaseAgent):
         if plan.failed_steps == 0:
             plan.status = PlanStatus.COMPLETED
             # Synthesize final output
-            plan.final_output = await self._synthesize_output(plan, step_results)
+            plan.final_output = await self._synthesize_output(plan, step_results, context)
 
             yield {
                 "type": "plan_completed",
@@ -1053,6 +1059,7 @@ Please complete this task and provide your response."""
         self,
         plan: ExecutionPlan,
         step_results: Dict[str, AgentResult],
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Synthesize final output from all step results."""
         # Collect outputs from all steps, normalizing dict outputs to strings
@@ -1097,13 +1104,41 @@ Please synthesize these outputs into a coherent final response that DIRECTLY add
 IMPORTANT: If the user asked to CREATE something (slogan, content, strategy, etc.), make sure your response INCLUDES that creation.
 Do not just summarize the research - provide the requested deliverable."""
 
+        # Add language instruction so synthesis respects user's language.
+        # For synthesis, don't use auto-detect (its examples confuse small models).
+        # Workers already handled language; synthesis just needs a simple constraint.
+        language = (context or {}).get("language", "en")
+        effective_lang = "en" if language in ("auto", "en", "") else language
+        lang_instruction = _get_language_instruction(effective_lang, auto_detect=False)
+
+        system_content = "You are synthesizing multiple agent outputs into a coherent final response for the user."
+        if lang_instruction:
+            system_content += f"\n{lang_instruction}"
+
+        # Verification instruction — synthesis-specific (not in invoke_llm)
+        # Asks the model to trace claims back to step outputs
+        enable_verification = (context or {}).get("enable_verification", False)
+        if enable_verification:
+            synthesis_prompt += """
+
+VERIFICATION: After synthesizing, verify each key claim against the step outputs above.
+If a claim cannot be traced to the provided step outputs, mark it as [unverified]."""
+
         messages = [
-            SystemMessage(content="You are synthesizing multiple outputs into a final response."),
+            SystemMessage(content=system_content),
             HumanMessage(content=synthesis_prompt),
         ]
 
+        # Intelligence grounding + CoT are handled centrally by invoke_llm()
+        # (with small-model gating). Only verification is synthesis-specific above.
         try:
-            response, _, _ = await self.invoke_llm(messages, record=True)
+            response, _, _ = await self.invoke_llm(
+                messages,
+                record=True,
+                temperature_override=(context or {}).get("temperature_override"),
+                intelligence_level=(context or {}).get("intelligence_level"),
+                enable_cot=(context or {}).get("enable_cot", False),
+            )
             return response
         except Exception as e:
             logger.error(f"Synthesis failed: {e}")

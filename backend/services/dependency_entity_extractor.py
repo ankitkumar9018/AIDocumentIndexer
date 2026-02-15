@@ -19,6 +19,7 @@ Use cases:
 - Preprocessing for LLM refinement
 """
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple, Set
@@ -93,8 +94,15 @@ class DependencyEntityExtractor:
                 # Model not installed - try to download
                 logger.warning(f"spaCy model {self.model_name} not found, attempting download")
                 try:
-                    import subprocess
-                    subprocess.run(["python", "-m", "spacy", "download", self.model_name], check=True)
+                    proc = await asyncio.create_subprocess_exec(
+                        "python", "-m", "spacy", "download", self.model_name,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await proc.wait()
+                    if proc.returncode != 0:
+                        stderr_data = await proc.stderr.read()
+                        raise RuntimeError(f"spacy download failed: {stderr_data.decode()}")
                     import spacy
                     self._nlp = spacy.load(self.model_name)
                 except Exception as e:

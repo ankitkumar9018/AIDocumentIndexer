@@ -29,13 +29,13 @@ dependencies = [
     "aiosqlite>=0.19.0",
     "aiomysql>=0.2.0",
     "sqlparse>=0.4.4",
-    # LLM & RAG (pinned to 0.3.x for stability)
-    "langchain>=0.3.0,<1.0.0",
-    "langchain-community>=0.3.0,<1.0.0",
-    "langchain-core>=0.3.0,<1.0.0",
-    "langchain-openai>=0.2.0,<1.0.0",
+    # LLM & RAG
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
     "langchain-litellm>=0.1.0",
-    "langgraph>=0.2.0,<1.0.0",
+    "langgraph>=0.2.0",
     "litellm>=1.50.0",
     # Embeddings
     "sentence-transformers>=2.2.2",
@@ -92,7 +92,7 @@ dependencies = [
     "numpy>=1.26.0",
     "pandas>=2.1.0",
     "pyjwt>=2.10.1",
-    "langchain-text-splitters>=0.3.0,<1.0.0",
+    "langchain-text-splitters>=0.3.0",
     "pytesseract>=0.3.13",
     "langchain-anthropic>=0.3.22",
     "bcrypt<4.1",
@@ -162,6 +162,14 @@ performance = [
     "datasketch>=1.6.0",
     "scipy>=1.11.0",
     "cython>=3.0.0",
+]
+# Additional LLM providers (install as needed)
+# pip install -e ".[providers]"
+providers = [
+    "langchain-google-genai>=2.0.0",
+    "langchain-cohere>=0.4.0",
+    "langchain-aws>=0.2.0",
+    "boto3>=1.26.0",
 ]
 
 [build-system]

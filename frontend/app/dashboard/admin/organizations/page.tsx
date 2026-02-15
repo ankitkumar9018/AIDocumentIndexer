@@ -477,11 +477,11 @@ export default function OrganizationsPage() {
             <Input
               placeholder="Search organizations..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
               className="pl-10"
             />
           </div>
-          <Select value={planFilter} onValueChange={setPlanFilter}>
+          <Select value={planFilter} onValueChange={(v) => { setPlanFilter(v); setPage(1); }}>
             <SelectTrigger className="w-[150px]">
               <SelectValue placeholder="All Plans" />
             </SelectTrigger>
@@ -492,7 +492,7 @@ export default function OrganizationsPage() {
               <SelectItem value="enterprise">Enterprise</SelectItem>
             </SelectContent>
           </Select>
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(1); }}>
             <SelectTrigger className="w-[150px]">
               <SelectValue placeholder="All Status" />
             </SelectTrigger>

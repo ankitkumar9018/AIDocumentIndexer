@@ -116,16 +116,17 @@ class LazyGraphRAGService:
     async def _get_llm(self):
         """Get LLM for summarization."""
         if self._llm is None:
-            self._llm = EnhancedLLMFactory.create_with_fallback(
-                task_type="summarization",
-                temperature=0.3,
+            llm, _config = await EnhancedLLMFactory.get_chat_model_for_operation(
+                operation="summarization",
+                track_usage=False,
             )
+            self._llm = llm
         return self._llm
 
     async def _get_embeddings(self):
         """Get embedding service."""
         if self._embedding_service is None:
-            self._embedding_service = await get_embedding_service()
+            self._embedding_service = get_embedding_service()
         return self._embedding_service
 
     # =========================================================================

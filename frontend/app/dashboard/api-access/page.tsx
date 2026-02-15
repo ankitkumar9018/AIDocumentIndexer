@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { api } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -112,8 +113,8 @@ export default function APIAccessPage() {
     setIsLoading(true);
     try {
       const [keysRes, endpointsRes] = await Promise.all([
-        fetch("/api/v1/external/api-keys", { credentials: "include" }),
-        fetch("/api/v1/external/published", { credentials: "include" }),
+        api.fetchWithAuth("/api/v1/external/api-keys"),
+        api.fetchWithAuth("/api/v1/external/published"),
       ]);
 
       if (keysRes.ok) {
@@ -131,10 +132,9 @@ export default function APIAccessPage() {
 
   const createApiKey = async () => {
     try {
-      const res = await fetch("/api/v1/external/api-keys", {
+      const res = await api.fetchWithAuth("/api/v1/external/api-keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           name: newKeyName,
           description: newKeyDescription,
@@ -160,9 +160,8 @@ export default function APIAccessPage() {
 
   const revokeApiKey = async (keyId: string) => {
     try {
-      const res = await fetch(`/api/v1/external/api-keys/${keyId}`, {
+      const res = await api.fetchWithAuth(`/api/v1/external/api-keys/${keyId}`, {
         method: "DELETE",
-        credentials: "include",
       });
 
       if (res.ok) {

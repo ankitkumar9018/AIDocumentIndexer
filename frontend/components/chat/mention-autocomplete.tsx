@@ -32,7 +32,7 @@ async function fetchMentionSuggestions(partial: string): Promise<MentionSuggesti
       `${API_BASE_URL}/chat/mentions/autocomplete?partial=${encodeURIComponent(partial)}`,
       {
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("authToken") || ""}`,
+          Authorization: `Bearer ${localStorage.getItem("auth_token") || ""}`,
         },
       }
     );

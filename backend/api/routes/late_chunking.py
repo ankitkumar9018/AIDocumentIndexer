@@ -12,9 +12,11 @@ embedding, improving retrieval accuracy by 15-25%.
 from typing import Dict, Any, List, Optional
 from enum import Enum
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 import structlog
+
+from backend.api.middleware.auth import get_current_user
 
 from backend.services.late_chunking import (
     get_late_chunking_engine,
@@ -63,7 +65,7 @@ class ChunkResponse(BaseModel):
 
 class ProcessDocumentRequest(BaseModel):
     """Request to process a document with late chunking."""
-    text: str = Field(..., description="Document text to process")
+    text: str = Field(..., max_length=500000, description="Document text to process")
     document_id: Optional[str] = Field(None, description="Optional document identifier")
     chunk_size: int = Field(256, ge=64, le=1024, description="Tokens per chunk")
     chunk_overlap: int = Field(32, ge=0, le=128, description="Token overlap between chunks")
@@ -104,8 +106,8 @@ class ProcessBatchResponse(BaseModel):
 
 class CompareRequest(BaseModel):
     """Request to compare late vs traditional chunking."""
-    text: str = Field(..., description="Document text")
-    queries: List[str] = Field(..., description="Test queries for retrieval comparison")
+    text: str = Field(..., max_length=500000, description="Document text")
+    queries: List[str] = Field(..., max_length=20, description="Test queries for retrieval comparison")
 
 
 class CompareResponse(BaseModel):
@@ -131,7 +133,7 @@ class ConfigResponse(BaseModel):
 # =============================================================================
 
 @router.post("/process", response_model=ProcessDocumentResponse)
-async def process_document(request: ProcessDocumentRequest) -> ProcessDocumentResponse:
+async def process_document(request: ProcessDocumentRequest, current_user: dict = Depends(get_current_user)) -> ProcessDocumentResponse:
     """
     Process a document with late chunking.
 
@@ -196,12 +198,12 @@ async def process_document(request: ProcessDocumentRequest) -> ProcessDocumentRe
         logger.error("Late chunking failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Late chunking failed: {str(e)}",
+            detail="Late chunking processing failed",
         )
 
 
 @router.post("/process-batch", response_model=ProcessBatchResponse)
-async def process_batch(request: ProcessBatchRequest) -> ProcessBatchResponse:
+async def process_batch(request: ProcessBatchRequest, current_user: dict = Depends(get_current_user)) -> ProcessBatchResponse:
     """
     Process multiple documents with late chunking.
 
@@ -268,12 +270,12 @@ async def process_batch(request: ProcessBatchRequest) -> ProcessBatchResponse:
         logger.error("Batch late chunking failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Batch processing failed: {str(e)}",
+            detail="Batch processing failed",
         )
 
 
 @router.post("/compare", response_model=CompareResponse)
-async def compare_chunking(request: CompareRequest) -> CompareResponse:
+async def compare_chunking(request: CompareRequest, current_user: dict = Depends(get_current_user)) -> CompareResponse:
     """
     Compare late chunking vs traditional chunking for retrieval.
 
@@ -303,12 +305,12 @@ async def compare_chunking(request: CompareRequest) -> CompareResponse:
         logger.error("Comparison failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Comparison failed: {str(e)}",
+            detail="Comparison failed",
         )
 
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_config() -> ConfigResponse:
+async def get_config(current_user: dict = Depends(get_current_user)) -> ConfigResponse:
     """Get current late chunking configuration."""
     try:
         engine = await get_late_chunking_engine()
@@ -327,12 +329,12 @@ async def get_config() -> ConfigResponse:
         logger.error("Failed to get config", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Failed to get late chunking configuration",
         )
 
 
 @router.get("/models")
-async def list_models() -> Dict[str, Any]:
+async def list_models(current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """List available late chunking models."""
     return {
         "models": [
@@ -381,7 +383,7 @@ async def list_models() -> Dict[str, Any]:
 
 
 @router.get("/health")
-async def health() -> Dict[str, Any]:
+async def health(current_user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """Check late chunking service health."""
     try:
         engine = await get_late_chunking_engine()
@@ -392,7 +394,8 @@ async def health() -> Dict[str, Any]:
             "device": str(engine._device) if engine._device else "api",
         }
     except Exception as e:
+        logger.error("Late chunking health check failed", error=str(e))
         return {
             "status": "error",
-            "error": str(e),
+            "error": "Service unavailable",
         }

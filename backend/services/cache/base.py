@@ -214,7 +214,7 @@ class BaseCache(ABC, Generic[T]):
             return False
 
         cache_key = self._make_key(key)
-        effective_ttl = ttl or await self._get_ttl()
+        effective_ttl = ttl if ttl is not None else await self._get_ttl()
 
         return await self._do_set(cache_key, value, effective_ttl)
 

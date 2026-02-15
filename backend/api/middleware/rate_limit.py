@@ -13,7 +13,7 @@ import asyncio
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
@@ -545,7 +545,7 @@ class RateLimitChecker:
         tier_id: str,
         tier_level: int,
         db: Optional[AsyncSession] = None
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """Get current rate limit usage for a user."""
         settings = await get_tier_rate_limits(tier_id, tier_level, db)
         state = await self.storage.get_user_state(user_id, settings)
@@ -620,7 +620,7 @@ async def rate_limit_dependency(
 
     result = await checker.check_request_limit(
         user_id=user.user_id,
-        tier_id=user.access_tier_id or "default",
+        tier_id=user.access_tier_name or "default",
         tier_level=user.access_tier_level,
         operation=operation,
         db=db

@@ -310,7 +310,7 @@ async def get_graph_stats(
         logger.error("Failed to get graph stats", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get graph statistics: {str(e)}"
+            detail="Failed to get graph statistics"
         )
 
 
@@ -460,7 +460,7 @@ async def get_graph_data(
         logger.error("Failed to get graph data", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get graph data: {str(e)}"
+            detail="Failed to get graph data"
         )
 
 
@@ -506,7 +506,8 @@ async def search_entities(
 
         # Name search
         if query:
-            search_pattern = f"%{query}%"
+            safe_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            search_pattern = f"%{safe_query}%"
             conditions.append(
                 or_(
                     Entity.name.ilike(search_pattern),
@@ -531,7 +532,7 @@ async def search_entities(
 
         # Apply pagination
         offset = (page - 1) * page_size
-        base_query = base_query.offset(offset).limit(page_size)
+        base_query = base_query.order_by(Entity.name.asc()).offset(offset).limit(page_size)
 
         result = await db.execute(base_query)
         entities = list(result.scalars().all())
@@ -576,7 +577,7 @@ async def search_entities(
         logger.error("Failed to search entities", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to search entities: {str(e)}"
+            detail="Failed to search entities"
         )
 
 
@@ -944,6 +945,12 @@ async def create_relation(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target entity not found")
 
     org_id = get_org_filter(user)
+
+    # Multi-tenant isolation: ensure both entities belong to user's org
+    if org_id:
+        if (source.organization_id and source.organization_id != org_id) or \
+           (target.organization_id and target.organization_id != org_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entity not found")
 
     relation = EntityRelation(
         source_entity_id=source_uuid,
@@ -1398,7 +1405,7 @@ async def extract_entities_from_document(
         logger.error("Failed to extract entities from document", document_id=document_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to extract entities: {str(e)}"
+            detail="Failed to extract entities"
         )
 
 
@@ -1489,7 +1496,7 @@ async def extract_entities_from_all_documents(
         logger.error("Failed to run bulk entity extraction", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to extract entities: {str(e)}"
+            detail="Failed to extract entities"
         )
 
 
@@ -1619,7 +1626,7 @@ async def cleanup_graph(
         logger.error("Failed to cleanup knowledge graph", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to cleanup graph: {str(e)}"
+            detail="Failed to cleanup graph"
         )
 
 
@@ -1771,15 +1778,16 @@ async def start_extraction_job(
         )
 
     except ValueError as e:
+        logger.warning("Invalid extraction job request", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid extraction job request",
         )
     except Exception as e:
         logger.error("Failed to start extraction job", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start extraction job: {str(e)}",
+            detail="Failed to start extraction job",
         )
 
 
@@ -1806,7 +1814,7 @@ async def get_current_extraction_job(
         logger.error("Failed to get current extraction job", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get extraction job: {str(e)}",
+            detail="Failed to get extraction job",
         )
 
 
@@ -1835,7 +1843,7 @@ async def get_pending_extraction_count(
         logger.error("Failed to get pending extraction count", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get pending count: {str(e)}",
+            detail="Failed to get pending count",
         )
 
 
@@ -1866,7 +1874,7 @@ async def get_extraction_job_progress(
         logger.error("Failed to get extraction job progress", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get job progress: {str(e)}",
+            detail="Failed to get job progress",
         )
 
 
@@ -1900,7 +1908,7 @@ async def get_extraction_job_documents(
         logger.error("Failed to get extraction job documents", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get job documents: {str(e)}",
+            detail="Failed to get job documents",
         )
 
 
@@ -1935,7 +1943,7 @@ async def cancel_extraction_job(
         logger.error("Failed to cancel extraction job", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to cancel job: {str(e)}",
+            detail="Failed to cancel job",
         )
 
 
@@ -1970,7 +1978,7 @@ async def pause_extraction_job(
         logger.error("Failed to pause extraction job", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to pause job: {str(e)}",
+            detail="Failed to pause job",
         )
 
 
@@ -2005,7 +2013,7 @@ async def resume_extraction_job(
         logger.error("Failed to resume extraction job", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to resume job: {str(e)}",
+            detail="Failed to resume job",
         )
 
 
@@ -2046,5 +2054,5 @@ async def list_extraction_jobs(
         logger.error("Failed to list extraction jobs", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list jobs: {str(e)}",
+            detail="Failed to list jobs",
         )

@@ -156,7 +156,7 @@ async def validate_license(
         logger.error("License validation error", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"License validation failed: {str(e)}",
+            detail="License validation failed",
         )
 
 
@@ -228,7 +228,7 @@ async def activate_license(
         logger.error("License activation error", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"License activation failed: {str(e)}",
+            detail="License activation failed",
         )
 
 
@@ -421,7 +421,7 @@ be transferred to other machines.
         logger.error("Failed to generate offline license", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate offline license: {str(e)}",
+            detail="Failed to generate offline license",
         )
 
 

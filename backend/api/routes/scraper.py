@@ -338,9 +338,10 @@ async def create_scrape_job(
             collection=request.collection,
         )
     except ValueError as e:
+        logger.warning("Invalid scraper request", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid request",
         )
 
     return job_to_response(job)
@@ -462,15 +463,16 @@ async def run_scrape_job(
             same_domain_only=same_domain_only,
         )
     except ValueError as e:
+        logger.warning("Invalid scraper request", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid request",
         )
     except Exception as e:
         logger.error("Scrape job failed", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Scraping failed: {str(e)}",
+            detail="Scraping failed",
         )
 
     # Get updated job
@@ -537,7 +539,7 @@ async def scrape_url_immediate(
         logger.error("Scrape failed", url=request.url, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to scrape URL: {str(e)}",
+            detail="Failed to scrape URL",
         )
 
 
@@ -611,7 +613,7 @@ async def index_pages_directly(
         logger.error("Failed to index pages", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to index content: {str(e)}",
+            detail="Failed to index content",
         )
 
 
@@ -717,12 +719,13 @@ Please answer the question based on the web content above."""
                 query=request.query,
                 config=request_to_config(config),
             )
+            result["pages_scraped"] = 1
             return result
     except Exception as e:
         logger.error("Scrape and query failed", url=request.url, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to scrape and query: {str(e)}",
+            detail="Failed to scrape and query",
         )
 
 
@@ -789,9 +792,10 @@ async def extract_links(
             same_domain_only=same_domain_only,
         )
     except Exception as e:
+        logger.error("Failed to extract links", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to extract links: {str(e)}",
+            detail="Failed to extract links",
         )
 
     return {
@@ -862,7 +866,7 @@ async def index_job_content(
         logger.error("Failed to index job content", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to index content: {str(e)}",
+            detail="Failed to index content",
         )
 
 
@@ -996,7 +1000,7 @@ async def sitemap_crawl(
         logger.error("Sitemap crawl failed", url=request.url, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Sitemap crawl failed: {str(e)}",
+            detail="Sitemap crawl failed",
         )
 
 
@@ -1032,10 +1036,16 @@ async def stream_job_progress(
 
     async def event_generator():
         """Generate SSE events for job progress."""
+        import time as time_module
         last_pages_scraped = 0
         last_status = None
+        start_time = time_module.monotonic()
+        MAX_POLL_SECONDS = 600  # 10 minute timeout
 
         while True:
+            if time_module.monotonic() - start_time > MAX_POLL_SECONDS:
+                yield f"data: {json_module.dumps({'type': 'timeout', 'message': 'Polling timed out after 10 minutes'})}\n\n"
+                break
             current_job = service.get_job(job_id)
             if not current_job:
                 yield f"data: {json_module.dumps({'type': 'error', 'message': 'Job not found'})}\n\n"
@@ -1160,7 +1170,7 @@ async def search_and_crawl(
         logger.error("Search and crawl failed", query=request.query, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Search and crawl failed: {str(e)}",
+            detail="Search and crawl failed",
         )
 
 
@@ -1188,7 +1198,7 @@ async def check_robots_txt(
         logger.error("robots.txt check failed", url=url, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to parse robots.txt: {str(e)}",
+            detail="Failed to parse robots.txt",
         )
 
 
@@ -1286,9 +1296,10 @@ async def create_scheduled_crawl(
             user_id=user.user_id,
         )
     except ValueError as e:
+        logger.warning("Invalid scraper request", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid request",
         )
 
     return ScheduledCrawlResponse(**scheduled_crawl.to_dict())
@@ -1384,9 +1395,10 @@ async def update_scheduled_crawl(
     try:
         updated_crawl = scheduler.update_schedule(schedule_id, updates)
     except ValueError as e:
+        logger.warning("Invalid scraper request", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid request",
         )
 
     logger.info(
@@ -1478,9 +1490,10 @@ async def run_scheduled_crawl(
     try:
         result = await scheduler.execute_scheduled_crawl(schedule_id)
     except ValueError as e:
+        logger.warning("Invalid scraper request", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid request",
         )
     except Exception as e:
         logger.error(
@@ -1490,7 +1503,7 @@ async def run_scheduled_crawl(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Scheduled crawl execution failed: {str(e)}",
+            detail="Scheduled crawl execution failed",
         )
 
     return result

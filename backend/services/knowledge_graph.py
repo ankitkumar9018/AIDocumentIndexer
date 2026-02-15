@@ -47,7 +47,7 @@ from backend.db.models import (
 )
 from backend.services.llm import EnhancedLLMFactory
 from backend.services.embeddings import get_embedding_service
-from backend.db.database import async_session_context
+from backend.db.database import async_session_context, get_async_session_factory
 from backend.core.config import settings
 
 logger = structlog.get_logger(__name__)
@@ -796,7 +796,7 @@ class KnowledgeGraphService:
     async def _get_embeddings(self):
         """Get or initialize embedding service."""
         if not self.embeddings:
-            self.embeddings = await get_embedding_service()
+            self.embeddings = get_embedding_service()
         return self.embeddings
 
     # -------------------------------------------------------------------------
@@ -1570,6 +1570,9 @@ Only include entities and relations clearly supported by the text."""
         if document.access_tier:
             doc_access_tier_level = document.access_tier.level
 
+        # Get organization_id for multi-tenant isolation
+        doc_org_id = getattr(document, 'organization_id', None)
+
         # Load chunks if not provided
         if not chunks:
             result = await self.db.execute(
@@ -1631,6 +1634,7 @@ Only include entities and relations clearly supported by the text."""
         entity_map = await self._batch_upsert_entities(
             all_entities,
             doc_access_tier_level=doc_access_tier_level,
+            organization_id=doc_org_id,
         )
 
         # Create mentions for all entities (also batched)
@@ -1655,6 +1659,7 @@ Only include entities and relations clearly supported by the text."""
                     relation_type=relation.relation_type,
                     relation_label=relation.relation_label,
                     document_id=document_id,
+                    organization_id=doc_org_id,
                 )
                 stats["relations"] += 1
 
@@ -1821,6 +1826,7 @@ Only include entities and relations clearly supported by the text."""
         doc_access_tier_level: int = 1,
         use_fuzzy_matching: bool = True,
         fuzzy_threshold: float = 0.80,
+        organization_id: Optional[uuid.UUID] = None,
     ) -> Dict[str, Entity]:
         """
         Batch upsert entities to reduce N+1 query problem.
@@ -1884,9 +1890,11 @@ Only include entities and relations clearly supported by the text."""
             batch_size = 100
             for i in range(0, len(lookup_conditions), batch_size):
                 batch_conditions = lookup_conditions[i:i + batch_size]
-                result = await self.db.execute(
-                    select(Entity).where(or_(*batch_conditions))
-                )
+                query = select(Entity).where(or_(*batch_conditions))
+                # Multi-tenant isolation: only match entities in same org (or org-less)
+                if organization_id:
+                    query = query.where(or_(Entity.organization_id == organization_id, Entity.organization_id.is_(None)))
+                result = await self.db.execute(query)
                 for entity in result.scalars().all():
                     key = f"{entity.name_normalized}:{entity.entity_type.value if hasattr(entity.entity_type, 'value') else entity.entity_type}"
                     existing_entities[key] = entity
@@ -1895,9 +1903,11 @@ Only include entities and relations clearly supported by the text."""
         if use_fuzzy_matching and HAS_ENTITY_RESOLUTION:
             entity_types = set(e.entity_type for e in deduped_dict.values())
             for etype in entity_types:
-                result = await self.db.execute(
-                    select(Entity).where(Entity.entity_type == etype).limit(500)
-                )
+                fuzzy_query = select(Entity).where(Entity.entity_type == etype)
+                # Multi-tenant isolation: only match entities in same org (or org-less)
+                if organization_id:
+                    fuzzy_query = fuzzy_query.where(or_(Entity.organization_id == organization_id, Entity.organization_id.is_(None)))
+                result = await self.db.execute(fuzzy_query.limit(500))
                 for entity in result.scalars().all():
                     etype_val = entity.entity_type.value if hasattr(entity.entity_type, 'value') else entity.entity_type
                     existing_by_type[etype_val].append(entity)
@@ -1978,6 +1988,7 @@ Only include entities and relations clearly supported by the text."""
                     aliases=data["aliases"],
                     mention_count=data["mention_count"],
                     min_access_tier_level=data["min_access_tier_level"],
+                    organization_id=organization_id,
                 )
                 self.db.add(entity)
                 new_entities.append(entity)
@@ -2202,6 +2213,7 @@ Only include entities and relations clearly supported by the text."""
         relation_type: RelationType,
         relation_label: Optional[str] = None,
         document_id: Optional[uuid.UUID] = None,
+        organization_id: Optional[uuid.UUID] = None,
     ) -> EntityRelation:
         """Create or update relationship."""
         # Check if exists - use limit(1) to handle duplicates gracefully
@@ -2224,6 +2236,7 @@ Only include entities and relations clearly supported by the text."""
                 relation_type=relation_type,
                 relation_label=relation_label,
                 document_id=document_id,
+                organization_id=organization_id,
             )
             self.db.add(relation)
 
@@ -4152,33 +4165,27 @@ async def get_knowledge_graph_service(db_session: AsyncSession) -> KnowledgeGrap
 
 
 # =============================================================================
-# Singleton Pattern & Convenience Functions
+# Per-Call Factory (replaces broken singleton)
 # =============================================================================
-
-_kg_service_instance: Optional[KnowledgeGraphService] = None
-_kg_service_session = None
 
 
 async def get_kg_service() -> KnowledgeGraphService:
     """
-    Get or create singleton KnowledgeGraphService instance.
+    Get a KnowledgeGraphService with a fresh database session.
 
-    This function manages its own database session for standalone use.
-    For use within FastAPI routes, prefer get_knowledge_graph_service(db_session).
+    Creates a new instance per call to avoid sharing a single session
+    across concurrent requests (which causes cross-request state corruption,
+    permanent error states, and connection pool leaks).
+
+    For use within FastAPI routes with an existing request-scoped session,
+    prefer get_knowledge_graph_service(db_session).
 
     Returns:
-        KnowledgeGraphService: Singleton instance
+        KnowledgeGraphService: Fresh instance with its own session
     """
-    global _kg_service_instance, _kg_service_session
-
-    if _kg_service_instance is None:
-        # Create a new session for the singleton
-        session_factory = async_session_context()
-        _kg_service_session = await session_factory.__aenter__()
-        _kg_service_instance = KnowledgeGraphService(_kg_service_session)
-        logger.info("KG service singleton created")
-
-    return _kg_service_instance
+    session_factory = get_async_session_factory()
+    session = session_factory()
+    return KnowledgeGraphService(session)
 
 
 async def extract_knowledge_graph(

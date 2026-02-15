@@ -203,10 +203,16 @@ class SeverityCountResponse(BaseModel):
 # =============================================================================
 
 def get_client_ip(request: Request) -> Optional[str]:
-    """Extract client IP from request."""
+    """Extract client IP from request with validation."""
+    import ipaddress
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        candidate = forwarded.split(",")[0].strip()
+        try:
+            ipaddress.ip_address(candidate)
+            return candidate
+        except ValueError:
+            pass  # Invalid IP format — fall through to request.client
     return request.client.host if request.client else None
 
 
@@ -382,7 +388,7 @@ async def update_access_tier(
         tier.name = update.name
 
     # Check for duplicate level if updating
-    if update.level and update.level != tier.level:
+    if update.level is not None and update.level != tier.level:
         level_query = select(AccessTier).where(
             and_(AccessTier.level == update.level, AccessTier.id != tier_id)
         )
@@ -526,8 +532,9 @@ async def list_users(
     if is_active is not None:
         conditions.append(User.is_active == is_active)
     if search:
+        escaped_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         conditions.append(
-            User.email.ilike(f"%{search}%") | User.name.ilike(f"%{search}%")
+            User.email.ilike(f"%{escaped_search}%") | User.name.ilike(f"%{escaped_search}%")
         )
 
     if conditions:
@@ -660,7 +667,9 @@ async def create_user(
     # Reload with access tier
     user_query = select(User).options(selectinload(User.access_tier)).where(User.id == new_user.id)
     user_result = await db.execute(user_query)
-    new_user = user_result.scalar_one()
+    new_user = user_result.scalar_one_or_none()
+    if not new_user:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to reload created user")
 
     # Log action
     audit_service = get_audit_service()
@@ -1374,6 +1383,15 @@ async def update_settings(
         except Exception as e:
             logger.warning("Failed to invalidate LLM infra caches", error=str(e))
         logger.info("Invalidated infrastructure caches", changed_keys=infra_keys_changed)
+
+    # Clear LLM instance cache when any LLM setting changes (provider, model, keys, etc.)
+    llm_keys_changed = [k for k in update.settings.keys() if k.startswith("llm.")]
+    if llm_keys_changed:
+        try:
+            from backend.services.llm import LLMFactory
+            LLMFactory.clear_cache()
+        except Exception as e:
+            logger.warning("Failed to clear LLM factory cache", error=str(e))
 
     definitions = settings_service.get_setting_definitions()
 
@@ -2489,7 +2507,7 @@ async def import_database(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid JSON data: {str(e)}"
+            detail="Invalid JSON data"
         )
 
     manager = get_database_manager(db)
@@ -2853,12 +2871,19 @@ async def create_llm_provider(
             session=db,
         )
 
+        # Clear LLM cache so new provider is picked up
+        try:
+            from backend.services.llm import LLMFactory
+            LLMFactory.clear_cache()
+        except Exception:
+            pass
+
         return LLMProviderService.format_provider_response(provider)
 
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
 
@@ -2917,6 +2942,14 @@ async def update_llm_provider(
         session=db,
     )
 
+    # Clear LLM cache so updated provider config is picked up
+    try:
+        from backend.services.llm import LLMFactory, LLMConfigManager
+        LLMFactory.clear_cache()
+        await LLMConfigManager.invalidate_provider_cache(provider_id)
+    except Exception:
+        pass
+
     return LLMProviderService.format_provider_response(provider)
 
 
@@ -2962,6 +2995,14 @@ async def delete_llm_provider(
         ip_address=get_client_ip(request),
         session=db,
     )
+
+    # Clear LLM cache after provider deletion
+    try:
+        from backend.services.llm import LLMFactory, LLMConfigManager
+        LLMFactory.clear_cache()
+        await LLMConfigManager.invalidate_provider_cache(provider_id)
+    except Exception:
+        pass
 
     return {"message": "LLM provider deleted successfully", "provider_id": provider_id}
 
@@ -3016,6 +3057,14 @@ async def set_default_llm_provider(
         ip_address=get_client_ip(request),
         session=db,
     )
+
+    # Clear LLM cache so new default is picked up
+    try:
+        from backend.services.llm import LLMFactory, LLMConfigManager
+        LLMFactory.clear_cache()
+        await LLMConfigManager.invalidate_provider_cache(provider_id)
+    except Exception:
+        pass
 
     return LLMProviderService.format_provider_response(provider)
 
@@ -3174,7 +3223,7 @@ async def create_database_connection(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
 
@@ -3266,7 +3315,7 @@ async def delete_database_connection(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Operation failed",
         )
 
     # Log the action
@@ -3514,6 +3563,11 @@ async def set_llm_operation_config(
 
     # Invalidate cache
     await LLMConfigManager.invalidate_cache(f"operation:{operation_type}")
+    try:
+        from backend.services.llm import LLMFactory
+        LLMFactory.clear_cache()
+    except Exception:
+        pass
 
     # Log the action
     audit_service = get_audit_service()
@@ -3541,7 +3595,9 @@ async def set_llm_operation_config(
         )
     )
     result = await db.execute(query)
-    config = result.scalar_one()
+    config = result.scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to reload updated config")
 
     return LLMOperationConfigResponse(
         id=str(config.id),
@@ -3596,6 +3652,11 @@ async def delete_llm_operation_config(
 
     # Invalidate cache
     await LLMConfigManager.invalidate_cache(f"operation:{operation_type}")
+    try:
+        from backend.services.llm import LLMFactory
+        LLMFactory.clear_cache()
+    except Exception:
+        pass
 
     # Log the action
     audit_service = get_audit_service()
@@ -4523,7 +4584,7 @@ async def get_provider_health(
                 provider_type=h.get("provider_type", ""),
                 is_healthy=h.get("is_healthy", False),
                 latency_ms=h.get("last_latency_ms"),
-                error_message=h.get("status") if not h.get("is_healthy") else None,
+                error_message=f"Status: {h.get('status')}" if not h.get("is_healthy") else None,
                 consecutive_failures=h.get("consecutive_failures", 0),
                 circuit_open=h.get("circuit_open", False),
                 last_check=datetime.fromisoformat(h["last_check_at"]) if h.get("last_check_at") else None,
@@ -4573,6 +4634,16 @@ async def trigger_health_check(
         session=db,
     )
 
+    # Fetch updated cache data for real consecutive_failures / circuit_open
+    cache_map: dict = {}
+    try:
+        from backend.db.models import ProviderHealthCache
+        cache_results = await db.execute(select(ProviderHealthCache))
+        for c in cache_results.scalars():
+            cache_map[str(c.provider_id)] = c
+    except Exception:
+        pass
+
     return {
         "checked": len(results),
         "results": [
@@ -4583,8 +4654,8 @@ async def trigger_health_check(
                 is_healthy=r.is_healthy,
                 latency_ms=r.latency_ms,
                 error_message=r.error_message,
-                consecutive_failures=0,  # Not available in HealthCheckResult
-                circuit_open=False,  # Not available in HealthCheckResult
+                consecutive_failures=cache_map[str(r.provider_id)].consecutive_failures if str(r.provider_id) in cache_map else 0,
+                circuit_open=cache_map[str(r.provider_id)].circuit_open if str(r.provider_id) in cache_map else False,
                 last_check=r.checked_at,
             ).model_dump()
             for r in results
@@ -5282,7 +5353,7 @@ async def backfill_hypothetical_chunks(
         logger.error("Hypothetical chunk backfill failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Backfill failed: {str(e)}",
+            detail="Backfill failed",
         )
 
 
@@ -5741,7 +5812,7 @@ async def restart_celery_workers(admin: AdminUser):
         logger.error("Error restarting Celery workers", error=str(e), admin_id=admin.user_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to restart workers: {str(e)}"
+            detail="Failed to restart workers"
         )
 
 
@@ -7046,7 +7117,7 @@ async def get_analytics_dashboard(
 
     except Exception as e:
         logger.error("Failed to get analytics dashboard", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Analytics error: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Analytics error")
 
 
 @router.get("/analytics/queries")
@@ -7101,7 +7172,7 @@ async def get_query_analytics(
 
     except Exception as e:
         logger.error("Failed to get query analytics", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Analytics error: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Analytics error")
 
 
 @router.get("/analytics/documents")
@@ -7135,7 +7206,7 @@ async def get_document_analytics(
 
     except Exception as e:
         logger.error("Failed to get document analytics", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Analytics error: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Analytics error")
 
 
 @router.post("/analytics/log-query")
@@ -7180,7 +7251,7 @@ async def log_query_for_analytics(
 
     except Exception as e:
         logger.error("Failed to log query", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Logging error: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Logging error")
 
 
 # =============================================================================
@@ -7246,7 +7317,7 @@ async def get_circuit_breaker_stats(
         logger.error("Failed to get circuit breaker stats", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get circuit breaker stats: {str(e)}"
+            detail="Failed to get circuit breaker stats"
         )
 
 
@@ -7292,7 +7363,7 @@ async def reset_circuit_breaker(
         logger.error("Failed to reset circuit breaker", name=circuit_name, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to reset circuit breaker: {str(e)}"
+            detail="Failed to reset circuit breaker"
         )
 
 
@@ -7331,7 +7402,7 @@ async def get_performance_status(
         logger.error("Failed to get performance status", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get performance status: {str(e)}"
+            detail="Failed to get performance status"
         )
 
 
@@ -7469,7 +7540,7 @@ async def cleanup_garbage_chunks(
         logger.error("Failed to cleanup garbage chunks", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to cleanup garbage chunks: {str(e)}"
+            detail="Failed to cleanup garbage chunks"
         )
 
 
@@ -7996,7 +8067,7 @@ async def backfill_document_tags(
         logger.error("Tag backfill failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Tag backfill failed: {str(e)}"
+            detail="Tag backfill failed"
         )
 
 
@@ -8738,7 +8809,7 @@ async def vectordb_status(
 
     except Exception as e:
         logger.error("VectorDB status check failed", error=str(e))
-        raise HTTPException(status_code=500, detail=f"VectorDB status check failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="VectorDB status check failed")
 
 
 @router.post("/vectordb/query")
@@ -8823,7 +8894,7 @@ async def vectordb_query(
         raise
     except Exception as e:
         logger.error("VectorDB query failed", error=str(e))
-        raise HTTPException(status_code=500, detail=f"VectorDB query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="VectorDB query failed")
 
 
 @router.get("/vectordb/documents/{document_id}/chunks")
@@ -8887,7 +8958,7 @@ async def vectordb_document_chunks(
 
     except Exception as e:
         logger.error("VectorDB document chunks failed", error=str(e), document_id=document_id)
-        raise HTTPException(status_code=500, detail=f"Failed to get document chunks: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get document chunks")
 
 
 @router.post("/vectordb/repair")
@@ -9041,4 +9112,4 @@ async def vectordb_delete_chunk(
 
     except Exception as e:
         logger.error("Chunk deletion failed", chunk_id=chunk_id, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to delete chunk: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete chunk")

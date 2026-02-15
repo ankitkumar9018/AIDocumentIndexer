@@ -11,6 +11,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
+from backend.api.deps import get_current_user
+
 router = APIRouter()
 
 
@@ -57,6 +59,7 @@ class UsageStats(BaseModel):
 
 @router.get("/usage", response_model=UsageStats)
 async def get_usage_stats(
+    user: dict = Depends(get_current_user),
     period: str = Query("7d", regex="^(7d|30d|90d)$"),
 ):
     """
@@ -143,7 +146,7 @@ class DocumentStats(BaseModel):
 
 
 @router.get("/documents/{document_id}/stats", response_model=DocumentStats)
-async def get_document_stats(document_id: str):
+async def get_document_stats(document_id: str, user: dict = Depends(get_current_user)):
     """Get statistics for a specific document."""
     # TODO: Implement with actual database queries
     return DocumentStats(
@@ -165,7 +168,7 @@ class CollectionStats(BaseModel):
 
 
 @router.get("/collections/{collection_id}/stats", response_model=CollectionStats)
-async def get_collection_stats(collection_id: str):
+async def get_collection_stats(collection_id: str, user: dict = Depends(get_current_user)):
     """Get statistics for a specific collection."""
     # TODO: Implement with actual database queries
     return CollectionStats(
@@ -187,6 +190,7 @@ class QueryAnalytics(BaseModel):
 
 @router.get("/queries", response_model=QueryAnalytics)
 async def get_query_analytics(
+    user: dict = Depends(get_current_user),
     period: str = Query("7d", regex="^(7d|30d|90d)$"),
 ):
     """Get query analytics for the specified period."""
@@ -221,7 +225,7 @@ class SystemHealth(BaseModel):
 
 
 @router.get("/system/health", response_model=SystemHealth)
-async def get_system_health():
+async def get_system_health(user: dict = Depends(get_current_user)):
     """Get current system health metrics."""
     # TODO: Implement with actual system monitoring
     import psutil

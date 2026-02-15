@@ -248,7 +248,7 @@ class ContextCompressionService:
 
         try:
             llm_module = _get_llm()
-            self._llm = await llm_module.get_chat_model(
+            self._llm = llm_module.get_chat_model(
                 provider=self.config.summary_provider,
                 model=self.config.summary_model,
             )

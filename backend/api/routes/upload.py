@@ -362,7 +362,9 @@ async def sync_upload_jobs_with_documents(force: bool = False) -> int:
 
 # In-memory cache for fast access (backed by database for persistence)
 # This provides both speed (in-memory) and persistence (database)
+# Bounded to prevent unbounded memory growth over long uptimes.
 _processing_status_cache: Dict[str, Dict] = {}
+_PROCESSING_CACHE_MAX_SIZE = 5000
 
 # Upload directory - use persistent storage, not /tmp which gets cleared on reboot
 # Default to ./data/uploads relative to project root
@@ -519,10 +521,32 @@ def validate_file(file: UploadFile) -> tuple[bool, str]:
         if ext not in ALLOWED_EXTENSIONS:
             return False, f"File type .{ext} is not supported"
 
-    # Check content type
-    if file.content_type:
-        # Basic MIME type validation
-        pass
+    # Check content type against extension
+    EXTENSION_MIME_MAP = {
+        "pdf": {"application/pdf"},
+        "doc": {"application/msword"},
+        "docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+        "txt": {"text/plain"},
+        "md": {"text/markdown", "text/plain"},
+        "csv": {"text/csv", "application/csv", "text/plain"},
+        "json": {"application/json", "text/plain"},
+        "xml": {"text/xml", "application/xml"},
+        "html": {"text/html"},
+        "htm": {"text/html"},
+        "png": {"image/png"},
+        "jpg": {"image/jpeg"},
+        "jpeg": {"image/jpeg"},
+        "gif": {"image/gif"},
+        "webp": {"image/webp"},
+        "svg": {"image/svg+xml"},
+        "mp3": {"audio/mpeg"},
+        "wav": {"audio/wav", "audio/x-wav"},
+        "mp4": {"video/mp4"},
+        "zip": {"application/zip", "application/x-zip-compressed"},
+    }
+    if file.content_type and ext in EXTENSION_MIME_MAP:
+        if file.content_type not in EXTENSION_MIME_MAP[ext]:
+            return False, f"MIME type {file.content_type} does not match .{ext} extension"
 
     return True, ""
 
@@ -564,7 +588,12 @@ async def create_upload_job(
         await session.commit()
         await session.refresh(job)
 
-        # Also cache in memory
+        # Also cache in memory (evict oldest completed entries if at capacity)
+        if len(_processing_status_cache) >= _PROCESSING_CACHE_MAX_SIZE:
+            completed_keys = [k for k, v in _processing_status_cache.items()
+                              if v.get("status") in ("completed", "failed")]
+            for k in completed_keys[:500]:  # Remove up to 500 completed/failed entries
+                del _processing_status_cache[k]
         _processing_status_cache[str(file_id)] = {
             "file_id": str(file_id),
             "filename": filename,
@@ -1753,7 +1782,7 @@ async def get_bulk_files(
         try:
             status_filter = FileStatus(status)
         except ValueError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid status: {status}")
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
 
     result = await tracker.get_batch_files(
         batch_id=batch_id,
@@ -1766,7 +1795,7 @@ async def get_bulk_files(
         # Check if batch exists
         batch = await tracker.get_batch(batch_id)
         if not batch:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Batch not found")
+            raise HTTPException(status_code=404, detail="Batch not found")
 
     files = [
         BulkFileStatus(
@@ -1850,19 +1879,19 @@ async def get_processing_status_endpoint(
     """
     logger.info("Getting processing status", file_id=str(file_id))
 
-    status = await get_upload_job(str(file_id))
-    if not status:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    job_status = await get_upload_job(str(file_id))
+    if not job_status:
+        raise HTTPException(status_code=404, detail="File not found")
 
     return ProcessingStatus(
         file_id=file_id,
-        filename=status.get("filename", "unknown"),
-        status=status.get("status", "unknown"),
-        progress=status.get("progress", 0),
-        current_step=status.get("current_step", "Unknown"),
-        error=status.get("error"),
-        created_at=status.get("created_at", datetime.now()),
-        updated_at=status.get("updated_at", datetime.now()),
+        filename=job_status.get("filename", "unknown"),
+        status=job_status.get("status", "unknown"),
+        progress=job_status.get("progress", 0),
+        current_step=job_status.get("current_step", "Unknown"),
+        error=job_status.get("error"),
+        created_at=job_status.get("created_at", datetime.now()),
+        updated_at=job_status.get("updated_at", datetime.now()),
     )
 
 
@@ -2280,7 +2309,8 @@ async def upload_folder(
                 detail=f"ZIP file too large. Maximum size: {MAX_FILE_SIZE * 10 // (1024*1024)}MB"
             )
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to read file: {str(e)}")
+        logger.error("Failed to read uploaded file", error=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to read file")
 
     # Save ZIP to temp file
     temp_zip_path = UPLOAD_DIR / f"temp_{uuid4()}.zip"
@@ -2295,6 +2325,15 @@ async def upload_folder(
 
             if not file_list:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ZIP file is empty")
+
+            # Decompression bomb protection: check total uncompressed size
+            MAX_UNCOMPRESSED_TOTAL = MAX_FILE_SIZE * 5  # 2.5GB total uncompressed limit
+            total_uncompressed = sum(info.file_size for info in zf.infolist() if not info.is_dir())
+            if total_uncompressed > MAX_UNCOMPRESSED_TOTAL:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"ZIP total uncompressed size ({total_uncompressed // (1024*1024)}MB) exceeds limit ({MAX_UNCOMPRESSED_TOTAL // (1024*1024)}MB)",
+                )
 
             # Filter to supported file types
             processable_files = []
@@ -2367,11 +2406,32 @@ async def upload_folder(
                         folder_cache[current_path] = str(subfolder.id)
                     parent_folder_id = folder_cache[current_path]
 
-                # Extract file
-                extracted_path = extract_dir / filepath
+                # Extract file — with path traversal and size protections
+                extracted_path = (extract_dir / filepath).resolve()
+                extract_dir_resolved = extract_dir.resolve()
+                if not str(extracted_path).startswith(str(extract_dir_resolved)):
+                    logger.warning("Path traversal attempt in ZIP — skipping", filepath=filepath)
+                    continue
+
+                # Per-file uncompressed size check
+                file_info = zf.getinfo(filepath)
+                if file_info.file_size > MAX_FILE_SIZE:
+                    logger.warning("Skipping oversized file in ZIP", filepath=filepath, size=file_info.file_size)
+                    continue
+
                 extracted_path.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(filepath) as src, open(extracted_path, 'wb') as dst:
-                    dst.write(src.read())
+                    # Chunked extraction to prevent memory exhaustion
+                    bytes_written = 0
+                    while True:
+                        chunk = src.read(1024 * 1024)  # 1MB chunks
+                        if not chunk:
+                            break
+                        bytes_written += len(chunk)
+                        if bytes_written > MAX_FILE_SIZE:
+                            logger.warning("File exceeded size limit during extraction", filepath=filepath)
+                            break
+                        dst.write(chunk)
 
                 # Create upload job
                 file_content = extracted_path.read_bytes()
@@ -2450,7 +2510,7 @@ async def upload_folder(
         raise
     except Exception as e:
         logger.error("Folder upload failed", error=str(e), exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Folder upload failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Folder upload failed")
     finally:
         # Clean up temp ZIP
         if temp_zip_path.exists():
@@ -2621,10 +2681,11 @@ async def upload_streaming_chunk(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        logger.warning("Chunk upload validation failed", document_id=document_id, error=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid chunk upload")
     except Exception as e:
         logger.error("Chunk upload failed", document_id=document_id, error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Chunk upload failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Chunk upload failed")
 
 
 @router.post("/streaming/{document_id}/finalize")
@@ -2654,10 +2715,11 @@ async def finalize_streaming_upload(document_id: str):
         }
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        logger.warning("Finalize validation failed", document_id=document_id, error=str(e))
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     except Exception as e:
         logger.error("Finalize failed", document_id=document_id, error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Finalize failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Finalize failed")
 
 
 @router.get("/streaming/{document_id}/status")
@@ -2668,12 +2730,12 @@ async def get_streaming_status(document_id: str):
     Phase 59: Shows real-time progress of chunk processing.
     """
     service = await get_streaming_service()
-    status = await service.get_document_status(document_id)
+    doc_status = await service.get_document_status(document_id)
 
-    if not status:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if not doc_status:
+        raise HTTPException(status_code=404, detail="Document not found")
 
-    return status
+    return doc_status
 
 
 @router.post("/streaming/{document_id}/query", response_model=StreamingQueryResponse)
@@ -2716,7 +2778,7 @@ async def query_streaming_document(
 
     except Exception as e:
         logger.error("Partial query failed", document_id=document_id, error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Query failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Query failed")
 
 
 @router.delete("/streaming/{document_id}")

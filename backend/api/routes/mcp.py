@@ -18,6 +18,7 @@ References:
 - JSON-RPC 2.0: https://www.jsonrpc.org/specification
 """
 
+import asyncio
 import json
 from typing import Optional, List, Dict, Any
 
@@ -182,22 +183,27 @@ async def call_mcp_tool(
         result = await server._tool_registry.call_tool(request.name, request.arguments)
         is_error = result.get("isError", False)
 
+        error_text = None
+        if is_error:
+            content = result.get("content") or []
+            error_text = content[0].get("text") if content else "Unknown tool error"
+
         return MCPToolResult(
             tool_name=request.name,
             success=not is_error,
             result=result.get("content", []),
-            error=result.get("content", [{}])[0].get("text") if is_error else None,
+            error=error_text,
         )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Tool not found",
         )
     except Exception as e:
         logger.error("MCP tool call error", tool=request.name, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="MCP tool call failed",
         )
 
 
@@ -371,8 +377,13 @@ async def mcp_websocket(websocket: WebSocket):
 
     try:
         while True:
-            # Receive JSON-RPC request
-            data = await websocket.receive_text()
+            # Receive JSON-RPC request (5-minute idle timeout)
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=300.0)
+            except asyncio.TimeoutError:
+                logger.info("MCP WebSocket idle timeout, closing")
+                await websocket.close(code=1000, reason="Idle timeout")
+                break
 
             try:
                 request = json.loads(data)

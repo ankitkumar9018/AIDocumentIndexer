@@ -420,7 +420,7 @@ class MultilingualEmbeddingService:
 
         # Fallback to individual embedding
         if self.base_service:
-            return await self.base_service.embed_texts(texts)
+            return self.base_service.embed_texts(texts)
 
         raise RuntimeError("No embedding service available")
 

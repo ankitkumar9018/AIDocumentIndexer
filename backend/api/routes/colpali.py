@@ -206,7 +206,7 @@ async def get_colpali_stats(
         logger.error("Failed to get ColPali stats", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get stats: {str(e)}",
+            detail="Failed to get stats",
         )
 
 
@@ -272,7 +272,7 @@ async def search_with_colpali(
         logger.error("ColPali search failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Search failed: {str(e)}",
+            detail="Search failed",
         )
 
 
@@ -362,7 +362,7 @@ async def index_document_images(
         logger.error("ColPali indexing failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Indexing failed: {str(e)}",
+            detail="Indexing failed",
         )
 
 

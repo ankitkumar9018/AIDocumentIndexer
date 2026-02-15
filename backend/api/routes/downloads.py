@@ -8,6 +8,9 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse, JSONResponse
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/downloads", tags=["downloads"])
 
@@ -29,11 +32,14 @@ def create_cli_zip() -> Path:
     # Create the zip file (shutil adds .zip extension)
     if zip_path.with_suffix(".zip").exists():
         # Check if source is newer than zip
-        source_mtime = max(
+        source_mtimes = [
             f.stat().st_mtime
             for f in CLI_SOURCE_PATH.rglob("*")
             if f.is_file() and "__pycache__" not in str(f)
-        )
+        ]
+        if not source_mtimes:
+            return zip_path.with_suffix(".zip")
+        source_mtime = max(source_mtimes)
         zip_mtime = zip_path.with_suffix(".zip").stat().st_mtime
         if source_mtime <= zip_mtime:
             return zip_path.with_suffix(".zip")
@@ -62,7 +68,8 @@ async def download_cli():
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create download: {str(e)}")
+        logger.error("Failed to create download", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create download")
 
 
 @router.get("/cli/info")

@@ -23,7 +23,7 @@ import asyncio
 import structlog
 
 from fastapi import APIRouter, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from backend.db.database import async_session_context
 from backend.db.models import Document, Chunk, ChatSession, ChatMessage, LLMUsageLog
@@ -450,7 +450,10 @@ async def get_metrics_json():
 
     except Exception as e:
         logger.error("Failed to generate JSON metrics", error=str(e))
-        return {"error": str(e)}
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to generate metrics"},
+        )
 
 
 @router.get("/health")

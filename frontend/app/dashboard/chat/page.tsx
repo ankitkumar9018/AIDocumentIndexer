@@ -516,13 +516,19 @@ export default function ChatPage() {
     }
   }, [messages]);
 
+  // Refs for keyboard shortcut handlers (avoid stale closures)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleSubmitRef = useRef<any>(null);
+  const handleExportChatRef = useRef<(() => void) | null>(null);
+  const handleNewChatRef = useRef<(() => void) | null>(null);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Cmd/Ctrl + Enter to send message
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && input.trim() && !isLoading) {
         e.preventDefault();
-        handleSubmit(e as unknown as React.FormEvent);
+        handleSubmitRef.current?.(e as unknown as React.FormEvent);
       }
       // Cmd/Ctrl + K to focus input
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -532,12 +538,12 @@ export default function ChatPage() {
       // Cmd/Ctrl + Shift + E to export chat
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "e") {
         e.preventDefault();
-        handleExportChat();
+        handleExportChatRef.current?.();
       }
       // Cmd/Ctrl + N for new chat
       if ((e.metaKey || e.ctrlKey) && e.key === "n") {
         e.preventDefault();
-        handleNewChat();
+        handleNewChatRef.current?.();
       }
       // Cmd/Ctrl + , to toggle settings drawer
       if ((e.metaKey || e.ctrlKey) && e.key === ",") {
@@ -930,7 +936,7 @@ export default function ChatPage() {
     ]);
 
     try {
-      const response = await fetch("/api/v1/chat/command", {
+      const response = await api.fetchWithAuth("/chat/command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1620,6 +1626,11 @@ export default function ChatPage() {
     setCurrentSessionId(null);
     setSelectedMessageId(null);
   };
+
+  // Keep keyboard shortcut refs in sync (defined after handlers to avoid TDZ)
+  handleSubmitRef.current = handleSubmit;
+  handleExportChatRef.current = handleExportChat;
+  handleNewChatRef.current = handleNewChat;
 
   const handleLoadSession = (sessionId: string) => {
     setShouldLoadHistory(true); // Flag that we want to load history messages

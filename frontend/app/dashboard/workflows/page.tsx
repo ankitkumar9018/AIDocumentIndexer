@@ -60,6 +60,7 @@ import {
   useUpdateWorkflow,
   type WorkflowListItem,
   type WorkflowTriggerType,
+  api,
 } from "@/lib/api";
 import { toast } from "sonner";
 import { formatDistanceToNow } from "date-fns";
@@ -339,13 +340,10 @@ export default function WorkflowsPage() {
 
   const fetchDeployStatus = async (workflowId: string) => {
     try {
-      const response = await fetch(`/api/v1/workflows/${workflowId}/deploy-status`);
-      if (response.ok) {
-        const status = await response.json();
-        setDeployStatus(status);
-        if (status.is_deployed && status.public_slug) {
-          setDeploySlug(status.public_slug);
-        }
+      const { data: status } = await api.get<{ is_deployed: boolean; public_slug?: string; public_url?: string }>(`/workflows/${workflowId}/deploy-status`);
+      setDeployStatus(status);
+      if (status.is_deployed && status.public_slug) {
+        setDeploySlug(status.public_slug);
       }
     } catch {
       console.error("Failed to fetch deploy status");
@@ -373,23 +371,13 @@ export default function WorkflowsPage() {
 
     setIsDeploying(true);
     try {
-      const response = await fetch(`/api/v1/workflows/${workflowToDeploy.id}/deploy`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          public_slug: deploySlug,
-          allowed_domains: deployAllowedDomains.split(",").map(d => d.trim()).filter(Boolean),
-          rate_limit: parseInt(deployRateLimit) || 100,
-          require_api_key: deployRequireApiKey,
-        }),
+      const { data: result } = await api.post<{ public_slug: string; public_url: string }>(`/workflows/${workflowToDeploy.id}/deploy`, {
+        public_slug: deploySlug,
+        allowed_domains: deployAllowedDomains.split(",").map(d => d.trim()).filter(Boolean),
+        rate_limit: parseInt(deployRateLimit) || 100,
+        require_api_key: deployRequireApiKey,
       });
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || "Failed to deploy");
-      }
-
-      const result = await response.json();
       setDeployStatus({
         is_deployed: true,
         public_slug: result.public_slug,
@@ -409,13 +397,7 @@ export default function WorkflowsPage() {
 
     setIsDeploying(true);
     try {
-      const response = await fetch(`/api/v1/workflows/${workflowToDeploy.id}/undeploy`, {
-        method: "POST",
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to undeploy");
-      }
+      await api.post(`/workflows/${workflowToDeploy.id}/undeploy`);
 
       setDeployStatus({ is_deployed: false });
       toast.success("Workflow undeployed");

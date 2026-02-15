@@ -15,6 +15,7 @@ Available Tools:
 - get_collection: Get collection details
 """
 
+import json
 import os
 from typing import Any, Callable, Dict, List, Optional
 from datetime import datetime
@@ -224,6 +225,28 @@ class MCPToolRegistry:
             )
             for name, schema in self._schemas.items()
         }
+
+    def get_tools(self) -> List[Dict[str, Any]]:
+        """Get all tools as list of dicts for API response."""
+        return [
+            {
+                "name": schema["name"],
+                "description": schema["description"],
+                "inputSchema": schema["input_schema"],
+            }
+            for schema in self._schemas.values()
+        ]
+
+    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Call a tool by name with given arguments."""
+        if name not in self._handlers:
+            raise ValueError(f"Tool not found: {name}")
+        handler = self._handlers[name]
+        try:
+            result = await handler(**arguments)
+            return {"content": [{"type": "text", "text": json.dumps(result, default=str)}], "isError": False}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": str(e)}], "isError": True}
 
     # =========================================================================
     # Tool Handlers

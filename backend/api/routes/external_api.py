@@ -664,7 +664,7 @@ async def execute_published_workflow(
             execution_id="",
             status="error",
             output=None,
-            error=str(e),
+            error="Workflow execution failed. Check server logs for details.",
         )
 
 

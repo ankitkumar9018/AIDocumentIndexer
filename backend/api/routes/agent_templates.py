@@ -22,7 +22,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+import structlog
+
 from backend.api.deps import get_current_user
+
+logger = structlog.get_logger(__name__)
 from backend.services.template_service import (
     get_template_service,
     TemplateInfo,
@@ -246,9 +250,10 @@ async def create_agent_from_template(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create agent: {str(e)}")
+        logger.error("Failed to create agent from template", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create agent")
 
 
 # =============================================================================
@@ -365,9 +370,10 @@ async def create_workflow_from_template(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create workflow: {str(e)}")
+        logger.error("Failed to create workflow from template", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create workflow")
 
 
 # =============================================================================

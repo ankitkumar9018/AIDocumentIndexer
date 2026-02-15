@@ -376,7 +376,7 @@ class AgentKnowledgeService:
                 # Generate embedding if service available
                 embedding = None
                 if self.embedding_service:
-                    embedding = await self.embedding_service.embed_text(chunk)
+                    embedding = self.embedding_service.embed_text(chunk)
 
                 # Store in vector store
                 if self.vector_store:

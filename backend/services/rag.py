@@ -37,13 +37,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-# LangChain chains (correct import paths for v0.3+)
-from langchain.chains.retrieval import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-
-# LangChain memory (Phase 87 audit: still valid in 0.3.x;
-# future migration to langgraph state management recommended)
-from langchain.memory import ConversationBufferWindowMemory
+# Conversation memory (replaced langchain.memory in 1.x migration)
+from backend.services.session_memory import ConversationBufferWindowMemory
 
 # Vector store and retrieval
 from langchain_community.vectorstores import PGVector, FAISS
@@ -55,6 +50,7 @@ from backend.services.llm import (
     LLMConfigManager,
     LLMConfigResult,
     LLMUsageTracker,
+    llm_config,
 )
 from backend.services.embeddings import EmbeddingService
 from backend.services.vectorstore import VectorStore, get_vector_store, SearchResult, SearchType
@@ -267,11 +263,14 @@ def _make_system_message(content: str, model_name: Optional[str] = None) -> Syst
 
 # Circuit breakers for different LLM providers (prevent cascading failures)
 _llm_circuit_breakers: Dict[str, CircuitBreaker] = {}
-_llm_circuit_breaker_lock = asyncio.Lock()
+_llm_circuit_breaker_lock: Optional[asyncio.Lock] = None
 
 
 async def _get_llm_circuit_breaker(provider: str) -> CircuitBreaker:
     """Get or create a circuit breaker for an LLM provider."""
+    global _llm_circuit_breaker_lock
+    if _llm_circuit_breaker_lock is None:
+        _llm_circuit_breaker_lock = asyncio.Lock()
     async with _llm_circuit_breaker_lock:
         if provider not in _llm_circuit_breakers:
             # Read from settings service (database-persisted, admin-configurable)
@@ -288,10 +287,10 @@ async def _get_llm_circuit_breaker(provider: str) -> CircuitBreaker:
                 call_timeout = None
 
             config = CircuitBreakerConfig(
-                failure_threshold=int(failure_threshold or os.getenv("LLM_CIRCUIT_BREAKER_THRESHOLD", "5")),
-                recovery_timeout=float(recovery_timeout or os.getenv("LLM_CIRCUIT_BREAKER_RECOVERY", "60.0")),
+                failure_threshold=int(failure_threshold if failure_threshold is not None else os.getenv("LLM_CIRCUIT_BREAKER_THRESHOLD", "5")),
+                recovery_timeout=float(recovery_timeout if recovery_timeout is not None else os.getenv("LLM_CIRCUIT_BREAKER_RECOVERY", "60.0")),
                 success_threshold=2,
-                timeout=float(call_timeout or os.getenv("LLM_CALL_TIMEOUT", "120.0")),
+                timeout=float(call_timeout if call_timeout is not None else os.getenv("LLM_CALL_TIMEOUT", "120.0")),
             )
             _llm_circuit_breakers[provider] = CircuitBreaker(f"llm_{provider}", config)
         return _llm_circuit_breakers[provider]
@@ -340,7 +339,7 @@ async def resilient_llm_invoke(
         max_retries_setting = None
 
     retry_config = RetryConfig(
-        max_retries=int(max_retries_setting or os.getenv("LLM_MAX_RETRIES", "3")),
+        max_retries=int(max_retries_setting if max_retries_setting is not None else os.getenv("LLM_MAX_RETRIES", "3")),
         base_delay=float(os.getenv("LLM_RETRY_BASE_DELAY", "1.0")),
         max_delay=float(os.getenv("LLM_RETRY_MAX_DELAY", "30.0")),
         jitter=True,
@@ -1034,7 +1033,7 @@ class RAGService:
                 api_key = provider_row[3]
 
             # Build the LLM from the resolved config
-            model = model_override or "llama3.2:latest"
+            model = model_override or llm_config.default_chat_model
             config = LLMConfigResult(
                 provider_type=provider_type,
                 model=model,
@@ -1506,6 +1505,13 @@ class RAGService:
         user_id: Optional[str] = None,
         is_superadmin: bool = False,
         exclude_chunk_ids: Optional[set] = None,
+        # Optional parameters for enhanced retrieval (parity with query() pipeline):
+        enhance_query: Optional[bool] = None,
+        skip_cache: bool = False,
+        intelligence_level: Optional[str] = None,
+        folder_id: Optional[str] = None,
+        include_subfolders: bool = True,
+        skip_score_gap_filter: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Search documents without generating an LLM response.
@@ -1522,16 +1528,35 @@ class RAGService:
             user_id: User ID for private document access
             is_superadmin: Whether user is a superadmin (can access all private docs)
             exclude_chunk_ids: Optional set of chunk IDs to exclude (for cross-section dedup)
+            enhance_query: Per-query override for query enhancement (expansion + HyDE).
+                           None = use config default, True = enable, False = disable.
+            skip_cache: Skip SearchResultCache for fresh retrieval results.
+            intelligence_level: Intelligence level (basic/standard/enhanced/maximum).
+                               Adjusts retrieval depth (top_k) when set.
+            folder_id: Optional folder ID to scope retrieval to specific folder.
+            include_subfolders: Whether to include documents from subfolders.
+            skip_score_gap_filter: Skip the score-gap filter that drops chunks below
+                                   82% of the best chunk's score. Useful for document
+                                   generation where diverse page coverage matters more
+                                   than strict relevance filtering.
 
         Returns:
             List of document dicts with content, source, and score
         """
+        # Intelligence level can adjust retrieval depth
+        if intelligence_level:
+            intelligence_top_k = _get_intelligence_top_k(intelligence_level)
+            if intelligence_top_k is not None:
+                limit = max(limit, intelligence_top_k)
+
         logger.info(
             "Searching documents",
             query_length=len(query),
             limit=limit,
             collection_filter=collection_filter,
             organization_id=organization_id,
+            intelligence_level=intelligence_level,
+            enhance_query=enhance_query,
         )
 
         # Classify query to enable adaptive retrieval (MMR, listing rescue, weight tuning)
@@ -1542,16 +1567,36 @@ class RAGService:
         except Exception:
             pass  # Classification is optional — proceed without it
 
-        # Use _retrieve to get document chunks
+        # Resolve folder_id to document_ids for folder-scoped retrieval
+        document_ids = None
+        if folder_id:
+            try:
+                from backend.services.folder_service import get_folder_service
+                folder_service = get_folder_service()
+                document_ids = await folder_service.get_folder_document_ids(
+                    folder_id=folder_id,
+                    include_subfolders=include_subfolders,
+                    user_tier_level=access_tier,
+                )
+                if not document_ids:
+                    logger.info("No documents found in folder for search", folder_id=folder_id)
+                    return []
+            except Exception as e:
+                logger.warning(f"Folder scoping failed for search (proceeding without): {e}")
+
+        # Use _retrieve to get document chunks (with enhanced retrieval params)
         retrieved_docs = await self._retrieve(
             query=query,
             collection_filter=collection_filter,
             access_tier=access_tier,
             top_k=limit,
+            document_ids=document_ids,
+            enhance_query=enhance_query,
             organization_id=organization_id,
             user_id=user_id,
             is_superadmin=is_superadmin,
             query_classification=query_classification,
+            skip_cache=skip_cache,
         )
 
         # Semantic dedup before trim (same as query() path)
@@ -1565,14 +1610,16 @@ class RAGService:
             )
 
         # Score-gap filter: drop chunks with similarity far below the best chunk
-        _before_gap = len(retrieved_docs)
-        retrieved_docs = _filter_score_gap(retrieved_docs, min_top_score=0.50, ratio=0.82)
-        if len(retrieved_docs) < _before_gap:
-            logger.info(
-                "search() score-gap filter removed low-confidence chunks",
-                before=_before_gap,
-                after=len(retrieved_docs),
-            )
+        # Skipped for generator use cases that need diverse page coverage
+        if not skip_score_gap_filter:
+            _before_gap = len(retrieved_docs)
+            retrieved_docs = _filter_score_gap(retrieved_docs, min_top_score=0.50, ratio=0.82)
+            if len(retrieved_docs) < _before_gap:
+                logger.info(
+                    "search() score-gap filter removed low-confidence chunks",
+                    before=_before_gap,
+                    after=len(retrieved_docs),
+                )
 
         # Trim to limit, preserving keyword_rescued chunks
         if len(retrieved_docs) > limit:
@@ -2012,7 +2059,7 @@ class RAGService:
                     branching_factor=tot_branching,
                     search_strategy='beam',
                 ))
-                tot_result = await tot.solve(problem=question, context=context)
+                tot_result = await tot.solve(problem=question, context="")
                 if tot_result and tot_result.confidence > 0.7:
                     logger.info("ToT produced high-confidence answer", confidence=tot_result.confidence)
                     # ToT provides reasoning path, continue with RAG for citation support
@@ -3489,23 +3536,26 @@ class RAGService:
 
         # Track usage if enabled and we have config
         if self.track_usage and llm_config:
-            # Accurate token counting using tiktoken
-            input_text = RAG_SYSTEM_PROMPT + context + question
-            input_tokens = self._count_tokens(input_text, llm_config.model)
-            output_tokens = self._count_tokens(content, llm_config.model)
+            try:
+                # Accurate token counting using tiktoken
+                input_text = RAG_SYSTEM_PROMPT + context + question
+                input_tokens = self._count_tokens(input_text, llm_config.model)
+                output_tokens = self._count_tokens(content, llm_config.model)
 
-            await LLMUsageTracker.log_usage(
-                provider_type=llm_config.provider_type,
-                model=llm_config.model,
-                operation_type="rag",
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                provider_id=llm_config.provider_id,
-                user_id=user_id,
-                session_id=session_id,
-                duration_ms=int(processing_time_ms),
-                success=True,
-            )
+                await LLMUsageTracker.log_usage(
+                    provider_type=llm_config.provider_type,
+                    model=llm_config.model,
+                    operation_type="rag",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    provider_id=llm_config.provider_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    duration_ms=int(processing_time_ms),
+                    success=True,
+                )
+            except Exception as e:
+                logger.warning("Failed to log usage", error=str(e))
 
         # Update memory if using session
         if session_id:
@@ -3581,7 +3631,7 @@ class RAGService:
                         collection_filter=collection_filter,
                         access_tier=access_tier,
                         top_k=top_k,
-                        document_ids=document_ids,  # Maintain folder filtering if applicable
+                        document_ids=folder_document_ids,  # Maintain folder filtering if applicable
                         organization_id=organization_id,
                         user_id=user_id,
                         is_superadmin=is_superadmin,
@@ -3594,7 +3644,7 @@ class RAGService:
                         if new_sources:
                             # Calculate new confidence from similarity scores
                             new_confidence = sum(s.similarity_score or s.relevance_score for s in new_sources) / len(new_sources)
-                            if new_confidence > confidence_score:
+                            if confidence_score is None or new_confidence > confidence_score:
                                 # Use new results - also update context for response
                                 sources = new_sources
                                 confidence_score = new_confidence
@@ -3788,6 +3838,8 @@ class RAGService:
         organization_id: Optional[str] = None,  # Organization ID for multi-tenant isolation
         is_superadmin: bool = False,  # Whether user is a superadmin
         intelligence_level: Optional[str] = None,  # Intelligence level: basic/standard/enhanced/maximum
+        temperature_override: Optional[float] = None,  # Per-request temperature (avoids session config race)
+        additional_context: Optional[str] = None,  # Additional context (temp docs, memory)
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Query RAG with streaming response.
@@ -3808,12 +3860,26 @@ class RAGService:
             organization_id: Organization ID for multi-tenant isolation.
             is_superadmin: Whether user is a superadmin (can access all private docs).
             intelligence_level: Intelligence level from frontend (basic/standard/enhanced/maximum).
+            temperature_override: Per-request temperature override (avoids session config race).
+            additional_context: Additional context to include (e.g., from temp documents).
 
         Yields:
             StreamChunk objects with response parts
         """
         import time
         start_time = time.time()
+
+        # Preload all settings in one batch (same pattern as query())
+        settings_svc = get_settings_service()
+        try:
+            _all_settings = await settings_svc.get_all_settings()
+        except Exception:
+            _all_settings = {}
+
+        def _s(key: str, default=None):
+            """Read a setting from the preloaded batch (zero DB cost)."""
+            val = _all_settings.get(key)
+            return val if val is not None else default
 
         # Load runtime settings from database if top_k not specified
         if top_k is None:
@@ -3936,6 +4002,11 @@ class RAGService:
 
         context, sources = self._format_context(retrieved_docs, include_collection_context, document_name_map=_stream_doc_name_map)
 
+        # Inject additional context (temp documents, memory context) — same as non-streaming path
+        if additional_context:
+            context = f"--- Uploaded Documents ---\n{additional_context}\n\n--- Library Documents ---\n{context}"
+            logger.debug("Streaming: Added additional context", additional_context_length=len(additional_context))
+
         # Build prompt with language instruction
         # Support "auto" mode: respond in the same language as the question
         auto_detect = (language == "auto")
@@ -3972,9 +4043,17 @@ class RAGService:
         # PHASE 15: Model-based temperature optimization for streaming
         sampling_config = _get_adaptive_sampling_config(model_name, query_intent=None)
 
-        # Check if user has manually overridden temperature via session config
-        # Use explicit flag if available, otherwise fall back to value comparison
-        has_manual_override = (
+        # Check for per-request temperature override first (eliminates race condition
+        # where session config hasn't been written to DB yet on first message)
+        if temperature_override is not None:
+            logger.info(
+                "Streaming: Using per-request temperature override",
+                request_temp=temperature_override,
+                optimized_temp=sampling_config["temperature"],
+                model=model_name,
+            )
+            sampling_config["temperature"] = temperature_override
+        elif (
             llm_config
             and (
                 # Prefer explicit flag over value comparison
@@ -3986,10 +4065,8 @@ class RAGService:
                     and getattr(llm_config, 'temperature_explicitly_set', False)
                 )
             )
-        )
-
-        if has_manual_override:
-            # User has set manual temperature - respect their choice
+        ):
+            # User has set manual temperature via session config - respect their choice
             logger.info(
                 "Streaming: Using manual temperature override",
                 manual_temp=llm_config.temperature,
@@ -4260,24 +4337,27 @@ class RAGService:
 
             # Track usage if enabled and we have config
             if self.track_usage and llm_config:
-                processing_time_ms = (time.time() - start_time) * 1000
-                input_text = RAG_SYSTEM_PROMPT + context + question
-                # Accurate token counting using tiktoken
-                input_tokens = self._count_tokens(input_text, llm_config.model)
-                output_tokens = self._count_tokens(full_response, llm_config.model)
+                try:
+                    processing_time_ms = (time.time() - start_time) * 1000
+                    input_text = RAG_SYSTEM_PROMPT + context + question
+                    # Accurate token counting using tiktoken
+                    input_tokens = self._count_tokens(input_text, llm_config.model)
+                    output_tokens = self._count_tokens(full_response, llm_config.model)
 
-                await LLMUsageTracker.log_usage(
-                    provider_type=llm_config.provider_type,
-                    model=llm_config.model,
-                    operation_type="rag",
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    provider_id=llm_config.provider_id,
-                    user_id=user_id,
-                    session_id=session_id,
-                    duration_ms=int(processing_time_ms),
-                    success=True,
-                )
+                    await LLMUsageTracker.log_usage(
+                        provider_type=llm_config.provider_type,
+                        model=llm_config.model,
+                        operation_type="rag",
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        provider_id=llm_config.provider_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        duration_ms=int(processing_time_ms),
+                        success=True,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to log usage", error=str(e))
 
             yield StreamChunk(type="done", data=None)
 

@@ -20,6 +20,7 @@ import {
   GitCompare,
   Percent
 } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface DocumentDNA {
   document_id: string;
@@ -67,11 +68,8 @@ export function DocumentDNA() {
 
   const fetchDNARecords = async () => {
     try {
-      const response = await fetch("/api/v1/intelligence/dna/list");
-      if (response.ok) {
-        const data = await response.json();
-        setDnaRecords(data.records || []);
-      }
+      const { data } = await api.get<{ records: DocumentDNA[] }>("/intelligence/dna/list");
+      setDnaRecords(data.records || []);
     } catch (error) {
       console.error("Failed to fetch DNA records:", error);
     }
@@ -80,14 +78,8 @@ export function DocumentDNA() {
   const checkDuplicates = async () => {
     setIsChecking(true);
     try {
-      const response = await fetch("/api/v1/intelligence/dna/check-duplicates", {
-        method: "POST",
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setDuplicateResult(data);
-      }
+      const { data } = await api.post<DuplicateCheckResult>("/intelligence/dna/check-duplicates");
+      setDuplicateResult(data);
     } catch (error) {
       console.error("Duplicate check failed:", error);
     } finally {
@@ -99,16 +91,8 @@ export function DocumentDNA() {
     setIsChecking(true);
     setSelectedDocId(documentId);
     try {
-      const response = await fetch("/api/v1/intelligence/dna/plagiarism-check", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_id: documentId }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setPlagiarismResult(data);
-      }
+      const { data } = await api.post<PlagiarismCheckResult>("/intelligence/dna/plagiarism-check", { document_id: documentId });
+      setPlagiarismResult(data);
     } catch (error) {
       console.error("Plagiarism check failed:", error);
     } finally {

@@ -625,13 +625,13 @@ class ChunkingComparison:
         traditional_chunks = await traditional_chunker.chunk(text)
 
         # Get embeddings for traditional chunks
-        embedding_service = await get_embedding_service()
-        traditional_embeddings = await embedding_service.embed_texts(
+        embedding_service = get_embedding_service()
+        traditional_embeddings = embedding_service.embed_texts(
             [c.content for c in traditional_chunks]
         )
 
         # Embed queries
-        query_embeddings = await embedding_service.embed_texts(queries)
+        query_embeddings = embedding_service.embed_texts(queries)
 
         # Calculate retrieval scores for both methods
         late_scores = self._calculate_scores(

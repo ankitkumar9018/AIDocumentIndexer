@@ -70,6 +70,7 @@ import structlog
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 # Phase 35: Use ORJSON for 20-50% faster JSON serialization
@@ -412,8 +413,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.warning("HTTP client shutdown failed", error=str(http_error))
 
         # Close database connections
-        # from backend.db.database import close_db
-        # await close_db()
+        try:
+            from backend.db.database import close_db
+            await close_db()
+            logger.info("Database connections closed")
+        except Exception as db_error:
+            logger.warning("Database shutdown failed", error=str(db_error))
 
         # Stop Celery worker if we started it
         try:
@@ -439,6 +444,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     except Exception as e:
         logger.error("Error during shutdown", error=str(e))
+
+
+# =============================================================================
+# Security Headers Middleware
+# =============================================================================
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add standard security headers to all responses."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
 
 
 # =============================================================================
@@ -476,10 +499,13 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Webhook-Secret"],
         expose_headers=["X-Request-ID"],  # Allow clients to read request ID
     )
+
+    # Add security headers to all responses
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Add GZip compression middleware (60-70% smaller responses)
     # Only compresses responses > 500 bytes to avoid overhead on small responses
@@ -532,8 +558,8 @@ def register_routes(app: FastAPI) -> None:
 
         # Check database connection
         try:
-            from backend.db.database import get_async_session
-            async with get_async_session() as session:
+            from backend.db.database import async_session_context
+            async with async_session_context() as session:
                 from sqlalchemy import text
                 await session.execute(text("SELECT 1"))
                 checks["database"] = "healthy"
@@ -824,17 +850,12 @@ def register_websocket_routes(app: FastAPI) -> None:
             - pong: Response to ping
             - error: Error message
         """
-        # Extract user_id from token if provided
-        user_id = None
-        if token:
-            try:
-                # Verify JWT token and extract user_id
-                from backend.api.routes.auth import decode_token
-                payload = decode_token(token)
-                user_id = payload.get("sub")
-            except Exception:
-                # Invalid token - allow anonymous connection
-                pass
+        # Validate token — reject unauthenticated connections
+        from backend.api.routes.websocket import _validate_ws_token
+        user_id = _validate_ws_token(token)
+        if not user_id:
+            await websocket.close(code=4001, reason="Authentication required")
+            return
 
         # Accept connection
         await manager.connect(websocket, user_id=user_id)
@@ -853,6 +874,10 @@ def register_websocket_routes(app: FastAPI) -> None:
         except Exception as e:
             logger.error("WebSocket error", error=str(e))
             await manager.disconnect(websocket)
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
     @app.get("/ws/stats", tags=["WebSocket"])
     async def websocket_stats():

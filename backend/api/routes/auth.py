@@ -51,6 +51,10 @@ security = HTTPBearer(auto_error=False)
 # Password hashing with bcrypt
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Pre-computed dummy hash for timing-safe comparison when user doesn't exist.
+# Prevents user enumeration via response time differences (bcrypt is slow).
+_DUMMY_PASSWORD_HASH = "$2b$12$LJ3m4ys3Lz.erfXkParfFux0UiUCUvZNpHBCwBR4ByDXaRTCZbxaS"
+
 
 # =============================================================================
 # Rate Limiting for Auth Endpoints
@@ -362,7 +366,8 @@ async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(
     # Fallback to mock users only in DEBUG mode
     if not db_user:
         if not settings.DEBUG:
-            # In production, no mock users - must exist in database
+            # Always run bcrypt to prevent timing-based user enumeration
+            verify_password(request.password, _DUMMY_PASSWORD_HASH)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password",
@@ -678,8 +683,8 @@ async def oauth_google(
             full_name=full_name,
             role=role,
             access_tier=access_tier,
-            is_active=user["is_active"],
-            created_at=user["created_at"],
+            is_active=db_user.is_active if db_user else True,
+            created_at=str(db_user.created_at) if db_user else str(datetime.utcnow()),
         ),
     )
 

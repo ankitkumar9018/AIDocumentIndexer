@@ -15,9 +15,11 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from enum import Enum
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 import structlog
+
+from backend.api.deps import get_current_user
 
 from backend.services.rag_security import (
     get_security_engine,
@@ -140,7 +142,7 @@ class ScanAllResponse(BaseModel):
 # =============================================================================
 
 @router.post("/scan/query", response_model=ScanQueryResponse)
-async def scan_query(request: ScanQueryRequest) -> ScanQueryResponse:
+async def scan_query(request: ScanQueryRequest, user: dict = Depends(get_current_user)) -> ScanQueryResponse:
     """
     Scan a user query for security threats.
 
@@ -195,12 +197,12 @@ async def scan_query(request: ScanQueryRequest) -> ScanQueryResponse:
         logger.error("Query scan failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Scan failed: {str(e)}",
+            detail="Scan failed",
         )
 
 
 @router.post("/scan/context", response_model=ScanContextResponse)
-async def scan_context(request: ScanContextRequest) -> ScanContextResponse:
+async def scan_context(request: ScanContextRequest, user: dict = Depends(get_current_user)) -> ScanContextResponse:
     """
     Scan retrieved context for RAG poisoning.
 
@@ -272,12 +274,12 @@ async def scan_context(request: ScanContextRequest) -> ScanContextResponse:
         logger.error("Context scan failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Scan failed: {str(e)}",
+            detail="Scan failed",
         )
 
 
 @router.post("/scan/response", response_model=ScanResponseResponse)
-async def scan_response(request: ScanResponseRequest) -> ScanResponseResponse:
+async def scan_response(request: ScanResponseRequest, user: dict = Depends(get_current_user)) -> ScanResponseResponse:
     """
     Scan LLM response for data leakage.
 
@@ -328,12 +330,12 @@ async def scan_response(request: ScanResponseRequest) -> ScanResponseResponse:
         logger.error("Response scan failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Scan failed: {str(e)}",
+            detail="Scan failed",
         )
 
 
 @router.post("/scan/all", response_model=ScanAllResponse)
-async def scan_all(request: ScanAllRequest) -> ScanAllResponse:
+async def scan_all(request: ScanAllRequest, user: dict = Depends(get_current_user)) -> ScanAllResponse:
     """
     Comprehensive security scan of query, context, and response.
 
@@ -483,7 +485,7 @@ async def scan_all(request: ScanAllRequest) -> ScanAllResponse:
         logger.error("Comprehensive scan failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Scan failed: {str(e)}",
+            detail="Scan failed",
         )
 
 
@@ -492,7 +494,7 @@ async def scan_all(request: ScanAllRequest) -> ScanAllResponse:
 # =============================================================================
 
 @router.get("/threats")
-async def list_threat_types() -> Dict[str, Any]:
+async def list_threat_types(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """List threat types and their descriptions."""
     return {
         "threat_types": [

@@ -164,7 +164,8 @@ async def list_reports(
         conditions.append(Report.is_starred == starred)
 
     if search:
-        search_pattern = f"%{search}%"
+        safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        search_pattern = f"%{safe}%"
         conditions.append(
             or_(
                 Report.title.ilike(search_pattern),

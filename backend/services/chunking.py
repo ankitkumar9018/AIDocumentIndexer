@@ -629,13 +629,22 @@ Output each proposition on a new line, numbered:"""
             return True
 
         try:
-            from langchain_openai import ChatOpenAI
-            self._llm = ChatOpenAI(model=self.llm_model, temperature=0)
+            from backend.services.llm import LLMFactory
+            self._llm = LLMFactory.get_chat_model(
+                model=self.llm_model,
+                temperature=0,
+            )
             self._initialized = True
             return True
-        except Exception as e:
-            logger.warning(f"PropositionChunker init failed: {e}")
-            return False
+        except Exception:
+            try:
+                from langchain_openai import ChatOpenAI
+                self._llm = ChatOpenAI(model=self.llm_model, temperature=0)
+                self._initialized = True
+                return True
+            except Exception as e:
+                logger.warning(f"PropositionChunker init failed: {e}")
+                return False
 
     async def extract_propositions(self, text: str) -> List[str]:
         """

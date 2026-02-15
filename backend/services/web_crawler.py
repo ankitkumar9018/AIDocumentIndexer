@@ -38,6 +38,10 @@ import random
 import re
 import urllib.robotparser
 import xml.etree.ElementTree as ET
+try:
+    import defusedxml.ElementTree as SafeET
+except ImportError:
+    SafeET = None
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +53,45 @@ import structlog
 from backend.core.config import settings
 
 logger = structlog.get_logger(__name__)
+
+
+def _validate_crawl_url(url: str) -> str:
+    """Validate crawl URL to prevent SSRF attacks.
+
+    Blocks private IPs, cloud metadata endpoints, and non-HTTP protocols.
+    Returns the URL if valid, raises ValueError otherwise.
+    """
+    import ipaddress
+    import socket
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Only HTTP/HTTPS protocols are allowed")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Invalid URL: no hostname")
+
+    blocked_hosts = {"metadata.google.internal", "metadata.gcp.internal", "169.254.169.254"}
+    if hostname in blocked_hosts:
+        raise ValueError("URL blocked: targets metadata endpoint")
+
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise ValueError("URL blocked: targets private/internal network")
+    except ValueError as ve:
+        if "blocked" in str(ve):
+            raise
+        # DNS hostname — resolve and check
+        try:
+            resolved = ipaddress.ip_address(socket.gethostbyname(hostname))
+            if resolved.is_private or resolved.is_loopback or resolved.is_link_local or resolved.is_reserved:
+                raise ValueError("URL blocked: resolves to private/internal network")
+        except socket.gaierror:
+            pass  # DNS failure will be caught by httpx
+
+    return url
 
 # Try to import crawl4ai
 try:
@@ -253,7 +296,8 @@ class EnhancedWebCrawler:
             timeout_seconds = await settings_svc.get_setting("scraping.timeout_seconds")
             if timeout_seconds is not None:
                 self.config.page_timeout = int(timeout_seconds) * 1000
-            self.max_crawl_depth = int(await settings_svc.get_setting("scraping.max_depth") or 2)
+            _max_depth = await settings_svc.get_setting("scraping.max_depth")
+            self.max_crawl_depth = int(_max_depth) if _max_depth is not None else 2
             rate_limit_ms = await settings_svc.get_setting("scraping.rate_limit_ms")
             if rate_limit_ms is not None:
                 delay_seconds = int(rate_limit_ms) / 1000.0
@@ -278,7 +322,8 @@ class EnhancedWebCrawler:
             self.crash_recovery_enabled = await settings_svc.get_setting("scraping.crash_recovery_enabled") != False
 
             # Crawler feature settings
-            self.max_pages_per_site = int(await settings_svc.get_setting("crawler.max_pages_per_site") or 100)
+            _max_pages = await settings_svc.get_setting("crawler.max_pages_per_site")
+            self.max_pages_per_site = int(_max_pages) if _max_pages is not None else 100
             self.stealth_mode_enabled = await settings_svc.get_setting("crawler.stealth_mode_enabled") != False
             self.magic_mode_enabled = await settings_svc.get_setting("crawler.magic_mode_enabled") != False
             self.llm_extraction_enabled = await settings_svc.get_setting("crawler.llm_extraction_enabled") != False
@@ -327,12 +372,12 @@ class EnhancedWebCrawler:
         now = datetime.utcnow()
         self._request_times = [
             t for t in self._request_times
-            if (now - t).seconds < 60
+            if (now - t).total_seconds() < 60
         ]
 
         # Check if we've exceeded the rate limit
         if len(self._request_times) >= self.config.requests_per_minute:
-            wait_time = 60 - (now - self._request_times[0]).seconds
+            wait_time = 60 - (now - self._request_times[0]).total_seconds()
             if wait_time > 0:
                 logger.debug("Rate limit reached, waiting", wait_time=wait_time)
                 await asyncio.sleep(wait_time)
@@ -367,9 +412,17 @@ class EnhancedWebCrawler:
 
         return None
 
+    _MAX_CACHE_SIZE = 1000
+    _MAX_ROBOTS_CACHE_SIZE = 500
+
     def _cache_result(self, url: str, result: CrawlResult) -> None:
         """Cache a crawl result."""
         if self.config.cache_enabled:
+            # Evict oldest entries if cache is full
+            if len(self._cache) >= self._MAX_CACHE_SIZE:
+                oldest_keys = sorted(self._cache, key=lambda k: self._cache[k][1])[:100]
+                for k in oldest_keys:
+                    del self._cache[k]
             self._cache[url] = (result, datetime.utcnow())
 
     def _extract_links(
@@ -435,6 +488,9 @@ class EnhancedWebCrawler:
         Returns:
             CrawlResult with content and metadata
         """
+        # SSRF prevention: validate URL before crawling
+        _validate_crawl_url(url)
+
         # Load settings from admin configuration on first use
         await self._load_settings()
 
@@ -886,6 +942,9 @@ Answer:"""
         Returns:
             List of CrawlResult objects
         """
+        # SSRF prevention: validate start URL
+        _validate_crawl_url(start_url)
+
         results = []
         visited = set()
         to_visit = [start_url]
@@ -1017,6 +1076,8 @@ Answer:"""
         self,
         client: Any,
         sitemap_url: str,
+        depth: int = 0,
+        max_depth: int = 3,
     ) -> List[Tuple[str, Optional[str]]]:
         """
         Fetch and parse a single sitemap URL.
@@ -1027,10 +1088,15 @@ Answer:"""
         Args:
             client: httpx.AsyncClient instance
             sitemap_url: URL of the sitemap to fetch
+            depth: Current recursion depth
+            max_depth: Maximum recursion depth for nested sitemaps
 
         Returns:
             List of (url, lastmod) tuples extracted from the sitemap
         """
+        if depth >= max_depth:
+            logger.warning("Sitemap recursion depth limit reached", sitemap_url=sitemap_url, depth=depth)
+            return []
         headers = {"User-Agent": self._get_user_agent()}
         response = await client.get(sitemap_url, headers=headers, follow_redirects=True)
 
@@ -1038,9 +1104,14 @@ Answer:"""
             return []
 
         # Handle gzip-compressed sitemaps
+        MAX_SITEMAP_SIZE = 50 * 1024 * 1024  # 50MB decompressed limit
         if sitemap_url.endswith(".gz"):
             try:
-                xml_content = gzip.decompress(response.content).decode("utf-8")
+                decompressed = gzip.decompress(response.content)
+                if len(decompressed) > MAX_SITEMAP_SIZE:
+                    logger.warning("Sitemap too large after decompression", sitemap_url=sitemap_url, size=len(decompressed))
+                    return []
+                xml_content = decompressed.decode("utf-8")
             except Exception:
                 return []
         else:
@@ -1049,9 +1120,12 @@ Answer:"""
         urls_with_dates: List[Tuple[str, Optional[str]]] = []
 
         try:
-            root = ET.fromstring(xml_content)
-        except ET.ParseError:
-            logger.warning("Failed to parse sitemap XML", sitemap_url=sitemap_url)
+            if SafeET is None:
+                logger.warning("defusedxml not installed — refusing to parse external XML for safety", sitemap_url=sitemap_url)
+                return []
+            root = SafeET.fromstring(xml_content)
+        except (ET.ParseError, Exception) as parse_err:
+            logger.warning("Failed to parse sitemap XML", sitemap_url=sitemap_url, error=str(parse_err))
             return []
 
         # Handle namespace
@@ -1065,7 +1139,7 @@ Answer:"""
                 loc_elem = sitemap_elem.find(f"{ns}loc")
                 if loc_elem is not None and loc_elem.text:
                     # Recursively fetch nested sitemaps
-                    nested_urls = await self._fetch_sitemap(client, loc_elem.text.strip())
+                    nested_urls = await self._fetch_sitemap(client, loc_elem.text.strip(), depth=depth + 1, max_depth=max_depth)
                     urls_with_dates.extend(nested_urls)
         else:
             # Standard urlset
@@ -1156,8 +1230,14 @@ Answer:"""
                     if path:
                         result["disallowed_paths"].append(path)
 
-            # Cache the parser for is_url_allowed checks
+            # Cache the parser for is_url_allowed checks (bounded)
             domain = parsed.netloc
+            if len(self._robots_cache) >= self._MAX_ROBOTS_CACHE_SIZE:
+                # Evict arbitrary old entries
+                keys_to_remove = list(self._robots_cache.keys())[:50]
+                for k in keys_to_remove:
+                    del self._robots_cache[k]
+                    self._domain_crawl_delays.pop(k, None)
             self._robots_cache[domain] = rp
 
             logger.info(

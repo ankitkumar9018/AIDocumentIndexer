@@ -393,10 +393,18 @@ export function InfrastructureTab({ localSettings, handleSettingChange }: Infras
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="auto">Auto (use default provider)</SelectItem>
                 <SelectItem value="ollama">Ollama (local, free)</SelectItem>
                 <SelectItem value="vllm">vLLM (2-4x faster batch inference)</SelectItem>
                 <SelectItem value="openai">OpenAI (cloud)</SelectItem>
                 <SelectItem value="anthropic">Anthropic (cloud)</SelectItem>
+                <SelectItem value="groq">Groq (fast cloud inference)</SelectItem>
+                <SelectItem value="together">Together AI (cloud)</SelectItem>
+                <SelectItem value="deepinfra">DeepInfra (cloud)</SelectItem>
+                <SelectItem value="bedrock">AWS Bedrock (cloud)</SelectItem>
+                <SelectItem value="google">Google AI (cloud)</SelectItem>
+                <SelectItem value="cohere">Cohere (cloud)</SelectItem>
+                <SelectItem value="custom">Custom (OpenAI-compatible)</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -455,7 +463,15 @@ export function InfrastructureTab({ localSettings, handleSettingChange }: Infras
             </div>
           )}
 
-          {(llmBackend === "ollama" || llmBackend === "openai" || llmBackend === "anthropic") && (
+          {llmBackend === "auto" && (
+            <p className="text-sm text-muted-foreground">
+              Auto mode uses the default provider configured in the Providers tab.
+              Add providers and mark one as default to get started. The system auto-detects
+              the provider type, API keys, and model settings from your provider configuration.
+            </p>
+          )}
+
+          {llmBackend && !["auto", "vllm"].includes(llmBackend) && (
             <p className="text-sm text-muted-foreground">
               {llmBackend === "ollama"
                 ? "Configured via Ollama. Manage models in the Providers tab."

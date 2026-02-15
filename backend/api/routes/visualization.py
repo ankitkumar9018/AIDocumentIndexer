@@ -11,8 +11,10 @@ Endpoints:
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+from backend.api.deps import get_current_user
 
 from backend.services.embedding_projection import (
     get_projection_service,
@@ -95,7 +97,7 @@ class CitationMapResponse(BaseModel):
 # =============================================================================
 
 @router.post("/project", response_model=ProjectionResponse)
-async def project_embeddings(request: ProjectionRequest):
+async def project_embeddings(request: ProjectionRequest, user: dict = Depends(get_current_user)):
     """
     Project high-dimensional embeddings to 2D/3D for visualization.
 
@@ -177,7 +179,7 @@ async def project_embeddings(request: ProjectionRequest):
 
 
 @router.post("/citations-map", response_model=CitationMapResponse)
-async def generate_citation_map(request: CitationMapRequest):
+async def generate_citation_map(request: CitationMapRequest, user: dict = Depends(get_current_user)):
     """
     Generate visualization data for citations.
 
@@ -257,16 +259,23 @@ async def generate_citation_map(request: CitationMapRequest):
     query_point = None
     points = []
 
+    # Whitelist safe metadata keys to avoid exposing internal fields
+    SAFE_VIZ_METADATA_KEYS = {
+        "document_filename", "document_title", "page_number", "chunk_index",
+        "source_type", "content_type", "collection_name",
+    }
+
     for point in result.points:
         if point.id == "__query__":
             query_point = {"x": point.x, "y": point.y}
         else:
+            safe_metadata = {k: v for k, v in point.metadata.items() if k in SAFE_VIZ_METADATA_KEYS}
             points.append({
                 "id": point.id,
                 "x": point.x,
                 "y": point.y,
                 "score": point.original_score,
-                **point.metadata,
+                **safe_metadata,
             })
 
     processing_time = (time.time() - start_time) * 1000
@@ -280,7 +289,7 @@ async def generate_citation_map(request: CitationMapRequest):
 
 
 @router.get("/methods")
-async def get_available_methods():
+async def get_available_methods(user: dict = Depends(get_current_user)):
     """
     Get available projection methods.
 

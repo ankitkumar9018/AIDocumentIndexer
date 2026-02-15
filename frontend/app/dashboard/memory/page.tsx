@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   Brain,
   Search,
@@ -118,13 +118,15 @@ export default function MemoryManagementPage() {
   // Debounced search
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value);
-    // Simple debounce via setTimeout
+  }, []);
+
+  useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(value);
+      setDebouncedSearch(searchQuery);
       setPage(1);
     }, 300);
     return () => clearTimeout(timer);
-  }, []);
+  }, [searchQuery]);
 
   // Queries
   const {

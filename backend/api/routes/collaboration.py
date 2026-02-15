@@ -325,7 +325,7 @@ async def run_collaboration(
         logger.error("Collaboration failed", session_id=session_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Collaboration failed: {str(e)}",
+            detail="Collaboration failed",
         )
 
     return session_to_response(session)
@@ -364,7 +364,8 @@ async def stream_collaboration(
             async for update in service.stream_collaboration(session_id):
                 yield f"data: {json.dumps(update)}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+            logger.error("Collaboration streaming error", error=str(e))
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Collaboration streaming error'})}\n\n"
 
     return StreamingResponse(
         event_generator(),

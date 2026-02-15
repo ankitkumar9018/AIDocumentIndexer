@@ -17,11 +17,69 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 import structlog
 
-from langchain.memory import ConversationBufferWindowMemory
 from langchain_core.messages import HumanMessage, AIMessage
 
 
 logger = structlog.get_logger(__name__)
+
+
+# =============================================================================
+# ConversationBufferWindowMemory replacement
+# =============================================================================
+# langchain 1.x removed ConversationBufferWindowMemory. This is a minimal
+# drop-in replacement that stores the last k conversation exchanges.
+
+class _ChatMemory:
+    """Simple chat message store."""
+
+    def __init__(self):
+        self.messages: List = []
+
+
+class ConversationBufferWindowMemory:
+    """Drop-in replacement for langchain's removed ConversationBufferWindowMemory.
+
+    Stores conversation history and returns the last k exchanges (human + AI
+    pairs) when queried via load_memory_variables().
+    """
+
+    def __init__(
+        self,
+        k: int = 5,
+        return_messages: bool = True,
+        memory_key: str = "chat_history",
+    ):
+        self.k = k
+        self.return_messages = return_messages
+        self.memory_key = memory_key
+        self.chat_memory = _ChatMemory()
+
+    def save_context(self, inputs: Dict[str, Any], outputs: Dict[str, Any]) -> None:
+        """Save a conversation exchange (human input + AI output)."""
+        input_str = inputs.get("input", inputs.get("question", ""))
+        output_str = outputs.get("output", outputs.get("answer", ""))
+        self.chat_memory.messages.append(HumanMessage(content=str(input_str)))
+        self.chat_memory.messages.append(AIMessage(content=str(output_str)))
+
+    def load_memory_variables(self, inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Return the last k exchanges as messages or formatted string."""
+        messages = self.chat_memory.messages
+        # k exchanges = 2k messages (human + AI pairs)
+        window_size = self.k * 2
+        window = messages[-window_size:] if len(messages) > window_size else list(messages)
+
+        if self.return_messages:
+            return {self.memory_key: window}
+
+        lines = []
+        for msg in window:
+            role = "Human" if isinstance(msg, HumanMessage) else "AI"
+            lines.append(f"{role}: {msg.content}")
+        return {self.memory_key: "\n".join(lines)}
+
+    def clear(self) -> None:
+        """Clear all stored messages."""
+        self.chat_memory.messages.clear()
 
 
 # =============================================================================
@@ -37,34 +95,85 @@ MODEL_TIER_CONFIG = {
     "tiny":   {"min_b": 0,   "max_b": 3,   "memory_k": 3,  "summarize_after": 2,  "budget": (10, 10, 60, 20)},
     "small":  {"min_b": 3,   "max_b": 9,   "memory_k": 6,  "summarize_after": 5,  "budget": (10, 15, 55, 20)},
     "medium": {"min_b": 9,   "max_b": 34,  "memory_k": 10, "summarize_after": 8,  "budget": (10, 15, 60, 15)},
-    "large":  {"min_b": 34,  "max_b": 999, "memory_k": 15, "summarize_after": 12, "budget": (10, 15, 60, 15)},
+    "large":  {"min_b": 34,  "max_b": float('inf'), "memory_k": 15, "summarize_after": 12, "budget": (10, 15, 60, 15)},
 }
+
+
+# Known cloud/API model sizes (approximate parameter counts in billions)
+# Used for tier detection when model names don't follow Ollama :Xb convention
+CLOUD_MODEL_SIZES = {
+    # OpenAI
+    "gpt-4o": 200, "gpt-4o-mini": 8, "gpt-4-turbo": 200, "gpt-4": 200, "gpt-3.5-turbo": 20,
+    "o1-preview": 200, "o1-mini": 8, "o3-mini": 8,
+    # Anthropic
+    "claude-3-5-sonnet": 70, "claude-3-opus": 200, "claude-3-sonnet": 70, "claude-3-haiku": 20,
+    "claude-3-5-haiku": 20,
+    # Meta Llama (API naming variants)
+    "llama-3.3-70b": 70, "llama-3.1-70b": 70, "llama-3.1-8b": 8, "llama-3.2-3b": 3,
+    "llama-3.2-1b": 1, "llama-3-70b": 70, "llama-3-8b": 8,
+    # AWS Bedrock naming
+    "meta.llama3-3-70b": 70, "meta.llama3-1-70b": 70, "meta.llama3-1-8b": 8,
+    # Qwen
+    "qwen2.5-72b": 72, "qwen2.5-32b": 32, "qwen2.5-14b": 14, "qwen2.5-7b": 7, "qwen2.5-3b": 3,
+    "qwen3-72b": 72, "qwen3-32b": 32, "qwen3-14b": 14, "qwen3-8b": 8, "qwen3-4b": 4,
+    # Mistral / Mixtral
+    "mixtral-8x7b": 7, "mixtral-8x22b": 22, "mistral-large": 123, "mistral-medium": 70,
+    "mistral-small": 22, "mistral-7b": 7,
+    # DeepSeek
+    "deepseek-r1": 671, "deepseek-v3": 671, "deepseek-r1-distill-llama-70b": 70,
+    "deepseek-r1-distill-qwen-32b": 32,
+    # Cohere
+    "command-r-plus": 104, "command-r": 35, "command": 6,
+    # Google
+    "gemini-1.5-pro": 200, "gemini-1.5-flash": 20, "gemini-pro": 200, "gemini-2.0-flash": 20,
+    # Amazon
+    "amazon.nova-pro": 200, "amazon.nova-lite": 20, "amazon.nova-micro": 8,
+}
+
+# Pre-computed sorted keys (longest first) for substring matching
+# Avoids O(n log n) sort on every call to _estimate_model_params_b()
+_CLOUD_MODEL_KEYS_BY_LENGTH = sorted(CLOUD_MODEL_SIZES.keys(), key=len, reverse=True)
 
 
 def _estimate_model_params_b(model_name: str) -> float:
     """
     Estimate model parameter count in billions from model name.
-    Uses common Ollama naming conventions (e.g., llama3.2:3b, deepseek-r1:14b).
+    Supports Ollama naming (llama3.2:3b), API naming (llama-3.3-70b-versatile),
+    and cloud provider naming (meta-llama/Llama-3.3-70B-Instruct).
     """
     if not model_name:
         return 3.0  # Default: assume small model
 
     model_lower = model_name.lower()
-
-    # Direct size indicators in model name
     import re
-    # Match patterns like :7b, :14b, :70b, :1.5b, :0.5b, -8b, etc.
+
+    # 1. Explicit size patterns FIRST (Ollama :Xb, API -Xb-, etc.)
+    # These are always authoritative when present (e.g., deepseek-r1:8b = 8B, not 671B)
     size_match = re.search(r'[:\-_](\d+\.?\d*)b', model_lower)
     if size_match:
         return float(size_match.group(1))
 
-    # Match "8x7b" pattern (MoE models — use active params, not total)
+    # 2. API-style: Match patterns like -70b-, /70B-, -8B-Instruct
+    api_match = re.search(r'[\-_/](\d+\.?\d*)[bB][\-_/\.]', model_lower)
+    if api_match:
+        return float(api_match.group(1))
+    api_end_match = re.search(r'[\-_/](\d+\.?\d*)[bB]$', model_lower)
+    if api_end_match:
+        return float(api_end_match.group(1))
+
+    # 3. MoE: Match "8x7b" pattern (use active params, not total)
     moe_match = re.search(r'(\d+)x(\d+\.?\d*)b', model_lower)
     if moe_match:
-        # Active params ≈ single expert size for memory purposes
         return float(moe_match.group(2))
 
-    # Known model name heuristics
+    # 4. Cloud model sizes dict (for models without explicit size in name)
+    # e.g., "gpt-4o", "claude-3-5-sonnet", "command-r-plus"
+    # Check longest keys first so "gpt-4o-mini" matches before "gpt-4o"
+    for known_model in _CLOUD_MODEL_KEYS_BY_LENGTH:
+        if known_model in model_lower:
+            return float(CLOUD_MODEL_SIZES[known_model])
+
+    # 5. Known model name heuristics
     if "latest" in model_lower:
         # Common defaults
         if "llama3.2" in model_lower:
@@ -94,7 +203,7 @@ def get_model_tier(model_name: str) -> Dict[str, Any]:
         if config["min_b"] <= params_b < config["max_b"]:
             return {**config, "tier": tier_name, "estimated_params_b": params_b}
 
-    # Fallback to medium
+    # Fallback to small (most conservative)
     return {**MODEL_TIER_CONFIG["small"], "tier": "small", "estimated_params_b": params_b}
 
 

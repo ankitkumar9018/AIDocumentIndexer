@@ -20,6 +20,7 @@ import {
   ThumbsDown,
   ExternalLink
 } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface Insight {
   id: string;
@@ -75,15 +76,12 @@ export function InsightFeed() {
   const fetchInsights = async () => {
     setState((prev) => ({ ...prev, loading: true }));
     try {
-      const response = await fetch("/api/v1/intelligence/insights/feed");
-      if (response.ok) {
-        const data = await response.json();
-        setState((prev) => ({
-          ...prev,
-          insights: data.insights || [],
-          loading: false,
-        }));
-      }
+      const { data } = await api.get<{ insights: Insight[] }>("/intelligence/insights/feed");
+      setState((prev) => ({
+        ...prev,
+        insights: data.insights || [],
+        loading: false,
+      }));
     } catch (error) {
       console.error("Failed to fetch insights:", error);
       setState((prev) => ({ ...prev, loading: false }));
@@ -92,9 +90,7 @@ export function InsightFeed() {
 
   const dismissInsight = async (id: string) => {
     try {
-      await fetch(`/api/v1/intelligence/insights/${id}/dismiss`, {
-        method: "POST",
-      });
+      await api.post(`/intelligence/insights/${id}/dismiss`);
       setState((prev) => ({
         ...prev,
         insights: prev.insights.filter((i) => i.id !== id),
@@ -106,11 +102,7 @@ export function InsightFeed() {
 
   const provideFeedback = async (id: string, helpful: boolean) => {
     try {
-      await fetch("/api/v1/intelligence/insights/track", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ insight_id: id, helpful }),
-      });
+      await api.post("/intelligence/insights/track", { insight_id: id, helpful });
     } catch (error) {
       console.error("Failed to track feedback:", error);
     }

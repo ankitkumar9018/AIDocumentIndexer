@@ -138,7 +138,7 @@ export default function IntegrationsSettingsPage() {
   const [origin, setOrigin] = useState("");
   useEffect(() => {
     if (typeof window !== "undefined") {
-      setOrigin(origin);
+      setOrigin(window.location.origin);
     }
   }, []);
 

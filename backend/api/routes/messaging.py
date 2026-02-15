@@ -70,13 +70,12 @@ async def _rag_query(query: str, collection: Optional[str] = None) -> str:
 
         rag = RAGService()
         result = await rag.query(
-            query=query,
-            collection_id=collection,
+            question=query,
+            collection_filter=collection,
             top_k=5,
-            include_sources=False,  # Keep response short for messaging
         )
 
-        return result.get("answer", "I couldn't find relevant information.")
+        return result.content or "I couldn't find relevant information."
 
     except Exception as e:
         logger.error("RAG query failed in messaging bot", error=str(e))

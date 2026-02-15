@@ -390,11 +390,14 @@ JSON array of claims:"""
                 claims = json.loads(content)
                 return claims[:10]
 
-            # Try to extract array from response
-            match = re.search(r'\[.*\]', content, re.DOTALL)
-            if match:
-                claims = json.loads(match.group())
-                return claims[:10]
+            # Try to extract array from response (non-greedy to avoid spanning multiple arrays)
+            for match in re.finditer(r'\[.*?\]', content, re.DOTALL):
+                try:
+                    claims = json.loads(match.group())
+                    if isinstance(claims, list):
+                        return claims[:10]
+                except json.JSONDecodeError:
+                    continue
 
         except Exception as e:
             logger.warning("LLM claim extraction failed", error=str(e))

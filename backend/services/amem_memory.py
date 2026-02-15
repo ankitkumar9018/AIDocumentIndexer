@@ -188,16 +188,20 @@ Respond with JSON:
 
         try:
             if self.config.use_local_model:
-                # Try to use local Ollama
-                from langchain_ollama import ChatOllama
-                self._llm = ChatOllama(
+                # Try to use local Ollama via factory (provider-agnostic)
+                from backend.services.llm import LLMFactory
+                self._llm = LLMFactory.get_chat_model(
+                    provider="ollama",
                     model=self.config.agent_model,
                     temperature=0.1,
                 )
             else:
-                # Use API-based model
-                from backend.services.llm import get_chat_model
-                self._llm = await get_chat_model()
+                # Use API-based model via factory
+                from backend.services.llm import LLMFactory
+                self._llm = LLMFactory.get_chat_model(
+                    model=self.config.agent_model,
+                    temperature=0.1,
+                )
 
             return self._llm
 
@@ -347,9 +351,8 @@ class AMemMemoryService:
         # Generate embedding outside lock to avoid blocking
         try:
             from backend.services.embeddings import get_embedding_service
-            service = await get_embedding_service()
-            result = await service.embed_text(text)
-            embedding = result.embedding
+            service = get_embedding_service()
+            embedding = service.embed_text(text)
 
             # Cache it with LRU eviction (with lock)
             if self.config.enable_caching:
@@ -657,10 +660,10 @@ class AMemMemoryService:
             cost_usd=0.0,
         )
 
-    async def _evict_lowest_score(self):
-        """Evict memory with lowest score."""
+    async def _evict_lowest_score(self) -> bool:
+        """Evict memory with lowest score. Returns True if eviction succeeded."""
         if not self._memories:
-            return
+            return False
 
         # Find memory with lowest decayed score (excluding CRITICAL)
         lowest_id = None
@@ -678,6 +681,16 @@ class AMemMemoryService:
         if lowest_id:
             del self._memories[lowest_id]
             logger.debug(f"Evicted memory {lowest_id} with score {lowest_score}")
+            return True
+
+        # All memories are CRITICAL — force-evict oldest by creation time
+        if self._memories:
+            oldest_id = min(self._memories, key=lambda mid: self._memories[mid].created_at)
+            del self._memories[oldest_id]
+            logger.warning(f"Force-evicted CRITICAL memory {oldest_id} (all memories are CRITICAL, store at capacity)")
+            return True
+
+        return False
 
     async def _consolidate_memories(self):
         """Consolidate similar memories."""

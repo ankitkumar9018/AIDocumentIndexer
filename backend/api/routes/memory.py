@@ -121,7 +121,7 @@ async def list_memories(
         )
     except Exception as e:
         logger.error("Failed to list memories", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to list memories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list memories")
 
 
 @router.get("/stats", response_model=MemoryStatsResponse)
@@ -144,7 +144,7 @@ async def get_memory_stats(
         )
     except Exception as e:
         logger.error("Failed to get memory stats", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to get memory stats: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get memory stats")
 
 
 @router.get("/export")
@@ -176,7 +176,7 @@ async def export_memories(
         )
     except Exception as e:
         logger.error("Failed to export memories", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to export memories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to export memories")
 
 
 @router.get("/{memory_id}", response_model=MemoryResponse)
@@ -213,7 +213,7 @@ async def get_memory(
         raise
     except Exception as e:
         logger.error("Failed to get memory", error=str(e), memory_id=memory_id)
-        raise HTTPException(status_code=500, detail=f"Failed to get memory: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get memory")
 
 
 @router.patch("/{memory_id}", response_model=MemoryResponse)
@@ -260,7 +260,7 @@ async def update_memory(
         raise
     except Exception as e:
         logger.error("Failed to update memory", error=str(e), memory_id=memory_id)
-        raise HTTPException(status_code=500, detail=f"Failed to update memory: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update memory")
 
 
 @router.delete("/{memory_id}")
@@ -283,7 +283,7 @@ async def delete_memory(
         raise
     except Exception as e:
         logger.error("Failed to delete memory", error=str(e), memory_id=memory_id)
-        raise HTTPException(status_code=500, detail=f"Failed to delete memory: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete memory")
 
 
 @router.delete("")
@@ -307,4 +307,4 @@ async def clear_all_memories(
         return {"cleared": True, "count": count}
     except Exception as e:
         logger.error("Failed to clear memories", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to clear memories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to clear memories")

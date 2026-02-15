@@ -357,8 +357,7 @@ class Settings(BaseSettings):
     ENABLE_CRAG: bool = Field(default=True, description="Enable Corrective RAG")
     ENABLE_SELF_RAG: bool = Field(default=True, description="Enable SELF-RAG for hallucination detection")
     SELF_RAG_MIN_SUPPORTED_RATIO: float = Field(default=0.7, description="Min ratio of supported claims for SELF-RAG")
-    ENABLE_LIGHTRAG: bool = Field(default=True, description="Enable LightRAG dual-level retrieval")
-    ENABLE_RAPTOR: bool = Field(default=True, description="Enable RAPTOR tree-organized retrieval")
+    # Note: ENABLE_LIGHTRAG and ENABLE_RAPTOR defined in Phase 51/62 section below
 
     # ==========================================================================
     # Audio Configuration
@@ -450,8 +449,7 @@ class Settings(BaseSettings):
     )
     KG_ENABLE_RULE_BASED_FALLBACK: bool = Field(default=True, description="Use rule-based extraction if all LLMs fail")
 
-    # Performance settings
-    USE_RAY_FOR_KG: bool = Field(default=True, description="Use Ray for distributed KG extraction")
+    # Performance settings (USE_RAY_FOR_KG defined in Ray section below)
     KG_CACHE_TTL: int = Field(default=3600, description="KG query cache TTL in seconds")
     KG_MIN_CONFIDENCE: float = Field(default=0.5, description="Minimum confidence threshold for entity inclusion")
 
@@ -486,7 +484,7 @@ class Settings(BaseSettings):
     # ==========================================================================
     ENABLE_RLM: bool = Field(default=True, description="Enable RLM for large context queries")
     RLM_THRESHOLD_TOKENS: int = Field(default=100000, description="Token threshold to trigger RLM (100K default)")
-    RLM_SANDBOX: str = Field(default="auto", description="RLM sandbox type (auto, local, docker, modal, prime)")
+    # Note: RLM_SANDBOX defined in Phase 54 RLM section below
     RLM_ROOT_MODEL: str = Field(default="gpt-4o", description="RLM root model for reasoning")
     RLM_RECURSIVE_MODEL: str = Field(default="gpt-4o-mini", description="RLM recursive model for chunks")
     RLM_MAX_ITERATIONS: int = Field(default=20, description="Max RLM REPL iterations")
@@ -562,7 +560,7 @@ class Settings(BaseSettings):
     # ==========================================================================
     ENABLE_ADAPTIVE_ROUTING: bool = Field(default=True, description="Enable intelligent query routing to optimal strategies")
     ENABLE_RAG_FUSION: bool = Field(default=True, description="Enable RAG-Fusion multi-query with RRF")
-    ENABLE_CONTEXT_COMPRESSION: bool = Field(default=True, description="Enable context compression for token efficiency")
+    # Note: ENABLE_CONTEXT_COMPRESSION defined in Phase 38 section below
     ENABLE_STEPBACK_PROMPTING: bool = Field(default=True, description="Enable step-back prompting for complex queries")
     ENABLE_CONTEXT_REORDERING: bool = Field(default=True, description="Enable context reordering to mitigate lost-in-the-middle")
     ENABLE_PHASE65: bool = Field(default=True, description="Enable Phase 65 features (spell correction, semantic cache, LTR)")
@@ -593,7 +591,7 @@ class Settings(BaseSettings):
     RLM_PROVIDER: str = Field(default="anthropic", description="RLM provider")
     RLM_THRESHOLD: int = Field(default=100000, description="Context threshold for RLM (tokens)")
     RLM_MAX_CONTEXT: int = Field(default=10000000, description="Max context tokens for RLM")
-    RLM_SANDBOX: str = Field(default="local", description="RLM sandbox type (local, modal, e2b)")
+    RLM_SANDBOX: str = Field(default="auto", description="RLM sandbox type (auto, local, docker, modal, e2b, prime)")
     RLM_SELF_REFINE: bool = Field(default=True, description="Enable RLM self-refinement")
 
     # ==========================================================================

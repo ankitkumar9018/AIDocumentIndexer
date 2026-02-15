@@ -101,7 +101,7 @@ interface FeatureControlPanelProps {
 // CONSTANTS
 // =============================================================================
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
+import { api } from "@/lib/api";
 
 const CATEGORY_ICONS: Record<string, React.ElementType> = {
   "Document Processing": Settings,
@@ -135,33 +135,18 @@ const STATUS_CONFIG = {
 // =============================================================================
 
 async function fetchFeatures(): Promise<{ features: Feature[]; categories: string[] }> {
-  const response = await fetch(`${API_BASE}/admin/features`, {
-    credentials: "include",
-  });
-  if (!response.ok) throw new Error("Failed to fetch features");
-  return response.json();
+  const { data } = await api.get<{ features: Feature[]; categories: string[] }>("/admin/features");
+  return data;
 }
 
 async function fetchFeatureHealth(): Promise<FeatureHealth> {
-  const response = await fetch(`${API_BASE}/admin/features/health/check`, {
-    credentials: "include",
-  });
-  if (!response.ok) throw new Error("Failed to fetch feature health");
-  return response.json();
+  const { data } = await api.get<FeatureHealth>("/admin/features/health/check");
+  return data;
 }
 
 async function toggleFeature(featureId: string, enabled: boolean): Promise<any> {
-  const response = await fetch(`${API_BASE}/admin/features/${featureId}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify({ enabled }),
-  });
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || "Failed to toggle feature");
-  }
-  return response.json();
+  const { data } = await api.put(`/admin/features/${featureId}`, { enabled });
+  return data;
 }
 
 // =============================================================================

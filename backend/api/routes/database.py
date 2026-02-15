@@ -181,54 +181,43 @@ def mask_string(s: str, visible_chars: int = 4) -> str:
     return s[:visible_chars] + "*" * (len(s) - visible_chars)
 
 
-def _get_fernet_key() -> bytes:
-    """
-    Derive a Fernet key from the application SECRET_KEY.
-    Uses PBKDF2 to derive a 32-byte key suitable for Fernet.
-    """
-    import hashlib
-    import base64
-    from backend.core.config import settings
-
-    # Use SECRET_KEY as the basis for encryption
-    secret = settings.SECRET_KEY.encode() if settings.SECRET_KEY else b"default-dev-key-change-in-prod"
-
-    # Derive a 32-byte key using SHA256 (Fernet requires exactly 32 bytes)
-    derived_key = hashlib.sha256(secret).digest()
-
-    # Fernet requires base64-encoded 32-byte key
-    return base64.urlsafe_b64encode(derived_key)
-
-
 def encrypt_credential(value: str) -> str:
-    """
-    Encrypt a credential value using Fernet symmetric encryption.
-
-    Uses the application SECRET_KEY to derive the encryption key.
-    Fernet guarantees that data encrypted cannot be read or tampered with.
-    """
-    from cryptography.fernet import Fernet
-
-    fernet = Fernet(_get_fernet_key())
-    encrypted = fernet.encrypt(value.encode())
-    return encrypted.decode()
+    """Encrypt a credential value using the shared encryption service."""
+    from backend.services.encryption import encrypt_value
+    return encrypt_value(value)
 
 
 def decrypt_credential(value: str) -> str:
-    """
-    Decrypt a credential value using Fernet symmetric encryption.
+    """Decrypt a credential value using the shared encryption service.
 
-    Raises InvalidToken if the data is corrupted or the key is wrong.
+    Falls back to legacy decryption for credentials encrypted with the old
+    SHA256-based key derivation (pre-consolidation).
     """
-    from cryptography.fernet import Fernet, InvalidToken
-
-    fernet = Fernet(_get_fernet_key())
+    from backend.services.encryption import decrypt_value
     try:
-        decrypted = fernet.decrypt(value.encode())
-        return decrypted.decode()
-    except InvalidToken:
-        logger.error("Failed to decrypt credential - invalid token or key mismatch")
-        raise ValueError("Failed to decrypt credential. The encryption key may have changed.")
+        return decrypt_value(value)
+    except ValueError:
+        # Backward compatibility: try legacy key derivation for old encrypted values
+        try:
+            return _decrypt_credential_legacy(value)
+        except Exception:
+            logger.error("Failed to decrypt credential with both new and legacy keys")
+            raise ValueError("Failed to decrypt credential. The encryption key may have changed.")
+
+
+def _decrypt_credential_legacy(value: str) -> str:
+    """Legacy decryption using old SHA256-based key derivation (backward compatibility)."""
+    import hashlib
+    import base64
+    from cryptography.fernet import Fernet
+    from backend.core.config import settings
+
+    if not settings.SECRET_KEY:
+        raise ValueError("SECRET_KEY required for credential decryption")
+    secret = settings.SECRET_KEY.encode()
+    derived_key = hashlib.sha256(secret).digest()
+    fernet = Fernet(base64.urlsafe_b64encode(derived_key))
+    return fernet.decrypt(value.encode()).decode()
 
 
 async def get_connector(connection: ExternalDatabaseConnection):
@@ -302,6 +291,14 @@ async def get_user_id(db: AsyncSession, user: AuthenticatedUser) -> UUID:
         if db_user:
             return db_user.id
 
+    # In dev mode, return the UUID directly (user may not exist in DB)
+    import os
+    if os.getenv("DEV_MODE", "false").lower() in ("true", "1", "yes"):
+        try:
+            return UUID(user.user_id)
+        except (ValueError, TypeError):
+            pass
+
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
 
@@ -328,7 +325,7 @@ async def create_connection(
         # Create the connection
         connection = ExternalDatabaseConnection(
             user_id=user_id,
-            organization_id=UUID(organization_id) if organization_id else None,
+            organization_id=UUID(str(organization_id)) if organization_id else None,
             name=request.name,
             description=request.description,
             connector_type=request.connector_type,
@@ -623,9 +620,10 @@ async def test_connection(
             connection.last_test_error = str(e)
             await db.commit()
 
+            logger.error("Database connection test failed", connection_id=str(connection_id), error=str(e))
             return TestConnectionResponse(
                 success=False,
-                message=str(e),
+                message="Connection failed. Check server logs for details.",
                 latency_ms=latency,
             )
         finally:
@@ -690,7 +688,7 @@ async def get_database_schema(
 
         except Exception as e:
             logger.error("Failed to get schema", error=str(e))
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get schema: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get schema. Check server logs for details.")
         finally:
             if connector:
                 try:
@@ -788,7 +786,7 @@ async def query_database(
 
         except Exception as e:
             logger.error("Query failed", error=str(e), question=request.question)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Query failed: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Query failed. Check server logs for details.")
         finally:
             if connector:
                 try:

@@ -361,7 +361,7 @@ export function ProvidersTab({
               {getProviderTypeConfig(newProvider.provider_type)?.fields.includes("api_key") && (
                 <div className="space-y-2">
                   <label className="text-sm font-medium">
-                    API Key
+                    {newProvider.provider_type === "bedrock" ? "AWS Credentials" : "API Key"}
                     {editingProvider && (
                       <span className="text-muted-foreground font-normal ml-1">(leave empty to keep current)</span>
                     )}
@@ -369,7 +369,7 @@ export function ProvidersTab({
                   <div className="relative">
                     <Input
                       type={showApiKey ? "text" : "password"}
-                      placeholder={editingProvider ? "----------------" : "sk-..."}
+                      placeholder={editingProvider ? "----------------" : newProvider.provider_type === "bedrock" ? "ACCESS_KEY_ID:SECRET_ACCESS_KEY" : "sk-..."}
                       value={newProvider.api_key}
                       onChange={(e) => setNewProvider({ ...newProvider, api_key: e.target.value })}
                     />
@@ -383,13 +383,16 @@ export function ProvidersTab({
                       {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                     </Button>
                   </div>
+                  {newProvider.provider_type === "bedrock" && (
+                    <p className="text-xs text-muted-foreground">Format: ACCESS_KEY_ID:SECRET_ACCESS_KEY (or use AWS env vars)</p>
+                  )}
                 </div>
               )}
               {getProviderTypeConfig(newProvider.provider_type)?.fields.includes("api_base_url") && (
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">API Base URL</label>
+                  <label className="text-sm font-medium">{newProvider.provider_type === "bedrock" ? "AWS Region" : "API Base URL"}</label>
                   <Input
-                    placeholder={getProviderTypeConfig(newProvider.provider_type)?.default_api_base_url || "https://api.example.com"}
+                    placeholder={newProvider.provider_type === "bedrock" ? "us-east-1" : getProviderTypeConfig(newProvider.provider_type)?.default_api_base_url || "https://api.example.com"}
                     value={newProvider.api_base_url}
                     onChange={(e) => setNewProvider({ ...newProvider, api_base_url: e.target.value })}
                   />

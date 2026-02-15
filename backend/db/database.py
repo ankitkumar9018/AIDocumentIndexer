@@ -370,7 +370,8 @@ async def set_user_context(session: AsyncSession, user_id: str) -> None:
     """
     if db_config.database_type == "postgresql":
         await session.execute(
-            text(f"SET app.current_user_id = '{user_id}'")
+            text("SET app.current_user_id = :user_id"),
+            {"user_id": str(user_id)}
         )
 
 

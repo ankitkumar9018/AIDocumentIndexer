@@ -290,8 +290,8 @@ class SegmentScorer:
 
         if self.config.use_embeddings:
             try:
-                from backend.services.embeddings import get_embeddings_service
-                self._embedder = await get_embeddings_service()
+                from backend.services.embeddings import get_embedding_service
+                self._embedder = get_embedding_service()
                 self._initialized = True
             except Exception as e:
                 logger.warning("Failed to init embeddings for scorer", error=str(e))
@@ -309,7 +309,7 @@ class SegmentScorer:
         query_embedding = None
         if self._embedder and self.config.use_embeddings:
             try:
-                query_embedding = await self._embedder.embed_text(query)
+                query_embedding = self._embedder.embed_text(query)
             except Exception as e:
                 logger.debug("Failed to get query embedding", error=str(e))
 
@@ -338,7 +338,7 @@ class SegmentScorer:
         # Query relevance score
         if query_embedding and self._embedder:
             try:
-                segment_embedding = await self._embedder.embed_text(segment.text)
+                segment_embedding = self._embedder.embed_text(segment.text)
                 segment.query_score = self._cosine_similarity(
                     query_embedding, segment_embedding
                 )

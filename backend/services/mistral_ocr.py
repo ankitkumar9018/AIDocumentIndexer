@@ -259,14 +259,13 @@ class MistralOCRService:
             )
 
             if response.status_code != 200:
-                error_detail = response.text
                 logger.error(
                     "Mistral OCR API error",
                     status_code=response.status_code,
-                    error=error_detail,
+                    error=response.text,
                 )
                 raise RuntimeError(
-                    f"Mistral OCR API error ({response.status_code}): {error_detail}"
+                    f"Mistral OCR API error ({response.status_code})"
                 )
 
             result_data = response.json()

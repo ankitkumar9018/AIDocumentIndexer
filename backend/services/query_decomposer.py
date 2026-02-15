@@ -90,12 +90,21 @@ class QueryDecomposer:
     def _get_llm(self):
         """Lazy load LLM for decomposition."""
         if self._llm is None:
-            from langchain_openai import ChatOpenAI
-            self._llm = ChatOpenAI(
-                model=self.config.model,
-                temperature=0,
-                max_tokens=500,
-            )
+            try:
+                from backend.services.llm import LLMFactory
+                self._llm = LLMFactory.get_chat_model(
+                    model=self.config.model,
+                    temperature=0,
+                    max_tokens=500,
+                )
+            except Exception as e:
+                logger.warning(f"Factory LLM failed for decomposer, using direct OpenAI: {e}")
+                from langchain_openai import ChatOpenAI
+                self._llm = ChatOpenAI(
+                    model=self.config.model,
+                    temperature=0,
+                    max_tokens=500,
+                )
         return self._llm
 
     def _detect_query_type(self, query: str) -> str:

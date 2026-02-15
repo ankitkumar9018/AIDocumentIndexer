@@ -11,11 +11,12 @@ API endpoints for workflow management and execution:
 
 import uuid
 import json
+import hmac
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -367,7 +368,7 @@ async def list_workflows(
         logger.error("Failed to list workflows", error=str(e), user_id=user.user_id)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to load workflows: {str(e)}"
+            detail="Failed to load workflows"
         )
 
 
@@ -877,7 +878,7 @@ async def execute_workflow(
         logger.error("Workflow execution failed", error=str(e), exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Workflow execution failed: {str(e)}",
+            detail="Workflow execution failed",
         )
 
 
@@ -923,7 +924,7 @@ async def execute_workflow_stream(
 
         except Exception as e:
             logger.error("Streaming execution failed", error=str(e))
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Streaming execution failed'})}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -952,6 +953,15 @@ async def list_workflow_executions(
     )
 
     from sqlalchemy import func, desc
+
+    # Verify workflow ownership
+    wf_result = await db.execute(select(Workflow).where(Workflow.id == workflow_id))
+    workflow = wf_result.scalar_one_or_none()
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    org_id = get_org_id(user)
+    if org_id and workflow.organization_id and str(workflow.organization_id) != str(org_id):
+        raise HTTPException(status_code=404, detail="Workflow not found")
 
     # Build query
     query = select(WorkflowExecution).where(WorkflowExecution.workflow_id == workflow_id)
@@ -1002,6 +1012,14 @@ async def get_execution(
             detail="Execution not found",
         )
 
+    # Verify ownership via parent workflow
+    org_id = get_org_id(user)
+    if org_id and execution.workflow_id:
+        wf_result = await db.execute(select(Workflow).where(Workflow.id == execution.workflow_id))
+        workflow = wf_result.scalar_one_or_none()
+        if workflow and workflow.organization_id and str(workflow.organization_id) != str(org_id):
+            raise HTTPException(status_code=404, detail="Execution not found")
+
     # Get node executions
     node_result = await db.execute(
         select(WorkflowNodeExecution)
@@ -1033,6 +1051,14 @@ async def cancel_execution(
             detail="Execution not found",
         )
 
+    # Verify ownership via parent workflow
+    org_id = get_org_id(user)
+    if org_id and execution.workflow_id:
+        wf_result = await db.execute(select(Workflow).where(Workflow.id == execution.workflow_id))
+        workflow = wf_result.scalar_one_or_none()
+        if workflow and workflow.organization_id and str(workflow.organization_id) != str(org_id):
+            raise HTTPException(status_code=404, detail="Execution not found")
+
     if execution.status not in [WorkflowStatus.PENDING.value, WorkflowStatus.RUNNING.value]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1055,14 +1081,15 @@ async def cancel_execution(
 async def webhook_trigger(
     workflow_id: uuid.UUID,
     payload: Dict[str, Any],
+    request: Request,
     db: AsyncSession = Depends(get_async_session),
-    # Note: Webhook auth should be handled separately (e.g., signature verification)
 ):
     """
     Trigger a workflow via webhook.
 
     This endpoint can be called by external systems to trigger a workflow.
     The workflow must have trigger_type='webhook' and be active.
+    Requires X-Webhook-Secret header matching the workflow's configured webhook_secret.
     """
     logger.info("Webhook trigger received", workflow_id=str(workflow_id))
 
@@ -1074,6 +1101,22 @@ async def webhook_trigger(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Workflow not found",
+        )
+
+    # Verify webhook secret
+    webhook_secret = (workflow.config or {}).get("webhook_secret")
+    if not webhook_secret:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Webhook secret not configured for this workflow",
+        )
+
+    provided_secret = request.headers.get("X-Webhook-Secret", "")
+    if not hmac.compare_digest(provided_secret, webhook_secret):
+        logger.warning("Invalid webhook secret", workflow_id=str(workflow_id))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid webhook secret",
         )
 
     if not workflow.is_active:
@@ -1109,7 +1152,7 @@ async def webhook_trigger(
         logger.error("Webhook trigger failed", error=str(e), exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Workflow execution failed: {str(e)}",
+            detail="Workflow execution failed",
         )
 
 
@@ -1670,10 +1713,13 @@ async def share_workflow(
         from datetime import timedelta
         expires_at = datetime.utcnow() + timedelta(days=request.expires_in_days)
 
-    # Hash password if provided
+    # Hash password if provided (using scrypt with random salt)
     password_hash = None
     if request.password:
-        password_hash = hashlib.sha256(request.password.encode()).hexdigest()
+        import os
+        salt = os.urandom(16)
+        hash_bytes = hashlib.scrypt(request.password.encode(), salt=salt, n=16384, r=8, p=1)
+        password_hash = f"scrypt:{salt.hex()}:{hash_bytes.hex()}"
 
     # Create share link record
     share_id = uuid.uuid4()
@@ -2085,18 +2131,29 @@ async def submit_form_trigger(
             triggered_by_id=workflow.created_by_id,
         )
 
+        # Validate redirect URL — only allow relative paths (same-origin)
+        redirect_url = trigger_config.get("redirect_url")
+        if redirect_url:
+            from urllib.parse import urlparse
+            parsed = urlparse(redirect_url)
+            # Block absolute URLs to prevent open redirect to external domains
+            if parsed.scheme or parsed.netloc:
+                redirect_url = None
+            elif not redirect_url.startswith("/"):
+                redirect_url = None
+
         return {
             "message": trigger_config.get("success_message", "Form submitted successfully!"),
             "execution_id": str(execution.id),
             "status": execution.status,
-            "redirect_url": trigger_config.get("redirect_url"),
+            "redirect_url": redirect_url,
         }
 
     except Exception as e:
         logger.error("Form trigger failed", error=str(e), exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Form submission failed: {str(e)}",
+            detail="Form submission failed",
         )
 
 

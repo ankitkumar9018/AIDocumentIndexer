@@ -17,7 +17,7 @@ Features:
 import hashlib
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -262,7 +262,7 @@ class ResponseCacheService:
                 return None
 
             # Check if expired
-            if cache_entry.expires_at and cache_entry.expires_at < datetime.utcnow():
+            if cache_entry.expires_at and cache_entry.expires_at < datetime.now(timezone.utc):
                 logger.debug(
                     "Cache entry expired",
                     prompt_hash=prompt_hash[:8],
@@ -505,7 +505,7 @@ class ResponseCacheService:
 
             prompt_hash = self.hash_prompt(prompt, system_prompt)
             system_hash = self.hash_system_prompt(system_prompt) if system_prompt else None
-            expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
 
             # Generate query embedding for semantic caching (if enabled)
             query_embedding = None
@@ -744,7 +744,7 @@ class ResponseCacheService:
         """
         try:
             query = delete(ResponseCache).where(
-                ResponseCache.expires_at < datetime.utcnow()
+                ResponseCache.expires_at < datetime.now(timezone.utc)
             )
 
             result = await db.execute(query)

@@ -166,6 +166,11 @@ function CreatePageContent() {
   const [includeNotesExplanation, setIncludeNotesExplanation] = useState<boolean>(false);
   // Query Enhancement - controls query expansion + HyDE for source search
   const [enhanceQuery, setEnhanceQuery] = useState<boolean | null>(null);
+  // Intelligence features - shared across moodboard + doc generation
+  const [intelligenceLevel, setIntelligenceLevel] = useState<string | null>(null);
+  const [enableCot, setEnableCot] = useState(false);
+  const [enableVerification, setEnableVerification] = useState(false);
+  const [skipCache, setSkipCache] = useState(false);
 
   // Vision Analysis (PPTX only) - per-document overrides for template analysis
   const [enableTemplateVisionAnalysis, setEnableTemplateVisionAnalysis] = useState<boolean | null>(null);
@@ -388,11 +393,19 @@ function CreatePageContent() {
         model: selectedModelName || undefined,
         use_existing_docs: useExistingDocs,
         collection_filters: useExistingDocs && styleCollections.length > 0 ? styleCollections : undefined,
+        folder_id: useExistingDocs && styleFolderId ? styleFolderId : undefined,
+        include_subfolders: useExistingDocs ? includeStyleSubfolders : undefined,
         dual_mode: useExistingDocs && dualModeEnabled,
         multi_llm: multiLLMEnabled && multiLLMProviders.length > 1 ? {
           providers: multiLLMProviders.map(p => ({ provider_id: p.provider_id, model: p.model })),
           merge_strategy: multiLLMStrategy,
         } : undefined,
+        enhance_query: enhanceQuery ?? undefined,
+        temperature_override: temperatureMode === "manual" ? manualTemperature : undefined,
+        intelligence_level: intelligenceLevel || undefined,
+        enable_cot: enableCot || undefined,
+        enable_verification: enableVerification || undefined,
+        skip_cache: skipCache || undefined,
       });
 
       const data = response.data as any;
@@ -644,6 +657,11 @@ function CreatePageContent() {
               provider_id: selectedProviderId || undefined,
               model: selectedModelName || undefined,
               temperature_override: temperatureMode === "manual" ? manualTemperature : undefined,
+              // Intelligence features
+              intelligence_level: intelligenceLevel || undefined,
+              enable_cot: enableCot || undefined,
+              enable_verification: enableVerification || undefined,
+              skip_cache: skipCache || undefined,
               // Dual Mode (RAG + General)
               dual_mode: useExistingDocs && dualModeEnabled ? true : undefined,
               dual_mode_blend: useExistingDocs && dualModeEnabled ? dualModeBlend : undefined,
@@ -1080,94 +1098,89 @@ function CreatePageContent() {
                       <p className="text-sm">No saved mood boards yet.</p>
                       <p className="text-xs">Create one and click Save to see it here.</p>
                     </div>
+                  ) : viewingMoodBoard ? (
+                    /* Moodboard Viewer — Infinite Canvas (replaces gallery when viewing) */
+                    <MoodboardCanvas
+                      board={viewingMoodBoard}
+                      onClose={() => setViewingMoodBoard(null)}
+                      onBoardUpdate={(updated) => {
+                        setViewingMoodBoard(updated);
+                        setSavedMoodBoards((prev: any[]) => prev.map((b: any) => b.id === updated.id ? { ...b, ...updated } : b));
+                      }}
+                    />
                   ) : (
-                    <>
-                      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                        {savedMoodBoards.map((board: any) => (
-                          <Card key={board.id} className="cursor-pointer hover:border-primary/50 transition-colors">
-                            <CardContent className="p-4 space-y-3">
-                              {/* Color swatches */}
-                              <div className="flex gap-1">
-                                {(board.color_palette || []).slice(0, 6).map((color: string, i: number) => (
-                                  <div
-                                    key={i}
-                                    className="h-6 flex-1 rounded"
-                                    style={{ backgroundColor: color }}
-                                  />
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                      {savedMoodBoards.map((board: any) => (
+                        <Card key={board.id} className="cursor-pointer hover:border-primary/50 transition-colors">
+                          <CardContent className="p-4 space-y-3">
+                            {/* Color swatches */}
+                            <div className="flex gap-1">
+                              {(board.color_palette || []).slice(0, 6).map((color: string, i: number) => (
+                                <div
+                                  key={i}
+                                  className="h-6 flex-1 rounded"
+                                  style={{ backgroundColor: color }}
+                                />
+                              ))}
+                            </div>
+                            <div>
+                              <p className="font-medium text-sm truncate">{board.name}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {(board.color_palette || []).length} colors
+                                {(board.themes || []).length > 0 && <> &middot; {(board.themes || []).length} fonts</>}
+                                {" "}&middot; {new Date(board.created_at).toLocaleDateString()}
+                              </p>
+                            </div>
+                            {(board.style_tags || []).length > 0 && (
+                              <div className="flex flex-wrap gap-1">
+                                {(board.style_tags || []).slice(0, 3).map((tag: string) => (
+                                  <span key={tag} className="px-1.5 py-0.5 rounded bg-primary/10 text-primary text-[10px]">{tag}</span>
                                 ))}
+                                {(board.style_tags || []).length > 3 && (
+                                  <span className="text-[10px] text-muted-foreground">+{(board.style_tags || []).length - 3}</span>
+                                )}
                               </div>
-                              <div>
-                                <p className="font-medium text-sm truncate">{board.name}</p>
-                                <p className="text-xs text-muted-foreground">
-                                  {(board.color_palette || []).length} colors
-                                  {(board.themes || []).length > 0 && <> &middot; {(board.themes || []).length} fonts</>}
-                                  {" "}&middot; {new Date(board.created_at).toLocaleDateString()}
-                                </p>
-                              </div>
-                              {(board.style_tags || []).length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {(board.style_tags || []).slice(0, 3).map((tag: string) => (
-                                    <span key={tag} className="px-1.5 py-0.5 rounded bg-primary/10 text-primary text-[10px]">{tag}</span>
-                                  ))}
-                                  {(board.style_tags || []).length > 3 && (
-                                    <span className="text-[10px] text-muted-foreground">+{(board.style_tags || []).length - 3}</span>
-                                  )}
-                                </div>
-                              )}
-                              <div className="flex gap-2">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="text-xs flex-1"
-                                  onClick={async (e) => {
-                                    e.stopPropagation();
-                                    try {
-                                      const resp = await api.get(`/moodboard/${board.id}`);
-                                      setViewingMoodBoard(resp.data);
-                                    } catch {
-                                      setViewingMoodBoard(board);
-                                    }
-                                  }}
-                                >
-                                  <Eye className="h-3 w-3 mr-1" />
-                                  View
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="text-xs text-destructive hover:text-destructive"
-                                  onClick={async (e) => {
-                                    e.stopPropagation();
-                                    try {
-                                      await api.delete(`/moodboard/${board.id}`);
-                                      setSavedMoodBoards(savedMoodBoards.filter((b: any) => b.id !== board.id));
-                                      toast.success("Mood board deleted");
-                                    } catch {
-                                      toast.error("Failed to delete");
-                                    }
-                                  }}
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                </Button>
-                              </div>
-                            </CardContent>
-                          </Card>
-                        ))}
-                      </div>
-
-                      {/* Moodboard Viewer — Infinite Canvas */}
-                      {viewingMoodBoard && (
-                        <MoodboardCanvas
-                          board={viewingMoodBoard}
-                          onClose={() => setViewingMoodBoard(null)}
-                          onBoardUpdate={(updated) => {
-                            setViewingMoodBoard(updated);
-                            setSavedMoodBoards((prev: any[]) => prev.map((b: any) => b.id === updated.id ? { ...b, ...updated } : b));
-                          }}
-                        />
-                      )}
-
-                    </>
+                            )}
+                            <div className="flex gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="text-xs flex-1"
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  try {
+                                    const resp = await api.get(`/moodboard/${board.id}`);
+                                    setViewingMoodBoard(resp.data);
+                                  } catch {
+                                    setViewingMoodBoard(board);
+                                  }
+                                }}
+                              >
+                                <Eye className="h-3 w-3 mr-1" />
+                                View
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-xs text-destructive hover:text-destructive"
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  try {
+                                    await api.delete(`/moodboard/${board.id}`);
+                                    setSavedMoodBoards(savedMoodBoards.filter((b: any) => b.id !== board.id));
+                                    toast.success("Mood board deleted");
+                                  } catch {
+                                    toast.error("Failed to delete");
+                                  }
+                                }}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
                   )}
                 </div>
               )}
@@ -1535,6 +1548,65 @@ function CreatePageContent() {
                       </div>
                     )}
                   </div>
+
+                  {/* Intelligence Features */}
+                  <div className="space-y-2 pt-2 border-t border-border/50">
+                    <label className="text-xs text-muted-foreground font-medium">Intelligence</label>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <label className="text-xs text-muted-foreground">Level</label>
+                        <select
+                          value={intelligenceLevel || ""}
+                          onChange={(e) => setIntelligenceLevel(e.target.value || null)}
+                          className="w-full h-8 px-2 rounded-md border bg-background text-xs"
+                        >
+                          <option value="">Auto (system default)</option>
+                          <option value="basic">Basic (fast, fewer sources)</option>
+                          <option value="standard">Standard</option>
+                          <option value="enhanced">Enhanced (more sources)</option>
+                          <option value="maximum">Maximum (most thorough)</option>
+                        </select>
+                      </div>
+                      <div className="space-y-2 pt-1">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={enableCot}
+                            onClick={() => setEnableCot(!enableCot)}
+                            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${enableCot ? "bg-primary" : "bg-muted-foreground/30"}`}
+                          >
+                            <span className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${enableCot ? "translate-x-3.5" : "translate-x-0.5"}`} />
+                          </button>
+                          <span className="text-xs text-muted-foreground">Chain of Thought</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={enableVerification}
+                            onClick={() => setEnableVerification(!enableVerification)}
+                            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${enableVerification ? "bg-primary" : "bg-muted-foreground/30"}`}
+                          >
+                            <span className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${enableVerification ? "translate-x-3.5" : "translate-x-0.5"}`} />
+                          </button>
+                          <span className="text-xs text-muted-foreground">Source Verification</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={skipCache}
+                            onClick={() => setSkipCache(!skipCache)}
+                            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${skipCache ? "bg-primary" : "bg-muted-foreground/30"}`}
+                          >
+                            <span className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${skipCache ? "translate-x-3.5" : "translate-x-0.5"}`} />
+                          </button>
+                          <span className="text-xs text-muted-foreground">Fresh Results (skip cache)</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Multi-LLM Toggle */}
@@ -1649,24 +1721,34 @@ function CreatePageContent() {
                       <div className="space-y-2">
                         <p className="text-sm font-medium">Suggested Typography</p>
                         <div className="flex flex-wrap gap-2">
-                          {generatedMoodBoard.generatedSuggestions.typography.map((font: string) => (
-                            <span key={font} className="px-2 py-1 rounded bg-background border text-sm">{font}</span>
-                          ))}
+                          {generatedMoodBoard.generatedSuggestions.typography.map((font: any, idx: number) => {
+                            const fontName = typeof font === 'string' ? font : font?.font || 'Unknown';
+                            const role = typeof font === 'object' ? font?.role : undefined;
+                            return (
+                              <span key={`font-${idx}`} className="px-2 py-1 rounded bg-background border text-sm" title={role ? `Role: ${role}` : undefined}>
+                                {fontName}
+                              </span>
+                            );
+                          })}
                         </div>
                       </div>
 
                       <div className="space-y-2">
                         <p className="text-sm font-medium">Complementary Colors</p>
                         <div className="flex gap-2">
-                          {generatedMoodBoard.generatedSuggestions.additionalColors.map((color: string) => (
-                            <div key={color} className="flex items-center gap-1">
-                              <div
-                                className="w-6 h-6 rounded border"
-                                style={{ backgroundColor: color }}
-                              />
-                              <span className="text-xs font-mono text-muted-foreground">{color}</span>
-                            </div>
-                          ))}
+                          {generatedMoodBoard.generatedSuggestions.additionalColors.map((color: any, idx: number) => {
+                            const hex = typeof color === 'string' ? color : color?.hex || '#000000';
+                            const name = typeof color === 'object' ? color?.name : undefined;
+                            return (
+                              <div key={`color-${idx}`} className="flex items-center gap-1">
+                                <div
+                                  className="w-6 h-6 rounded border"
+                                  style={{ backgroundColor: hex }}
+                                />
+                                <span className="text-xs font-mono text-muted-foreground">{name || hex}</span>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
 
@@ -2316,6 +2398,65 @@ function CreatePageContent() {
                         <span className="text-xs font-mono w-8 text-right">{manualTemperature.toFixed(2)}</span>
                       </div>
                     )}
+                  </div>
+
+                  {/* Intelligence Features */}
+                  <div className="space-y-2 pt-2 border-t border-border/50">
+                    <label className="text-xs text-muted-foreground font-medium">Intelligence</label>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <label className="text-xs text-muted-foreground">Level</label>
+                        <select
+                          value={intelligenceLevel || ""}
+                          onChange={(e) => setIntelligenceLevel(e.target.value || null)}
+                          className="w-full h-8 px-2 rounded-md border bg-background text-xs"
+                        >
+                          <option value="">Auto (system default)</option>
+                          <option value="basic">Basic (fast, fewer sources)</option>
+                          <option value="standard">Standard</option>
+                          <option value="enhanced">Enhanced (more sources)</option>
+                          <option value="maximum">Maximum (most thorough)</option>
+                        </select>
+                      </div>
+                      <div className="space-y-2 pt-1">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={enableCot}
+                            onClick={() => setEnableCot(!enableCot)}
+                            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${enableCot ? "bg-primary" : "bg-muted-foreground/30"}`}
+                          >
+                            <span className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${enableCot ? "translate-x-3.5" : "translate-x-0.5"}`} />
+                          </button>
+                          <span className="text-xs text-muted-foreground">Chain of Thought</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={enableVerification}
+                            onClick={() => setEnableVerification(!enableVerification)}
+                            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${enableVerification ? "bg-primary" : "bg-muted-foreground/30"}`}
+                          >
+                            <span className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${enableVerification ? "translate-x-3.5" : "translate-x-0.5"}`} />
+                          </button>
+                          <span className="text-xs text-muted-foreground">Source Verification</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={skipCache}
+                            onClick={() => setSkipCache(!skipCache)}
+                            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${skipCache ? "bg-primary" : "bg-muted-foreground/30"}`}
+                          >
+                            <span className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${skipCache ? "translate-x-3.5" : "translate-x-0.5"}`} />
+                          </button>
+                          <span className="text-xs text-muted-foreground">Fresh Results (skip cache)</span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
 

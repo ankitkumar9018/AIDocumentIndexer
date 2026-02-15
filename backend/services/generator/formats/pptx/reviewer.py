@@ -1229,6 +1229,10 @@ If the slide looks visually correct: {{"issues": [], "scores": {{"design": 1.0, 
             shutil.rmtree(self._temp_dir, ignore_errors=True)
             self._temp_dir = None
 
+    def __del__(self):
+        """Ensure temp files are cleaned up on garbage collection."""
+        self.cleanup()
+
 
 async def create_ollama_vision_func(model: str = "llava") -> Optional[Callable]:
     """

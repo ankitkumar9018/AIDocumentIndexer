@@ -469,19 +469,19 @@ class DOCXGenerator(BaseFormatGenerator):
                                     tmp.write(generated_chart.image_bytes)
                                     tmp_path = tmp.name
 
-                                doc.add_paragraph()
-                                chart_para = doc.add_paragraph()
-                                chart_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                                chart_run = chart_para.add_run()
-                                chart_run.add_picture(tmp_path, width=Inches(6.0))
-                                doc.add_paragraph()
-
-                                rendered_as_chart = True
-
                                 try:
-                                    os.unlink(tmp_path)
-                                except Exception:
-                                    pass
+                                    doc.add_paragraph()
+                                    chart_para = doc.add_paragraph()
+                                    chart_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    chart_run = chart_para.add_run()
+                                    chart_run.add_picture(tmp_path, width=Inches(6.0))
+                                    doc.add_paragraph()
+                                    rendered_as_chart = True
+                                finally:
+                                    try:
+                                        os.unlink(tmp_path)
+                                    except Exception:
+                                        pass
 
                     except Exception as e:
                         logger.warning(f"Chart detection failed: {e}")

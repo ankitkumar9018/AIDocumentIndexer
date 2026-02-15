@@ -73,14 +73,14 @@ class ProviderRateLimiter:
     }
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._requests: Dict[str, list] = defaultdict(list)
         self._enabled = True
 
     def _get_limit(self, provider: str) -> int:
         return self.DEFAULT_LIMITS.get(provider.lower(), self.DEFAULT_LIMITS["default"])
 
-    def check(self, provider: str) -> bool:
+    async def check(self, provider: str) -> bool:
         """Check if a request is allowed. Returns True if allowed."""
         if not self._enabled:
             return True
@@ -90,7 +90,7 @@ class ProviderRateLimiter:
         now = time.time()
         window = 60.0  # 1 minute
 
-        with self._lock:
+        async with self._lock:
             # Clean old entries
             cutoff = now - window
             self._requests[provider] = [t for t in self._requests[provider] if t > cutoff]
@@ -107,7 +107,7 @@ class ProviderRateLimiter:
             self._requests[provider].append(now)
             return True
 
-    def wait_if_needed(self, provider: str) -> float:
+    async def wait_if_needed(self, provider: str) -> float:
         """
         Check rate limit. If exceeded, return seconds to wait.
         Returns 0 if request is allowed.
@@ -120,7 +120,7 @@ class ProviderRateLimiter:
         now = time.time()
         window = 60.0
 
-        with self._lock:
+        async with self._lock:
             cutoff = now - window
             self._requests[provider] = [t for t in self._requests[provider] if t > cutoff]
 
@@ -143,26 +143,31 @@ _provider_rate_limiter = ProviderRateLimiter()
 # =============================================================================
 
 _vllm_settings_cache: Dict[str, Optional[str]] = {}
+_auto_provider_cache: Dict[str, Optional[str]] = {}
 
 
 def _get_vllm_setting(key: str) -> Optional[str]:
-    """Get a vLLM/infrastructure setting from DB (cached, sync-safe)."""
+    """Get a vLLM/infrastructure setting from DB (cached, sync-safe).
+
+    Uses sync DB session to avoid issues with running event loops in FastAPI.
+    """
     if key in _vllm_settings_cache:
         return _vllm_settings_cache[key]
 
     try:
-        import asyncio
-        from backend.services.settings import get_settings_service
-        settings_svc = get_settings_service()
+        from backend.db.database import get_sync_session
+        from backend.db.models import SystemSettings
+        from sqlalchemy import select
+        session = get_sync_session()
         try:
-            asyncio.get_running_loop()
-            # Running loop exists — can't await. Return None, use env fallback.
-            return None
-        except RuntimeError:
-            # No running loop — safe to run sync
-            value = asyncio.run(settings_svc.get_setting(key))
+            result = session.execute(
+                select(SystemSettings.value).where(SystemSettings.key == key)
+            )
+            value = result.scalar_one_or_none()
             _vllm_settings_cache[key] = value
             return value
+        finally:
+            session.close()
     except Exception:
         return None
 
@@ -170,6 +175,7 @@ def _get_vllm_setting(key: str) -> Optional[str]:
 def invalidate_llm_infra_cache():
     """Invalidate cached LLM infrastructure settings."""
     _vllm_settings_cache.clear()
+    _auto_provider_cache.clear()
 
 
 # =============================================================================
@@ -214,12 +220,20 @@ class LLMConfig:
         self.default_temperature = float(os.getenv("DEFAULT_TEMPERATURE", "0.7"))
         self.default_max_tokens = int(os.getenv("DEFAULT_MAX_TOKENS", "4096"))
 
+    # All valid provider types for inference backend
+    VALID_PROVIDERS = frozenset({
+        "ollama", "vllm", "openai", "anthropic", "azure", "google",
+        "groq", "together", "cohere", "deepinfra", "bedrock", "custom", "auto",
+    })
+
     def _resolve_default_provider(self) -> str:
         """
         Resolve the default LLM provider with smart detection.
 
         Priority:
         1. Settings DB (llm.inference_backend) — admin-configurable
+           - "auto": use the default provider from LLMProvider DB table
+           - explicit provider name: use that provider directly
         2. Explicitly set DEFAULT_LLM_PROVIDER env var (legacy)
         3. Ollama if enabled (free, local)
         4. OpenAI if API key is set
@@ -238,7 +252,13 @@ class LLMConfig:
             except RuntimeError:
                 # No running loop — safe to run
                 backend = asyncio.run(settings_svc.get_setting("llm.inference_backend"))
-                if backend and backend in ("ollama", "vllm", "openai", "anthropic"):
+                if backend == "auto":
+                    # Auto mode: use the default provider from LLMProvider DB table
+                    resolved = self._resolve_auto_provider()
+                    if resolved:
+                        return resolved
+                    # Fall through to env-based detection if no DB provider set
+                elif backend and backend in self.VALID_PROVIDERS:
                     return backend
         except Exception:
             pass  # Settings not available yet (startup), fall through
@@ -264,6 +284,45 @@ class LLMConfig:
 
         # 5. Default to ollama
         return "ollama"
+
+    @staticmethod
+    def _resolve_auto_provider() -> Optional[str]:
+        """
+        Resolve provider from the default LLMProvider in the database.
+        Returns provider_type string or None if no default provider is configured.
+        Uses sync-safe pattern: returns None when event loop is running (FastAPI context).
+        """
+        if "default" in _auto_provider_cache:
+            return _auto_provider_cache["default"]
+
+        try:
+            import asyncio
+            try:
+                asyncio.get_running_loop()
+                # Running loop exists (FastAPI) — can't use asyncio.run(). Return None.
+                return None
+            except RuntimeError:
+                pass  # No running loop — safe to run sync
+
+            from sqlalchemy import select
+            from backend.db.database import async_session_context
+            from backend.db.models import LLMProvider
+
+            async def _get_default():
+                async with async_session_context() as session:
+                    result = await session.execute(
+                        select(LLMProvider.provider_type).where(
+                            LLMProvider.is_default == True,
+                            LLMProvider.is_active == True,
+                        )
+                    )
+                    return result.scalar_one_or_none()
+
+            resolved = asyncio.run(_get_default())
+            _auto_provider_cache["default"] = resolved
+            return resolved
+        except Exception:
+            return None
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
@@ -295,13 +354,26 @@ class LLMFactory:
     _max_cache_size: int = int(os.getenv("LLM_MAX_CACHE_SIZE", "50"))
 
     @classmethod
+    def clear_cache(cls) -> None:
+        """Clear all cached LLM instances. Called when provider settings change."""
+        count = len(cls._instances) + len(cls._embedding_instances)
+        cls._instances.clear()
+        cls._embedding_instances.clear()
+        _auto_provider_cache.clear()
+        if count > 0:
+            logger.info("Cleared LLM instance cache", evicted=count)
+
+    _cache_lock = threading.Lock()
+
+    @classmethod
     def _evict_oldest(cls, cache: Dict, max_size: int) -> None:
         """Evict oldest entries from cache if it exceeds max size (LRU-style)."""
-        while len(cache) > max_size:
-            # Python 3.7+ dicts maintain insertion order, so first key is oldest
-            oldest_key = next(iter(cache))
-            del cache[oldest_key]
-            logger.debug("Evicted oldest LLM instance from cache", key=oldest_key)
+        with cls._cache_lock:
+            while len(cache) > max_size:
+                # Python 3.7+ dicts maintain insertion order, so first key is oldest
+                oldest_key = next(iter(cache))
+                del cache[oldest_key]
+                logger.debug("Evicted oldest LLM instance from cache", key=oldest_key)
 
     @classmethod
     def get_chat_model(
@@ -399,6 +471,13 @@ class LLMFactory:
             **kwargs,
         )
 
+    # Default API base URLs for OpenAI-compatible cloud providers
+    PROVIDER_API_BASES = {
+        "groq": "https://api.groq.com/openai/v1",
+        "together": "https://api.together.xyz/v1",
+        "deepinfra": "https://api.deepinfra.com/v1/openai",
+    }
+
     @classmethod
     def _create_litellm_model(
         cls,
@@ -409,6 +488,10 @@ class LLMFactory:
         **kwargs,
     ) -> BaseChatModel:
         """Create model using LiteLLM."""
+
+        # Extract api_key and api_base from kwargs (passed from DB provider config)
+        api_key = kwargs.pop("api_key", None)
+        api_base = kwargs.pop("api_base", None)
 
         # Build LiteLLM model string
         if provider == "openai":
@@ -421,10 +504,15 @@ class LLMFactory:
             # Phase 68: vLLM integration - 2-4x faster inference
             # Route through OpenAI-compatible API
             litellm_model = f"openai/{model}"
+        elif provider == "bedrock":
+            litellm_model = f"bedrock/{model}"
+        elif provider in ("groq", "together", "deepinfra", "custom"):
+            # OpenAI-compatible providers — route through openai prefix for LiteLLM
+            litellm_model = f"openai/{model}"
         else:
             litellm_model = f"{provider}/{model}"
 
-        # Additional params for Ollama
+        # Build extra params based on provider
         extra_params = {}
         if provider == "ollama":
             extra_params["api_base"] = llm_config.ollama_host
@@ -433,8 +521,23 @@ class LLMFactory:
             # Settings DB takes priority over env vars
             vllm_api_base = _get_vllm_setting("llm.vllm_api_base") or os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
             vllm_api_key = _get_vllm_setting("llm.vllm_api_key") or os.getenv("VLLM_API_KEY", "dummy")
-            extra_params["api_base"] = vllm_api_base
-            extra_params["api_key"] = vllm_api_key
+            extra_params["api_base"] = api_base or vllm_api_base
+            extra_params["api_key"] = api_key or vllm_api_key
+        elif provider in cls.PROVIDER_API_BASES:
+            # OpenAI-compatible cloud providers — set api_base and api_key
+            extra_params["api_base"] = api_base or cls.PROVIDER_API_BASES[provider]
+            if api_key:
+                extra_params["api_key"] = api_key
+        elif provider == "custom":
+            # Custom provider needs api_base
+            if api_base:
+                extra_params["api_base"] = api_base
+            if api_key:
+                extra_params["api_key"] = api_key
+
+        # Pass through api_key for standard cloud providers (openai, anthropic, etc.)
+        if api_key and "api_key" not in extra_params and provider not in ("ollama",):
+            extra_params["api_key"] = api_key
 
         return ChatLiteLLM(
             model=litellm_model,
@@ -456,51 +559,162 @@ class LLMFactory:
         """Create model using native LangChain integrations."""
 
         if provider == "openai":
+            api_key = kwargs.pop("api_key", None) or llm_config.openai_api_key
+            kwargs.pop("api_base", None)  # not used for direct openai
             return ChatOpenAI(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                api_key=llm_config.openai_api_key,
+                api_key=api_key,
                 **kwargs,
             )
 
         elif provider == "ollama":
             from langchain_ollama import ChatOllama
             num_ctx = kwargs.pop("num_ctx", 4096)
+            kwargs.pop("api_key", None)  # ollama doesn't use api_key
+            custom_base = kwargs.pop("api_base", None)  # DB-configured URL override
             return ChatOllama(
                 model=model,
                 temperature=temperature,
-                base_url=llm_config.ollama_host,
+                base_url=custom_base or llm_config.ollama_host,
                 num_ctx=num_ctx,
                 **kwargs,
             )
 
         elif provider == "anthropic":
+            api_key = kwargs.pop("api_key", None) or llm_config.anthropic_api_key
+            kwargs.pop("api_base", None)  # not used for anthropic
             from langchain_anthropic import ChatAnthropic
             return ChatAnthropic(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                api_key=llm_config.anthropic_api_key,
+                api_key=api_key,
                 **kwargs,
             )
 
         elif provider == "vllm":
             # Phase 68: vLLM integration - use OpenAI-compatible interface
             # Settings DB takes priority over env vars
-            vllm_api_base = _get_vllm_setting("llm.vllm_api_base") or os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
-            vllm_api_key = _get_vllm_setting("llm.vllm_api_key") or os.getenv("VLLM_API_KEY", "dummy")
+            api_key = kwargs.pop("api_key", None)
+            api_base = kwargs.pop("api_base", None)
+            vllm_api_base = api_base or _get_vllm_setting("llm.vllm_api_base") or os.getenv("VLLM_API_BASE", "http://localhost:8000/v1")
+            vllm_api_key = api_key or _get_vllm_setting("llm.vllm_api_key") or os.getenv("VLLM_API_KEY", "dummy")
             return ChatOpenAI(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                openai_api_key=vllm_api_key,
-                openai_api_base=vllm_api_base,
+                api_key=vllm_api_key,
+                base_url=vllm_api_base,
                 **kwargs,
             )
 
+        elif provider in ("groq", "together", "deepinfra", "custom"):
+            # OpenAI-compatible providers — use ChatOpenAI with custom base URL
+            api_key = kwargs.pop("api_key", None)
+            api_base = kwargs.pop("api_base", None)
+            provider_base = api_base or cls.PROVIDER_API_BASES.get(provider, "")
+            if not api_key and not provider_base:
+                raise ValueError(f"Provider '{provider}' requires api_key or api_base. Configure in Settings > Providers.")
+            native_kwargs = {}
+            if provider_base:
+                native_kwargs["base_url"] = provider_base
+            if api_key:
+                native_kwargs["api_key"] = api_key
+            return ChatOpenAI(
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **native_kwargs,
+                **kwargs,
+            )
+
+        elif provider == "google":
+            api_key = kwargs.pop("api_key", None)
+            kwargs.pop("api_base", None)  # not used for google
+            try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                return ChatGoogleGenerativeAI(
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    google_api_key=api_key,
+                    **kwargs,
+                )
+            except ImportError:
+                raise ValueError("Google provider requires: pip install langchain-google-genai")
+
+        elif provider == "cohere":
+            api_key = kwargs.pop("api_key", None)
+            kwargs.pop("api_base", None)
+            try:
+                from langchain_cohere import ChatCohere
+                return ChatCohere(
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    cohere_api_key=api_key,
+                    **kwargs,
+                )
+            except ImportError:
+                raise ValueError("Cohere provider requires: pip install langchain-cohere")
+
+        elif provider == "azure":
+            api_key = kwargs.pop("api_key", None)
+            api_base = kwargs.pop("api_base", None)
+            try:
+                from langchain_openai import AzureChatOpenAI
+                return AzureChatOpenAI(
+                    azure_deployment=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    azure_endpoint=api_base or "",
+                    api_key=api_key or "",
+                    api_version="2024-02-01",
+                    **kwargs,
+                )
+            except ImportError:
+                raise ValueError("Azure provider requires: pip install langchain-openai")
+
+        elif provider == "bedrock":
+            api_key = kwargs.pop("api_key", None)
+            api_base = kwargs.pop("api_base", None)  # region
+            # Split combined key format: "ACCESS_KEY_ID:SECRET_ACCESS_KEY"
+            aws_access_key = None
+            aws_secret_key = None
+            if api_key and ":" in api_key:
+                parts = api_key.split(":", 1)
+                aws_access_key = parts[0]
+                aws_secret_key = parts[1]
+            elif api_key:
+                aws_access_key = api_key
+            # Fallback to env vars (standard AWS credential chain)
+            if not aws_access_key:
+                aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+            if not aws_secret_key:
+                aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+            try:
+                from langchain_aws import ChatBedrock
+                bedrock_kwargs: Dict[str, Any] = {
+                    "model_id": model,
+                    "region_name": api_base or os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+                    "model_kwargs": {"temperature": temperature, "max_tokens": max_tokens},
+                }
+                if aws_access_key and aws_secret_key:
+                    import boto3
+                    bedrock_kwargs["client"] = boto3.client(
+                        "bedrock-runtime",
+                        region_name=bedrock_kwargs["region_name"],
+                        aws_access_key_id=aws_access_key,
+                        aws_secret_access_key=aws_secret_key,
+                    )
+                return ChatBedrock(**bedrock_kwargs, **kwargs)
+            except ImportError:
+                raise ValueError("Bedrock provider requires: pip install langchain-aws boto3")
+
         else:
-            raise ValueError(f"Unsupported provider without LiteLLM: {provider}")
+            raise ValueError(f"Unsupported provider without LiteLLM: {provider}. Install litellm or use a supported provider.")
 
     @classmethod
     def get_embeddings(
@@ -627,12 +841,6 @@ class LLMFactory:
                 temperature=temperature,
             )
 
-    @classmethod
-    def clear_cache(cls) -> None:
-        """Clear all cached model instances."""
-        cls._instances.clear()
-        cls._embedding_instances.clear()
-        logger.info("LLM cache cleared")
 
 
 # =============================================================================
@@ -1003,6 +1211,12 @@ class LLMConfigManager:
         for key in keys_to_remove:
             cls._cache.pop(key, None)
 
+        # Clear all session override caches (can't know which sessions reference
+        # this provider without scanning, so clear all session entries)
+        session_keys = [k for k in cls._cache.keys() if k.startswith("session:")]
+        for key in session_keys:
+            cls._cache.pop(key, None)
+
         logger.info("Provider-related cache invalidated", provider_id=provider_id)
 
     @classmethod
@@ -1080,7 +1294,7 @@ class LLMConfigManager:
                         return fallback_config
 
                 # Try any healthy provider
-                healthy_config = await cls._get_healthy_provider(db, health_checker)
+                healthy_config = await cls._get_healthy_provider(db, health_checker, exclude_provider_id=config.provider_id)
                 if healthy_config:
                     logger.info(
                         "Using healthy fallback provider",
@@ -1143,10 +1357,13 @@ class LLMConfigManager:
         cls,
         db,
         health_checker,
+        exclude_provider_id: Optional[str] = None,
     ) -> Optional[LLMConfigResult]:
         """Get any healthy provider as fallback."""
         try:
-            healthy_provider = await health_checker.get_healthy_provider_for_failover(db)
+            healthy_provider = await health_checker.get_healthy_provider_for_failover(
+                exclude_provider_id=exclude_provider_id
+            )
             if healthy_provider:
                 from backend.db.models import LLMProvider
                 from sqlalchemy import select
@@ -1338,6 +1555,11 @@ class EnhancedLLMFactory:
                 litellm_model = f"ollama/{config.model}"
             elif config.provider_type == "anthropic":
                 litellm_model = f"anthropic/{config.model}"
+            elif config.provider_type == "bedrock":
+                litellm_model = f"bedrock/{config.model}"
+            elif config.provider_type in ("groq", "together", "deepinfra", "vllm", "custom"):
+                # OpenAI-compatible providers — use openai/ prefix
+                litellm_model = f"openai/{config.model}"
             else:
                 litellm_model = f"{config.provider_type}/{config.model}"
 
@@ -1348,34 +1570,30 @@ class EnhancedLLMFactory:
                 model_kwargs.setdefault("model_kwargs", {})
                 model_kwargs["model_kwargs"]["num_ctx"] = num_ctx
 
+            # For OpenAI-compatible providers, set api_base if not already set
+            if config.provider_type in LLMFactory.PROVIDER_API_BASES and "api_base" not in model_kwargs:
+                model_kwargs["api_base"] = LLMFactory.PROVIDER_API_BASES[config.provider_type]
+
             return ChatLiteLLM(
                 model=litellm_model,
                 **model_kwargs,
             )
 
-        # Fallback to native implementations
-        if config.provider_type == "openai":
-            return ChatOpenAI(
-                model=config.model,
-                **model_kwargs,
-            )
-        elif config.provider_type == "ollama":
-            from langchain_ollama import ChatOllama
-            num_ctx = kwargs.pop("num_ctx", 4096)
-            return ChatOllama(
-                model=config.model,
-                temperature=config.temperature,
-                base_url=config.api_base_url or llm_config.ollama_host,
-                num_ctx=num_ctx,
-            )
-        elif config.provider_type == "anthropic":
-            from langchain_anthropic import ChatAnthropic
-            return ChatAnthropic(
-                model=config.model,
-                **model_kwargs,
-            )
-        else:
-            raise ValueError(f"Unsupported provider without LiteLLM: {config.provider_type}")
+        # Fallback to native implementations — delegate to LLMFactory._create_native_model
+        # which supports all providers (openai, ollama, anthropic, vllm, groq, together,
+        # deepinfra, google, cohere, azure, bedrock, custom)
+        native_kwargs = {**kwargs}
+        if config.api_key:
+            native_kwargs["api_key"] = config.api_key
+        if config.api_base_url:
+            native_kwargs["api_base"] = config.api_base_url
+        return LLMFactory._create_native_model(
+            provider=config.provider_type,
+            model=config.model,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
+            **native_kwargs,
+        )
 
     @classmethod
     def _create_embeddings_from_config(
@@ -1606,7 +1824,7 @@ async def generate_response(
         str: Generated response
     """
     effective_provider = provider or llm_config.default_provider
-    wait = _provider_rate_limiter.wait_if_needed(effective_provider)
+    wait = await _provider_rate_limiter.wait_if_needed(effective_provider)
     if wait > 0:
         logger.info("Rate limit backpressure", provider=effective_provider, wait_seconds=round(wait, 1))
         await asyncio.sleep(wait)
@@ -1722,6 +1940,49 @@ async def test_embeddings_connection(provider: Optional[str] = None) -> Dict[str
         }
 
 
+def _validate_ollama_url(url: str) -> str:
+    """Validate Ollama base URL doesn't target dangerous internal networks.
+
+    Allows localhost (Ollama runs locally) and LAN IPs (remote Ollama on LAN),
+    but blocks cloud metadata, link-local, and reserved ranges.
+
+    Returns validated URL or raises ValueError.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Invalid Ollama URL: no hostname")
+
+    blocked = {"metadata.google.internal", "metadata.gcp.internal", "169.254.169.254"}
+    if hostname in blocked:
+        raise ValueError("Ollama URL blocked: targets metadata endpoint")
+
+    # Allow localhost — Ollama typically runs locally
+    if hostname in ("localhost", "127.0.0.1", "::1"):
+        return url
+
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_link_local or ip.is_reserved:
+            raise ValueError("Ollama URL blocked: targets link-local/reserved network")
+    except ValueError as ve:
+        if "blocked" in str(ve):
+            raise
+        # Not an IP — resolve DNS and check
+        try:
+            resolved = ipaddress.ip_address(socket.gethostbyname(hostname))
+            if resolved.is_link_local or resolved.is_reserved:
+                raise ValueError("Ollama URL blocked: resolves to link-local/reserved network")
+        except socket.gaierror:
+            pass
+
+    return url
+
+
 async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
     """
     List available models from local Ollama instance.
@@ -1734,7 +1995,7 @@ async def list_ollama_models(base_url: str = None) -> Dict[str, Any]:
     """
     import httpx
 
-    ollama_url = base_url or llm_config.ollama_host
+    ollama_url = _validate_ollama_url(base_url or llm_config.ollama_host)
 
     try:
         async with httpx.AsyncClient() as client:
@@ -1897,7 +2158,7 @@ async def get_ollama_model_context_length(model_name: str = None, base_url: str 
     """
     import httpx
 
-    ollama_url = base_url or llm_config.ollama_host
+    ollama_url = _validate_ollama_url(base_url or llm_config.ollama_host)
 
     if not model_name:
         model_name = os.getenv("DEFAULT_CHAT_MODEL", "llama3.2:latest")
@@ -1966,7 +2227,7 @@ async def pull_ollama_model(model_name: str, base_url: str = None) -> Dict[str, 
     """
     import httpx
 
-    ollama_url = base_url or llm_config.ollama_host
+    ollama_url = _validate_ollama_url(base_url or llm_config.ollama_host)
 
     logger.info("Pulling Ollama model", model_name=model_name, ollama_url=ollama_url)
 
@@ -2019,7 +2280,7 @@ async def delete_ollama_model(model_name: str, base_url: str = None) -> Dict[str
     """
     import httpx
 
-    ollama_url = base_url or llm_config.ollama_host
+    ollama_url = _validate_ollama_url(base_url or llm_config.ollama_host)
 
     logger.info("Deleting Ollama model", model_name=model_name, ollama_url=ollama_url)
 

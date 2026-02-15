@@ -7,6 +7,7 @@ Redis-backed cache with automatic in-memory fallback.
 
 import json
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
@@ -68,10 +69,9 @@ class RedisBackedCache(BaseCache[T]):
 
         self.redis_enabled_check = redis_enabled_check
 
-        # Memory fallback cache
-        self._memory_cache: Dict[str, Any] = {}
+        # Memory fallback cache (OrderedDict for O(1) LRU operations)
+        self._memory_cache: OrderedDict[str, Any] = OrderedDict()
         self._memory_timestamps: Dict[str, tuple[float, int]] = {}  # key -> (created_at, ttl)
-        self._memory_order: List[str] = []
 
     async def _get_redis_client(self):
         """Get Redis client if available."""
@@ -142,7 +142,6 @@ class RedisBackedCache(BaseCache[T]):
         count = len(self._memory_cache)
         self._memory_cache.clear()
         self._memory_timestamps.clear()
-        self._memory_order.clear()
         return count
 
     # =========================================================================
@@ -161,10 +160,8 @@ class RedisBackedCache(BaseCache[T]):
             self._stats.memory_misses += 1
             return None
 
-        # Update LRU order
-        if key in self._memory_order:
-            self._memory_order.remove(key)
-        self._memory_order.append(key)
+        # Update LRU order — O(1) with OrderedDict
+        self._memory_cache.move_to_end(key)
 
         self._stats.memory_hits += 1
         return self._memory_cache[key]
@@ -182,10 +179,8 @@ class RedisBackedCache(BaseCache[T]):
         self._memory_cache[key] = value
         self._memory_timestamps[key] = (time.time(), ttl)
 
-        # Update LRU order
-        if key in self._memory_order:
-            self._memory_order.remove(key)
-        self._memory_order.append(key)
+        # Update LRU order — O(1) with OrderedDict
+        self._memory_cache.move_to_end(key)
 
         self._stats.size = len(self._memory_cache)
 
@@ -193,8 +188,6 @@ class RedisBackedCache(BaseCache[T]):
         """Remove key from memory cache."""
         self._memory_cache.pop(key, None)
         self._memory_timestamps.pop(key, None)
-        if key in self._memory_order:
-            self._memory_order.remove(key)
         self._stats.size = len(self._memory_cache)
 
     def _is_memory_expired(self, key: str) -> bool:
@@ -217,18 +210,16 @@ class RedisBackedCache(BaseCache[T]):
             self._stats.evictions += 1
 
     def _memory_evict_lru(self) -> None:
-        """Evict oldest entries if at capacity."""
-        while len(self._memory_cache) >= self.max_items and self._memory_order:
-            oldest = self._memory_order.pop(0)
-            self._memory_cache.pop(oldest, None)
-            self._memory_timestamps.pop(oldest, None)
+        """Evict oldest entries if at capacity. O(1) per eviction with OrderedDict."""
+        while len(self._memory_cache) >= self.max_items and self._memory_cache:
+            oldest_key, _ = self._memory_cache.popitem(last=False)
+            self._memory_timestamps.pop(oldest_key, None)
             self._stats.evictions += 1
 
     def clear_memory_cache(self) -> None:
         """Clear only the in-memory fallback cache."""
         self._memory_cache.clear()
         self._memory_timestamps.clear()
-        self._memory_order.clear()
         self._stats.size = 0
 
     def get_stats(self) -> CacheStats:

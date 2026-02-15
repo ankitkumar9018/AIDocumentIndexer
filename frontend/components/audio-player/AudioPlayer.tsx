@@ -84,6 +84,7 @@ export function AudioPlayer({
   const [playbackRate, setPlaybackRate] = useState(1);
   const [activeSegmentIndex, setActiveSegmentIndex] = useState(-1);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const blobUrlRef = useRef<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Fetch audio with auth and create blob URL
@@ -106,6 +107,7 @@ export function AudioPlayer({
           const blob = await response.blob();
           if (!cancelled) {
             const url = URL.createObjectURL(blob);
+            blobUrlRef.current = url;
             setBlobUrl(url);
             // Note: isLoading will be set to false by handleCanPlay/handleLoadedMetadata
           }
@@ -127,8 +129,9 @@ export function AudioPlayer({
 
     return () => {
       cancelled = true;
-      if (blobUrl && blobUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(blobUrl);
+      if (blobUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
       }
     };
   }, [src]);

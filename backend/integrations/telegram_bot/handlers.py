@@ -45,8 +45,8 @@ class TelegramCommandHandler:
             try:
                 from backend.services.rag import RAGService
                 self._rag_service = RAGService()
-            except ImportError:
-                logger.warning("RAG service not available")
+            except Exception as e:
+                logger.warning("RAG service not available", error=str(e))
         return self._rag_service
 
     async def _get_search_service(self):

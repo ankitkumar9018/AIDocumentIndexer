@@ -124,12 +124,15 @@ export function PDFViewer({
 
   // Load PDF document
   useEffect(() => {
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+
     const loadDocument = async () => {
       if (typeof window === 'undefined' || !(window as any).pdfjsLib) {
         // Wait for PDF.js to load
-        const checkInterval = setInterval(() => {
+        pollInterval = setInterval(() => {
           if ((window as any).pdfjsLib) {
-            clearInterval(checkInterval);
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = null;
             loadDocument();
           }
         }, 100);
@@ -158,6 +161,7 @@ export function PDFViewer({
     loadDocument();
 
     return () => {
+      if (pollInterval) clearInterval(pollInterval);
       pdfDoc?.destroy();
     };
   }, [url]);

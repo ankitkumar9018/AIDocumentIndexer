@@ -24,6 +24,7 @@ import {
   Hash,
   HelpCircle
 } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface ConflictSource {
   document_id: string;
@@ -83,17 +84,12 @@ export function ConflictDetector() {
         setProgress((prev) => Math.min(prev + 5, 90));
       }, 300);
 
-      const response = await fetch("/api/v1/intelligence/conflicts/analyze", {
-        method: "POST",
-      });
+      const { data } = await api.post<ConflictReport>("/intelligence/conflicts/analyze");
 
       clearInterval(progressInterval);
       setProgress(100);
 
-      if (response.ok) {
-        const data = await response.json();
-        setReport(data);
-      }
+      setReport(data);
     } catch (error) {
       console.error("Analysis failed:", error);
     } finally {
@@ -106,13 +102,9 @@ export function ConflictDetector() {
     if (!selectedConflict) return;
 
     try {
-      await fetch(`/api/v1/intelligence/conflicts/${selectedConflict.id}/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          resolution_type: resolutionChoice,
-          notes: resolution,
-        }),
+      await api.post(`/intelligence/conflicts/${selectedConflict.id}/resolve`, {
+        resolution_type: resolutionChoice,
+        notes: resolution,
       });
 
       // Update local state

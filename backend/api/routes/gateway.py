@@ -13,12 +13,15 @@ from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request, s
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+import structlog
 
 from backend.api.deps import (
     get_async_session as get_db_session,
     get_current_user,
     get_current_organization_id,
 )
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -175,7 +178,8 @@ async def chat_completions(
                     yield f"data: {chunk}\n\n"
                 yield "data: [DONE]\n\n"
             except Exception as e:
-                yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+                logger.error("Gateway streaming error", error=str(e))
+                yield f"data: {{\"error\": \"Streaming error\"}}\n\n"
 
         return StreamingResponse(
             stream_generator(),
@@ -185,8 +189,11 @@ async def chat_completions(
         try:
             response = await gateway.complete(gateway_request, api_key)
             return response.to_openai_format()
+        except HTTPException:
+            raise  # Re-raise FastAPI HTTP exceptions with their original status
         except Exception as e:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            logger.error("Gateway completion failed", error=str(e))
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Gateway request failed")
 
 
 @router.get("/v1/models")
@@ -559,6 +566,11 @@ async def get_usage_stats(
     """Get usage statistics."""
     from backend.services.llm_gateway.usage import UsageTracker
 
+    # Restrict non-admin users to their own data
+    if user_id and user_id != current_user.get("sub"):
+        if current_user.get("role") != "admin":
+            user_id = current_user.get("sub")
+
     tracker = UsageTracker(
         session=session,
         organization_id=organization_id,
@@ -582,6 +594,11 @@ async def get_daily_usage(
 ):
     """Get daily usage for the past N days."""
     from backend.services.llm_gateway.usage import UsageTracker
+
+    # Restrict non-admin users to their own data
+    if user_id and user_id != current_user.get("sub"):
+        if current_user.get("role") != "admin":
+            user_id = current_user.get("sub")
 
     tracker = UsageTracker(
         session=session,

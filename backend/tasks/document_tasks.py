@@ -461,7 +461,7 @@ def embedding_task(
 
         async def _embed():
             service = get_embedding_service(use_ray=should_use_ray)
-            embeddings = await service.embed_texts(texts, model=model)
+            embeddings = service.embed_texts(texts)
             return embeddings
 
         embeddings = run_async(_embed())
@@ -1209,6 +1209,9 @@ def reembed_document_chunks(
                 "tags": new_tags,
                 "embedding_dimensions": len(new_embeddings[0]) if new_embeddings else 0,
             }
+        except Exception:
+            session.rollback()
+            raise
         finally:
             session.close()
 

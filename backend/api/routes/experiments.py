@@ -10,9 +10,12 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from enum import Enum
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 import structlog
+
+from backend.api.deps import get_current_user
+from backend.api.middleware.auth import require_admin
 
 logger = structlog.get_logger(__name__)
 
@@ -86,7 +89,7 @@ class ToggleExperimentRequest(BaseModel):
 
 
 @router.get("/")
-async def get_feature_flags() -> Dict[str, Any]:
+async def get_feature_flags(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """
     Get all experiment feature flags with their current states.
 
@@ -132,7 +135,7 @@ async def get_feature_flags() -> Dict[str, Any]:
 
 
 @router.put("/{name}")
-async def toggle_feature_flag(name: str, request: ToggleExperimentRequest) -> Dict[str, Any]:
+async def toggle_feature_flag(name: str, request: ToggleExperimentRequest, user: dict = Depends(require_admin)) -> Dict[str, Any]:
     """
     Toggle an experiment feature flag.
 
@@ -141,7 +144,7 @@ async def toggle_feature_flag(name: str, request: ToggleExperimentRequest) -> Di
     if name not in EXPERIMENT_SETTINGS_MAP:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Unknown experiment: {name}. Valid experiments: {', '.join(EXPERIMENT_SETTINGS_MAP.keys())}",
+            detail="Unknown experiment",
         )
 
     settings_key = EXPERIMENT_SETTINGS_MAP[name]
@@ -164,7 +167,7 @@ async def toggle_feature_flag(name: str, request: ToggleExperimentRequest) -> Di
         logger.error("Failed to toggle experiment", experiment=name, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to toggle experiment {name}: {str(e)}",
+            detail="Failed to toggle experiment",
         )
 
 
@@ -270,7 +273,7 @@ class ExperimentSummaryResponse(BaseModel):
 # =============================================================================
 
 @router.post("/feedback/click", response_model=FeedbackResponse)
-async def record_click(request: RecordClickRequest) -> FeedbackResponse:
+async def record_click(request: RecordClickRequest, user: dict = Depends(get_current_user)) -> FeedbackResponse:
     """
     Record a click on a search result.
 
@@ -308,12 +311,12 @@ async def record_click(request: RecordClickRequest) -> FeedbackResponse:
         logger.error("Failed to record click", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to record click: {str(e)}",
+            detail="Failed to record click",
         )
 
 
 @router.post("/feedback/dwell", response_model=FeedbackResponse)
-async def record_dwell(request: RecordDwellRequest) -> FeedbackResponse:
+async def record_dwell(request: RecordDwellRequest, user: dict = Depends(get_current_user)) -> FeedbackResponse:
     """
     Record dwell time on a search result.
 
@@ -346,12 +349,12 @@ async def record_dwell(request: RecordDwellRequest) -> FeedbackResponse:
         logger.error("Failed to record dwell", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         )
 
 
 @router.post("/feedback/explicit", response_model=FeedbackResponse)
-async def record_explicit_feedback(request: RecordExplicitFeedbackRequest) -> FeedbackResponse:
+async def record_explicit_feedback(request: RecordExplicitFeedbackRequest, user: dict = Depends(get_current_user)) -> FeedbackResponse:
     """
     Record explicit user feedback (thumbs up/down, rating).
 
@@ -385,12 +388,12 @@ async def record_explicit_feedback(request: RecordExplicitFeedbackRequest) -> Fe
         logger.error("Failed to record feedback", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         )
 
 
 @router.get("/feedback/metrics", response_model=FeedbackMetricsResponse)
-async def get_feedback_metrics() -> FeedbackMetricsResponse:
+async def get_feedback_metrics(user: dict = Depends(get_current_user)) -> FeedbackMetricsResponse:
     """Get aggregated feedback metrics."""
     try:
         from backend.services.reranker_feedback import get_feedback_collector
@@ -412,7 +415,7 @@ async def get_feedback_metrics() -> FeedbackMetricsResponse:
         logger.error("Failed to get metrics", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         )
 
 
@@ -421,7 +424,7 @@ async def get_feedback_metrics() -> FeedbackMetricsResponse:
 # =============================================================================
 
 @router.post("/create", response_model=Dict[str, str])
-async def create_experiment(request: CreateExperimentRequest) -> Dict[str, str]:
+async def create_experiment(request: CreateExperimentRequest, user: dict = Depends(get_current_user)) -> Dict[str, str]:
     """
     Create a new experiment for tracking RAG quality.
 
@@ -451,12 +454,12 @@ async def create_experiment(request: CreateExperimentRequest) -> Dict[str, str]:
         logger.error("Failed to create experiment", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         )
 
 
 @router.post("/log", response_model=Dict[str, str])
-async def log_evaluation(request: LogEvaluationRequest) -> Dict[str, str]:
+async def log_evaluation(request: LogEvaluationRequest, user: dict = Depends(get_current_user)) -> Dict[str, str]:
     """
     Log an evaluation for an experiment.
 
@@ -482,21 +485,21 @@ async def log_evaluation(request: LogEvaluationRequest) -> Dict[str, str]:
             "status": "logged",
         }
 
-    except ValueError as e:
+    except ValueError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Experiment not found",
         )
     except Exception as e:
         logger.error("Failed to log evaluation", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         )
 
 
 @router.get("/{experiment_id}/summary", response_model=ExperimentSummaryResponse)
-async def get_experiment_summary(experiment_id: str) -> ExperimentSummaryResponse:
+async def get_experiment_summary(experiment_id: str, user: dict = Depends(get_current_user)) -> ExperimentSummaryResponse:
     """Get summary statistics for an experiment."""
     try:
         from backend.services.trulens_integration import get_trulens_manager
@@ -515,21 +518,21 @@ async def get_experiment_summary(experiment_id: str) -> ExperimentSummaryRespons
             status=summary.status.value,
         )
 
-    except ValueError as e:
+    except ValueError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Experiment not found",
         )
     except Exception as e:
         logger.error("Failed to get summary", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         )
 
 
 @router.post("/compare", response_model=Dict[str, Any])
-async def compare_experiments(experiment_ids: List[str]) -> Dict[str, Any]:
+async def compare_experiments(experiment_ids: List[str], user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """
     Compare multiple experiments.
 
@@ -553,12 +556,12 @@ async def compare_experiments(experiment_ids: List[str]) -> Dict[str, Any]:
         logger.error("Failed to compare experiments", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         )
 
 
 @router.get("/list", response_model=List[ExperimentSummaryResponse])
-async def list_experiments() -> List[ExperimentSummaryResponse]:
+async def list_experiments(user: dict = Depends(get_current_user)) -> List[ExperimentSummaryResponse]:
     """List all experiments with summaries."""
     try:
         from backend.services.trulens_integration import get_trulens_manager
@@ -584,7 +587,7 @@ async def list_experiments() -> List[ExperimentSummaryResponse]:
         logger.error("Failed to list experiments", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         )
 
 

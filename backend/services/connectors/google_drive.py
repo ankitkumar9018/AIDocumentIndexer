@@ -193,7 +193,7 @@ class GoogleDriveConnector(BaseConnector):
                     resource_type=ResourceType.FOLDER if is_folder else ResourceType.FILE,
                     mime_type=file.get("mimeType"),
                     size_bytes=int(file.get("size", 0)) if file.get("size") else None,
-                    parent_id=file.get("parents", [None])[0],
+                    parent_id=(file.get("parents") or [None])[0],
                     created_at=datetime.fromisoformat(file["createdTime"].replace("Z", "+00:00")) if file.get("createdTime") else None,
                     modified_at=datetime.fromisoformat(file["modifiedTime"].replace("Z", "+00:00")) if file.get("modifiedTime") else None,
                     web_url=file.get("webViewLink"),
@@ -228,7 +228,7 @@ class GoogleDriveConnector(BaseConnector):
                 resource_type=ResourceType.FOLDER if is_folder else ResourceType.FILE,
                 mime_type=file.get("mimeType"),
                 size_bytes=int(file.get("size", 0)) if file.get("size") else None,
-                parent_id=file.get("parents", [None])[0],
+                parent_id=(file.get("parents") or [None])[0],
                 created_at=datetime.fromisoformat(file["createdTime"].replace("Z", "+00:00")) if file.get("createdTime") else None,
                 modified_at=datetime.fromisoformat(file["modifiedTime"].replace("Z", "+00:00")) if file.get("modifiedTime") else None,
                 web_url=file.get("webViewLink"),
@@ -394,7 +394,8 @@ class GoogleDriveConnector(BaseConnector):
             )
 
             if response.status_code != 200:
-                raise ValueError(f"OAuth token exchange failed (HTTP {response.status_code}): {response.text}")
+                logger.error("OAuth token exchange failed", status_code=response.status_code)
+                raise ValueError(f"OAuth token exchange failed (HTTP {response.status_code})")
 
             tokens = response.json()
 

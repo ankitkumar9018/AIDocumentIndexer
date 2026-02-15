@@ -966,7 +966,7 @@ class RealTimeIndexerService:
                 from backend.services.embeddings import get_embedding_service
 
                 embedding_service = get_embedding_service()
-                new_embedding = await embedding_service.embed_text(chunk.content)
+                new_embedding = embedding_service.embed_text(chunk.content)
 
                 # Update the chunk's embedding
                 chunk.embedding = new_embedding

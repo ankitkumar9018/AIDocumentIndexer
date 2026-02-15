@@ -112,7 +112,7 @@ interface LogViewerProps {
 // CONSTANTS
 // =============================================================================
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
+import { api } from "@/lib/api";
 
 const SEVERITY_CONFIG: Record<
   LogSeverity,
@@ -208,11 +208,8 @@ async function fetchLogs(params: {
     if (params.start_date) searchParams.set("start_date", params.start_date);
     if (params.end_date) searchParams.set("end_date", params.end_date);
 
-    const response = await fetch(`${API_BASE}/admin/audit-logs?${searchParams}`, {
-      credentials: "include",
-    });
-    if (!response.ok) throw new Error("Failed to fetch logs");
-    return await response.json();
+    const { data } = await api.get<{ logs: AuditLog[]; total: number; has_more: boolean }>(`/admin/audit-logs?${searchParams}`);
+    return data;
   } catch (error) {
     console.error("Error fetching logs:", error);
     return { logs: [], total: 0, has_more: false };
@@ -221,12 +218,8 @@ async function fetchLogs(params: {
 
 async function fetchSeverityCounts(hours: number = 24): Promise<SeverityCounts> {
   try {
-    const response = await fetch(
-      `${API_BASE}/admin/audit-logs/severity-counts?hours=${hours}`,
-      { credentials: "include" }
-    );
-    if (!response.ok) throw new Error("Failed to fetch severity counts");
-    return await response.json();
+    const { data } = await api.get<SeverityCounts>(`/admin/audit-logs/severity-counts?hours=${hours}`);
+    return data;
   } catch (error) {
     console.error("Error fetching severity counts:", error);
     return { debug: 0, info: 0, notice: 0, warning: 0, error: 0, critical: 0 };
@@ -235,11 +228,7 @@ async function fetchSeverityCounts(hours: number = 24): Promise<SeverityCounts> 
 
 async function fetchAuditActions(): Promise<{ value: string; name: string }[]> {
   try {
-    const response = await fetch(`${API_BASE}/admin/audit-logs/actions`, {
-      credentials: "include",
-    });
-    if (!response.ok) throw new Error("Failed to fetch actions");
-    const data = await response.json();
+    const { data } = await api.get<{ actions: { value: string; name: string }[] }>(`/admin/audit-logs/actions`);
     return data.actions || [];
   } catch (error) {
     console.error("Error fetching actions:", error);

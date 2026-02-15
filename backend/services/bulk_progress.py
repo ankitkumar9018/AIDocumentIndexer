@@ -25,15 +25,15 @@ import structlog
 try:
     import orjson
     def _json_dumps(obj):
-        return or_json_dumps(obj).decode()
+        return orjson.dumps(obj).decode()
     def _json_loads(s):
-        return or_json_loads(s)
+        return orjson.loads(s)
 except ImportError:
     import json
     def _json_dumps(obj):
-        return _json_dumps(obj)
+        return json.dumps(obj)
     def _json_loads(s):
-        return _json_loads(s)
+        return json.loads(s)
 
 logger = structlog.get_logger(__name__)
 

@@ -58,6 +58,7 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
+import { api } from "@/lib/api";
 
 // Types
 interface UploadedFile {
@@ -240,7 +241,7 @@ export default function PDFToolsPage() {
           break;
       }
 
-      const response = await fetch(endpoint, {
+      const response = await api.fetchWithAuth(endpoint, {
         method: "POST",
         body: formData,
       });
@@ -285,7 +286,7 @@ export default function PDFToolsPage() {
           const file = new File([blob], filename, { type: "application/pdf" });
           indexFormData.append("file", file);
 
-          const indexResponse = await fetch("/api/v1/upload/single", {
+          const indexResponse = await api.fetchWithAuth("/api/v1/upload/single", {
             method: "POST",
             body: indexFormData,
           });

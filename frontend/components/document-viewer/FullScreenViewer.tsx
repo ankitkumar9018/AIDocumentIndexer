@@ -17,6 +17,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import DOMPurify from "dompurify";
 import {
   X,
   ZoomIn,
@@ -49,6 +50,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useDocumentEntities } from "@/lib/api";
+import { api } from "@/lib/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -219,7 +221,7 @@ export function FullScreenViewer({
   // Text loading
   const loadText = async () => {
     try {
-      const response = await fetch(documentUrl);
+      const response = await api.fetchWithAuth(documentUrl);
       const text = await response.text();
       setTextContent(text);
       setIsLoading(false);
@@ -232,7 +234,7 @@ export function FullScreenViewer({
   const loadOfficePreview = async () => {
     try {
       // Server converts to HTML or images
-      const response = await fetch(`/api/v1/documents/${documentId}/preview`);
+      const response = await api.fetchWithAuth(`/api/v1/documents/${documentId}/preview`);
       if (!response.ok) throw new Error("Preview not available");
 
       const data = await response.json();
@@ -343,12 +345,18 @@ export function FullScreenViewer({
 
   // Navigation functions
   const goToPage = (page: number) => {
-    const newPage = Math.max(1, Math.min(page, state.totalPages));
-    setState((prev) => ({ ...prev, currentPage: newPage }));
+    setState((prev) => {
+      const newPage = Math.max(1, Math.min(page, prev.totalPages));
+      return { ...prev, currentPage: newPage };
+    });
   };
 
-  const goToNextPage = () => goToPage(state.currentPage + 1);
-  const goToPreviousPage = () => goToPage(state.currentPage - 1);
+  const goToNextPage = () => {
+    setState((prev) => ({ ...prev, currentPage: Math.min(prev.currentPage + 1, prev.totalPages) }));
+  };
+  const goToPreviousPage = () => {
+    setState((prev) => ({ ...prev, currentPage: Math.max(prev.currentPage - 1, 1) }));
+  };
 
   // Zoom functions
   const zoomIn = () => {
@@ -801,7 +809,7 @@ export function FullScreenViewer({
             >
               <pre className="whitespace-pre-wrap font-mono text-sm">
                 {state.searchQuery
-                  ? textContent.split(new RegExp(`(${state.searchQuery})`, "gi")).map(
+                  ? textContent.split(new RegExp(`(${state.searchQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi")).map(
                       (part, i) =>
                         part.toLowerCase() === state.searchQuery.toLowerCase() ? (
                           <mark key={i} className="bg-yellow-300 dark:bg-yellow-700">
@@ -820,7 +828,7 @@ export function FullScreenViewer({
             <div
               className="w-full max-w-4xl bg-white dark:bg-gray-900 p-8 shadow-lg rounded-lg overflow-auto"
               style={{ transform: `scale(${state.zoom})` }}
-              dangerouslySetInnerHTML={{ __html: textContent }}
+              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(textContent) }}
             />
           )}
         </div>

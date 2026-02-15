@@ -109,6 +109,34 @@ PROVIDER_TYPES = {
         "default_chat_model": "command-r-plus",
         "default_embedding_model": "embed-english-v3.0",
     },
+    "deepinfra": {
+        "name": "DeepInfra",
+        "fields": ["api_key"],
+        "required_fields": ["api_key"],
+        "chat_models": [
+            "meta-llama/Llama-3.3-70B-Instruct",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "Qwen/Qwen2.5-72B-Instruct",
+            "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        ],
+        "embedding_models": [],
+        "default_chat_model": "meta-llama/Llama-3.3-70B-Instruct",
+        "default_embedding_model": None,
+    },
+    "bedrock": {
+        "name": "AWS Bedrock",
+        "fields": ["api_key", "api_base_url"],  # api_key = "ACCESS_KEY_ID:SECRET_ACCESS_KEY", api_base_url = region
+        "required_fields": ["api_key"],
+        "chat_models": [
+            "meta.llama3-3-70b-instruct-v1:0",
+            "meta.llama3-1-8b-instruct-v1:0",
+            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "amazon.nova-pro-v1:0",
+        ],
+        "embedding_models": ["amazon.titan-embed-text-v2:0"],
+        "default_chat_model": "meta.llama3-3-70b-instruct-v1:0",
+        "default_embedding_model": "amazon.titan-embed-text-v2:0",
+    },
     "custom": {
         "name": "Custom (OpenAI-compatible)",
         "fields": ["api_key", "api_base_url"],
@@ -271,6 +299,7 @@ class LLMProviderService:
             return False
 
         await session.delete(provider)
+        await session.flush()
         logger.info("Deleted LLM provider", provider_id=provider_id)
         return True
 
@@ -322,6 +351,10 @@ class LLMProviderService:
                 return await _test_together(api_key)
             elif provider.provider_type == "cohere":
                 return await _test_cohere(api_key)
+            elif provider.provider_type == "deepinfra":
+                return await _test_deepinfra(api_key)
+            elif provider.provider_type == "bedrock":
+                return await _test_bedrock(api_key, base_url)
             elif provider.provider_type == "custom":
                 return await _test_custom(api_key, base_url)
             else:
@@ -329,7 +362,7 @@ class LLMProviderService:
 
         except Exception as e:
             logger.error("Provider test failed", provider_id=provider_id, error=str(e))
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": "Provider test failed. Check server logs for details."}
 
     @staticmethod
     async def list_available_models(session: AsyncSession, provider_id: str) -> Dict[str, Any]:
@@ -367,7 +400,7 @@ class LLMProviderService:
 
         except Exception as e:
             logger.error("Failed to list models", provider_id=provider_id, error=str(e))
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": "Failed to list models. Check server logs for details."}
 
     @staticmethod
     def get_provider_types() -> Dict[str, Any]:
@@ -463,6 +496,12 @@ async def _test_anthropic(api_key: str) -> Dict[str, Any]:
 
 async def _test_ollama(base_url: str) -> Dict[str, Any]:
     """Test Ollama connection."""
+    from backend.services.llm import _validate_ollama_url
+    try:
+        base_url = _validate_ollama_url(base_url)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{base_url}/api/tags", timeout=10.0)
@@ -485,6 +524,14 @@ async def _test_azure(api_key: str, endpoint: str) -> Dict[str, Any]:
     if not endpoint:
         return {"success": False, "error": "Azure endpoint URL is required"}
 
+    # Validate Azure endpoint to prevent credential theft via SSRF
+    from urllib.parse import urlparse
+    parsed = urlparse(endpoint)
+    if not parsed.hostname or not parsed.hostname.endswith(
+        (".openai.azure.com", ".azure.com", ".cognitiveservices.azure.com")
+    ):
+        return {"success": False, "error": "Invalid Azure endpoint: must be an Azure domain (*.azure.com)"}
+
     async with httpx.AsyncClient() as client:
         response = await client.get(
             f"{endpoint.rstrip('/')}/openai/models?api-version=2024-02-15-preview",
@@ -501,7 +548,8 @@ async def _test_google(api_key: str) -> Dict[str, Any]:
     """Test Google AI connection."""
     async with httpx.AsyncClient() as client:
         response = await client.get(
-            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": api_key},
             timeout=10.0,
         )
         if response.status_code == 200:
@@ -552,6 +600,50 @@ async def _test_cohere(api_key: str) -> Dict[str, Any]:
             return {"success": False, "error": f"Cohere API error: {response.status_code}"}
 
 
+async def _test_deepinfra(api_key: str) -> Dict[str, Any]:
+    """Test DeepInfra connection."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            "https://api.deepinfra.com/v1/openai/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10.0,
+        )
+        if response.status_code == 200:
+            return {"success": True, "message": "Connected to DeepInfra successfully"}
+        else:
+            return {"success": False, "error": f"DeepInfra API error: {response.status_code}"}
+
+
+async def _test_bedrock(api_key: str, region: Optional[str] = None) -> Dict[str, Any]:
+    """Test AWS Bedrock connection. api_key = 'ACCESS_KEY_ID:SECRET_ACCESS_KEY', region from api_base_url field."""
+    import asyncio
+
+    # Split combined key format: "ACCESS_KEY_ID:SECRET_ACCESS_KEY"
+    aws_access_key = api_key
+    aws_secret_key = None
+    if api_key and ":" in api_key:
+        parts = api_key.split(":", 1)
+        aws_access_key = parts[0]
+        aws_secret_key = parts[1]
+
+    def _sync_test():
+        try:
+            import boto3
+            _region = region or "us-east-1"
+            creds = {"region_name": _region, "aws_access_key_id": aws_access_key}
+            if aws_secret_key:
+                creds["aws_secret_access_key"] = aws_secret_key
+            bedrock_client = boto3.client("bedrock", **creds)
+            bedrock_client.list_foundation_models(maxResults=1)
+            return {"success": True, "message": f"Connected to AWS Bedrock ({_region}) successfully"}
+        except ImportError:
+            return {"success": False, "error": "boto3 not installed. Run: pip install boto3"}
+        except Exception as e:
+            return {"success": False, "error": f"Bedrock error: {str(e)}"}
+
+    return await asyncio.get_event_loop().run_in_executor(None, _sync_test)
+
+
 async def _test_custom(api_key: Optional[str], base_url: str) -> Dict[str, Any]:
     """Test custom OpenAI-compatible endpoint."""
     if not base_url:
@@ -592,6 +684,12 @@ def _is_vision_model(model_name: str) -> bool:
 
 async def _list_ollama_models(base_url: str) -> Dict[str, Any]:
     """List models available in Ollama, including vision model detection."""
+    from backend.services.llm import _validate_ollama_url
+    try:
+        base_url = _validate_ollama_url(base_url)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{base_url}/api/tags", timeout=10.0)

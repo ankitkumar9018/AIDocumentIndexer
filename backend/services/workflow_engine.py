@@ -136,7 +136,8 @@ class WorkflowService(CRUDService[Workflow]):
 
         # Search filter
         if search:
-            search_pattern = f"%{search}%"
+            safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            search_pattern = f"%{safe}%"
             query = query.where(
                 or_(
                     Workflow.name.ilike(search_pattern),
@@ -526,12 +527,20 @@ class ExecutionContext:
         trigger_type: str,
         trigger_data: Optional[Dict] = None,
         input_data: Optional[Dict] = None,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session: Optional[Any] = None,
     ):
         self.execution_id = execution_id
         self.workflow_id = workflow_id
         self.trigger_type = trigger_type
         self.trigger_data = trigger_data or {}
         self.input_data = input_data or {}
+
+        # Caller-provided context (used by _action_create_document, etc.)
+        self.organization_id = organization_id
+        self.user_id = user_id
+        self.session = session
 
         # Runtime state
         self.variables: Dict[str, Any] = {}
@@ -610,6 +619,31 @@ class NodeExecutor:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.logger = structlog.get_logger(__name__)
+
+    @staticmethod
+    def _validate_outbound_url(url: str) -> None:
+        """Validate outbound URL to prevent SSRF attacks."""
+        import ipaddress
+        import socket
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Only HTTP/HTTPS protocols are allowed")
+
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("Invalid URL: no hostname")
+
+        if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            raise ValueError("Requests to localhost are not allowed")
+
+        try:
+            resolved_ip = ipaddress.ip_address(socket.gethostbyname(hostname))
+            if resolved_ip.is_private or resolved_ip.is_loopback or resolved_ip.is_link_local or resolved_ip.is_reserved:
+                raise ValueError("Requests to private/internal IPs are not allowed")
+        except socket.gaierror:
+            pass  # Let the HTTP client handle DNS resolution failures
 
     async def execute(
         self,
@@ -906,6 +940,7 @@ class NodeExecutor:
         body = params.get("body")
 
         try:
+            self._validate_outbound_url(url)
             async with aiohttp.ClientSession() as session:
                 async with session.request(
                     method, url, headers=headers, json=body,
@@ -1723,14 +1758,19 @@ class NodeExecutor:
         """
         import aiohttp
         import base64
+        import ipaddress as _ipaddress
+        import socket as _socket
 
         config = node.config or {}
         url = context.resolve_template(config.get("url", ""))
         method = config.get("method", "GET").upper()
-        timeout_seconds = config.get("timeout", 30)
-        retries = config.get("retries", 0)
+        timeout_seconds = min(config.get("timeout", 30), 120)
+        retries = min(config.get("retries", 0), 5)
         follow_redirects = config.get("follow_redirects", True)
         ignore_ssl = config.get("ignore_ssl", False)
+
+        # SSRF protection: block requests to private/internal IPs
+        self._validate_outbound_url(url)
 
         # Build headers
         headers = {}
@@ -1810,7 +1850,12 @@ class NodeExecutor:
                         timeout=aiohttp.ClientTimeout(total=timeout_seconds),
                         allow_redirects=follow_redirects,
                     ) as response:
-                        response_text = await response.text()
+                        # Limit response body size to prevent OOM
+                        MAX_RESPONSE_SIZE = 10 * 1024 * 1024  # 10MB
+                        response_bytes = await response.content.read(MAX_RESPONSE_SIZE + 1)
+                        if len(response_bytes) > MAX_RESPONSE_SIZE:
+                            raise ValueError(f"Response body exceeds {MAX_RESPONSE_SIZE // (1024*1024)}MB limit")
+                        response_text = response_bytes.decode('utf-8', errors='replace')
 
                         # Parse response based on type
                         response_type = config.get("response_type", "auto")
@@ -2088,6 +2133,11 @@ class NodeExecutor:
         if not webhook_url:
             return {"channel": "slack", "sent": False, "error": "No Slack webhook URL configured"}
 
+        try:
+            self._validate_outbound_url(webhook_url)
+        except ValueError as e:
+            return {"channel": "slack", "sent": False, "error": str(e)}
+
         payload = {
             "text": message,
             "username": config.get("username", "Workflow Bot"),
@@ -2112,6 +2162,11 @@ class NodeExecutor:
         if not webhook_url:
             return {"channel": "webhook", "sent": False, "error": "No webhook URL configured"}
 
+        try:
+            self._validate_outbound_url(webhook_url)
+        except ValueError as e:
+            return {"channel": "webhook", "sent": False, "error": str(e)}
+
         payload = {
             "message": message,
             "recipients": recipients,
@@ -2134,6 +2189,11 @@ class NodeExecutor:
         if not webhook_url:
             return {"channel": "teams", "sent": False, "error": "No Teams webhook URL configured"}
 
+        try:
+            self._validate_outbound_url(webhook_url)
+        except ValueError as e:
+            return {"channel": "teams", "sent": False, "error": str(e)}
+
         payload = {
             "@type": "MessageCard",
             "@context": "http://schema.org/extensions",
@@ -2155,6 +2215,11 @@ class NodeExecutor:
         webhook_url = config.get("webhook_url") or config.get("discord_webhook")
         if not webhook_url:
             return {"channel": "discord", "sent": False, "error": "No Discord webhook URL configured"}
+
+        try:
+            self._validate_outbound_url(webhook_url)
+        except ValueError as e:
+            return {"channel": "discord", "sent": False, "error": str(e)}
 
         payload = {"content": message, "username": config.get("username", "Workflow Bot")}
 
@@ -3131,6 +3196,13 @@ Please provide a comprehensive answer based on the context above."""
         if not url:
             return {"status": "error", "error": "No URL specified"}
 
+        # SSRF prevention: validate URL before making request
+        try:
+            from backend.services.web_crawler import _validate_crawl_url
+            _validate_crawl_url(url)
+        except ValueError as ssrf_err:
+            return {"status": "error", "error": f"URL blocked: {ssrf_err}"}
+
         method = config.get("method", "GET").upper()
         headers = config.get("headers", {})
         body = config.get("body")
@@ -3205,8 +3277,10 @@ Please provide a comprehensive answer based on the context above."""
         working_dir = config.get("working_dir")
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            # Use create_subprocess_exec with parsed args to prevent shell injection.
+            # create_subprocess_shell would allow "ls; rm -rf /" to bypass whitelist.
+            proc = await asyncio.create_subprocess_exec(
+                *parts,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=working_dir,
@@ -3838,6 +3912,27 @@ Approval ID: {approval_id}
                 result = jmespath.search(expression, input_data)
 
             elif transform_type == "python":
+                import ast
+
+                # Validate expression AST before eval
+                try:
+                    tree = ast.parse(expression, mode='eval')
+                except SyntaxError:
+                    raise ValueError("Invalid expression syntax")
+
+                blocked_attrs = {
+                    "__builtins__", "__import__", "__class__", "__bases__",
+                    "__subclasses__", "__mro__", "__globals__", "__code__",
+                    "__getattribute__", "__dict__", "__module__",
+                }
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Attribute) and node.attr in blocked_attrs:
+                        raise ValueError(f"Access to '{node.attr}' is not allowed")
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                        if node.func.id in ("eval", "exec", "compile", "open", "__import__",
+                                             "getattr", "setattr", "delattr", "globals", "locals"):
+                            raise ValueError(f"Function '{node.func.id}' not allowed")
+
                 # Safe eval with limited scope
                 safe_globals = {
                     "__builtins__": {},

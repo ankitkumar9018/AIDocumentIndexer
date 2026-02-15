@@ -203,54 +203,32 @@ def ensure_complete_thought(text: str, max_chars: int) -> str:
         if len(candidate) <= max_chars and is_sentence_complete(candidate):
             return candidate
 
-    # Strategy 3: Truncate at word boundary and remove incomplete endings
+    # Strategy 3: Truncate at word boundary, only strip dangling connectors
     truncated = text[:max_chars]
     last_space = truncated.rfind(' ')
     if last_space > max_chars * 0.5:
         truncated = truncated[:last_space]
 
-    # Aggressively remove incomplete trailing phrases
+    # Only remove the most egregious dangling words (conjunctions, articles, prepositions)
+    # Do NOT aggressively pop content words — better to have a slightly awkward ending
+    # than to destroy the meaning by removing too many words
     words = truncated.split()
-    incomplete_endings = {
-        'and', 'or', 'but', 'nor', 'yet', 'so', 'to', 'for', 'of', 'in', 'on', 'at',
-        'by', 'with', 'from', 'the', 'a', 'an', 'is', 'are', 'was', 'were', 'will',
-        'can', 'could', 'should', 'would', 'that', 'which', 'who', 'this', 'these',
-        'highlight', 'highlighting', 'amplify', 'amplifying', 'make', 'making',
-        'using', 'including', 'featuring', 'providing', 'offering', 'creating', 'developing',
-        'customized', 'enhanced', 'innovative', 'strategic', 'comprehensive', 'integrated',
-        'unique', 'exclusive', 'interactive', 'immersive', 'engaging', 'dynamic',
-        'new', 'additional', 'various', 'specific', 'particular', 'increased', 'brand',
-        'like', 'as', 'its', 'their', 'our', 'your', 'such',
-        # Additional incomplete endings
-        'allowing', 'enabling', 'showcasing', 'demonstrating', 'driving', 'boosting',
-        'leveraging', 'turns', 'showcase', 'existing', 'leading', 'growing', 'building',
-        'influential', 'emotional', 'favorite', 'effective', 'affordable',
-        'real', 'nivea',  # Brand names that need context
-        'in-stadium', 'in-store', 'on-site', 'off-site', 'co-branded',
+    dangling_connectors = {
+        'and', 'or', 'but', 'the', 'a', 'an', 'to', 'for', 'of', 'in', 'on', 'at',
+        'by', 'with', 'from', 'that', 'which', 'as',
     }
 
-    # Remove words until we have a complete thought
-    while len(words) > 3:
+    # Remove at most 2 trailing connector words
+    removed = 0
+    while len(words) > 3 and removed < 2:
         last_word = words[-1].lower().rstrip('.,;:!?-–— ')
-        if last_word in incomplete_endings:
+        if last_word in dangling_connectors:
             words.pop()
+            removed += 1
         else:
             break
 
-    result = ' '.join(words).rstrip('.,;:!?-–— ')
-
-    # Final check - if still incomplete, try to fix by removing trailing incomplete words
-    if not is_sentence_complete(result):
-        # Try to complete common incomplete patterns
-        result_words = result.split()
-        if result_words and len(result_words) > 1:  # Need at least 2 words to remove one
-            last_word = result_words[-1].lower()
-            if last_word in ['and', 'or']:
-                result = result.rsplit(' ', 1)[0]  # Remove the conjunction
-            elif last_word in ['for', 'with', 'to']:
-                result = result.rsplit(' ', 1)[0]  # Remove the preposition
-
-    return result[:max_chars]
+    return ' '.join(words)
 
 
 async def llm_condense_text(text: str, max_chars: int, context: dict = None) -> str:
@@ -715,7 +693,7 @@ def get_layout_placeholder_mapping(layout) -> dict:
     return mapping
 
 
-def enforce_bullet_constraints(
+async def enforce_bullet_constraints(
     content: str,
     max_bullet_chars: int = 120,  # PHASE 11: Increased from 70 to allow complete sentences
     max_bullets: int = 6,  # ENTERPRISE STANDARD: 6x6 rule
@@ -731,6 +709,9 @@ def enforce_bullet_constraints(
     - Max 2 sub-bullets per main bullet
     - Each bullet should be a complete, actionable insight
 
+    Oversized bullets are condensed by LLM to preserve meaning, not
+    randomly truncated. Falls back to smart truncation if LLM fails.
+
     Args:
         content: Raw content with bullet points
         max_bullet_chars: Maximum characters per bullet (backup limit)
@@ -745,26 +726,8 @@ def enforce_bullet_constraints(
         return content
 
     def count_words(text: str) -> int:
-        """Count words in text, excluding common stop words for accuracy."""
-        words = text.split()
-        return len(words)
-
-    def truncate_to_words(text: str, max_words: int) -> str:
-        """Truncate text to maximum word count while keeping it coherent."""
-        words = text.split()
-        if len(words) <= max_words:
-            return text
-
-        # Truncate to max_words and ensure it ends cleanly
-        truncated = ' '.join(words[:max_words])
-
-        # Remove trailing incomplete words (articles, prepositions)
-        incomplete = ['the', 'a', 'an', 'to', 'for', 'of', 'in', 'on', 'at', 'and', 'or', 'but', 'with', 'by']
-        words_result = truncated.split()
-        while words_result and words_result[-1].lower() in incomplete:
-            words_result.pop()
-
-        return ' '.join(words_result) if words_result else truncated
+        """Count words in text."""
+        return len(text.split())
 
     lines = content.split('\n')
     result_lines = []
@@ -797,19 +760,15 @@ def enforce_bullet_constraints(
             # Clean the bullet text
             bullet_text = stripped.lstrip('•*- ')
 
-            # ENTERPRISE: Enforce word count FIRST, then char limit as backup
+            # Use LLM condensation for oversized bullets (word or char limit)
             word_count = count_words(bullet_text)
-            if word_count > max_words_per_bullet:
+            if word_count > max_words_per_bullet or len(bullet_text) > max_bullet_chars:
                 original_text = bullet_text
-                bullet_text = truncate_to_words(bullet_text, max_words_per_bullet)
+                bullet_text = await llm_condense_text(bullet_text, max_bullet_chars)
                 logger.debug(
-                    f"6x6 Rule: Truncated bullet from {word_count} to {count_words(bullet_text)} words",
+                    f"6x6 Rule: LLM-condensed bullet from {len(original_text)} to {len(bullet_text)} chars",
                     original=original_text[:50],
                 )
-
-            # Backup: character limit for very long words
-            if len(bullet_text) > max_bullet_chars:
-                bullet_text = enforce_text_length(bullet_text, max_bullet_chars, "bullet")
 
             result_lines.append(f"• {bullet_text}")
 
@@ -819,13 +778,10 @@ def enforce_bullet_constraints(
                 # Clean sub-bullet
                 sub_text = stripped.lstrip('◦○•*- ')
 
-                # ENTERPRISE: Word limit for sub-bullets (slightly fewer than main)
-                if count_words(sub_text) > max_words_per_bullet - 2:
-                    sub_text = truncate_to_words(sub_text, max_words_per_bullet - 2)
-
-                # Backup: character limit
-                if len(sub_text) > max_bullet_chars - 10:
-                    sub_text = enforce_text_length(sub_text, max_bullet_chars - 10, "sub-bullet")
+                # Use LLM condensation for oversized sub-bullets
+                sub_char_limit = max_bullet_chars - 10
+                if count_words(sub_text) > max_words_per_bullet - 2 or len(sub_text) > sub_char_limit:
+                    sub_text = await llm_condense_text(sub_text, sub_char_limit)
 
                 result_lines.append(f"  ◦ {sub_text}")
             elif current_sub_bullets == max_sub_bullets_per_main + 1:
@@ -4038,7 +3994,7 @@ Presenter guidance:
                             learned_layout = slide_plan.layout
                             template_constraints = {
                                 "title_max_chars": slide_plan.title_constraints.get('max_chars', 50),
-                                "bullet_max_chars": slide_plan.content_constraints.get('max_bullet_chars', 70),
+                                "bullet_max_chars": slide_plan.content_constraints.get('max_bullet_chars', 120),
                                 "bullets_per_slide": slide_plan.content_constraints.get('max_bullets', 7 if has_image else 12),
                                 "body_max_chars": 500,
                             }
@@ -4061,7 +4017,7 @@ Presenter guidance:
 
                         # Adjust for image presence (content area is narrower)
                         if has_image:
-                            template_constraints["bullet_max_chars"] = min(template_constraints["bullet_max_chars"], 50)
+                            template_constraints["bullet_max_chars"] = min(template_constraints["bullet_max_chars"], 80)
                             template_constraints["bullets_per_slide"] = min(template_constraints["bullets_per_slide"], 7)
 
                         # HARD ENFORCEMENT: Truncate content BEFORE LLM review as failsafe
@@ -4071,7 +4027,7 @@ Presenter guidance:
                             template_constraints["title_max_chars"],
                             "title"
                         )
-                        section.content = enforce_bullet_constraints(
+                        section.content = await enforce_bullet_constraints(
                             section.content,
                             max_bullet_chars=template_constraints["bullet_max_chars"],
                             max_bullets=template_constraints["bullets_per_slide"],
@@ -4632,10 +4588,12 @@ Presenter guidance:
                         chars=total_chars,
                     )
 
-                # Calculate max_chars based on actual content box width
-                max_chars = int(content_width_inches * chars_per_inch)
-                # Apply reasonable bounds
-                max_chars = max(40, min(max_chars, 120))
+                # Calculate max_chars: allow up to 2 wrapped lines per bullet
+                # so bullets can be complete sentences without overflow
+                chars_per_line = int(content_width_inches * chars_per_inch)
+                max_chars = chars_per_line * 2  # 2 lines of wrapped text
+                # Apply reasonable bounds (min 80 for coherent sentences)
+                max_chars = max(80, min(max_chars, 150))
 
                 logger.debug(
                     f"Dynamic max_chars calculation: width={content_width_inches:.1f}in, "
@@ -4672,20 +4630,6 @@ Presenter guidance:
                             'next_bullet': bullet_texts[idx + 1] if idx < len(bullet_texts) - 1 else None,
                         }
                         bullet_text = await llm_condense_text(bullet_text, max_chars, context=bullet_context)
-
-                    # Final validation: ensure bullet is a complete thought
-                    if not is_sentence_complete(bullet_text):
-                        # Try to fix by removing incomplete ending
-                        fixed_bullet = ensure_complete_thought(bullet_text, len(bullet_text))
-                        if fixed_bullet and is_sentence_complete(fixed_bullet):
-                            bullet_text = fixed_bullet
-                        else:
-                            # Last resort: trim incomplete ending words
-                            words = bullet_text.split()
-                            while len(words) > 3 and not is_sentence_complete(' '.join(words)):
-                                words.pop()
-                            bullet_text = ' '.join(words)
-                            logger.debug(f"Fixed incomplete bullet: {bullet_text[:50]}...")
 
                     # Set paragraph level for bullet hierarchy
                     p.level = bullet_level
@@ -4987,11 +4931,27 @@ Presenter guidance:
 
                 source_bullet = content_bullets[0] if content_bullets else "•"
 
-                # Group sources by usage type for the sources slide
+                # Dedup and sort sources for clean display
                 from ...models import SourceUsageType
-                content_sources = [s for s in job.sources_used if getattr(s, 'usage_type', SourceUsageType.CONTENT) == SourceUsageType.CONTENT]
-                style_sources = [s for s in job.sources_used if getattr(s, 'usage_type', None) == SourceUsageType.STYLE]
-                other_sources = [s for s in job.sources_used if getattr(s, 'usage_type', None) not in [SourceUsageType.CONTENT, SourceUsageType.STYLE, None]]
+                _seen_display_keys = set()
+                _deduped_sources = []
+                for s in job.sources_used:
+                    pn = getattr(s, 'page_number', None)
+                    pn = int(pn) if pn is not None else None
+                    dk = (str(getattr(s, 'document_name', '') or getattr(s, 'document_id', '')), pn)
+                    if dk not in _seen_display_keys:
+                        _deduped_sources.append(s)
+                        _seen_display_keys.add(dk)
+                # Sort by document name then page number
+                _deduped_sources.sort(key=lambda s: (
+                    str(getattr(s, 'document_name', '') or ''),
+                    int(getattr(s, 'page_number', 0) or 0),
+                ))
+
+                # Group sources by usage type for the sources slide
+                content_sources = [s for s in _deduped_sources if getattr(s, 'usage_type', SourceUsageType.CONTENT) == SourceUsageType.CONTENT]
+                style_sources = [s for s in _deduped_sources if getattr(s, 'usage_type', None) == SourceUsageType.STYLE]
+                other_sources = [s for s in _deduped_sources if getattr(s, 'usage_type', None) not in [SourceUsageType.CONTENT, SourceUsageType.STYLE, None]]
 
                 def format_source_text(source):
                     """Format source with location and usage info."""
@@ -5065,22 +5025,22 @@ Presenter guidance:
 
                 first_source_used = False
 
-                # Add content sources
+                # Add content sources (fit up to ~12 on a slide at Pt 14)
                 if content_sources:
                     add_section_header("Content References:", not first_source_used)
-                    for source in content_sources[:6]:
+                    for source in content_sources[:12]:
                         add_source_paragraph(source, False)
 
                 # Add style sources
                 if style_sources:
                     add_section_header("Style References:", not first_source_used)
-                    for source in style_sources[:3]:
+                    for source in style_sources[:5]:
                         add_source_paragraph(source, False)
 
                 # Add other sources
                 if other_sources:
                     add_section_header("Other References:", not first_source_used)
-                    for source in other_sources[:3]:
+                    for source in other_sources[:5]:
                         add_source_paragraph(source, False)
 
                 # Fallback if no categorized sources

@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from backend.api.deps import get_current_user
+from backend.api.middleware.auth import AdminUser
 from backend.services.menu_config import (
     get_menu_service,
     MenuMode,
@@ -70,9 +72,8 @@ class MenuResponse(BaseModel):
 
 @router.get("/")
 async def get_user_menu(
-    user_id: str = Query(..., description="User ID"),
+    user: dict = Depends(get_current_user),
     role_level: int = Query(1, ge=1, le=7, description="User's role level"),
-    org_id: Optional[str] = Query(None, description="Organization ID"),
     mode: Optional[str] = Query(None, description="Override menu mode"),
     service: MenuConfigService = Depends(get_menu_service),
 ) -> MenuResponse:
@@ -84,12 +85,15 @@ async def get_user_menu(
     - Menu mode (simple/complete)
     - Organization settings
     """
+    user_id = user.get("sub", "unknown")
+    org_id = user.get("organization_id")
+
     menu_mode = None
     if mode:
         try:
             menu_mode = MenuMode(mode)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid mode: {mode}")
+            raise HTTPException(status_code=400, detail="Invalid menu mode")
 
     sections = service.get_menu_for_user(
         user_id=user_id,
@@ -111,27 +115,29 @@ async def get_user_menu(
 
 @router.get("/preferences")
 async def get_user_preferences(
-    user_id: str = Query(..., description="User ID"),
+    user: dict = Depends(get_current_user),
     service: MenuConfigService = Depends(get_menu_service),
 ) -> Dict[str, Any]:
     """Get user's menu preferences."""
+    user_id = user.get("sub", "unknown")
     prefs = service.get_user_preferences(user_id)
     return prefs.to_dict()
 
 
 @router.post("/preferences")
 async def update_user_preferences(
-    user_id: str = Query(..., description="User ID"),
-    request: UserPreferencesRequest = ...,
+    request: UserPreferencesRequest,
+    user: dict = Depends(get_current_user),
     service: MenuConfigService = Depends(get_menu_service),
 ) -> Dict[str, Any]:
     """Update user's menu preferences."""
+    user_id = user.get("sub", "unknown")
     menu_mode = None
     if request.menu_mode:
         try:
             menu_mode = MenuMode(request.menu_mode)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid mode: {request.menu_mode}")
+            raise HTTPException(status_code=400, detail="Invalid menu mode")
 
     prefs = service.update_user_preferences(
         user_id=user_id,
@@ -146,10 +152,11 @@ async def update_user_preferences(
 
 @router.post("/toggle-mode")
 async def toggle_menu_mode(
-    user_id: str = Query(..., description="User ID"),
+    user: dict = Depends(get_current_user),
     service: MenuConfigService = Depends(get_menu_service),
 ) -> Dict[str, Any]:
     """Toggle between simple and complete menu mode."""
+    user_id = user.get("sub", "unknown")
     prefs = service.get_user_preferences(user_id)
     new_mode = MenuMode.COMPLETE if prefs.menu_mode == MenuMode.SIMPLE else MenuMode.SIMPLE
 
@@ -160,6 +167,7 @@ async def toggle_menu_mode(
 @router.get("/search")
 async def search_menu_sections(
     query: str = Query(..., min_length=1, description="Search query"),
+    user: dict = Depends(get_current_user),
     service: MenuConfigService = Depends(get_menu_service),
 ) -> List[Dict[str, Any]]:
     """Search menu sections by label or key."""
@@ -172,6 +180,7 @@ async def search_menu_sections(
 
 @router.get("/admin/all-sections")
 async def get_all_sections(
+    user: AdminUser,
     service: MenuConfigService = Depends(get_menu_service),
 ) -> List[Dict[str, Any]]:
     """Get all menu sections (admin only)."""
@@ -180,6 +189,7 @@ async def get_all_sections(
 
 @router.get("/admin/role-levels")
 async def get_role_levels(
+    user: AdminUser,
     service: MenuConfigService = Depends(get_menu_service),
 ) -> Dict[str, Any]:
     """Get all role levels with descriptions."""
@@ -193,6 +203,7 @@ async def get_role_levels(
 
 @router.get("/admin/org-settings")
 async def get_org_settings(
+    user: AdminUser,
     org_id: str = Query(..., description="Organization ID"),
     service: MenuConfigService = Depends(get_menu_service),
 ) -> Dict[str, Any]:
@@ -203,8 +214,9 @@ async def get_org_settings(
 
 @router.post("/admin/org-settings")
 async def update_org_settings(
+    request: OrganizationSettingsRequest,
+    user: AdminUser,
     org_id: str = Query(..., description="Organization ID"),
-    request: OrganizationSettingsRequest = ...,
     service: MenuConfigService = Depends(get_menu_service),
 ) -> Dict[str, Any]:
     """Update organization's menu settings."""
@@ -213,7 +225,7 @@ async def update_org_settings(
         try:
             default_mode = MenuMode(request.default_mode)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid mode: {request.default_mode}")
+            raise HTTPException(status_code=400, detail="Invalid menu mode")
 
     settings = service.update_org_settings(
         org_id=org_id,
@@ -226,6 +238,7 @@ async def update_org_settings(
 
 @router.post("/admin/toggle-section")
 async def toggle_section(
+    user: AdminUser,
     org_id: str = Query(..., description="Organization ID"),
     section_key: str = Query(..., description="Section key to toggle"),
     is_enabled: bool = Query(..., description="Enable or disable"),
@@ -242,6 +255,7 @@ async def toggle_section(
 
 @router.post("/admin/section-role-level")
 async def set_section_role_level(
+    user: AdminUser,
     org_id: str = Query(..., description="Organization ID"),
     section_key: str = Query(..., description="Section key"),
     min_role_level: int = Query(..., ge=1, le=7, description="Minimum role level"),
@@ -258,8 +272,9 @@ async def set_section_role_level(
 
 @router.post("/admin/custom-role")
 async def create_custom_role(
+    request: CustomRoleRequest,
+    user: AdminUser,
     org_id: str = Query(..., description="Organization ID"),
-    request: CustomRoleRequest = ...,
     service: MenuConfigService = Depends(get_menu_service),
 ) -> Dict[str, Any]:
     """Create a custom role for an organization."""
@@ -275,6 +290,7 @@ async def create_custom_role(
 
 @router.get("/admin/custom-roles")
 async def get_custom_roles(
+    user: AdminUser,
     org_id: str = Query(..., description="Organization ID"),
     service: MenuConfigService = Depends(get_menu_service),
 ) -> Dict[str, Any]:
@@ -285,6 +301,7 @@ async def get_custom_roles(
 
 @router.delete("/admin/custom-role")
 async def delete_custom_role(
+    user: AdminUser,
     org_id: str = Query(..., description="Organization ID"),
     role_name: str = Query(..., description="Role name to delete"),
     service: MenuConfigService = Depends(get_menu_service),
@@ -293,7 +310,7 @@ async def delete_custom_role(
     settings = service.get_org_settings(org_id)
 
     if role_name not in settings.custom_roles:
-        raise HTTPException(status_code=404, detail=f"Role not found: {role_name}")
+        raise HTTPException(status_code=404, detail="Role not found")
 
     del settings.custom_roles[role_name]
     service._org_settings[org_id] = settings

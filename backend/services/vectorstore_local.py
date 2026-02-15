@@ -829,7 +829,7 @@ class ChromaVectorStore:
         search_results = []
         # Track documents identified by hypothetical question matches
         # These questions are meant to identify relevant documents, not provide answers
-        self._hypothetical_match_docs: Dict[str, float] = {}
+        _hypothetical_match_docs: Dict[str, float] = {}
         _hyp_filtered_count = 0
 
         if results["ids"] and results["ids"][0]:
@@ -853,8 +853,8 @@ class ChromaVectorStore:
                     doc_id = metadata.get("document_id", "")
                     if doc_id and similarity > 0.5:
                         # Keep the highest similarity score per document
-                        self._hypothetical_match_docs[doc_id] = max(
-                            self._hypothetical_match_docs.get(doc_id, 0.0),
+                        _hypothetical_match_docs[doc_id] = max(
+                            _hypothetical_match_docs.get(doc_id, 0.0),
                             similarity,
                         )
                     continue
@@ -883,7 +883,7 @@ class ChromaVectorStore:
         # then we fetch real content from those docs to include in results.
         # This runs inside similarity_search so it works regardless of whether the caller
         # is hybrid_search(), hybrid_retriever, or direct vector search.
-        hyp_match_docs = self._hypothetical_match_docs
+        hyp_match_docs = _hypothetical_match_docs
         if _hyp_filtered_count > 0 or hyp_match_docs:
             logger.warning(
                 "Similarity search: hypothetical question routing",
@@ -966,6 +966,7 @@ class ChromaVectorStore:
         # Trim back — allow extra slots for hypothetical-routed chunks so they survive
         # The downstream pipeline (hybrid retriever, RRF, verifier) handles final selection
         routed_count = sum(1 for r in search_results if r.metadata.get("hypothetical_routed"))
+        routed_count = min(routed_count, top_k)  # Cap to prevent over-allocation
         search_results = search_results[:top_k + routed_count]
 
         # Filter out soft-deleted documents and private docs
@@ -1043,7 +1044,9 @@ class ChromaVectorStore:
             if term.endswith("ies") and len(term) > 4:
                 variants.append(term[:-3] + "y")      # boundaries → boundary
             elif term.endswith("es") and len(term) > 3:
-                variants.append(term[:-2])             # changes → chang (less useful)
+                root = term[:-2]
+                if len(root) >= 4:  # Only add if root is substantial (avoids "chang" from "changes")
+                    variants.append(root)              # processes → process ✓
                 variants.append(term[:-1])             # changes → change
             elif term.endswith("s") and len(term) > 3:
                 variants.append(term[:-1])             # systems → system
@@ -1391,7 +1394,7 @@ class ChromaVectorStore:
 
         # Legacy hyp_doc_results for RRF scoring compatibility
         hyp_doc_results = []
-        hyp_match_docs = getattr(self, "_hypothetical_match_docs", {})
+        hyp_match_docs: Dict[str, float] = {}  # Disabled: routing now in similarity_search
         if False and hyp_match_docs:  # Disabled: routing now in similarity_search
             for doc_id, hyp_sim in hyp_match_docs.items():
                 try:

@@ -408,20 +408,22 @@ async def verify_research_stream(
 
         yield f"data: {json.dumps({'type': 'start', 'research_id': research_id})}\n\n"
 
-        # Get providers
+        # Get providers — use fresh session inside generator (request-scoped session is closed)
         providers = []
         if request.provider_ids:
-            for provider_id in request.provider_ids:
-                try:
-                    provider = await LLMProviderService.get_provider(db, provider_id)
-                    if provider and provider.is_active:
-                        providers.append({
-                            "type": provider.provider_type,
-                            "model": provider.default_chat_model or "gpt-4o",
-                            "name": provider.name,
-                        })
-                except Exception:
-                    pass
+            from backend.db.database import async_session_context
+            async with async_session_context() as gen_db:
+                for provider_id in request.provider_ids:
+                    try:
+                        provider = await LLMProviderService.get_provider(gen_db, provider_id)
+                        if provider and provider.is_active:
+                            providers.append({
+                                "type": provider.provider_type,
+                                "model": provider.default_chat_model or "gpt-4o",
+                                "name": provider.name,
+                            })
+                    except Exception:
+                        pass
 
         if not providers:
             providers = [{"type": "openai", "model": "gpt-4o", "name": "GPT-4o"}]

@@ -147,15 +147,14 @@ class ChatPrivacyService:
         # Note: In production, this would query user_privacy_preferences table
         # For now, we'll check if user has preferences stored in their profile
 
-        query = select(User).where(User.id == UUID(user_id))
-        result = await db.execute(query)
-        user = result.scalar_one_or_none()
+        try:
+            query = select(User).where(User.id == UUID(user_id))
+            result = await db.execute(query)
+            user = result.scalar_one_or_none()
+        except (ValueError, Exception):
+            user = None
 
-        if not user:
-            raise ValueError(f"User not found: {user_id}")
-
-        # Check for existing preferences in user metadata or dedicated table
-        # Default to sensible privacy-preserving defaults
+        # Return default preferences if user not found (e.g. dev mode)
         return PrivacyPreferences(
             user_id=user_id,
             chat_history_enabled=True,

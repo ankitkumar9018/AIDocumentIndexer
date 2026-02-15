@@ -212,36 +212,37 @@ class SlackEventHandler:
                 temp_dir = tempfile.mkdtemp()
                 temp_path = os.path.join(temp_dir, filename)
 
-                with open(temp_path, "wb") as f:
-                    f.write(file_content)
-
-                # Process through document pipeline
-                from backend.services.pipeline import DocumentPipeline
-
-                pipeline = DocumentPipeline()
-
-                # Create a unique collection for Slack uploads if user context available
-                collection_name = f"slack_uploads_{user}" if user else "slack_uploads"
-
-                # Process the document
-                result = await pipeline.process_document(
-                    file_path=temp_path,
-                    metadata={
-                        "original_filename": filename,
-                        "source": "slack",
-                        "channel_id": channel,
-                        "user_id": user,
-                        "file_id": file_id,
-                    },
-                    collection=collection_name,
-                )
-
-                # Cleanup temp file
                 try:
-                    os.remove(temp_path)
-                    os.rmdir(temp_dir)
-                except Exception:
-                    pass
+                    with open(temp_path, "wb") as f:
+                        f.write(file_content)
+
+                    # Process through document pipeline
+                    from backend.services.pipeline import DocumentPipeline
+
+                    pipeline = DocumentPipeline()
+
+                    # Create a unique collection for Slack uploads if user context available
+                    collection_name = f"slack_uploads_{user}" if user else "slack_uploads"
+
+                    # Process the document
+                    result = await pipeline.process_document(
+                        file_path=temp_path,
+                        metadata={
+                            "original_filename": filename,
+                            "source": "slack",
+                            "channel_id": channel,
+                            "user_id": user,
+                            "file_id": file_id,
+                        },
+                        collection=collection_name,
+                    )
+                finally:
+                    # Always cleanup temp file
+                    try:
+                        os.remove(temp_path)
+                        os.rmdir(temp_dir)
+                    except Exception:
+                        pass
 
                 chunks_count = result.get("chunks_created", 0)
                 await say(

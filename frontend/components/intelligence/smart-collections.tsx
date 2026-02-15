@@ -18,6 +18,7 @@ import {
   Target,
   Layers
 } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface SmartCollection {
   id: string;
@@ -73,20 +74,15 @@ export function SmartCollections() {
         setProgress((prev) => Math.min(prev + 10, 90));
       }, 500);
 
-      const response = await fetch("/api/v1/intelligence/collections/organize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy: selectedStrategy }),
+      const { data: result } = await api.post<OrganizationResult>("/intelligence/collections/organize", {
+        strategy: selectedStrategy,
       });
 
       clearInterval(progressInterval);
       setProgress(100);
 
-      if (response.ok) {
-        const result: OrganizationResult = await response.json();
-        setCollections(result.collections);
-        setStats(result.stats);
-      }
+      setCollections(result.collections);
+      setStats(result.stats);
     } catch (error) {
       console.error("Organization failed:", error);
     } finally {
@@ -97,11 +93,8 @@ export function SmartCollections() {
 
   const fetchCollections = async () => {
     try {
-      const response = await fetch("/api/v1/intelligence/collections/smart");
-      if (response.ok) {
-        const data = await response.json();
-        setCollections(data.collections || []);
-      }
+      const { data } = await api.get<{ collections: SmartCollection[] }>("/intelligence/collections/smart");
+      setCollections(data.collections || []);
     } catch (error) {
       console.error("Failed to fetch collections:", error);
     }

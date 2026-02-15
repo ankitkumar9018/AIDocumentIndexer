@@ -60,7 +60,7 @@ async def _get_colbert_settings() -> Tuple[bool, str]:
         from backend.services.settings import get_settings_service
 
         settings = get_settings_service()
-        enabled = await settings.get_setting("rag.colbert_reranking_enabled")
+        enabled = await settings.get_setting("rag.use_colbert_reranker")
         model = await settings.get_setting("rag.colbert_model")
 
         _colbert_enabled = enabled if enabled is not None else False

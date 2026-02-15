@@ -11,6 +11,7 @@
  */
 
 import { useState, useCallback } from "react";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -110,17 +111,7 @@ export function WebCrawlerInterface() {
     setCrawlResult(null);
 
     try {
-      const response = await fetch("/api/v1/crawler/crawl", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: crawlUrl, bypass_cache: bypassCache }),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.detail || "Crawl failed");
-      }
+      const { data: result } = await api.post<CrawlResult>("/crawler/crawl", { url: crawlUrl, bypass_cache: bypassCache });
 
       setCrawlResult(result);
       toast.success(`Crawled ${result.title || crawlUrl}`);
@@ -152,21 +143,11 @@ export function WebCrawlerInterface() {
         }
       }
 
-      const response = await fetch("/api/v1/crawler/crawl/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: extractUrl,
-          schema,
-          extraction_prompt: extractPrompt || undefined,
-        }),
+      const { data: result } = await api.post<CrawlResult>("/crawler/crawl/extract", {
+        url: extractUrl,
+        schema,
+        extraction_prompt: extractPrompt || undefined,
       });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.detail || "Extraction failed");
-      }
 
       setExtractResult(result);
       toast.success("Extracted structured data");
@@ -187,17 +168,7 @@ export function WebCrawlerInterface() {
     setQueryResult(null);
 
     try {
-      const response = await fetch("/api/v1/crawler/query", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: queryUrl, question: queryQuestion }),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.detail || "Query failed");
-      }
+      const { data: result } = await api.post<QueryResult>("/crawler/query", { url: queryUrl, question: queryQuestion });
 
       setQueryResult(result);
       toast.success("Got answer");
@@ -218,22 +189,12 @@ export function WebCrawlerInterface() {
     setSiteCrawlResult(null);
 
     try {
-      const response = await fetch("/api/v1/crawler/crawl/site", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          start_url: siteUrl,
-          max_pages: maxPages,
-          same_domain_only: sameDomainOnly,
-          url_pattern: urlPattern || undefined,
-        }),
+      const { data: result } = await api.post<SiteCrawlResult>("/crawler/crawl/site", {
+        start_url: siteUrl,
+        max_pages: maxPages,
+        same_domain_only: sameDomainOnly,
+        url_pattern: urlPattern || undefined,
       });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.detail || "Site crawl failed");
-      }
 
       setSiteCrawlResult(result);
       toast.success(`Crawled ${result.pages_successful} pages`);

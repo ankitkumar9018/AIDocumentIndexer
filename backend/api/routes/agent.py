@@ -376,8 +376,8 @@ async def execute_stream(
             yield "data: {\"type\": \"stream_end\"}\n\n"
 
         except Exception as e:
-            logger.error(f"Stream error: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+            logger.error("Agent streaming error", error=str(e))
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Agent streaming error'})}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -400,12 +400,21 @@ async def approve_execution(
     user_id = user.user_id
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        async for update in orchestrator.approve_execution(plan_id, user_id):
-            yield f"data: {json.dumps(update)}\n\n"
+        try:
+            async for update in orchestrator.approve_execution(plan_id, user_id):
+                yield f"data: {json.dumps(update)}\n\n"
+            yield "data: {\"type\": \"stream_end\"}\n\n"
+        except Exception as e:
+            logger.error("Agent approval streaming error", error=str(e))
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Agent approval streaming error'})}\n\n"
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
     )
 
 
@@ -434,16 +443,17 @@ async def cancel_execution(
 @router.get("/plans/{plan_id}")
 async def get_plan_status(
     plan_id: str,
+    user: AuthenticatedUser,
     db: AsyncSession = Depends(get_db),
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ) -> PlanStatusResponse:
     """Get execution plan status."""
-    status = await orchestrator.get_plan_status(plan_id)
+    plan_status = await orchestrator.get_plan_status(plan_id)
 
-    if not status:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
+    if not plan_status:
+        raise HTTPException(status_code=404, detail="Plan not found")
 
-    return PlanStatusResponse(**status)
+    return PlanStatusResponse(**plan_status)
 
 
 @router.get("/plans")
@@ -1655,7 +1665,7 @@ Respond with ONLY the improved description, nothing else."""
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to enhance prompt: {str(e)}"
+            detail="Failed to enhance prompt"
         )
 
 
@@ -2267,7 +2277,7 @@ async def get_agent_evaluation(
 
     except Exception as e:
         logger.error("Failed to get agent evaluation", error=str(e), agent_id=agent_id)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get evaluation: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get evaluation")
 
 
 @router.post("/agents/{agent_id}/evaluation/trial")
@@ -2306,7 +2316,7 @@ async def record_evaluation_trial(
 
     except Exception as e:
         logger.error("Failed to record trial", error=str(e), agent_id=agent_id)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to record trial: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to record trial")
 
 
 @router.get("/agents/{agent_id}/evaluation/pass-k")
@@ -2342,7 +2352,7 @@ async def get_pass_k_metric(
 
     except Exception as e:
         logger.error("Failed to compute Pass^k", error=str(e), agent_id=agent_id)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to compute Pass^k: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to compute metric")
 
 
 @router.get("/agents/{agent_id}/personalization")
@@ -2375,7 +2385,7 @@ async def get_user_personalization(
 
     except Exception as e:
         logger.error("Failed to get personalization", error=str(e), agent_id=agent_id)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get personalization: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get personalization")
 
 
 @router.post("/agents/{agent_id}/personalization/feedback")
@@ -2416,4 +2426,4 @@ async def record_personalization_feedback(
 
     except Exception as e:
         logger.error("Failed to record feedback", error=str(e), agent_id=agent_id)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to record feedback: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to record feedback")

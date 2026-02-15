@@ -653,23 +653,34 @@ class ResearchAgent(BaseAgent):
         self.clear_trajectory()
         start_time = time.time()
 
-        # Extract search query
-        query = task.description or context.get("query", "")
+        # Use original user request for search (LLM-generated task descriptions
+        # can diverge from the actual query, especially with small models)
+        search_query = context.get("user_request", "") or task.description or context.get("query", "")
+        # Keep task description for LLM synthesis context
+        query = task.description or search_query
 
         # Record research start
         self.record_step(
             action_type="research_start",
-            input_data={"query": query},
+            input_data={"query": search_query},
             output_data={},
         )
 
         sources = []
         search_results = []
 
-        # 1. Search documents via RAG
+        # 1. Search documents via RAG (with intelligence features from context)
+        search_limit = context.get("top_k", 10)
         if self.rag_service:
             try:
-                rag_results = await self._search_documents(query)
+                rag_results = await self._search_documents(
+                    search_query,
+                    limit=search_limit,
+                    collection_filter=context.get("collection_filter"),
+                    enhance_query=context.get("enhance_query"),
+                    skip_cache=context.get("skip_cache", False),
+                    intelligence_level=context.get("intelligence_level"),
+                )
                 if rag_results:
                     search_results.extend(rag_results)
                     sources.append("Document search")
@@ -689,7 +700,7 @@ class ResearchAgent(BaseAgent):
         # 3. Synthesize findings using LLM
         if search_results:
             sources_text = "\n".join(
-                f"- {r.get('source', 'Unknown')}: {r.get('content', '')[:300]}"
+                f"- {r.get('source', 'Unknown')}: {r.get('content', '')[:800]}"
                 for r in search_results
             )
         else:
@@ -705,7 +716,11 @@ class ResearchAgent(BaseAgent):
 
         try:
             response_text, input_tokens, output_tokens = await self.invoke_llm(
-                messages, record=True
+                messages,
+                record=True,
+                temperature_override=context.get("temperature_override"),
+                intelligence_level=context.get("intelligence_level"),
+                enable_cot=context.get("enable_cot", False),
             )
 
             duration_ms = int((time.time() - start_time) * 1000)
@@ -741,18 +756,26 @@ class ResearchAgent(BaseAgent):
     async def _search_documents(
         self,
         query: str,
-        limit: int = 5
+        limit: int = 10,
+        collection_filter: Optional[str] = None,
+        enhance_query: Optional[bool] = None,
+        skip_cache: bool = False,
+        intelligence_level: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search documents using RAGService."""
+        """Search documents using RAGService with optional enhanced retrieval."""
         if not self.rag_service:
             logger.warning("No RAG service available for document search")
             return []
 
         try:
-            # Use RAGService search method
+            # Use RAGService search method (with intelligence features)
             results = await self.rag_service.search(
                 query=query,
                 limit=limit,
+                collection_filter=collection_filter,
+                enhance_query=enhance_query,
+                skip_cache=skip_cache,
+                intelligence_level=intelligence_level,
             )
 
             self.record_step(

@@ -189,16 +189,22 @@ class MCPResourceProvider:
         # Extract document ID from URI
         # Format: aidoc://documents/{document_id}
         parts = uri.replace("aidoc://documents/", "").split("/")
-        document_id = parts[0] if parts else None
+        document_id_str = parts[0] if parts else None
 
-        if not document_id:
+        if not document_id_str:
             return {"uri": uri, "mimeType": "text/plain", "text": "Error: Invalid document URI"}
 
         try:
+            from uuid import UUID as PyUUID
             from backend.db.database import get_async_session
             from backend.db.models import Document, Chunk
             from sqlalchemy import select
             from sqlalchemy.orm import selectinload
+
+            try:
+                document_id = PyUUID(document_id_str)
+            except ValueError:
+                return {"uri": uri, "mimeType": "text/plain", "text": "Error: Invalid document ID format"}
 
             async with get_async_session() as session:
                 query = (

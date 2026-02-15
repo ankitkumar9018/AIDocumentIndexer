@@ -173,18 +173,15 @@ interface SystemStats {
 // API HELPER
 // =============================================================================
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
+import { api } from "@/lib/api";
 
 async function fetchSettings(category?: string): Promise<Record<string, SettingValue>> {
   try {
-    const url = category
-      ? `${API_BASE}/admin/settings?category=${category}`
-      : `${API_BASE}/admin/settings`;
-    const response = await fetch(url, {
-      credentials: "include",
-    });
-    if (!response.ok) throw new Error("Failed to fetch settings");
-    return await response.json();
+    const endpoint = category
+      ? `/admin/settings?category=${category}`
+      : `/admin/settings`;
+    const { data } = await api.get<Record<string, SettingValue>>(endpoint);
+    return data;
   } catch (error) {
     console.error("Error fetching settings:", error);
     return {};
@@ -193,13 +190,8 @@ async function fetchSettings(category?: string): Promise<Record<string, SettingV
 
 async function updateSetting(key: string, value: any): Promise<boolean> {
   try {
-    const response = await fetch(`${API_BASE}/admin/settings/${key}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ value }),
-    });
-    return response.ok;
+    await api.put(`/admin/settings/${key}`, { value });
+    return true;
   } catch (error) {
     console.error("Error updating setting:", error);
     return false;
@@ -208,11 +200,8 @@ async function updateSetting(key: string, value: any): Promise<boolean> {
 
 async function resetSetting(key: string): Promise<boolean> {
   try {
-    const response = await fetch(`${API_BASE}/admin/settings/${key}`, {
-      method: "DELETE",
-      credentials: "include",
-    });
-    return response.ok;
+    await api.delete(`/admin/settings/${key}`);
+    return true;
   } catch (error) {
     console.error("Error resetting setting:", error);
     return false;

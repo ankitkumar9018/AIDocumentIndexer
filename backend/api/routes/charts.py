@@ -8,10 +8,13 @@ API endpoints for generating charts and visualizations.
 from typing import List, Optional, Dict, Any
 from enum import Enum
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+import math
+from pydantic import BaseModel, Field, field_validator
 import structlog
+
+from backend.api.deps import get_current_user
 
 from backend.services.chart_generator import (
     ChartGenerator,
@@ -53,12 +56,28 @@ class ChartTypeEnum(str, Enum):
 
 class ChartDataRequest(BaseModel):
     """Data for chart generation."""
-    labels: List[str] = Field(..., description="Labels for chart data points")
-    values: List[float] = Field(..., description="Numeric values for chart")
-    series_name: str = Field("Data", description="Name of the data series")
+    labels: List[str] = Field(..., max_length=10000, description="Labels for chart data points")
+    values: List[float] = Field(..., max_length=10000, description="Numeric values for chart")
+    series_name: str = Field("Data", max_length=200, description="Name of the data series")
     additional_series: Optional[Dict[str, List[float]]] = Field(
-        None, description="Additional data series for multi-series charts"
+        None, description="Additional data series for multi-series charts (max 10 series)"
     )
+
+    @field_validator('labels')
+    @classmethod
+    def validate_labels(cls, v):
+        for label in v:
+            if len(label) > 1000:
+                raise ValueError('Individual label must be <= 1000 characters')
+        return v
+
+    @field_validator('values')
+    @classmethod
+    def validate_values(cls, v):
+        for val in v:
+            if math.isinf(val) or math.isnan(val):
+                raise ValueError('Infinity and NaN values are not allowed')
+        return v
 
 
 class ChartStyleRequest(BaseModel):
@@ -98,12 +117,22 @@ class ChartInfoResponse(BaseModel):
 # =============================================================================
 
 @router.post("/generate", response_class=Response)
-async def generate_chart(request: GenerateChartRequest):
+async def generate_chart(request: GenerateChartRequest, user: dict = Depends(get_current_user)):
     """
     Generate a chart from provided data.
 
     Returns the chart image in the specified format (PNG, SVG, or PDF).
     """
+    if len(request.data.labels) != len(request.data.values):
+        raise HTTPException(status_code=400, detail="Labels and values must have the same length")
+
+    if request.data.additional_series:
+        if len(request.data.additional_series) > 10:
+            raise HTTPException(status_code=400, detail="Maximum 10 additional series allowed")
+        for name, series_values in request.data.additional_series.items():
+            if len(series_values) > 10000:
+                raise HTTPException(status_code=400, detail=f"Series '{name}' exceeds maximum of 10000 data points")
+
     logger.info(
         "Generating chart",
         chart_type=request.chart_type.value,
@@ -177,14 +206,14 @@ async def generate_chart(request: GenerateChartRequest):
 
     except ValueError as e:
         logger.warning("Invalid chart request", error=str(e))
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid chart request")
     except Exception as e:
         logger.error("Chart generation failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Chart generation failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Chart generation failed")
 
 
 @router.get("/types")
-async def list_chart_types() -> Dict[str, Any]:
+async def list_chart_types(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """
     List available chart types with descriptions.
     """

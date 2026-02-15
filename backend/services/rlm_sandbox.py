@@ -471,11 +471,12 @@ if answer.get("ready"):
         """Clean up Docker container if running."""
         if self._container_id:
             try:
-                subprocess.run(
-                    ["docker", "kill", self._container_id],
-                    capture_output=True,
-                    timeout=5
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "kill", self._container_id,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
                 )
+                await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception as e:
                 logger.debug("Failed to kill Docker container", container_id=self._container_id, error=str(e))
             self._container_id = None
@@ -824,12 +825,13 @@ async def get_best_sandbox() -> Tuple[BaseSandbox, SandboxType]:
 
     # Check Docker
     try:
-        result = subprocess.run(
-            ["docker", "version"],
-            capture_output=True,
-            timeout=5
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "version",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        if result.returncode == 0:
+        returncode = await asyncio.wait_for(proc.wait(), timeout=5)
+        if returncode == 0:
             config = SandboxConfig(sandbox_type=SandboxType.DOCKER)
             return DockerSandbox(config), SandboxType.DOCKER
     except Exception:

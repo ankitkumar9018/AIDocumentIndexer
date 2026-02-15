@@ -5,10 +5,12 @@ WebSocket API Routes
 Real-time WebSocket endpoints for live updates.
 """
 
+import os
 import uuid
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+import structlog
 
 from backend.services.websocket_manager import (
     get_websocket_manager,
@@ -16,7 +18,25 @@ from backend.services.websocket_manager import (
     EventType,
 )
 
+logger = structlog.get_logger(__name__)
+
 router = APIRouter()
+
+DEV_MODE = os.getenv("DEV_MODE", "false").lower() in ("true", "1", "yes")
+
+
+def _validate_ws_token(token: Optional[str]) -> Optional[str]:
+    """Validate WebSocket token and return user_id, or None if invalid."""
+    if not token:
+        return None
+    if DEV_MODE and token == "dev-token":
+        return "dev-user"
+    try:
+        from backend.api.middleware.auth import decode_jwt_token
+        payload = decode_jwt_token(token)
+        return payload.get("sub")
+    except Exception:
+        return None
 
 
 @router.websocket("/ws")
@@ -52,12 +72,13 @@ async def websocket_endpoint(
         - collection:{id} - Collection updates
         - system - System-wide events
     """
+    user_id = _validate_ws_token(token)
+    if not user_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
     manager = get_websocket_manager()
     connection_id = str(uuid.uuid4())
-
-    # TODO: Validate token and get user_id
-    user_id = None
-
     await manager.handle_connection(websocket, connection_id, user_id)
 
 
@@ -72,6 +93,11 @@ async def chat_websocket(
 
     Automatically subscribes to chat:{conversation_id} channel.
     """
+    user_id = _validate_ws_token(token)
+    if not user_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
     manager = get_websocket_manager()
     connection_id = str(uuid.uuid4())
 
@@ -109,6 +135,11 @@ async def documents_websocket(
     Subscribes to all document events by default.
     Send subscription messages to filter specific documents.
     """
+    user_id = _validate_ws_token(token)
+    if not user_id:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
     manager = get_websocket_manager()
     connection_id = str(uuid.uuid4())
 

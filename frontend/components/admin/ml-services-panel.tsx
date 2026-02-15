@@ -157,15 +157,12 @@ interface MLServiceMetrics {
 // API Helpers
 // =============================================================================
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
+import { api } from "@/lib/api";
 
 async function fetchRayStatus(): Promise<RayClusterInfo | null> {
   try {
-    const response = await fetch(`${API_BASE}/admin/ray/status`, {
-      credentials: "include",
-    });
-    if (!response.ok) return null;
-    return await response.json();
+    const { data } = await api.get<RayClusterInfo>("/admin/ray/status");
+    return data;
   } catch {
     return null;
   }
@@ -173,11 +170,8 @@ async function fetchRayStatus(): Promise<RayClusterInfo | null> {
 
 async function fetchVLMConfig(): Promise<VLMConfig> {
   try {
-    const response = await fetch(`${API_BASE}/admin/vlm/config`, {
-      credentials: "include",
-    });
-    if (!response.ok) throw new Error();
-    return await response.json();
+    const { data } = await api.get<VLMConfig>("/admin/vlm/config");
+    return data;
   } catch {
     return {
       enabled: false,
@@ -193,11 +187,8 @@ async function fetchVLMConfig(): Promise<VLMConfig> {
 
 async function fetchRLMConfig(): Promise<RLMConfig> {
   try {
-    const response = await fetch(`${API_BASE}/admin/rlm/config`, {
-      credentials: "include",
-    });
-    if (!response.ok) throw new Error();
-    return await response.json();
+    const { data } = await api.get<RLMConfig>("/admin/rlm/config");
+    return data;
   } catch {
     return {
       enabled: false,
@@ -512,12 +503,7 @@ function VLMPanel() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await fetch(`${API_BASE}/admin/vlm/config`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(config),
-      });
+      await api.put("/admin/vlm/config", config);
     } catch (error) {
       console.error("Failed to save VLM config:", error);
     }
@@ -527,11 +513,7 @@ function VLMPanel() {
   const handleTest = async () => {
     setTestResult(null);
     try {
-      const response = await fetch(`${API_BASE}/admin/vlm/test`, {
-        method: "POST",
-        credentials: "include",
-      });
-      const result = await response.json();
+      const { data: result } = await api.post<{ success: boolean; message?: string }>("/admin/vlm/test");
       setTestResult({
         success: result.success,
         message: result.message || (result.success ? "VLM is working correctly" : "VLM test failed"),
@@ -794,12 +776,7 @@ function RLMPanel() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await fetch(`${API_BASE}/admin/rlm/config`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(config),
-      });
+      await api.put("/admin/rlm/config", config);
     } catch (error) {
       console.error("Failed to save RLM config:", error);
     }

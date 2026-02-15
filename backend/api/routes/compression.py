@@ -189,7 +189,7 @@ async def llmlingua_compress(
         logger.error("LLMLingua-2 compression failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Compression failed: {str(e)}",
+            detail="Compression failed",
         )
 
 
@@ -237,7 +237,7 @@ async def llmlingua_compress_batch(
         logger.error("Batch compression failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Batch compression failed: {str(e)}",
+            detail="Batch compression failed",
         )
 
 
@@ -293,7 +293,7 @@ async def llmlingua_compress_rag(
         logger.error("RAG compression failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"RAG compression failed: {str(e)}",
+            detail="RAG compression failed",
         )
 
 
@@ -358,7 +358,7 @@ async def oscar_compress(
         logger.error("OSCAR compression failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"OSCAR compression failed: {str(e)}",
+            detail="OSCAR compression failed",
         )
 
 
@@ -367,7 +367,7 @@ async def oscar_compress(
 # =============================================================================
 
 @router.get("/methods")
-async def list_compression_methods() -> Dict[str, Any]:
+async def list_compression_methods(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """List available compression methods with comparison."""
     return {
         "methods": [
@@ -413,7 +413,7 @@ async def list_compression_methods() -> Dict[str, Any]:
 
 
 @router.get("/health")
-async def compression_health() -> Dict[str, Any]:
+async def compression_health(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
     """Check compression services health."""
     status_map = {}
 

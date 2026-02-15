@@ -213,8 +213,8 @@ async def get_my_access(
 @router.get("/services/{service_name}", response_model=ServiceConfigResponse)
 async def get_service_config(
     service_name: str,
+    user: AuthenticatedUser,
     operation_name: Optional[str] = Query(None),
-    user: AuthenticatedUser = None,
 ):
     """
     Get LLM configuration for a service.
@@ -228,7 +228,7 @@ async def get_service_config(
             db,
             service_name=service_name,
             operation_name=operation_name,
-            organization_id=user.organization_id if user else None,
+            organization_id=user.organization_id,
         )
 
         return ServiceConfigResponse(
@@ -296,8 +296,8 @@ async def list_service_configs(
 @router.get("/overrides/{service_name}", response_model=Optional[UserOverrideResponse])
 async def get_my_override(
     service_name: str,
+    user: AuthenticatedUser,
     operation_name: Optional[str] = Query(None),
-    user: AuthenticatedUser = None,
 ):
     """
     Get your model override for a service.
@@ -332,8 +332,8 @@ async def get_my_override(
 async def set_my_override(
     service_name: str,
     override: UserOverrideRequest,
+    user: AuthenticatedUser,
     operation_name: Optional[str] = Query(None),
-    user: AuthenticatedUser = None,
 ):
     """
     Set your model override for a service.
@@ -388,8 +388,8 @@ async def set_my_override(
 @router.delete("/overrides/{service_name}")
 async def delete_my_override(
     service_name: str,
+    user: AuthenticatedUser,
     operation_name: Optional[str] = Query(None),
-    user: AuthenticatedUser = None,
 ):
     """
     Remove your model override for a service.
@@ -414,8 +414,8 @@ async def delete_my_override(
 async def update_service_config(
     service_name: str,
     updates: ServiceConfigUpdate,
+    user: AuthenticatedUser,
     operation_name: Optional[str] = Query(None),
-    user: AuthenticatedUser = None,
 ):
     """
     Update LLM configuration for a service.
@@ -1179,14 +1179,14 @@ async def get_vllm_model_info():
         logger.error("Failed to get vLLM model info", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get model info: {str(e)}",
+            detail="Failed to get model info",
         )
 
 
 @router.post("/vllm/generate", response_model=VLLMGenerateResponse)
 async def vllm_generate(
     request: VLLMGenerateRequest,
-    user: AuthenticatedUser = None,
+    user: AuthenticatedUser,
 ):
     """
     Generate text using vLLM.
@@ -1218,13 +1218,14 @@ async def vllm_generate(
         )
 
     except ValueError as e:
+        logger.warning("vLLM generation invalid input", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid generation request",
         )
     except Exception as e:
         logger.error("vLLM generation failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Generation failed: {str(e)}",
+            detail="Generation failed",
         )

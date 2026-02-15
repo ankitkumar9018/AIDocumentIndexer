@@ -11,13 +11,15 @@ Endpoints:
 - POST /crawl/site - Crawl multiple pages from a site
 """
 
+import re
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, status
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from pydantic import BaseModel, Field, HttpUrl
 
 import structlog
 
+from backend.api.deps import get_current_user
 from backend.services.web_crawler import (
     get_web_crawler,
     CrawlResult,
@@ -118,7 +120,7 @@ class SiteCrawlResponse(BaseModel):
 # =============================================================================
 
 @router.post("/crawl", response_model=CrawlResponse)
-async def crawl_url(request: CrawlRequest) -> CrawlResponse:
+async def crawl_url(request: CrawlRequest, user: dict = Depends(get_current_user)) -> CrawlResponse:
     """
     Crawl a URL and return the content.
 
@@ -154,11 +156,11 @@ async def crawl_url(request: CrawlRequest) -> CrawlResponse:
 
     except Exception as e:
         logger.error("Crawl endpoint error", url=request.url, error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Crawl operation failed. Check server logs for details.")
 
 
 @router.post("/crawl/extract", response_model=CrawlResponse)
-async def crawl_with_extraction(request: CrawlWithExtractionRequest) -> CrawlResponse:
+async def crawl_with_extraction(request: CrawlWithExtractionRequest, user: dict = Depends(get_current_user)) -> CrawlResponse:
     """
     Crawl a URL and extract structured data using LLM.
 
@@ -203,11 +205,11 @@ async def crawl_with_extraction(request: CrawlWithExtractionRequest) -> CrawlRes
 
     except Exception as e:
         logger.error("Crawl extraction error", url=request.url, error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Crawl extraction failed. Check server logs for details.")
 
 
 @router.post("/query", response_model=WebQueryResponse)
-async def query_website(request: WebQueryRequest) -> WebQueryResponse:
+async def query_website(request: WebQueryRequest, user: dict = Depends(get_current_user)) -> WebQueryResponse:
     """
     Answer a question about a website's content.
 
@@ -235,11 +237,11 @@ async def query_website(request: WebQueryRequest) -> WebQueryResponse:
 
     except Exception as e:
         logger.error("Query website error", url=request.url, error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Website query failed. Check server logs for details.")
 
 
 @router.post("/crawl/site", response_model=SiteCrawlResponse)
-async def crawl_site(request: SiteCrawlRequest) -> SiteCrawlResponse:
+async def crawl_site(request: SiteCrawlRequest, user: dict = Depends(get_current_user)) -> SiteCrawlResponse:
     """
     Crawl multiple pages from a website.
 
@@ -249,6 +251,21 @@ async def crawl_site(request: SiteCrawlRequest) -> SiteCrawlResponse:
 
     Use url_pattern to filter which URLs to crawl (regex).
     """
+    # Validate regex pattern to prevent ReDoS
+    if request.url_pattern:
+        if len(request.url_pattern) > 200:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Regex pattern too long (max 200 characters)",
+            )
+        try:
+            re.compile(request.url_pattern)
+        except re.error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid regex pattern",
+            )
+
     try:
         import time
         start_time = time.time()
@@ -291,11 +308,11 @@ async def crawl_site(request: SiteCrawlRequest) -> SiteCrawlResponse:
 
     except Exception as e:
         logger.error("Site crawl error", url=request.start_url, error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Site crawl failed. Check server logs for details.")
 
 
 @router.get("/status")
-async def crawler_status() -> Dict[str, Any]:
+async def crawler_status(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     """
     Get the status of the web crawler.
 

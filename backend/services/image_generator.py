@@ -144,8 +144,11 @@ class ImageGeneratorService:
             logger.debug("Image generation is disabled")
             return None
 
-        width = width or self.config.default_width
-        height = height or self.config.default_height
+        MAX_IMAGE_DIMENSION = 2048
+        width = min(width or self.config.default_width, MAX_IMAGE_DIMENSION)
+        height = min(height or self.config.default_height, MAX_IMAGE_DIMENSION)
+        if width < 1 or height < 1:
+            raise ValueError("Image dimensions must be positive")
 
         # Create prompt from section content
         prompt = self._create_prompt(section_title, section_content, document_title)

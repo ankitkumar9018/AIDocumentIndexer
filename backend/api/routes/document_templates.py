@@ -8,6 +8,7 @@ These are file templates for document generation, not prompt templates.
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import List, Optional
 
@@ -22,6 +23,27 @@ router = APIRouter(prefix="/document-templates", tags=["Document Templates"])
 
 # Path to templates directory
 TEMPLATES_DIR = Path(__file__).parent.parent.parent.parent / "data" / "templates"
+
+
+def _validate_template_path_segment(segment: str, name: str) -> str:
+    """Validate a template path segment contains only safe characters (prevent path traversal)."""
+    if not re.match(r'^[a-zA-Z0-9_.-]+$', segment):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {name}",
+        )
+    return segment
+
+
+def _validate_resolved_path(path: Path) -> None:
+    """Ensure a resolved path stays within the templates directory."""
+    try:
+        path.resolve().relative_to(TEMPLATES_DIR.resolve())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid template path",
+        )
 
 
 # =============================================================================
@@ -334,7 +356,12 @@ async def get_template_metadata(
     """
     Get metadata for a specific template.
     """
+    file_type = _validate_template_path_segment(file_type, "file type")
+    category = _validate_template_path_segment(category, "category")
+    template_id = _validate_template_path_segment(template_id, "template ID")
+
     json_path = TEMPLATES_DIR / file_type / category / f"{template_id.replace(f'{category}-', '')}.json"
+    _validate_resolved_path(json_path)
 
     # Try alternative path patterns
     if not json_path.exists():
@@ -361,6 +388,10 @@ async def download_template(
     """
     Download the actual template file.
     """
+    file_type = _validate_template_path_segment(file_type, "file type")
+    category = _validate_template_path_segment(category, "category")
+    template_id = _validate_template_path_segment(template_id, "template ID")
+
     # Find the template file
     template_dir = TEMPLATES_DIR / file_type / category
 
@@ -382,6 +413,8 @@ async def download_template(
     if not template_file.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template file not found")
 
+    _validate_resolved_path(template_file)
+
     return FileResponse(
         path=str(template_file),
         filename=template_file.name,
@@ -400,6 +433,10 @@ async def get_template_preview(
 
     Returns a PNG preview if available, otherwise a placeholder response.
     """
+    file_type = _validate_template_path_segment(file_type, "file type")
+    category = _validate_template_path_segment(category, "category")
+    template_id = _validate_template_path_segment(template_id, "template ID")
+
     template_dir = TEMPLATES_DIR / file_type / category
 
     if not template_dir.exists():
@@ -413,6 +450,7 @@ async def get_template_preview(
         preview_file = template_dir / f"{template_name}_preview.png"
 
     if preview_file.exists():
+        _validate_resolved_path(preview_file)
         return FileResponse(
             path=str(preview_file),
             media_type="image/png",

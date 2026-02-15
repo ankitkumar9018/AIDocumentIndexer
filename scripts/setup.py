@@ -1191,7 +1191,7 @@ def start_services(project_root: Path, deps: Dict) -> bool:
     # Check services with retry (backend can take 60-90s with service registry + table checks)
     backend_running = False
     frontend_running = False
-    max_retries = 24  # 24 * 5s = 120s max wait
+    max_retries = 36  # 36 * 5s = 180s max wait (backend has heavy imports + table checks)
     for i in range(max_retries):
         time.sleep(5)
         if not backend_running:

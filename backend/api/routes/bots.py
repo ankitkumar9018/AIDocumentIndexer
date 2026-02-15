@@ -28,8 +28,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.api.deps import get_current_user, get_async_session, get_current_organization_id
 from backend.db.models import BotConnection, BotPlatform
 from backend.core.config import settings
+from backend.services.encryption import encrypt_value, decrypt_value
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+
+def _decrypt_bot_token(token: str) -> str:
+    """Decrypt bot token, with backward compatibility for plaintext tokens."""
+    if not token:
+        return ""
+    try:
+        return decrypt_value(token)
+    except ValueError:
+        return token  # Already plaintext (pre-encryption records)
 
 
 # =============================================================================
@@ -153,7 +167,7 @@ async def create_bot_connection(
         organization_id=organization_id,
         platform=platform_enum,
         workspace_id=request.workspace_id,
-        bot_token=request.bot_token,  # Should be encrypted in production
+        bot_token=encrypt_value(request.bot_token),
         config=request.config,
         is_active=True,
         installed_by_id=uuid.UUID(current_user.get("sub")) if current_user.get("sub") else None,
@@ -338,7 +352,7 @@ async def slack_oauth_callback(
         connection = existing.scalar_one_or_none()
 
         if connection:
-            connection.bot_token = bot_token
+            connection.bot_token = encrypt_value(bot_token)
             connection.workspace_name = workspace_name
             connection.is_active = True
         else:
@@ -348,7 +362,7 @@ async def slack_oauth_callback(
                 platform=BotPlatform.SLACK,
                 workspace_id=workspace_id,
                 workspace_name=workspace_name,
-                bot_token=bot_token,
+                bot_token=encrypt_value(bot_token),
                 is_active=True,
                 installed_by_id=user_id,
                 config=data,
@@ -365,9 +379,10 @@ async def slack_oauth_callback(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("OAuth callback failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"OAuth failed: {str(e)}",
+            detail="OAuth callback failed",
         )
 
 

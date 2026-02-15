@@ -361,7 +361,7 @@ Only return the JSON array, no explanation."""
             _provider = self.provider or llm_config.default_provider
             _model = self.model or llm_config.default_chat_model
 
-            self._llm = await get_chat_model(provider=_provider, model=_model)
+            self._llm = get_chat_model(provider=_provider, model=_model)
             self._initialized = True
             return True
         except Exception as e:
@@ -664,11 +664,11 @@ class SemanticRerankerStage(BaseRerankerStage):
         if self._embedding_service:
             try:
                 # Get query embedding
-                query_embedding = await self._embedding_service.embed_text(query)
+                query_embedding = self._embedding_service.embed_text(query)
 
                 # Get candidate embeddings (batch)
                 texts = [c.content[:1000] for c in candidates]  # Limit text length
-                candidate_embeddings = await self._embedding_service.embed_texts(texts)
+                candidate_embeddings = self._embedding_service.embed_texts(texts)
 
                 # Compute cosine similarity
                 import numpy as np

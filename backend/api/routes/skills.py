@@ -75,11 +75,11 @@ class SkillCreateRequest(BaseModel):
     name: str = Field(..., description="Skill name")
     description: str = Field(..., description="Skill description")
     category: str = Field(default="custom", description="Skill category")
-    system_prompt: str = Field(..., description="System prompt for the skill")
-    inputs: List[SkillInput] = Field(default_factory=list, description="Input schema")
-    outputs: List[SkillOutput] = Field(default_factory=list, description="Output schema")
-    tags: List[str] = Field(default_factory=list, description="Skill tags")
-    icon: str = Field(default="zap", description="Icon name")
+    system_prompt: str = Field(..., max_length=100000, description="System prompt for the skill")
+    inputs: List[SkillInput] = Field(default_factory=list, max_length=50, description="Input schema")
+    outputs: List[SkillOutput] = Field(default_factory=list, max_length=50, description="Output schema")
+    tags: List[str] = Field(default_factory=list, max_length=20, description="Skill tags")
+    icon: str = Field(default="zap", max_length=50, description="Icon name")
     is_public: bool = Field(default=False, description="Make skill public")
 
 
@@ -199,9 +199,9 @@ class ExternalAgentCreateRequest(BaseModel):
     request_template: Optional[Dict[str, Any]] = Field(None, description="Base request body template")
 
     # Advanced settings
-    timeout_seconds: int = Field(default=60, description="Request timeout")
-    retry_count: int = Field(default=1, description="Number of retries on failure")
-    rate_limit_per_minute: int = Field(default=60, description="Rate limit for this agent")
+    timeout_seconds: int = Field(default=60, ge=1, le=300, description="Request timeout")
+    retry_count: int = Field(default=1, ge=0, le=5, description="Number of retries on failure")
+    rate_limit_per_minute: int = Field(default=60, ge=1, le=600, description="Rate limit for this agent")
     is_public: bool = Field(default=False, description="Make skill public")
 
 
@@ -664,7 +664,7 @@ async def execute_skill(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Skill execution failed: {str(e)}"
+            detail="Skill execution failed"
         )
 
 
@@ -837,7 +837,8 @@ async def list_skills(
             conditions.append(Skill.is_builtin == True)
 
         if search:
-            search_pattern = f"%{search}%"
+            safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            search_pattern = f"%{safe}%"
             conditions.append(
                 or_(
                     Skill.name.ilike(search_pattern),
@@ -877,7 +878,7 @@ async def list_skills(
         logger.error("Failed to list skills", error=str(e), user_id=user.user_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load skills: {str(e)}"
+            detail="Failed to load skills"
         )
 
 
@@ -1044,27 +1045,25 @@ async def get_skill_executions(
 
     user_uuid = _to_uuid(user.user_id)
 
-    # Only show user's own executions unless they own the skill
+    # Skill owner/builtin: show all executions; non-owner: only their own
     if skill.user_id == user_uuid or skill.is_builtin:
-        # Show all executions by this user
         query = select(SkillExecution).where(
             SkillExecution.skill_id == skill.id,
-            SkillExecution.user_id == user_uuid,
         ).order_by(SkillExecution.created_at.desc()).offset(offset).limit(limit)
+        count_conditions = [SkillExecution.skill_id == skill.id]
     else:
-        # Only show this user's executions
         query = select(SkillExecution).where(
             SkillExecution.skill_id == skill.id,
             SkillExecution.user_id == user_uuid,
         ).order_by(SkillExecution.created_at.desc()).offset(offset).limit(limit)
+        count_conditions = [SkillExecution.skill_id == skill.id, SkillExecution.user_id == user_uuid]
 
     result = await db.execute(query)
     executions = result.scalars().all()
 
     # Get total count
     count_query = select(func.count(SkillExecution.id)).where(
-        SkillExecution.skill_id == skill.id,
-        SkillExecution.user_id == user_uuid,
+        *count_conditions,
     )
     total = (await db.execute(count_query)).scalar() or 0
 
@@ -1095,6 +1094,32 @@ async def get_skill_executions(
 import httpx
 import time
 import json as json_module
+
+from backend.services.encryption import encrypt_value, decrypt_value
+
+# Sensitive fields in ExternalAgentAuth that must be encrypted at rest
+_SENSITIVE_AUTH_FIELDS = ("api_key", "bearer_token", "password", "oauth2_client_secret")
+
+
+def _encrypt_auth_data(auth_data: dict) -> dict:
+    """Encrypt sensitive fields in external agent auth config before storage."""
+    for field in _SENSITIVE_AUTH_FIELDS:
+        value = auth_data.get(field)
+        if value:
+            auth_data[field] = encrypt_value(value)
+    return auth_data
+
+
+def _decrypt_auth_data(auth_data: dict) -> dict:
+    """Decrypt sensitive fields in external agent auth config for use."""
+    for field in _SENSITIVE_AUTH_FIELDS:
+        value = auth_data.get(field)
+        if value:
+            try:
+                auth_data[field] = decrypt_value(value)
+            except ValueError:
+                pass  # Already plaintext (pre-encryption records)
+    return auth_data
 
 
 def _apply_json_path(data: Any, path: str) -> Any:
@@ -1151,6 +1176,41 @@ def _build_auth_headers(auth: ExternalAgentAuth) -> Dict[str, str]:
     return headers
 
 
+def _is_safe_url(url: str) -> bool:
+    """Validate URL is not targeting internal/private services (SSRF prevention)."""
+    from urllib.parse import urlparse
+    import ipaddress
+
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        # Block known internal/metadata hostnames
+        blocked = {"localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "[::1]"}
+        if hostname in blocked:
+            return False
+        # Block private and link-local IP ranges
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        except ValueError:
+            # Hostname, not IP — resolve DNS and check the resolved IP
+            import socket
+            try:
+                resolved_ip = ipaddress.ip_address(socket.gethostbyname(hostname))
+                if resolved_ip.is_private or resolved_ip.is_loopback or resolved_ip.is_link_local or resolved_ip.is_reserved:
+                    return False
+            except socket.gaierror:
+                return False  # DNS resolution failed — deny unverifiable addresses
+        return True
+    except Exception:
+        return False
+
+
 @router.post("/external/test", response_model=ExternalAgentTestResponse)
 async def test_external_agent(
     request: ExternalAgentTestRequest,
@@ -1160,6 +1220,13 @@ async def test_external_agent(
     Test an external agent configuration before creating the skill.
     Verifies connectivity, authentication, and response format.
     """
+    # SSRF prevention: validate endpoint URL
+    if not _is_safe_url(request.endpoint_url):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid endpoint URL: private/internal addresses are not allowed",
+        )
+
     start_time = time.time()
 
     try:
@@ -1256,7 +1323,7 @@ async def create_external_agent_skill(
         "endpoint_url": request.endpoint_url,
         "method": request.method,
         "content_type": request.content_type,
-        "auth": request.auth.model_dump(),
+        "auth": _encrypt_auth_data(request.auth.model_dump()),
         "input_mapping": [m.model_dump() for m in request.input_mapping],
         "output_mapping": [m.model_dump() for m in request.output_mapping],
         "request_template": request.request_template,
@@ -1336,7 +1403,15 @@ async def execute_external_agent_skill(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to parse external agent configuration: {str(e)}",
+            detail="Failed to parse external agent configuration",
+        )
+
+    # SSRF prevention: validate endpoint URL from stored config
+    endpoint_url = config.get("endpoint_url", "")
+    if not _is_safe_url(endpoint_url):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid endpoint URL: private/internal addresses are not allowed",
         )
 
     user_uuid = _to_uuid(user.user_id)
@@ -1360,8 +1435,9 @@ async def execute_external_agent_skill(
                     pass
             _set_json_path(request_body, api_path, value)
 
-    # Build auth headers
-    auth_config = ExternalAgentAuth(**config.get("auth", {}))
+    # Build auth headers (decrypt credentials from storage)
+    auth_data = _decrypt_auth_data(config.get("auth", {}))
+    auth_config = ExternalAgentAuth(**auth_data)
     headers = _build_auth_headers(auth_config)
     headers["Content-Type"] = config.get("content_type", "application/json")
 
@@ -1378,8 +1454,8 @@ async def execute_external_agent_skill(
     await db.commit()
 
     try:
-        timeout = config.get("timeout_seconds", 60)
-        retry_count = config.get("retry_count", 1)
+        timeout = min(config.get("timeout_seconds", 60), 120)  # Max 2 minutes per request
+        retry_count = min(config.get("retry_count", 1), 5)  # Max 5 retries
 
         last_error = None
         response = None
@@ -1483,7 +1559,7 @@ async def execute_external_agent_skill(
         logger.error("External agent execution failed", error=str(e), skill_id=skill_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"External agent execution failed: {str(e)}",
+            detail="External agent execution failed",
         )
 
 
@@ -1543,7 +1619,7 @@ async def get_external_agent_config(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to parse configuration: {str(e)}",
+            detail="Failed to parse configuration",
         )
 
 

@@ -77,10 +77,18 @@ export default function PrivacyPage() {
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState<"json" | "csv" | "zip">("json");
 
-  // Sync settings from API
+  // Sync settings from API — map backend field names to frontend interface
   useEffect(() => {
     if (privacyData) {
-      setSettings(privacyData);
+      const raw = privacyData as any;
+      setSettings({
+        chat_history_enabled: raw.chat_history_enabled ?? true,
+        chat_history_admin_visible: raw.chat_history_admin_visible ?? raw.chat_history_visible_to_admins ?? false,
+        ai_memory_enabled: raw.ai_memory_enabled ?? raw.memory_enabled ?? true,
+        memory_retention_days: raw.memory_retention_days ?? raw.auto_delete_memory_days ?? 90,
+        auto_delete_history_days: raw.auto_delete_history_days ?? null,
+        incognito_mode: raw.incognito_mode ?? false,
+      });
     }
   }, [privacyData]);
 

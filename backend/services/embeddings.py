@@ -43,6 +43,9 @@ try:
 except ImportError:
     QWEN3_AVAILABLE = False
 
+# Alias used by EmbeddingGemma and EmbeddingStellaV5
+HAS_TRANSFORMERS = QWEN3_AVAILABLE
+
 # Phase 69: Google Gemini Embedding (gemini-embedding-001) - #1 on MTEB Multilingual
 # Phase 87: Migrated from deprecated google-generativeai to google-genai SDK
 try:
@@ -207,15 +210,18 @@ class NomicOllamaEmbeddings(Embeddings):
     def __init__(
         self,
         model: str = "nomic-embed-text",
-        base_url: str = "http://localhost:11434",
+        base_url: str = None,
     ):
         """
         Initialize Nomic Ollama embeddings.
 
         Args:
             model: Ollama model name (should be nomic-embed-text)
-            base_url: Ollama server URL
+            base_url: Ollama server URL (defaults to llm_config.ollama_host)
         """
+        if base_url is None:
+            from backend.services.llm import llm_config
+            base_url = llm_config.ollama_host
         self.model = model
         self.base_url = base_url
         self._ollama = OllamaEmbeddings(model=model, base_url=base_url)
@@ -2848,6 +2854,14 @@ class RayEmbeddingService:
     def dimensions(self) -> int:
         """Get embedding dimensions."""
         return self._local_service.dimensions
+
+    def embed_text(self, text: str) -> List[float]:
+        """Generate embedding for a single text. Delegates to local service."""
+        return self._local_service.embed_text(text)
+
+    def embed_query(self, text: str) -> List[float]:
+        """Generate embedding for a query. Delegates to local service."""
+        return self._local_service.embed_text(text)
 
     def _is_ray_available(self) -> bool:
         """Check if Ray is initialized and available."""

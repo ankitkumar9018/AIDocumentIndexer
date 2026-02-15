@@ -3209,7 +3209,7 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         category=SettingCategory.INFRASTRUCTURE,
         default_value="ollama",
         value_type=ValueType.STRING,
-        description="LLM inference backend: ollama (default), vllm (2-4x faster batch inference), openai, anthropic"
+        description="LLM inference backend: auto (use default provider from Providers tab), ollama (default), vllm (2-4x faster batch inference), openai, anthropic, groq, together, deepinfra, bedrock, google, cohere, custom"
     ),
     SettingDefinition(
         key="llm.vllm_api_base",
@@ -3293,7 +3293,9 @@ class SettingsService:
                 except ValueError:
                     return float(value)
             elif value_type == ValueType.BOOLEAN:
-                return value.lower() in ("true", "1", "yes", "on")
+                if isinstance(value, bool):
+                    return value
+                return str(value).lower() in ("true", "1", "yes", "on")
             elif value_type == ValueType.JSON:
                 return json.loads(value)
             else:

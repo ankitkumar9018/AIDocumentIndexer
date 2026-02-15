@@ -171,7 +171,7 @@ async def ensemble_query(
         logger.error("Ensemble query failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Ensemble query failed: {str(e)}",
+            detail="Ensemble query failed",
         )
 
 

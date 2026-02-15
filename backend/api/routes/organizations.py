@@ -302,9 +302,10 @@ async def list_organizations(
 
     # Apply filters
     if search:
+        safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         search_filter = or_(
-            Organization.name.ilike(f"%{search}%"),
-            Organization.slug.ilike(f"%{search}%"),
+            Organization.name.ilike(f"%{safe}%"),
+            Organization.slug.ilike(f"%{safe}%"),
         )
         query = query.where(search_filter)
         count_query = count_query.where(search_filter)
@@ -896,7 +897,10 @@ async def add_organization_member(
         )
 
     # Create member
-    role = OrganizationRole(request.role) if hasattr(OrganizationRole, request.role.upper()) else OrganizationRole.MEMBER
+    try:
+        role = OrganizationRole(request.role.lower())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {request.role}. Must be one of: owner, admin, member")
     member = OrganizationMember(
         id=uuid.uuid4(),
         organization_id=org_id,
@@ -951,7 +955,10 @@ async def update_member_role(
     member, target_user = row
 
     # Update role
-    role = OrganizationRole(request.role) if hasattr(OrganizationRole, request.role.upper()) else OrganizationRole.MEMBER
+    try:
+        role = OrganizationRole(request.role.lower())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {request.role}. Must be one of: owner, admin, member")
     member.role = role
 
     await db.commit()

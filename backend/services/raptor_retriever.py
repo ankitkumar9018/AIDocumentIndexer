@@ -377,7 +377,7 @@ class RAPTORTreeBuilder:
             return
 
         texts = [n.content for n in nodes_needing_embeddings]
-        embeddings = await self.embedding_service.embed_texts(texts)
+        embeddings = self.embedding_service.embed_texts(texts)
 
         for node, emb in zip(nodes_needing_embeddings, embeddings):
             node.embedding = emb
@@ -611,7 +611,7 @@ class RAPTORRetriever:
         )
 
         # Get query embedding
-        query_embedding = await self.embedding_service.embed_text(query)
+        query_embedding = self.embedding_service.embed_text(query)
 
         # Traverse based on strategy
         if self.config.traversal_strategy == TraversalStrategy.TOP_DOWN:

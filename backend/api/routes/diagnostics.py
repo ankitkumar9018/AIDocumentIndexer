@@ -756,7 +756,7 @@ async def get_usage_analytics(
         logger.error("Failed to get usage analytics", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get analytics: {str(e)}",
+            detail="Failed to get analytics",
         )
 
 

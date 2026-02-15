@@ -505,7 +505,10 @@ async def list_documents(
     total = total_result.scalar() or 0
 
     # Apply sorting
-    sort_column = getattr(Document, sort_by, Document.created_at)
+    ALLOWED_SORT_FIELDS = {"created_at", "updated_at", "title", "file_type", "file_size", "processing_status"}
+    if sort_by not in ALLOWED_SORT_FIELDS:
+        sort_by = "created_at"
+    sort_column = getattr(Document, sort_by)
     if sort_order == "desc":
         base_query = base_query.order_by(desc(sort_column))
     else:
@@ -941,9 +944,10 @@ async def generate_more_questions(
             "count": len(new_questions),
         }
     except ValueError as e:
+        logger.warning("Question generation validation failed", document_id=str(document_id), error=str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Invalid request",
         )
     except Exception as e:
         logger.error(
@@ -953,7 +957,7 @@ async def generate_more_questions(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate questions: {str(e)}",
+            detail="Failed to generate questions",
         )
 
 
@@ -1249,8 +1253,12 @@ async def restore_deleted_document(
             detail="Deleted document not found",
         )
 
-    # Restore the document
-    document.processing_status = ProcessingStatus.COMPLETED
+    # Restore the document — infer correct status from chunk presence
+    chunk_count_result = await db.execute(
+        select(func.count()).select_from(Chunk).where(Chunk.document_id == document_id)
+    )
+    has_chunks = chunk_count_result.scalar() > 0
+    document.processing_status = ProcessingStatus.COMPLETED if has_chunks else ProcessingStatus.PENDING
     document.processing_error = None
     await db.commit()
 
@@ -2060,7 +2068,7 @@ async def get_uploaded_document_preview_page(
             raise HTTPException(status_code=500, detail="PPTX conversion timed out")
         except Exception as e:
             logger.error("PPTX preview error", error=str(e))
-            raise HTTPException(status_code=500, detail=f"Failed to render slide: {e}")
+            raise HTTPException(status_code=500, detail="Failed to render slide preview")
 
     # DOCX: Return HTML
     elif file_type == "docx":
@@ -2084,7 +2092,8 @@ img {{ max-width: 100%; height: auto; }}
         except ImportError:
             raise HTTPException(status_code=500, detail="DOCX preview not available")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to render DOCX: {e}")
+            logger.error("DOCX preview error", error=str(e))
+            raise HTTPException(status_code=500, detail="Failed to render DOCX preview")
 
     # PDF: Render page as image (if pdf2image available)
     elif file_type == "pdf":
@@ -2103,8 +2112,11 @@ img {{ max-width: 100%; height: auto; }}
         except ImportError:
             # Fallback: just return the PDF page (browser will handle)
             raise HTTPException(status_code=501, detail="PDF rendering not available, use iframe")
+        except HTTPException:
+            raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to render PDF: {e}")
+            logger.error("PDF preview error", error=str(e))
+            raise HTTPException(status_code=500, detail="Failed to render PDF preview")
 
     # Text files: Return content
     elif file_type in ["txt", "md", "html", "json", "csv", "xml"]:
@@ -2117,7 +2129,8 @@ img {{ max-width: 100%; height: auto; }}
             }
             return Response(content=content, media_type=content_types.get(file_type, "text/plain"))
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to read file: {e}")
+            logger.error("File preview error", error=str(e))
+            raise HTTPException(status_code=500, detail="Failed to read file for preview")
 
     else:
         raise HTTPException(status_code=400, detail=f"Preview not supported for {file_type} files")
@@ -2253,7 +2266,7 @@ async def get_all_uploaded_document_slides(
         raise
     except Exception as e:
         logger.error("PPTX slides error", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to render slides: {e}")
+        raise HTTPException(status_code=500, detail="Failed to render slides preview")
 
 
 @router.post("/bulk-download")
@@ -2309,6 +2322,19 @@ async def bulk_download_documents(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No accessible documents found",
+        )
+
+    # Check total file size before creating ZIP (prevent OOM)
+    MAX_BULK_DOWNLOAD_SIZE = 500 * 1024 * 1024  # 500MB
+    total_size = 0
+    for doc in documents:
+        file_path = Path(doc.file_path)
+        if file_path.exists():
+            total_size += file_path.stat().st_size
+    if total_size > MAX_BULK_DOWNLOAD_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Total download size ({total_size // (1024*1024)}MB) exceeds 500MB limit",
         )
 
     # Create ZIP file in memory
@@ -3712,7 +3738,7 @@ async def import_document_local(
         logger.error("Failed to download from external source", url=source_url, error=str(e))
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to download from external source: {str(e)}",
+            detail="Failed to download from external source",
         )
 
     # Save to local storage

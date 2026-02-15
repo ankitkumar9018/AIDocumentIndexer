@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
 import structlog
 
+from backend.api.deps import get_current_user
 from backend.db.database import AsyncSession, get_async_session
 from backend.services.rag_evaluation import (
     RAGEvaluator,
@@ -162,7 +163,7 @@ async def _get_evaluator() -> RAGEvaluator:
         llm = None
 
     try:
-        embedding_service = await get_embedding_service()
+        embedding_service = get_embedding_service()
     except Exception as e:
         logger.warning("Failed to initialize embedding service for RAG evaluation", error=str(e))
         embedding_service = None
@@ -177,6 +178,7 @@ async def _get_evaluator() -> RAGEvaluator:
 @router.post("/evaluate", response_model=EvaluationResponse)
 async def evaluate(
     request: EvaluateRequest,
+    user: dict = Depends(get_current_user),
 ) -> EvaluationResponse:
     """
     Evaluate a RAG response using RAGAS-inspired metrics.
@@ -218,12 +220,13 @@ async def evaluate(
 
     except Exception as e:
         logger.error("Evaluation failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Evaluation failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Evaluation failed")
 
 
 @router.post("/evaluate-query", response_model=EvaluationResponse)
 async def evaluate_query(
     request: EvaluateResponseRequest,
+    user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ) -> EvaluationResponse:
     """
@@ -266,12 +269,13 @@ async def evaluate_query(
 
     except Exception as e:
         logger.error("Query evaluation failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Query evaluation failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Query evaluation failed")
 
 
 @router.post("/benchmark", response_model=BenchmarkResponse)
 async def run_benchmark(
     request: BenchmarkRequest,
+    user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ) -> BenchmarkResponse:
     """
@@ -327,12 +331,13 @@ async def run_benchmark(
 
     except Exception as e:
         logger.error("Benchmark failed", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Benchmark failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Benchmark failed")
 
 
 @router.get("/metrics/recent")
 async def get_recent_metrics(
     hours: int = 24,
+    user: dict = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
     Get aggregate metrics for recent evaluations.
@@ -360,6 +365,7 @@ async def get_recent_metrics(
 @router.get("/metrics/summary")
 async def get_metrics_summary(
     period_hours: int = 24,
+    user: dict = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
     Get summary metrics for evaluations (alias for /metrics/recent).
@@ -394,6 +400,7 @@ async def get_metrics_trend(
     metric: str = "overall_score",
     periods: int = 7,
     period_hours: int = 24,
+    user: dict = Depends(get_current_user),
 ) -> TrendResponse:
     """
     Get trend of a metric over time.

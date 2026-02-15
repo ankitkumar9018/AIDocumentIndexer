@@ -297,7 +297,7 @@ class ChartGenerator:
 
         # Calculate percentages for display
         total = sum(data.values)
-        percentages = [v / total * 100 for v in data.values]
+        percentages = [v / total * 100 for v in data.values] if total > 0 else [0] * len(data.values)
 
         wedges, texts, autotexts = ax.pie(
             data.values,

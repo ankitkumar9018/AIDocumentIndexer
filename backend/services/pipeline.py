@@ -1068,6 +1068,15 @@ class DocumentPipeline:
                     # Filter corresponding embeddings (they're 1-to-1 with chunks)
                     if result.embeddings and len(result.embeddings) == original_chunk_count:
                         result.embeddings = [result.embeddings[i] for i in keep_indices]
+                    elif result.embeddings:
+                        # Length mismatch — can't safely filter, clear to prevent misalignment
+                        logger.warning(
+                            "Embedding/chunk count mismatch during garbage filtering — clearing embeddings",
+                            document_id=document_id,
+                            chunk_count=original_chunk_count,
+                            embedding_count=len(result.embeddings),
+                        )
+                        result.embeddings = None
 
                     logger.info(
                         "Filtered garbage chunks before indexing",

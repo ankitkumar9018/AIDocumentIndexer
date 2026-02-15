@@ -42,14 +42,15 @@ export function TextToSpeech({
     setIsMounted(true);
   }, []);
 
-  // Cleanup on unmount
+  // Cleanup on unmount — always cancel to prevent speech continuing after navigation
   useEffect(() => {
     return () => {
-      if (isSpeaking) {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
+        window.speechSynthesis.onvoiceschanged = null;
       }
     };
-  }, [isSpeaking]);
+  }, []);
 
   // Handle speech synthesis events
   const speak = useCallback(() => {
@@ -124,6 +125,7 @@ export function TextToSpeech({
     // Voices may not be loaded immediately, wait if needed
     if (voices.length === 0) {
       window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.onvoiceschanged = null; // One-shot: clean up handler
         const newVoices = window.speechSynthesis.getVoices();
         const voice = newVoices.find((v) => v.lang.startsWith("en"));
         if (voice) {

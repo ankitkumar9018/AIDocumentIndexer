@@ -1318,17 +1318,24 @@ class RetrievalAwareCache:
 
     Groups related chunks together and caches at the retrieval unit level
     (chunk, document, or passage) for optimal cache efficiency.
+
+    Has bounded size with LRU eviction to prevent unbounded memory growth.
     """
 
     def __init__(self, config: Optional[RAGCacheV2Config] = None):
         config = config or RAGCacheV2Config()
         self.config = config
 
+        # Max sizes to prevent unbounded memory growth
+        self._max_groups = 5000
+        self._max_retrievals = 10000
+
         # Chunk groups: group_key -> list of chunk_ids
         self._chunk_groups: Dict[str, List[str]] = {}
 
         # Cached retrieval results: (query_hash, group_key) -> results
         self._retrieval_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        self._retrieval_order: List[Tuple[str, str]] = []  # LRU order
 
         self._lock = asyncio.Lock()
 
@@ -1339,6 +1346,10 @@ class RetrievalAwareCache:
     ) -> None:
         """Register a group of related chunks."""
         async with self._lock:
+            # Evict oldest group if at capacity
+            if len(self._chunk_groups) >= self._max_groups and group_key not in self._chunk_groups:
+                oldest_key = next(iter(self._chunk_groups))
+                del self._chunk_groups[oldest_key]
             self._chunk_groups[group_key] = chunk_ids
 
     async def get_cached_retrieval(
@@ -1350,7 +1361,13 @@ class RetrievalAwareCache:
         query_hash = hash_content(query)
         cache_key = (query_hash, group_key or "")
 
-        return self._retrieval_cache.get(cache_key)
+        result = self._retrieval_cache.get(cache_key)
+        if result is not None:
+            # Move to end of LRU order
+            if cache_key in self._retrieval_order:
+                self._retrieval_order.remove(cache_key)
+            self._retrieval_order.append(cache_key)
+        return result
 
     async def cache_retrieval(
         self,
@@ -1363,7 +1380,16 @@ class RetrievalAwareCache:
         cache_key = (query_hash, group_key or "")
 
         async with self._lock:
+            # Evict oldest entries if at capacity
+            while len(self._retrieval_cache) >= self._max_retrievals and self._retrieval_order:
+                oldest = self._retrieval_order.pop(0)
+                self._retrieval_cache.pop(oldest, None)
+
             self._retrieval_cache[cache_key] = results
+
+            if cache_key in self._retrieval_order:
+                self._retrieval_order.remove(cache_key)
+            self._retrieval_order.append(cache_key)
 
         return True
 
@@ -1371,7 +1397,9 @@ class RetrievalAwareCache:
         """Get retrieval cache statistics."""
         return {
             "chunk_groups": len(self._chunk_groups),
+            "max_groups": self._max_groups,
             "cached_retrievals": len(self._retrieval_cache),
+            "max_retrievals": self._max_retrievals,
             "total_chunks_grouped": sum(len(g) for g in self._chunk_groups.values()),
         }
 

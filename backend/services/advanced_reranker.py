@@ -1133,6 +1133,21 @@ Respond with ONLY a number between 0 and 10."""
 
         return scores
 
+    def _get_cached_llm(self):
+        """Get or create cached LLM instance for verification scoring."""
+        if not hasattr(self, '_cached_llm') or self._cached_llm is None:
+            try:
+                from backend.services.llm import LLMFactory
+                self._cached_llm = LLMFactory.get_chat_model(
+                    model=self.model_name,
+                    temperature=0,
+                    max_tokens=100,
+                )
+            except Exception:
+                from langchain_openai import ChatOpenAI
+                self._cached_llm = ChatOpenAI(model=self.model_name, temperature=0)
+        return self._cached_llm
+
     async def _score_single(
         self,
         query: str,
@@ -1142,10 +1157,9 @@ Respond with ONLY a number between 0 and 10."""
         """Score a single document."""
         async with self._semaphore:
             try:
-                from langchain_openai import ChatOpenAI
                 from langchain_core.messages import HumanMessage
 
-                llm = ChatOpenAI(model=self.model_name, temperature=0)
+                llm = self._get_cached_llm()
 
                 prompt = self.VERIFICATION_PROMPT.format(
                     query=query,

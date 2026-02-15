@@ -193,10 +193,10 @@ class TempDocumentService:
                 # Optionally create embeddings
                 if create_embeddings and self._embedding_service:
                     try:
-                        embedding_results = await self._embedding_service.embed_texts(
+                        embedding_results = self._embedding_service.embed_texts(
                             [chunk.content for chunk in chunks]
                         )
-                        doc.embeddings = [r.embedding for r in embedding_results]
+                        doc.embeddings = embedding_results
                     except Exception as e:
                         logger.warning("Failed to create embeddings", error=str(e))
 
@@ -269,11 +269,11 @@ class TempDocumentService:
                 if query and doc.embeddings and self._embedding_service:
                     # Semantic search in chunks
                     try:
-                        query_embedding = await self._embedding_service.embed_text(query)
+                        query_embedding = self._embedding_service.embed_text(query)
                         # Simple cosine similarity search
                         scores = []
                         for i, emb in enumerate(doc.embeddings):
-                            score = self._cosine_similarity(query_embedding.embedding, emb)
+                            score = self._cosine_similarity(query_embedding, emb)
                             scores.append((i, score))
                         scores.sort(key=lambda x: x[1], reverse=True)
 

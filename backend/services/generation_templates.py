@@ -229,7 +229,8 @@ class GenerationTemplateService:
 
         # Search filter
         if search:
-            search_pattern = f"%{search}%"
+            safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            search_pattern = f"%{safe}%"
             query = query.where(
                 or_(
                     GenerationTemplate.name.ilike(search_pattern),

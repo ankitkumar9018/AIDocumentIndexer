@@ -405,17 +405,17 @@ class PDFGenerator(BaseFormatGenerator):
                                     tmp.write(generated_chart.image_bytes)
                                     tmp_path = tmp.name
 
-                                story.append(Spacer(1, 0.2*inch))
-                                chart_img = Image(tmp_path, width=5.5*inch, height=3.5*inch)
-                                story.append(chart_img)
-                                story.append(Spacer(1, 0.2*inch))
-
-                                rendered_as_chart = True
-
                                 try:
-                                    os.unlink(tmp_path)
-                                except Exception:
-                                    pass
+                                    story.append(Spacer(1, 0.2*inch))
+                                    chart_img = Image(tmp_path, width=5.5*inch, height=3.5*inch)
+                                    story.append(chart_img)
+                                    story.append(Spacer(1, 0.2*inch))
+                                    rendered_as_chart = True
+                                finally:
+                                    try:
+                                        os.unlink(tmp_path)
+                                    except Exception:
+                                        pass
 
                     except Exception as e:
                         logger.warning(f"Chart detection failed: {e}")

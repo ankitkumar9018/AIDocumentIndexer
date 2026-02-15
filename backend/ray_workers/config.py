@@ -120,7 +120,7 @@ class RayConfig:
 
         except Exception as e:
             logger.debug("Could not load Ray settings, using env vars", error=str(e))
-            self._settings_loaded = True
+            # Don't set _settings_loaded — allow retry on next call
 
 
 # Global Ray configuration
@@ -159,7 +159,7 @@ def _register_cleanup_handlers() -> None:
 
     # Register signal handlers (only in main process)
     try:
-        if os.getpid() == os.getppid() or True:  # Always register for safety
+        if os.getpid() == os.getppid():  # Only register in main process
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
     except (ValueError, OSError) as e:

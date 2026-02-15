@@ -31,6 +31,8 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
+import asyncio
+
 import aiohttp
 import structlog
 from cryptography.hazmat.primitives import hashes, serialization
@@ -203,6 +205,7 @@ class SSOService:
 
         # In-memory state store (use Redis in production)
         self._auth_requests: Dict[str, SSOAuthRequest] = {}
+        self._auth_lock = asyncio.Lock()
 
         # HTTP client for OIDC token exchange
         self._http_client: Optional[aiohttp.ClientSession] = None
@@ -285,8 +288,9 @@ class SSOService:
             relay_state=relay_state,
         )
 
-        # Store for validation
-        self._auth_requests[auth_request.state] = auth_request
+        # Store for validation (lock protects concurrent access)
+        async with self._auth_lock:
+            self._auth_requests[auth_request.state] = auth_request
 
         # Generate SAML AuthnRequest
         request_id = f"_{uuid4()}"
@@ -344,13 +348,15 @@ class SSOService:
         Returns:
             SSOUser with authenticated user information
         """
-        # Validate state
-        auth_request = self._auth_requests.get(relay_state)
+        # Validate state (lock protects concurrent access)
+        async with self._auth_lock:
+            auth_request = self._auth_requests.get(relay_state)
         if not auth_request:
             raise ValueError("Invalid relay state - possible CSRF attack")
 
         if datetime.utcnow() > auth_request.expires_at:
-            del self._auth_requests[relay_state]
+            async with self._auth_lock:
+                self._auth_requests.pop(relay_state, None)
             raise ValueError("Authentication request expired")
 
         # Decode response
@@ -399,7 +405,8 @@ class SSOService:
         groups = attributes.get(groups_attr, "").split(",") if groups_attr in attributes else []
 
         # Clean up auth request
-        del self._auth_requests[relay_state]
+        async with self._auth_lock:
+            self._auth_requests.pop(relay_state, None)
 
         user = SSOUser(
             email=email,
@@ -449,8 +456,9 @@ class SSOService:
             redirect_uri=redirect_uri,
         )
 
-        # Store for validation
-        self._auth_requests[auth_request.state] = auth_request
+        # Store for validation (lock protects concurrent access)
+        async with self._auth_lock:
+            self._auth_requests[auth_request.state] = auth_request
 
         # Build authorization URL
         params = {
@@ -489,13 +497,15 @@ class SSOService:
         Returns:
             SSOUser with authenticated user information
         """
-        # Validate state
-        auth_request = self._auth_requests.get(state)
+        # Validate state (lock protects concurrent access)
+        async with self._auth_lock:
+            auth_request = self._auth_requests.get(state)
         if not auth_request:
             raise ValueError("Invalid state - possible CSRF attack")
 
         if datetime.utcnow() > auth_request.expires_at:
-            del self._auth_requests[state]
+            async with self._auth_lock:
+                self._auth_requests.pop(state, None)
             raise ValueError("Authentication request expired")
 
         # Exchange code for tokens
@@ -558,7 +568,8 @@ class SSOService:
             groups = [groups]
 
         # Clean up auth request
-        del self._auth_requests[state]
+        async with self._auth_lock:
+            self._auth_requests.pop(state, None)
 
         user = SSOUser(
             email=email,

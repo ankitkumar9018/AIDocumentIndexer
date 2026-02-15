@@ -69,6 +69,20 @@ class MoodBoardGenerateRequest(BaseModel):
     dual_mode: bool = Field(default=False, description="Combine docs + general AI")
     # Multi-LLM
     multi_llm: Optional[MultiLLMConfig] = Field(None, description="Multi-LLM config")
+    # Intelligence features (parity with chat/doc-gen pipeline)
+    intelligence_level: Optional[str] = Field(
+        default=None,
+        pattern="^(basic|standard|enhanced|maximum)$",
+        description="Intelligence level for source retrieval"
+    )
+    enhance_query: Optional[bool] = Field(None, description="Enable query enhancement for source search")
+    skip_cache: bool = Field(default=False, description="Skip retrieval cache for fresh results")
+    enable_cot: bool = Field(default=False, description="Enable chain-of-thought reasoning for generation")
+    enable_verification: bool = Field(default=False, description="Verify generated content against source documents")
+    temperature_override: Optional[float] = Field(
+        default=None, ge=0.0, le=2.0,
+        description="Override default temperature for generation"
+    )
 
 
 class GeneratedSuggestions(BaseModel):
@@ -130,13 +144,14 @@ async def _call_single_llm(
     provider_type: str,
     model_name: Optional[str],
     prompt: str,
+    temperature_override: Optional[float] = None,
 ) -> Optional[dict]:
     """Call a single LLM and parse its JSON response. Returns None on failure."""
     try:
         llm = LLMFactory.get_chat_model(
             provider=provider_type,
             model=model_name,
-            temperature=0.8,
+            temperature=temperature_override if temperature_override is not None else 0.8,
             max_tokens=2048,
         )
         response = await llm.ainvoke(prompt)
@@ -391,21 +406,48 @@ async def generate_mood_board(
     if request.use_existing_docs:
         try:
             from backend.services.rag import get_rag_service
-            rag = await get_rag_service()
+            rag = get_rag_service()
             search_query = f"{request.name} {' '.join(request.keywords or [])} design style theme"
             results = await rag.search(
                 query=search_query,
-                collection_filters=request.collection_filters,
+                collection_filter=request.collection_filters[0] if request.collection_filters else None,
+                limit=request.max_doc_sources,
+                enhance_query=request.enhance_query,
+                skip_cache=request.skip_cache,
+                intelligence_level=request.intelligence_level,
                 folder_id=request.folder_id,
                 include_subfolders=request.include_subfolders,
-                top_k=request.max_doc_sources,
             )
-            if results and hasattr(results, "chunks") and results.chunks:
-                doc_snippets = "\n---\n".join([c.content[:500] for c in results.chunks[:request.max_doc_sources]])
+            if results:
+                doc_snippets = "\n---\n".join([r.get("content", "")[:500] for r in results[:request.max_doc_sources]])
                 formatted_prompt += f"\n\nDocument Context (use these as inspiration for design direction, themes, and content):\n{doc_snippets}"
-                logger.info("Added document context to moodboard prompt", num_chunks=len(results.chunks))
+                logger.info("Added document context to moodboard prompt", num_chunks=len(results))
         except Exception as e:
             logger.warning("Failed to fetch document context for moodboard", error=str(e))
+
+    # Inject CoT / verification instructions (gated by model tier)
+    try:
+        from backend.services.session_memory import get_model_tier
+        _resolved_model = model_name or llm_config.default_model
+        _tier_info = get_model_tier(_resolved_model)
+        _is_small = _tier_info["tier"] in ("tiny", "small")
+    except Exception:
+        _is_small = False
+
+    if not _is_small:
+        if request.enable_cot:
+            formatted_prompt += (
+                "\n\nThink step-by-step before generating your design suggestions: "
+                "1) Analyze the provided colors and keywords for mood/tone. "
+                "2) Consider how typography, additional colors, and design direction align with the concept. "
+                "3) Generate cohesive, well-reasoned suggestions."
+            )
+        if request.enable_verification and request.use_existing_docs:
+            formatted_prompt += (
+                "\n\nIMPORTANT: Verify your suggestions against the provided Document Context. "
+                "Ensure design direction, themes, and keywords are grounded in the source documents. "
+                "Do NOT fabricate themes that contradict the document content."
+            )
 
     # Get LLM(s) and execute
     try:
@@ -431,7 +473,7 @@ async def generate_mood_board(
                         strategy=request.multi_llm.merge_strategy)
 
             raw_results = await asyncio.gather(
-                *[_call_single_llm(pt, pm, formatted_prompt) for pt, pm in provider_configs],
+                *[_call_single_llm(pt, pm, formatted_prompt, temperature_override=request.temperature_override) for pt, pm in provider_configs],
                 return_exceptions=True,
             )
 
@@ -453,7 +495,7 @@ async def generate_mood_board(
 
         else:
             # ── Single LLM call ──
-            result = await _call_single_llm(provider_type, model_name, formatted_prompt)
+            result = await _call_single_llm(provider_type, model_name, formatted_prompt, temperature_override=request.temperature_override)
             if result is None:
                 # Fallback
                 result = {
@@ -518,7 +560,7 @@ async def generate_mood_board(
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Mood board generation failed: {str(e)}"
+            detail="Mood board generation failed"
         )
 
 
@@ -821,28 +863,28 @@ async def preview_documents(
     """Preview which documents will be used as inspiration before generating."""
     try:
         from backend.services.rag import get_rag_service
-        rag = await get_rag_service()
+        rag = get_rag_service()
         search_query = f"{name} {' '.join(keywords)} design style theme"
         results = await rag.search(
             query=search_query,
-            collection_filters=collection_filters,
+            collection_filter=collection_filters[0] if collection_filters else None,
+            limit=max_sources,
             folder_id=folder_id,
             include_subfolders=include_subfolders,
-            top_k=max_sources,
         )
         docs = []
-        if results and hasattr(results, "chunks") and results.chunks:
-            for c in results.chunks[:max_sources]:
+        if results:
+            for r in results[:max_sources]:
                 docs.append({
-                    "title": c.metadata.get("source", c.metadata.get("document_name", "Unknown")),
-                    "snippet": c.content[:300],
-                    "score": round(getattr(c, "score", 0.0), 3),
-                    "doc_id": c.metadata.get("document_id", ""),
+                    "title": r.get("source", r.get("document_name", "Unknown")),
+                    "snippet": r.get("content", "")[:300],
+                    "score": round(r.get("score", 0.0), 3),
+                    "doc_id": r.get("document_id", ""),
                 })
         return {"documents": docs, "total_found": len(docs)}
     except Exception as e:
         logger.error("Document preview failed", error=str(e))
-        return {"documents": [], "total_found": 0, "error": str(e)}
+        return {"documents": [], "total_found": 0, "error": "Document preview failed"}
 
 
 @router.post("/{board_id}/enhance")
@@ -978,7 +1020,7 @@ async def enhance_mood_board(
         logger.error("Mood board enhancement failed", board_id=board_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Enhancement failed: {str(e)}"
+            detail="Enhancement failed"
         )
 
 

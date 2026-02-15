@@ -45,7 +45,7 @@ async def _generate_draft(
     draft_index: int,
 ) -> DraftResponse:
     """Generate a single draft response from a context subset."""
-    from langchain.schema import HumanMessage, SystemMessage
+    from langchain_core.messages import HumanMessage, SystemMessage
 
     messages = [
         SystemMessage(content=(
@@ -75,7 +75,7 @@ async def _verify_and_select(
     full_context: str,
 ) -> int:
     """Use the verifier model to select the best draft."""
-    from langchain.schema import HumanMessage, SystemMessage
+    from langchain_core.messages import HumanMessage, SystemMessage
 
     if not drafts or all(not d.answer for d in drafts):
         return 0

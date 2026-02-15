@@ -39,7 +39,7 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 
-async def get_db_user_id(db, user_id: str, user_email: str = None) -> UUID:
+async def get_db_user_id(db, user_id: str, user_email: str = None) -> Optional[UUID]:
     """
     Get a valid database user UUID from user_id string or email.
     Returns UUID of the user in the database.
@@ -79,26 +79,31 @@ async def get_db_user_id(db, user_id: str, user_email: str = None) -> UUID:
 
 async def get_or_create_session(db, session_id: UUID, user_id: str, user_email: str = None) -> ChatSessionModel:
     """Get existing session or create a new one."""
+    db_user_id = await get_db_user_id(db, user_id, user_email)
+
+    if not db_user_id:
+        raise ValueError("Could not find valid user for session creation")
+
     query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
     result = await db.execute(query)
     session = result.scalar_one_or_none()
 
-    if not session:
-        db_user_id = await get_db_user_id(db, user_id, user_email)
+    if session:
+        # Verify ownership — prevent cross-user session access
+        if session.user_id != db_user_id:
+            raise ValueError("Session does not belong to the requesting user")
+        return session
 
-        if not db_user_id:
-            raise ValueError(f"Could not find valid user for session creation")
-
-        # Create new session
-        session = ChatSessionModel(
-            id=session_id,
-            user_id=db_user_id,
-            title="New Conversation",
-            is_active=True,
-        )
-        db.add(session)
-        await db.commit()
-        await db.refresh(session)
+    # Create new session
+    session = ChatSessionModel(
+        id=session_id,
+        user_id=db_user_id,
+        title="New Conversation",
+        is_active=True,
+    )
+    db.add(session)
+    await db.commit()
+    await db.refresh(session)
 
     return session
 
@@ -201,6 +206,10 @@ class ChatSource(BaseModel):
     snippet: str
     full_content: Optional[str] = None  # Full chunk content for source viewer modal
     collection: Optional[str] = None  # Collection/tag for grouping
+    # Knowledge Graph metadata (populated when KG-enhanced retrieval is used)
+    source: Optional[str] = Field(None, description="Source type indicator (e.g., 'knowledge_graph')")
+    from_knowledge_graph: bool = Field(default=False, description="Whether source was found via KG traversal")
+    kg_entities: Optional[List[str]] = Field(default=None, description="Associated KG entities")
 
 
 class AgentOptions(BaseModel):
@@ -253,6 +262,9 @@ class ChatRequest(BaseModel):
     enable_verification: bool = Field(default=False, description="Enable self-verification of answers")
     # Temperature override - sent inline with each request to avoid race condition
     temperature_override: Optional[float] = Field(default=None, ge=0.0, le=2.0, description="Temperature override from UI (avoids race condition with session config)")
+    # Extended thinking
+    enable_extended_thinking: bool = Field(default=False, description="Enable extended thinking for deeper reasoning")
+    thinking_level: Optional[str] = Field(default=None, pattern="^(low|medium|high)$", description="Extended thinking budget level")
     # Ensemble voting
     ensemble_voting: bool = Field(default=False, description="Enable ensemble voting across multiple models")
     ensemble_strategy: Optional[str] = Field(default=None, pattern="^(confidence|majority|weighted|consensus|synthesis)$", description="Ensemble voting strategy")
@@ -330,6 +342,8 @@ class SessionListResponse(BaseModel):
     """List of chat sessions."""
     sessions: List[SessionResponse]
     total: int
+    page: int
+    page_size: int
 
 
 class SessionMessagesResponse(BaseModel):
@@ -393,7 +407,7 @@ async def execute_command(
     # Execute the parsed command
     result = await service.execute(
         parsed=parsed,
-        user_id=user.id,
+        user_id=user.user_id,
         context={"session_id": str(request.session_id) if request.session_id else None},
     )
 
@@ -484,11 +498,27 @@ async def create_chat_completion(
                 # Build context with agent options
                 agent_context = {"collection_filter": request.first_collection_filter}
                 # Pass language through agent context
-                # Prioritize: explicit agent_options.language > request.language > "auto"
-                agent_language = request.language or "auto"
+                # Default to "en" (not "auto") — auto-detect's complex examples
+                # confuse small models in the multi-agent pipeline
+                agent_language = request.language if request.language and request.language != "auto" else "en"
                 if request.agent_options and request.agent_options.language:
                     agent_language = request.agent_options.language
                 agent_context["language"] = agent_language
+                if request.top_k:
+                    agent_context["top_k"] = request.top_k
+                # Pass intelligence features through to agent pipeline
+                if request.intelligence_level:
+                    agent_context["intelligence_level"] = request.intelligence_level
+                if request.temperature_override is not None:
+                    agent_context["temperature_override"] = request.temperature_override
+                if request.enable_cot:
+                    agent_context["enable_cot"] = request.enable_cot
+                if request.enable_verification:
+                    agent_context["enable_verification"] = request.enable_verification
+                if request.enhance_query is not None:
+                    agent_context["enhance_query"] = request.enhance_query
+                if request.skip_cache:
+                    agent_context["skip_cache"] = request.skip_cache
                 if request.agent_options:
                     agent_context["options"] = request.agent_options.model_dump()
 
@@ -526,13 +556,18 @@ async def create_chat_completion(
                 if agent_sources and request.include_sources:
                     for src in agent_sources[:request.max_sources]:
                         if isinstance(src, dict):
-                            formatted_sources.append(ChatSource(
-                                document_id=src.get("document_id", ""),
-                                document_name=src.get("document_name", src.get("title", "Unknown")),
-                                content=src.get("content", ""),
-                                score=src.get("score", 0.0),
-                                chunk_index=src.get("chunk_index", 0),
-                            ))
+                            try:
+                                from uuid import UUID as _UUID
+                                formatted_sources.append(ChatSource(
+                                    document_id=_UUID(src["document_id"]) if src.get("document_id") else _UUID(int=0),
+                                    document_name=src.get("document_name", src.get("title", "Unknown")),
+                                    chunk_id=_UUID(src["chunk_id"]) if src.get("chunk_id") else _UUID(int=0),
+                                    snippet=src.get("content", "")[:500],
+                                    relevance_score=src.get("score", 0.0),
+                                    similarity_score=src.get("similarity_score"),
+                                ))
+                            except (ValueError, KeyError):
+                                pass  # Skip malformed source entries
 
                 return ChatResponse(
                     session_id=session_id,
@@ -642,7 +677,7 @@ async def create_chat_completion(
             if not request.images:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Vision mode requires at least one image attachment")
 
-            from backend.services.llm import chat_with_vision
+            from backend.services.llm import chat_with_vision, get_chat_model
             import base64
 
             # Process images
@@ -662,20 +697,18 @@ async def create_chat_completion(
 
             # Use the first image (extend to multi-image later if needed)
             response_content = ""
+            vision_model = get_chat_model()
             if image_data_list:
                 image_bytes, mime_type = image_data_list[0]
                 response_content = await chat_with_vision(
-                    model=None,  # Use default vision model
+                    model=vision_model,
                     text=request.message,
                     image_data=image_bytes,
                     image_type=mime_type,
                 )
             elif image_urls:
-                from backend.services.llm import create_vision_messages_from_urls, get_chat_llm
-                llm = await get_chat_llm()
-                # For URL-based images, use a different approach
                 response_content = await chat_with_vision(
-                    model=None,
+                    model=vision_model,
                     text=request.message,
                     image_url=image_urls[0],
                 )
@@ -947,7 +980,7 @@ async def create_chat_completion(
                     # If merged mode, synthesize both answers into one
                     if parallel_output_mode == "merged" and general_answer:
                         from backend.services.llm import LLMFactory
-                        merge_llm = await LLMFactory.get_chat_model()
+                        merge_llm = LLMFactory.get_chat_model()
                         merge_prompt = (
                             f"You have two answers to the question: \"{request.message}\"\n\n"
                             f"**Answer from Documents (with citations):**\n{response.content}\n\n"
@@ -1127,7 +1160,7 @@ async def create_chat_completion(
     except Exception as e:
         import traceback
         logger.error("Chat completion failed", error=str(e), traceback=traceback.format_exc())
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Chat completion failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Chat completion failed")
 
 
 @router.post("/completions/stream")
@@ -1171,12 +1204,27 @@ async def create_streaming_completion(
 
                 # Build context with agent options
                 agent_context = {"collection_filter": request.first_collection_filter}
-                # Pass language through agent context
-                # Prioritize: explicit agent_options.language > request.language > "auto"
-                agent_language = request.language or "auto"
+                # Default to "en" (not "auto") — auto-detect's complex examples
+                # confuse small models in the multi-agent pipeline
+                agent_language = request.language if request.language and request.language != "auto" else "en"
                 if request.agent_options and request.agent_options.language:
                     agent_language = request.agent_options.language
                 agent_context["language"] = agent_language
+                if request.top_k:
+                    agent_context["top_k"] = request.top_k
+                # Pass intelligence features through to agent pipeline
+                if request.intelligence_level:
+                    agent_context["intelligence_level"] = request.intelligence_level
+                if request.temperature_override is not None:
+                    agent_context["temperature_override"] = request.temperature_override
+                if request.enable_cot:
+                    agent_context["enable_cot"] = request.enable_cot
+                if request.enable_verification:
+                    agent_context["enable_verification"] = request.enable_verification
+                if request.enhance_query is not None:
+                    agent_context["enhance_query"] = request.enhance_query
+                if request.skip_cache:
+                    agent_context["skip_cache"] = request.skip_cache
                 if request.agent_options:
                     agent_context["options"] = request.agent_options.model_dump()
 
@@ -1269,7 +1317,7 @@ async def create_streaming_completion(
 
         except Exception as e:
             logger.error("Agent streaming error", error=str(e), exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'data': 'An error occurred during streaming'})}\n\n"
 
     async def generate_general_stream() -> AsyncGenerator[str, None]:
         """Generate streaming response using general chat (no RAG)."""
@@ -1332,7 +1380,7 @@ async def create_streaming_completion(
 
         except Exception as e:
             logger.error("General chat streaming error", error=str(e))
-            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'data': 'An error occurred during streaming'})}\n\n"
 
     async def generate_rag_stream() -> AsyncGenerator[str, None]:
         """Generate streaming response using RAG service."""
@@ -1376,6 +1424,8 @@ async def create_streaming_completion(
                 organization_id=user.organization_id,  # Organization for multi-tenant isolation
                 is_superadmin=user.is_superadmin,  # Superadmin can access all private docs
                 intelligence_level=request.intelligence_level,  # Intelligence level for grounding
+                temperature_override=request.temperature_override,  # Per-request temperature override
+                additional_context=temp_context,  # Temp document context
             ):
                 if chunk.type == "content":
                     accumulated_content.append(chunk.data)
@@ -1407,7 +1457,7 @@ async def create_streaming_completion(
 
         except Exception as e:
             logger.error("RAG streaming error", error=str(e))
-            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'data': 'An error occurred during streaming'})}\n\n"
 
     # Route to appropriate stream generator based on mode
     if request.mode == "agent":
@@ -1499,11 +1549,13 @@ async def list_sessions(
             return SessionListResponse(
                 sessions=session_responses,
                 total=total,
+                page=page,
+                page_size=page_size,
             )
 
     except Exception as e:
         logger.error("Failed to list sessions", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to list sessions: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list sessions")
 
 
 @router.get("/sessions/{session_id}", response_model=SessionMessagesResponse)
@@ -1518,10 +1570,16 @@ async def get_session(
 
     try:
         async with async_session_context() as db:
-            # Get session with messages
+            # Resolve user ID for ownership check
+            db_user_id = await get_db_user_id(db, user.user_id, user.email)
+
+            # Get session with messages (filtered by user ownership)
             query = (
                 select(ChatSessionModel)
-                .where(ChatSessionModel.id == session_id)
+                .where(
+                    ChatSessionModel.id == session_id,
+                    ChatSessionModel.user_id == db_user_id,
+                )
                 .options(selectinload(ChatSessionModel.messages))
             )
             result = await db.execute(query)
@@ -1562,7 +1620,7 @@ async def get_session(
         raise
     except Exception as e:
         logger.error("Failed to get session", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get session: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get session")
 
 
 @router.delete("/sessions/{session_id}")
@@ -1577,8 +1635,14 @@ async def delete_session(
 
     try:
         async with async_session_context() as db:
-            # Get the session
-            query = select(ChatSessionModel).where(ChatSessionModel.id == session_id)
+            # Resolve user ID for ownership check
+            db_user_id = await get_db_user_id(db, user.user_id, user.email)
+
+            # Get the session (filtered by user ownership)
+            query = select(ChatSessionModel).where(
+                ChatSessionModel.id == session_id,
+                ChatSessionModel.user_id == db_user_id,
+            )
             result = await db.execute(query)
             session = result.scalar_one_or_none()
 
@@ -1595,7 +1659,7 @@ async def delete_session(
         raise
     except Exception as e:
         logger.error("Failed to delete session", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete session: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete session")
 
 
 @router.delete("/sessions")
@@ -1620,9 +1684,14 @@ async def delete_all_sessions(
         async with async_session_context() as db:
             from sqlalchemy import delete
 
+            # Resolve user ID for consistent UUID comparison
+            db_user_id = await get_db_user_id(db, user.user_id, user.email)
+            if not db_user_id:
+                return {"message": "No sessions found", "deleted_count": 0}
+
             # Delete all sessions for user (cascade will delete messages)
             result = await db.execute(
-                delete(ChatSessionModel).where(ChatSessionModel.user_id == user.user_id)
+                delete(ChatSessionModel).where(ChatSessionModel.user_id == db_user_id)
             )
             await db.commit()
 
@@ -1635,7 +1704,7 @@ async def delete_all_sessions(
         raise
     except Exception as e:
         logger.error("Failed to delete all sessions", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete all sessions: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete all sessions")
 
 
 class BulkDeleteRequest(BaseModel):
@@ -1678,7 +1747,7 @@ async def bulk_delete_sessions(
 
     except Exception as e:
         logger.error("Failed to bulk delete sessions", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to bulk delete sessions: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to bulk delete sessions")
 
 
 @router.patch("/sessions/{session_id}/title")
@@ -1712,7 +1781,7 @@ async def update_session_title(
         raise
     except Exception as e:
         logger.error("Failed to update session title", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to update title: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update title")
 
 
 @router.post("/sessions/new", response_model=SessionResponse)
@@ -1747,7 +1816,7 @@ async def create_session(
 
     except Exception as e:
         logger.error("Failed to create session", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to create session: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create session")
 
 
 @router.post("/feedback")
@@ -1961,7 +2030,7 @@ async def get_session_llm_override(
 
     except Exception as e:
         logger.error("Failed to get session LLM config", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get session LLM config: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get session LLM config")
 
 
 @router.put("/sessions/{session_id}/llm", response_model=SessionLLMOverrideResponse)
@@ -2051,7 +2120,7 @@ async def set_session_llm_override(
         raise
     except Exception as e:
         logger.error("Failed to set session LLM override", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to set session LLM override: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to set session LLM override")
 
 
 @router.delete("/sessions/{session_id}/llm")
@@ -2100,7 +2169,7 @@ async def delete_session_llm_override(
         raise
     except Exception as e:
         logger.error("Failed to delete session LLM override", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete session LLM override: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete session LLM override")
 
 
 # =============================================================================
@@ -2231,11 +2300,14 @@ async def export_chat_session(
         raise
     except Exception as e:
         logger.error("Failed to export session", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Export failed: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Export failed")
 
 
 @router.get("/sessions/{session_id}/token-count")
-async def get_session_token_count(session_id: UUID):
+async def get_session_token_count(
+    session_id: UUID,
+    user: AuthenticatedUser,
+):
     """
     Get the total token count for a chat session.
 
@@ -2248,8 +2320,14 @@ async def get_session_token_count(session_id: UUID):
 
     try:
         async with async_session_context() as db:
-            # Verify session exists
-            session_query = select(ChatSession).where(ChatSession.id == session_id)
+            # Resolve user ID for ownership check
+            db_user_id = await get_db_user_id(db, user.user_id, user.email)
+
+            # Verify session exists and belongs to user
+            session_query = select(ChatSession).where(
+                ChatSession.id == session_id,
+                ChatSession.user_id == db_user_id,
+            )
             result = await db.execute(session_query)
             session = result.scalar_one_or_none()
 
@@ -2283,7 +2361,7 @@ async def get_session_token_count(session_id: UUID):
         raise
     except Exception as e:
         logger.error("Failed to get token count", error=str(e))
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get token count: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get token count")
 
 
 # =============================================================================
@@ -2522,7 +2600,7 @@ async def record_ltr_feedback(
         logger.error("Failed to record LTR feedback", error=str(e))
         return LTRFeedbackResponse(
             success=False,
-            message=f"Failed to record feedback: {str(e)}",
+            message="Failed to record feedback",
             total_feedback_samples=0,
         )
 
@@ -2564,7 +2642,7 @@ async def train_ltr_model(
         logger.error("Failed to train LTR model", error=str(e))
         return LTRTrainResponse(
             success=False,
-            message=f"Training failed: {str(e)}",
+            message="Training failed",
             metrics=None,
         )
 
@@ -2601,7 +2679,7 @@ async def get_phase65_stats(
         logger.error("Failed to get Phase 65 stats", error=str(e))
         return Phase65StatsResponse(
             initialized=False,
-            config={"error": str(e)},
+            config={"error": "Failed to get stats"},
         )
 
 
