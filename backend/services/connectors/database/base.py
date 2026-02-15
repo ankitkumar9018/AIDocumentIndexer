@@ -82,11 +82,41 @@ class DatabaseSchema(BaseModel):
             return [col.name for col in table.columns]
         return []
 
-    def to_ddl_string(self, include_sample_values: bool = True) -> str:
-        """Convert schema to DDL string for LLM context."""
+    @staticmethod
+    def _sanitize_annotation(text: str, max_length: int = 200) -> str:
+        """Sanitize user-provided annotation text for safe LLM prompt inclusion."""
+        if not text:
+            return ""
+        text = text[:max_length]
+        # Strip SQL comment closers that could break out of comment context
+        text = text.replace("*/", "").replace("--", "")
+        # Strip newlines to prevent breaking DDL structure
+        text = text.replace("\n", " ").replace("\r", "")
+        return text.strip()
+
+    def to_ddl_string(
+        self,
+        include_sample_values: bool = True,
+        annotations: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Convert schema to DDL string for LLM context, with optional semantic annotations."""
         ddl_parts = []
 
+        # Business glossary section
+        if annotations and annotations.get("glossary"):
+            glossary_lines = ["-- BUSINESS GLOSSARY:"]
+            for term, definition in annotations["glossary"].items():
+                safe_term = self._sanitize_annotation(term, 50)
+                safe_def = self._sanitize_annotation(definition)
+                if safe_term and safe_def:
+                    glossary_lines.append(f"--   {safe_term}: {safe_def}")
+            ddl_parts.append("\n".join(glossary_lines))
+
+        table_annotations = (annotations or {}).get("tables", {})
+
         for table in self.tables:
+            col_annotations = table_annotations.get(table.name, {}).get("columns", {})
+
             columns_ddl = []
             for col in table.columns:
                 col_def = f"  {col.name} {col.data_type}"
@@ -96,9 +126,19 @@ class DatabaseSchema(BaseModel):
                     col_def += " NOT NULL"
                 if col.is_foreign_key and col.foreign_key_table:
                     col_def += f" REFERENCES {col.foreign_key_table}({col.foreign_key_column})"
+
+                # Add description as inline comment (user annotation > native db comment)
+                desc = col_annotations.get(col.name) or (col.description if col.description else None)
+                if desc:
+                    col_def += f"  -- {self._sanitize_annotation(desc)}"
+
                 columns_ddl.append(col_def)
 
-            table_ddl = f"CREATE TABLE {table.name} (\n"
+            # Table-level description (user annotation > native db comment)
+            table_desc = table_annotations.get(table.name, {}).get("description") or table.description
+            table_comment = f"  -- {self._sanitize_annotation(table_desc, 500)}" if table_desc else ""
+
+            table_ddl = f"CREATE TABLE {table.name} ({table_comment}\n"
             table_ddl += ",\n".join(columns_ddl)
             table_ddl += "\n);"
 
@@ -114,6 +154,54 @@ class DatabaseSchema(BaseModel):
             ddl_parts.append(table_ddl)
 
         return "\n\n".join(ddl_parts)
+
+    def to_compact_ddl(self, annotations: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Convert schema to a compact, token-efficient format for small models.
+
+        Format: TableName (N rows): col1 type PK, col2 type FK->other, col3 type -- desc
+        """
+        lines = []
+
+        # Glossary (compact)
+        if annotations and annotations.get("glossary"):
+            lines.append("GLOSSARY:")
+            for term, definition in annotations["glossary"].items():
+                safe_term = self._sanitize_annotation(term, 50)
+                safe_def = self._sanitize_annotation(definition, 100)
+                if safe_term and safe_def:
+                    lines.append(f"  {safe_term}: {safe_def}")
+            lines.append("")
+
+        table_annotations = (annotations or {}).get("tables", {})
+
+        for table in self.tables:
+            col_annotations = table_annotations.get(table.name, {}).get("columns", {})
+
+            # Table header
+            row_info = f" ({table.row_count} rows)" if table.row_count else ""
+            table_desc = table_annotations.get(table.name, {}).get("description") or table.description
+            desc_suffix = f" -- {self._sanitize_annotation(table_desc, 80)}" if table_desc else ""
+
+            col_parts = []
+            for col in table.columns:
+                part = f"{col.name} {col.data_type}"
+                if col.is_primary_key:
+                    part += " PK"
+                if col.is_foreign_key and col.foreign_key_table:
+                    part += f" FK->{col.foreign_key_table}"
+                elif not col.is_nullable:
+                    part += " NN"
+
+                col_desc = col_annotations.get(col.name) or col.description
+                if col_desc:
+                    part += f" --{self._sanitize_annotation(col_desc, 40)}"
+
+                col_parts.append(part)
+
+            lines.append(f"{table.name}{row_info}: {', '.join(col_parts)}{desc_suffix}")
+
+        return "\n".join(lines)
 
 
 class QueryResult(BaseModel):
@@ -491,6 +579,15 @@ class BaseDatabaseConnector(ABC):
     def log_warning(self, message: str, **kwargs):
         """Log warning message with context."""
         logger.warning(
+            message,
+            connector_type=self.connector_type.value if self.connector_type else None,
+            database=self.database,
+            **kwargs,
+        )
+
+    def log_debug(self, message: str, **kwargs):
+        """Log debug message with context."""
+        logger.debug(
             message,
             connector_type=self.connector_type.value if self.connector_type else None,
             database=self.database,

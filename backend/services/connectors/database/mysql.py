@@ -117,7 +117,7 @@ class MySQLConnector(BaseDatabaseConnector):
             )
 
             self._connected = True
-            self.log_info("Connected to MySQL", host=self.host, database=self.database)
+            self.log_info("Connected to MySQL", host=self.host)
             return True
 
         except Exception as e:
@@ -165,7 +165,7 @@ class MySQLConnector(BaseDatabaseConnector):
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 # Get tables and views
                 await cur.execute("""
-                    SELECT TABLE_NAME, TABLE_TYPE
+                    SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT
                     FROM INFORMATION_SCHEMA.TABLES
                     WHERE TABLE_SCHEMA = %s
                     ORDER BY TABLE_NAME
@@ -190,6 +190,7 @@ class MySQLConnector(BaseDatabaseConnector):
                     if not is_view:
                         row_count = await self._get_row_count_estimate(cur, table_name)
 
+                    table_comment = row.get("TABLE_COMMENT") or None
                     table_schema = TableSchema(
                         name=table_name,
                         schema_name=self.database,
@@ -197,6 +198,7 @@ class MySQLConnector(BaseDatabaseConnector):
                         primary_key=pk_columns,
                         foreign_keys=foreign_keys,
                         row_count=row_count,
+                        description=table_comment,
                     )
 
                     if is_view:
@@ -230,7 +232,8 @@ class MySQLConnector(BaseDatabaseConnector):
                 c.CHARACTER_MAXIMUM_LENGTH,
                 c.NUMERIC_PRECISION,
                 c.NUMERIC_SCALE,
-                c.COLUMN_KEY
+                c.COLUMN_KEY,
+                c.COLUMN_COMMENT
             FROM INFORMATION_SCHEMA.COLUMNS c
             WHERE c.TABLE_SCHEMA = %s AND c.TABLE_NAME = %s
             ORDER BY c.ORDINAL_POSITION
@@ -271,6 +274,7 @@ class MySQLConnector(BaseDatabaseConnector):
                 foreign_key_table=fk_info["REFERENCED_TABLE_NAME"] if fk_info else None,
                 foreign_key_column=fk_info["REFERENCED_COLUMN_NAME"] if fk_info else None,
                 default_value=row["COLUMN_DEFAULT"],
+                description=row.get("COLUMN_COMMENT") or None,
             ))
 
         return columns

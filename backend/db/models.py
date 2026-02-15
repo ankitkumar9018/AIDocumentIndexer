@@ -4596,6 +4596,9 @@ class ExternalDatabaseConnection(Base, UUIDMixin, TimestampMixin):
     schema_cache: Mapped[Optional[dict]] = mapped_column(JSONType())
     schema_cached_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
+    # User-provided schema annotations for semantic layer (table/column descriptions, glossary)
+    schema_annotations: Mapped[Optional[dict]] = mapped_column(JSONType())
+
     # Status
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     last_tested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -4647,6 +4650,7 @@ class DatabaseQueryHistory(Base, UUIDMixin):
     natural_language_query: Mapped[str] = mapped_column(Text, nullable=False)
     generated_sql: Mapped[str] = mapped_column(Text, nullable=False)
     explanation: Mapped[Optional[str]] = mapped_column(Text)
+    answer: Mapped[Optional[str]] = mapped_column(Text)
 
     # Execution results
     execution_success: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -4716,6 +4720,9 @@ class TextToSQLExample(Base, UUIDMixin):
     # Usage tracking
     times_used: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Embedding for dynamic few-shot selection
+    question_embedding: Mapped[Optional[dict]] = mapped_column(JSONType(), nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

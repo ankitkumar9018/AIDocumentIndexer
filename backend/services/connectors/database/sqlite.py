@@ -109,7 +109,7 @@ class SQLiteConnector(BaseDatabaseConnector):
             # Enable foreign keys
             await self._connection.execute("PRAGMA foreign_keys = ON")
             self._connected = True
-            self.log_info("Connected to SQLite", database=self.database_path)
+            self.log_info("Connected to SQLite", db_path=self.database_path)
             return True
 
         except Exception as e:

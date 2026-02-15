@@ -1847,6 +1847,64 @@ DEFAULT_SETTINGS: List[SettingDefinition] = [
         value_type=ValueType.BOOLEAN,
         description="Show query preview and cost estimate before execution"
     ),
+    SettingDefinition(
+        key="database.llm_model",
+        category=SettingCategory.DATABASE,
+        default_value="",
+        value_type=ValueType.STRING,
+        description="LLM model to use for text-to-SQL generation (empty = use default model)"
+    ),
+    SettingDefinition(
+        key="database.max_retries",
+        category=SettingCategory.DATABASE,
+        default_value=2,
+        value_type=ValueType.NUMBER,
+        description="Maximum retry attempts when SQL generation fails"
+    ),
+
+    # Text-to-SQL Enhancement Features
+    SettingDefinition(
+        key="database.schema_linking_enabled",
+        category=SettingCategory.DATABASE,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Prune schema to relevant tables using keyword/embedding similarity"
+    ),
+    SettingDefinition(
+        key="database.sample_rows_enabled",
+        category=SettingCategory.DATABASE,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Include sample data rows in the LLM prompt for value-aware SQL generation"
+    ),
+    SettingDefinition(
+        key="database.self_consistency_enabled",
+        category=SettingCategory.DATABASE,
+        default_value=False,
+        value_type=ValueType.BOOLEAN,
+        description="Generate multiple SQL candidates and pick the best one (slower but more accurate)"
+    ),
+    SettingDefinition(
+        key="database.self_consistency_candidates",
+        category=SettingCategory.DATABASE,
+        default_value=3,
+        value_type=ValueType.NUMBER,
+        description="Number of SQL candidates to generate for self-consistency (2-5)"
+    ),
+    SettingDefinition(
+        key="database.dynamic_examples_enabled",
+        category=SettingCategory.DATABASE,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Select few-shot examples by semantic similarity instead of usage count"
+    ),
+    SettingDefinition(
+        key="database.complexity_routing_enabled",
+        category=SettingCategory.DATABASE,
+        default_value=True,
+        value_type=ValueType.BOOLEAN,
+        description="Route queries to complexity-adapted prompt templates (easy/medium/hard)"
+    ),
 
     # ==========================================================================
     # Phase 65: Enterprise Features

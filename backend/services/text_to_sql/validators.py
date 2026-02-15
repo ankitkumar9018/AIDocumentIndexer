@@ -6,8 +6,9 @@ SQL validation and safety checks for Text-to-SQL queries.
 """
 
 import re
-from typing import List, Set
+from typing import List, Optional, Set, Tuple
 
+import sqlparse
 import structlog
 
 from backend.services.connectors.database.base import (
@@ -198,6 +199,53 @@ class SQLValidator:
                 clean_tables.append(table)
 
         return list(set(clean_tables))
+
+    def validate_syntax(self, query: str) -> Tuple[bool, Optional[str]]:
+        """
+        Pre-validate SQL syntax using sqlparse before hitting the database.
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        if not query or not query.strip():
+            return False, "Empty query"
+
+        # Check unbalanced parentheses
+        open_count = query.count("(")
+        close_count = query.count(")")
+        if open_count != close_count:
+            return False, f"Unbalanced parentheses: {open_count} opening vs {close_count} closing"
+
+        # Check unterminated string literals
+        single_quotes = query.count("'")
+        if single_quotes % 2 != 0:
+            # Account for escaped quotes
+            escaped = query.count("\\'")
+            if (single_quotes - escaped) % 2 != 0:
+                return False, "Unterminated string literal (unmatched single quote)"
+
+        # Parse with sqlparse
+        try:
+            parsed = sqlparse.parse(query)
+            if not parsed:
+                return False, "Failed to parse SQL statement"
+
+            stmt = parsed[0]
+
+            # Check statement type is SELECT/WITH
+            stmt_type = stmt.get_type()
+            if stmt_type and stmt_type not in ("SELECT", "UNKNOWN"):
+                return False, f"Only SELECT queries allowed, got: {stmt_type}"
+
+            # Check for empty parsed statement
+            tokens = [t for t in stmt.tokens if not t.is_whitespace]
+            if not tokens:
+                return False, "Empty SQL statement after parsing"
+
+        except Exception as e:
+            return False, f"SQL parse error: {str(e)}"
+
+        return True, None
 
     def sanitize_identifier(self, identifier: str) -> str:
         """

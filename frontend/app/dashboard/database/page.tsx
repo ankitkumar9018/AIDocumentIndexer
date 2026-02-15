@@ -18,6 +18,12 @@ import {
   Code,
   MessageSquare,
   Loader2,
+  BookOpen,
+  ChevronDown,
+  ChevronRight,
+  Save,
+  Sparkles,
+  SlidersHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,6 +53,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Switch } from "@/components/ui/switch";
+import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table as UITable,
@@ -93,6 +103,7 @@ interface QueryResult {
   natural_language_query: string;
   generated_sql?: string;
   explanation?: string;
+  answer?: string;
   columns: string[];
   rows: any[][];
   row_count: number;
@@ -100,6 +111,22 @@ interface QueryResult {
   confidence: number;
   error?: string;
   query_id?: string;
+  // Enhanced metadata
+  complexity?: string;
+  schema_tables_used?: string[];
+  candidates_generated?: number;
+  features_used?: string[];
+}
+
+interface SchemaAnnotations {
+  tables: Record<string, { description?: string; columns?: Record<string, string> }>;
+  glossary: Record<string, string>;
+}
+
+interface SchemaTable {
+  name: string;
+  columns: { name: string; data_type: string; description?: string }[];
+  description?: string;
 }
 
 interface QueryHistoryItem {
@@ -133,6 +160,25 @@ export default function DatabasePage() {
   const [activeTab, setActiveTab] = useState("results");
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
   const [isQuerying, setIsQuerying] = useState(false);
+
+  // Schema annotation editor state
+  const [isSchemaEditorOpen, setIsSchemaEditorOpen] = useState(false);
+  const [annotations, setAnnotations] = useState<SchemaAnnotations>({ tables: {}, glossary: {} });
+  const [schemaData, setSchemaData] = useState<SchemaTable[]>([]);
+  const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
+  const [glossaryNewTerm, setGlossaryNewTerm] = useState("");
+  const [glossaryNewDef, setGlossaryNewDef] = useState("");
+  const [isSavingAnnotations, setIsSavingAnnotations] = useState(false);
+  const [isRawDataOpen, setIsRawDataOpen] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<string>("__default__");
+
+  // Advanced options state
+  const [schemaLinking, setSchemaLinking] = useState(true);
+  const [sampleRows, setSampleRows] = useState(true);
+  const [selfConsistency, setSelfConsistency] = useState(false);
+  const [dynamicExamples, setDynamicExamples] = useState(true);
+  const [complexityRouting, setComplexityRouting] = useState(true);
+  const [numExamples, setNumExamples] = useState(3);
 
   // Form with Zod validation for new connection
   const connectionForm = useForm<DatabaseConnectionInput>({
@@ -204,6 +250,30 @@ export default function DatabasePage() {
       return response.json();
     },
     enabled: !!selectedConnection && !!accessToken,
+  });
+
+  // Fetch available models from configured LLM providers
+  const { data: availableModels = [] } = useQuery({
+    queryKey: ["provider-models"],
+    queryFn: async () => {
+      try {
+        const { providers } = await api.listLLMProviders();
+        const activeProviders = providers.filter((p) => p.is_active);
+        // Only show models explicitly configured as default_chat_model on each provider
+        const seen = new Set<string>();
+        const models: { name: string; provider: string }[] = [];
+        for (const provider of activeProviders) {
+          if (provider.default_chat_model && !seen.has(provider.default_chat_model)) {
+            seen.add(provider.default_chat_model);
+            models.push({ name: provider.default_chat_model, provider: provider.name });
+          }
+        }
+        return models;
+      } catch {
+        return [];
+      }
+    },
+    staleTime: 60000,
   });
 
   // Create connection mutation
@@ -358,6 +428,13 @@ export default function DatabasePage() {
             question: query,
             execute: true,
             explain: true,
+            model_override: selectedModel !== "__default__" ? selectedModel : undefined,
+            schema_linking: schemaLinking,
+            sample_rows: sampleRows,
+            self_consistency: selfConsistency,
+            dynamic_examples: dynamicExamples,
+            complexity_routing: complexityRouting,
+            num_examples: numExamples,
           }),
         }
       );
@@ -732,6 +809,33 @@ export default function DatabasePage() {
                         <span className="ml-1">Test</span>
                       </Button>
                       <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={async () => {
+                          setIsSchemaEditorOpen(true);
+                          // Fetch annotations and schema independently
+                          try {
+                            const { data: annData } = await api.get<SchemaAnnotations>(`/database/connections/${selectedConnection.id}/annotations`);
+                            const ann = annData as SchemaAnnotations | null;
+                            setAnnotations({ tables: ann?.tables || {}, glossary: ann?.glossary || {} });
+                          } catch (e) {
+                            console.error("Failed to fetch annotations:", e);
+                            setAnnotations({ tables: {}, glossary: {} });
+                          }
+                          try {
+                            const { data: schData } = await api.get<{ tables: SchemaTable[] }>(`/database/connections/${selectedConnection.id}/schema`);
+                            const sch = schData as { tables?: SchemaTable[] } | null;
+                            setSchemaData(sch?.tables || []);
+                          } catch (e) {
+                            console.error("Failed to fetch schema:", e);
+                            setSchemaData([]);
+                          }
+                        }}
+                      >
+                        <BookOpen className="h-4 w-4" />
+                        <span className="ml-1">Teach Schema</span>
+                      </Button>
+                      <Button
                         variant="ghost"
                         size="sm"
                         className="text-destructive"
@@ -783,9 +887,99 @@ export default function DatabasePage() {
                       <span className="ml-1">Run</span>
                     </Button>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-2">
-                    Press ⌘+Enter or Ctrl+Enter to run
-                  </p>
+                  <div className="flex items-center gap-3 mt-2">
+                    <div className="flex items-center gap-2">
+                      <Label className="text-xs text-muted-foreground whitespace-nowrap">Model:</Label>
+                      <Select value={selectedModel} onValueChange={setSelectedModel}>
+                        <SelectTrigger className="h-7 w-[260px] text-xs">
+                          <SelectValue placeholder="Default" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default__">Default</SelectItem>
+                          {availableModels.map((m: { name: string; provider: string }) => (
+                            <SelectItem key={`${m.provider}-${m.name}`} value={m.name}>
+                              <span className="flex items-center gap-1.5">
+                                <span>{m.name}</span>
+                                <span className="text-muted-foreground">({m.provider})</span>
+                              </span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button variant="outline" size="sm" className="h-7 text-xs gap-1">
+                          <SlidersHorizontal className="h-3 w-3" />
+                          Advanced
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-72 p-4" align="start">
+                        <div className="space-y-4">
+                          <h4 className="font-medium text-sm">Query Options</h4>
+
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <Label className="text-xs">Schema Linking</Label>
+                              <p className="text-[10px] text-muted-foreground">Prune to relevant tables</p>
+                            </div>
+                            <Switch checked={schemaLinking} onCheckedChange={setSchemaLinking} />
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <Label className="text-xs">Sample Rows</Label>
+                              <p className="text-[10px] text-muted-foreground">Include data samples in prompt</p>
+                            </div>
+                            <Switch checked={sampleRows} onCheckedChange={setSampleRows} />
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <Label className="text-xs">Self-Consistency</Label>
+                              <p className="text-[10px] text-muted-foreground">Multiple candidates (slower)</p>
+                            </div>
+                            <Switch checked={selfConsistency} onCheckedChange={setSelfConsistency} />
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <Label className="text-xs">Smart Examples</Label>
+                              <p className="text-[10px] text-muted-foreground">Semantic example selection</p>
+                            </div>
+                            <Switch checked={dynamicExamples} onCheckedChange={setDynamicExamples} />
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <Label className="text-xs">Complexity Routing</Label>
+                              <p className="text-[10px] text-muted-foreground">Adaptive prompt templates</p>
+                            </div>
+                            <Switch checked={complexityRouting} onCheckedChange={setComplexityRouting} />
+                          </div>
+
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <Label className="text-xs">Examples</Label>
+                              <span className="text-xs text-muted-foreground">{numExamples}</span>
+                            </div>
+                            <Slider
+                              value={[numExamples]}
+                              onValueChange={([v]) => setNumExamples(v)}
+                              min={0}
+                              max={5}
+                              step={1}
+                              className="w-full"
+                            />
+                          </div>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+
+                    <p className="text-xs text-muted-foreground">
+                      Press ⌘+Enter or Ctrl+Enter to run
+                    </p>
+                  </div>
                 </CardContent>
               </Card>
 
@@ -829,6 +1023,31 @@ export default function DatabasePage() {
                         </div>
                       )}
                     </div>
+                    {/* Feature metadata badges */}
+                    {queryResult.success && (queryResult.complexity || (queryResult.features_used && queryResult.features_used.length > 0)) && (
+                      <div className="flex flex-wrap gap-1.5 mt-1">
+                        {queryResult.complexity && (
+                          <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                            {queryResult.complexity}
+                          </Badge>
+                        )}
+                        {queryResult.schema_tables_used && queryResult.schema_tables_used.length > 0 && (
+                          <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                            {queryResult.schema_tables_used.length} tables
+                          </Badge>
+                        )}
+                        {queryResult.candidates_generated && queryResult.candidates_generated > 1 && (
+                          <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                            {queryResult.candidates_generated} candidates
+                          </Badge>
+                        )}
+                        {queryResult.features_used?.map((f) => (
+                          <Badge key={f} variant="secondary" className="text-[10px] px-1.5 py-0">
+                            {f.replace(/_/g, " ")}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
                   </CardHeader>
                   <CardContent>
                     <Tabs value={activeTab} onValueChange={setActiveTab}>
@@ -853,40 +1072,71 @@ export default function DatabasePage() {
                             <AlertCircle className="h-5 w-5 mt-0.5" />
                             <span>{queryResult.error}</span>
                           </div>
-                        ) : queryResult.rows.length === 0 ? (
-                          <div className="text-center py-8 text-muted-foreground">
-                            No results found
-                          </div>
                         ) : (
-                          <div className="border rounded-lg overflow-auto max-h-[400px]">
-                            <UITable>
-                              <TableHeader>
-                                <TableRow>
-                                  {queryResult.columns.map((col) => (
-                                    <TableHead key={col}>{col}</TableHead>
-                                  ))}
-                                </TableRow>
-                              </TableHeader>
-                              <TableBody>
-                                {queryResult.rows.map((row, i) => (
-                                  <TableRow key={i}>
-                                    {row.map((cell, j) => (
-                                      <TableCell key={j}>
-                                        {cell === null ? (
-                                          <span className="text-muted-foreground italic">
-                                            null
-                                          </span>
-                                        ) : typeof cell === "object" ? (
-                                          JSON.stringify(cell)
-                                        ) : (
-                                          String(cell)
-                                        )}
-                                      </TableCell>
-                                    ))}
-                                  </TableRow>
-                                ))}
-                              </TableBody>
-                            </UITable>
+                          <div className="space-y-3">
+                            {/* Human-readable answer */}
+                            {queryResult.answer && (
+                              <div className="bg-primary/5 border border-primary/20 p-4 rounded-lg">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <Sparkles className="h-4 w-4 text-primary" />
+                                  <span className="font-medium text-sm text-primary">Answer</span>
+                                </div>
+                                <p className="text-sm whitespace-pre-wrap">{queryResult.answer}</p>
+                              </div>
+                            )}
+
+                            {/* Raw data table - collapsible when answer is present */}
+                            {queryResult.rows.length === 0 ? (
+                              <div className="text-center py-8 text-muted-foreground">
+                                No results found
+                              </div>
+                            ) : (
+                              <div>
+                                <button
+                                  className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-2"
+                                  onClick={() => setIsRawDataOpen(!isRawDataOpen)}
+                                >
+                                  {isRawDataOpen ? (
+                                    <ChevronDown className="h-4 w-4" />
+                                  ) : (
+                                    <ChevronRight className="h-4 w-4" />
+                                  )}
+                                  Raw Data ({queryResult.row_count} rows)
+                                </button>
+                                {(isRawDataOpen || !queryResult.answer) && (
+                                  <div className="border rounded-lg overflow-auto max-h-[400px]">
+                                    <UITable>
+                                      <TableHeader>
+                                        <TableRow>
+                                          {queryResult.columns.map((col) => (
+                                            <TableHead key={col}>{col}</TableHead>
+                                          ))}
+                                        </TableRow>
+                                      </TableHeader>
+                                      <TableBody>
+                                        {queryResult.rows.map((row, i) => (
+                                          <TableRow key={i}>
+                                            {row.map((cell, j) => (
+                                              <TableCell key={j}>
+                                                {cell === null ? (
+                                                  <span className="text-muted-foreground italic">
+                                                    null
+                                                  </span>
+                                                ) : typeof cell === "object" ? (
+                                                  JSON.stringify(cell)
+                                                ) : (
+                                                  String(cell)
+                                                )}
+                                              </TableCell>
+                                            ))}
+                                          </TableRow>
+                                        ))}
+                                      </TableBody>
+                                    </UITable>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         )}
                         {queryResult.success && (
@@ -999,6 +1249,232 @@ export default function DatabasePage() {
           )}
         </div>
       </div>
+
+      {/* Schema Annotation Editor Dialog */}
+      <Dialog open={isSchemaEditorOpen} onOpenChange={setIsSchemaEditorOpen}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <BookOpen className="h-5 w-5" />
+              Teach Schema
+            </DialogTitle>
+            <DialogDescription>
+              Help the AI understand your database by adding descriptions and a business glossary.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto pr-4">
+            <div className="space-y-6">
+              {/* Glossary Section */}
+              <div>
+                <h4 className="font-medium text-sm mb-2">Business Glossary</h4>
+                <p className="text-xs text-muted-foreground mb-3">
+                  Define business terms so the AI maps them to the right columns.
+                </p>
+                <div className="space-y-2">
+                  {Object.entries(annotations.glossary).map(([term, def]) => (
+                    <div key={term} className="flex items-center gap-2">
+                      <Input
+                        className="w-1/3"
+                        value={term}
+                        readOnly
+                      />
+                      <Input
+                        className="flex-1"
+                        value={def}
+                        onChange={(e) => {
+                          const updated = { ...annotations.glossary, [term]: e.target.value };
+                          setAnnotations({ ...annotations, glossary: updated });
+                        }}
+                      />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          const updated = { ...annotations.glossary };
+                          delete updated[term];
+                          setAnnotations({ ...annotations, glossary: updated });
+                        }}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-2">
+                    <Input
+                      className="w-1/3"
+                      placeholder="Term (e.g. MRR)"
+                      value={glossaryNewTerm}
+                      onChange={(e) => setGlossaryNewTerm(e.target.value)}
+                    />
+                    <Input
+                      className="flex-1"
+                      placeholder="Definition (e.g. Monthly Recurring Revenue)"
+                      value={glossaryNewDef}
+                      onChange={(e) => setGlossaryNewDef(e.target.value)}
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!glossaryNewTerm.trim() || !glossaryNewDef.trim()}
+                      onClick={() => {
+                        setAnnotations({
+                          ...annotations,
+                          glossary: { ...annotations.glossary, [glossaryNewTerm.trim()]: glossaryNewDef.trim() },
+                        });
+                        setGlossaryNewTerm("");
+                        setGlossaryNewDef("");
+                      }}
+                    >
+                      <Plus className="h-3 w-3" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Tables Section */}
+              <div>
+                <h4 className="font-medium text-sm mb-2">Table & Column Descriptions</h4>
+                <p className="text-xs text-muted-foreground mb-3">
+                  Describe what tables and columns mean in your business context.
+                </p>
+                {schemaData.length === 0 ? (
+                  <p className="text-sm text-muted-foreground italic">
+                    No schema loaded. Test the connection first.
+                  </p>
+                ) : (
+                  <div className="space-y-1">
+                    {schemaData.map((table) => (
+                      <div key={table.name} className="border rounded-lg">
+                        <button
+                          className="w-full flex items-center gap-2 p-3 text-sm font-medium hover:bg-muted/50"
+                          onClick={() => {
+                            const next = new Set(expandedTables);
+                            if (next.has(table.name)) next.delete(table.name);
+                            else next.add(table.name);
+                            setExpandedTables(next);
+                          }}
+                        >
+                          {expandedTables.has(table.name) ? (
+                            <ChevronDown className="h-4 w-4" />
+                          ) : (
+                            <ChevronRight className="h-4 w-4" />
+                          )}
+                          {table.name}
+                          <Badge variant="secondary" className="ml-auto text-xs">
+                            {table.columns.length} cols
+                          </Badge>
+                        </button>
+                        {expandedTables.has(table.name) && (
+                          <div className="px-3 pb-3 space-y-2">
+                            <div>
+                              <Label className="text-xs">Table Description</Label>
+                              <Input
+                                placeholder="What does this table store?"
+                                value={annotations.tables[table.name]?.description || ""}
+                                onChange={(e) => {
+                                  const tableAnn = annotations.tables[table.name] || {};
+                                  setAnnotations({
+                                    ...annotations,
+                                    tables: {
+                                      ...annotations.tables,
+                                      [table.name]: { ...tableAnn, description: e.target.value },
+                                    },
+                                  });
+                                }}
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              {table.columns.map((col) => (
+                                <div key={col.name} className="flex items-center gap-2">
+                                  <span className="text-xs font-mono w-1/3 truncate" title={col.name}>
+                                    {col.name}
+                                    <span className="text-muted-foreground ml-1">({col.data_type})</span>
+                                  </span>
+                                  <Input
+                                    className="flex-1 h-8 text-xs"
+                                    placeholder={col.description || "Describe this column..."}
+                                    value={annotations.tables[table.name]?.columns?.[col.name] || ""}
+                                    onChange={(e) => {
+                                      const tableAnn = annotations.tables[table.name] || {};
+                                      const cols = tableAnn.columns || {};
+                                      setAnnotations({
+                                        ...annotations,
+                                        tables: {
+                                          ...annotations.tables,
+                                          [table.name]: {
+                                            ...tableAnn,
+                                            columns: { ...cols, [col.name]: e.target.value },
+                                          },
+                                        },
+                                      });
+                                    }}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsSchemaEditorOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={isSavingAnnotations}
+              onClick={async () => {
+                if (!selectedConnection) return;
+                setIsSavingAnnotations(true);
+                try {
+                  // Clean empty values before saving
+                  const cleanTables: Record<string, any> = {};
+                  for (const [tName, tAnn] of Object.entries(annotations.tables)) {
+                    const cleanCols: Record<string, string> = {};
+                    for (const [cName, cDesc] of Object.entries(tAnn.columns || {})) {
+                      if (cDesc.trim()) cleanCols[cName] = cDesc.trim();
+                    }
+                    if (tAnn.description?.trim() || Object.keys(cleanCols).length > 0) {
+                      cleanTables[tName] = {
+                        ...(tAnn.description?.trim() ? { description: tAnn.description.trim() } : {}),
+                        ...(Object.keys(cleanCols).length > 0 ? { columns: cleanCols } : {}),
+                      };
+                    }
+                  }
+                  const cleanGlossary: Record<string, string> = {};
+                  for (const [term, def] of Object.entries(annotations.glossary)) {
+                    if (term.trim() && def.trim()) cleanGlossary[term.trim()] = def.trim();
+                  }
+
+                  await api.put(`/database/connections/${selectedConnection.id}/annotations`, {
+                    tables: cleanTables,
+                    glossary: cleanGlossary,
+                  });
+                  toast.success("Schema annotations saved");
+                  setIsSchemaEditorOpen(false);
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : "Failed to save annotations");
+                } finally {
+                  setIsSavingAnnotations(false);
+                }
+              }}
+            >
+              {isSavingAnnotations ? (
+                <Loader2 className="h-4 w-4 animate-spin mr-1" />
+              ) : (
+                <Save className="h-4 w-4 mr-1" />
+              )}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -125,7 +125,7 @@ class PostgreSQLConnector(BaseDatabaseConnector):
             )
 
             self._connected = True
-            self.log_info("Connected to PostgreSQL", host=self.host, database=self.database)
+            self.log_info("Connected to PostgreSQL", host=self.host)
             return True
 
         except Exception as e:
@@ -183,6 +183,15 @@ class PostgreSQLConnector(BaseDatabaseConnector):
                 # Get columns
                 columns = await self._get_table_columns(conn, table_name)
 
+                # Merge native column comments from pg_description
+                col_comments = await self._get_column_comments(conn, table_name)
+                for col in columns:
+                    if col.name in col_comments:
+                        col.description = col_comments[col.name]
+
+                # Get table-level comment
+                table_comment = await self._get_table_comment(conn, table_name)
+
                 # Get primary key
                 pk_columns = await self._get_primary_key(conn, table_name)
 
@@ -201,6 +210,7 @@ class PostgreSQLConnector(BaseDatabaseConnector):
                     primary_key=pk_columns,
                     foreign_keys=foreign_keys,
                     row_count=row_count,
+                    description=table_comment,
                 )
 
                 if is_view:
@@ -339,6 +349,50 @@ class PostgreSQLConnector(BaseDatabaseConnector):
             }
             for row in rows
         ]
+
+    async def _get_column_comments(
+        self,
+        conn,
+        table_name: str,
+    ) -> Dict[str, str]:
+        """Fetch column COMMENT metadata from pg_description."""
+        try:
+            rows = await conn.fetch("""
+                SELECT
+                    a.attname AS column_name,
+                    d.description AS comment
+                FROM pg_catalog.pg_attribute a
+                JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+                JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+                LEFT JOIN pg_catalog.pg_description d
+                    ON d.objoid = c.oid AND d.objsubid = a.attnum
+                WHERE n.nspname = $1
+                  AND c.relname = $2
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+                  AND d.description IS NOT NULL
+            """, self.schema, table_name)
+            return {row["column_name"]: row["comment"] for row in rows}
+        except Exception:
+            return {}
+
+    async def _get_table_comment(
+        self,
+        conn,
+        table_name: str,
+    ) -> Optional[str]:
+        """Fetch table-level COMMENT from pg_description."""
+        try:
+            result = await conn.fetchval("""
+                SELECT d.description
+                FROM pg_catalog.pg_description d
+                JOIN pg_catalog.pg_class c ON d.objoid = c.oid
+                JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+                WHERE n.nspname = $1 AND c.relname = $2 AND d.objsubid = 0
+            """, self.schema, table_name)
+            return result
+        except Exception:
+            return None
 
     async def _get_row_count_estimate(
         self,

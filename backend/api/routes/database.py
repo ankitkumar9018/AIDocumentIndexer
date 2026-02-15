@@ -129,6 +129,15 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     execute: bool = Field(default=True, description="Whether to execute the generated SQL")
     explain: bool = Field(default=True, description="Whether to generate an explanation")
+    model_override: Optional[str] = Field(default=None, description="Override LLM model for this query")
+    # Advanced options (per-query overrides)
+    schema_linking: Optional[bool] = Field(default=None, description="Enable schema linking for table pruning")
+    sample_rows: Optional[bool] = Field(default=None, description="Include sample data rows in prompt")
+    self_consistency: Optional[bool] = Field(default=None, description="Generate multiple candidates and pick best")
+    num_candidates: int = Field(default=3, ge=2, le=5, description="Number of candidates for self-consistency")
+    num_examples: int = Field(default=3, ge=0, le=5, description="Number of few-shot examples")
+    dynamic_examples: Optional[bool] = Field(default=None, description="Use embedding-based example selection")
+    complexity_routing: Optional[bool] = Field(default=None, description="Route to complexity-adapted prompts")
 
 
 class QueryResponse(BaseModel):
@@ -137,6 +146,7 @@ class QueryResponse(BaseModel):
     natural_language_query: str
     generated_sql: Optional[str]
     explanation: Optional[str]
+    answer: Optional[str] = None
     columns: List[str] = []
     rows: List[List[Any]] = []
     row_count: int = 0
@@ -144,6 +154,11 @@ class QueryResponse(BaseModel):
     confidence: float = 0
     error: Optional[str]
     query_id: Optional[str]  # ID of the saved query history record
+    # Enhanced metadata
+    complexity: Optional[str] = None
+    schema_tables_used: List[str] = []
+    candidates_generated: int = 1
+    features_used: List[str] = []
 
 
 class QueryHistoryResponse(BaseModel):
@@ -168,6 +183,18 @@ class FeedbackRequest(BaseModel):
     rating: int = Field(..., ge=1, le=5)
     feedback: Optional[str] = Field(None, max_length=1000)
     is_correct: bool = Field(default=True)
+
+
+class SchemaAnnotationsUpdate(BaseModel):
+    """Update schema annotations for a connection (semantic layer)."""
+    tables: Optional[Dict[str, Dict[str, Any]]] = None
+    glossary: Optional[Dict[str, str]] = None
+
+
+class SchemaAnnotationsResponse(BaseModel):
+    """Schema annotations response."""
+    tables: Dict[str, Dict[str, Any]] = {}
+    glossary: Dict[str, str] = {}
 
 
 # =============================================================================
@@ -726,24 +753,49 @@ async def query_database(
         connector = None
         try:
             connector = await get_connector(connection)
-            service = TextToSQLService(connector)
+
+            # Get configured LLM model for database queries
+            db_llm_model = None
+            try:
+                from backend.services.settings import get_settings_service
+                settings_svc = get_settings_service()
+                db_llm_model = await settings_svc.get_setting("database.llm_model") or None
+            except Exception:
+                pass
+
+            # Per-query override > admin setting > default
+            effective_model = request.model_override or db_llm_model
+
+            service = TextToSQLService(
+                connector,
+                llm_model=effective_model,
+                schema_annotations=connection.schema_annotations if hasattr(connection, 'schema_annotations') else None,
+            )
 
             # Load verified examples for few-shot prompting
-            examples_result = await db.execute(
+            examples_query = (
                 select(TextToSQLExample).where(
                     TextToSQLExample.connection_id == connection_id,
                     TextToSQLExample.is_verified == True,
-                ).order_by(TextToSQLExample.times_used.desc()).limit(5)
+                ).order_by(TextToSQLExample.times_used.desc()).limit(request.num_examples)
             )
+            examples_result = await db.execute(examples_query)
             examples = examples_result.scalars().all()
             for ex in examples:
                 service.add_example(ex.question, ex.sql, ex.explanation)
 
-            # Execute the query
+            # Execute the query with per-query feature overrides
             query_result = await service.query(
                 question=request.question,
                 execute=request.execute,
                 explain=request.explain,
+                schema_linking=request.schema_linking,
+                sample_rows=request.sample_rows,
+                self_consistency=request.self_consistency,
+                num_candidates=request.num_candidates,
+                dynamic_examples=request.dynamic_examples,
+                complexity_routing=request.complexity_routing,
+                num_examples=request.num_examples,
             )
 
             # Save query history
@@ -753,6 +805,7 @@ async def query_database(
                 natural_language_query=request.question,
                 generated_sql=query_result.generated_sql or "",
                 explanation=query_result.explanation,
+                answer=query_result.answer,
                 execution_success=query_result.success,
                 execution_time_ms=query_result.query_result.execution_time_ms if query_result.query_result else 0,
                 row_count=query_result.query_result.row_count if query_result.query_result else 0,
@@ -775,6 +828,7 @@ async def query_database(
                 natural_language_query=request.question,
                 generated_sql=query_result.generated_sql,
                 explanation=query_result.explanation,
+                answer=query_result.answer,
                 columns=query_result.query_result.columns if query_result.query_result else [],
                 rows=query_result.query_result.rows if query_result.query_result else [],
                 row_count=query_result.query_result.row_count if query_result.query_result else 0,
@@ -782,6 +836,10 @@ async def query_database(
                 confidence=query_result.confidence,
                 error=query_result.error,
                 query_id=str(history.id),
+                complexity=query_result.complexity,
+                schema_tables_used=query_result.schema_tables_used,
+                candidates_generated=query_result.candidates_generated,
+                features_used=query_result.features_used,
             )
 
         except Exception as e:
@@ -873,6 +931,15 @@ async def submit_feedback(
 
         # If highly rated and correct, create a verified example
         if request.rating >= 4 and request.is_correct:
+            # Embed the question for dynamic few-shot selection
+            question_embedding = None
+            try:
+                from backend.services.embeddings import get_embedding_service
+                embed_svc = get_embedding_service()
+                question_embedding = await embed_svc.embed_text(history.natural_language_query)
+            except Exception as e:
+                logger.debug("Failed to embed example question", error=str(e))
+
             example = TextToSQLExample(
                 connection_id=history.connection_id,
                 question=history.natural_language_query,
@@ -881,9 +948,109 @@ async def submit_feedback(
                 is_verified=True,
                 verified_by_id=user_id,
                 verified_at=datetime.utcnow(),
+                question_embedding=question_embedding,
             )
             db.add(example)
 
         await db.commit()
 
         return {"message": "Feedback submitted"}
+
+
+# =============================================================================
+# Schema Annotations (Semantic Layer)
+# =============================================================================
+
+MAX_TABLE_DESCRIPTION_LEN = 500
+MAX_COLUMN_DESCRIPTION_LEN = 200
+MAX_GLOSSARY_TERM_LEN = 50
+MAX_GLOSSARY_DEFINITION_LEN = 200
+MAX_GLOSSARY_ENTRIES = 100
+MAX_TABLE_ANNOTATIONS = 200
+
+
+@router.get("/connections/{connection_id}/annotations", response_model=SchemaAnnotationsResponse)
+async def get_schema_annotations(
+    connection_id: UUID,
+    user: AuthenticatedUser,
+):
+    """Get schema annotations (semantic layer) for a connection."""
+    async with async_session_context() as db:
+        user_id = await get_user_id(db, user)
+
+        result = await db.execute(
+            select(ExternalDatabaseConnection).where(
+                ExternalDatabaseConnection.id == connection_id,
+                ExternalDatabaseConnection.user_id == user_id,
+            )
+        )
+        connection = result.scalar_one_or_none()
+
+        if not connection:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
+
+        annotations = connection.schema_annotations or {}
+        return SchemaAnnotationsResponse(
+            tables=annotations.get("tables", {}),
+            glossary=annotations.get("glossary", {}),
+        )
+
+
+@router.put("/connections/{connection_id}/annotations", response_model=SchemaAnnotationsResponse)
+async def update_schema_annotations(
+    connection_id: UUID,
+    request: SchemaAnnotationsUpdate,
+    user: AuthenticatedUser,
+):
+    """Update schema annotations (semantic layer) for a connection."""
+    async with async_session_context() as db:
+        user_id = await get_user_id(db, user)
+
+        result = await db.execute(
+            select(ExternalDatabaseConnection).where(
+                ExternalDatabaseConnection.id == connection_id,
+                ExternalDatabaseConnection.user_id == user_id,
+            )
+        )
+        connection = result.scalar_one_or_none()
+
+        if not connection:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
+
+        # Validate glossary sizes
+        if request.glossary:
+            if len(request.glossary) > MAX_GLOSSARY_ENTRIES:
+                raise HTTPException(status_code=400, detail=f"Too many glossary entries (max {MAX_GLOSSARY_ENTRIES})")
+            for term, defn in request.glossary.items():
+                if len(term) > MAX_GLOSSARY_TERM_LEN:
+                    raise HTTPException(status_code=400, detail=f"Glossary term too long: {term[:20]}...")
+                if len(defn) > MAX_GLOSSARY_DEFINITION_LEN:
+                    raise HTTPException(status_code=400, detail=f"Glossary definition too long for: {term[:20]}...")
+
+        # Validate table annotations
+        if request.tables:
+            if len(request.tables) > MAX_TABLE_ANNOTATIONS:
+                raise HTTPException(status_code=400, detail=f"Too many table annotations (max {MAX_TABLE_ANNOTATIONS})")
+            for table_name, table_ann in request.tables.items():
+                if isinstance(table_ann, dict):
+                    desc = table_ann.get("description", "")
+                    if desc and len(desc) > MAX_TABLE_DESCRIPTION_LEN:
+                        raise HTTPException(status_code=400, detail=f"Table description too long: {table_name}")
+                    for col_name, col_desc in table_ann.get("columns", {}).items():
+                        if isinstance(col_desc, str) and len(col_desc) > MAX_COLUMN_DESCRIPTION_LEN:
+                            raise HTTPException(status_code=400, detail=f"Column description too long: {table_name}.{col_name}")
+
+        # Merge with existing annotations
+        existing = connection.schema_annotations or {}
+        if request.tables is not None:
+            existing["tables"] = request.tables
+        if request.glossary is not None:
+            existing["glossary"] = request.glossary
+
+        connection.schema_annotations = existing
+        await db.commit()
+
+        return SchemaAnnotationsResponse(
+            tables=existing.get("tables", {}),
+            glossary=existing.get("glossary", {}),
+        )
